@@ -1,7 +1,7 @@
 # Cross-component tests
 
 Unit and integration tests live next to the code they test:
-- `backend/tests/` - FastAPI app, authentication, security building blocks
+- `backend/tests/` - FastAPI app, authentication, security building blocks, public and dashboard APIs
 - `database/tests/` - Alembic migrations, role privileges, ETL mapping rules
 
 This directory holds checks that span components or run against a deployed environment.

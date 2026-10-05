@@ -2,7 +2,7 @@
 
 Source of truth for the design: the restored Supabase schema (`hyperchat_restore_test`, PostgreSQL 15,
 dump of 2026-10-04). Every change below was checked against that data (counts only) before it was made.
-Migrations: `database/migrations/versions/0001…0008`; data load: `database/etl/`.
+Migrations: `database/migrations/versions/0001…0009`; data load: `database/etl/`.
 
 ## Clusters and roles
 | Cluster | Port | Databases | Purpose |
@@ -27,7 +27,7 @@ Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):
 | `streamers` | `streamers` | `donation_table_id` dropped; Razorpay name columns → `razorpay_key_ref` / `razorpay_secret_ref`; `user_id` FK added |
 | `obs_tokens` | `obs_tokens` | plaintext `token` → `token_hash` (SHA-256); streamer_id NOT NULL |
 | `order_lookup` | `order_lookup` | `streamer_slug`, `donation_table_id` dropped; FK → donations |
-| `moderation_actions` | `moderation_actions` | `donation_table` dropped; `donation_id` without FK (audit, orphans kept) |
+| `moderation_actions` | `moderation_actions` | `donation_table` dropped; `donation_id` without FK (audit, orphans kept); `actor_user_id` (0009, FK `users` ON DELETE SET NULL): the web user behind a dashboard action |
 | `telegram_/discord_callback_mapping` | same | `table_name` dropped; FK → donations; only unexpired rows migrated |
 | `streamer_donator_totals` | same | `streamer_slug` → `streamer_id` FK |
 | slug-keyed soundboard tables, `api_keys` | same | FK on `streamer_slug` (ON UPDATE CASCADE) |
