@@ -7,11 +7,15 @@ helpers connect as hyperchat_app, the DML-only runtime role.
 
 Every synthetic row is recognizable and removed after each test: users/invites @authtest.invalid,
 streamers (and their donations) and partners with slugs starting "authtest-", nonces starting
-"authtest-", platform soundboard slots with audio_key starting "authtest-".
+"authtest-", platform soundboard slots with audio_key starting "authtest-". Rows owned by a synthetic
+creator (moderators, bans, donor totals, moderation actions) go with it (ON DELETE CASCADE); terms
+acceptances go with their synthetic user.
 """
 
 import logging
 import os
+import secrets
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -63,6 +67,19 @@ def make_streamer(slug: str, user_id: str | None = None, name: str = "Auth Test"
     with db() as conn:
         return conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) VALUES (%s, %s, %s) "
                             "RETURNING id::text", (slug, name, user_id)).fetchone()[0]
+
+
+def make_donation(streamer_id: str, amount_inr=100, *, payment: str = "success", moderation: str = "pending",
+                  name: str = "Donor", message: str | None = None, at: datetime | None = None,
+                  currency: str = "INR", amount=None, visible: bool = True) -> str:
+    """Insert a synthetic donation (order_id "authtest-...") and return its id."""
+    with db() as conn:
+        return conn.execute(
+            "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
+            "payment_status, moderation_status, message, message_visible, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id::text",
+            (streamer_id, SLUG_PREFIX + secrets.token_hex(6), name, amount if amount is not None else amount_inr,
+             currency, amount_inr, payment, moderation, message, visible, at or datetime.now(UTC))).fetchone()[0]
 
 
 def cleanup_synthetic_rows() -> None:
@@ -158,6 +175,9 @@ class Browser:
 
     def patch(self, url: str, **kwargs):
         return self.request("PATCH", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
 
 
 def new_browser(client) -> Browser:
