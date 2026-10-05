@@ -135,6 +135,17 @@ class DonationPage(_Model):  # D-R2
     has_more: bool
 
 
+class DonationStats(_Model):  # D-R3: every paid donation, any moderation status
+    total_revenue_inr: float
+    total_donations: int
+    today_revenue_inr: float
+    month_revenue_inr: float
+    timezone: str
+    as_of: datetime
+
+
+# ── G3 moderation ───────────────────────────────────────────────────────────────
+
 class QueueItem(DonationItem):  # D-R5 row and the D-M2 result
     approved_at: datetime | None
     approved_by_label: str | None
@@ -161,10 +172,40 @@ class ModerationResult(_Model):  # D-M2
     donation: QueueItem
 
 
-class DonationStats(_Model):  # D-R3: every paid donation, any moderation status
-    total_revenue_inr: float
-    total_donations: int
-    today_revenue_inr: float
-    month_revenue_inr: float
-    timezone: str
-    as_of: datetime
+# ── G4 moderators ───────────────────────────────────────────────────────────────
+
+class Moderator(_Model):  # D-R6 row (Telegram / Discord identities; no web access in Phase 5)
+    moderator_id: str
+    mod_name: str
+    telegram_user_id: str | None
+    discord_user_id: str | None
+    role: str
+    can_approve: bool
+    can_reject: bool
+    can_hide_message: bool
+    can_ban: bool
+    can_replay: bool
+    is_active: bool
+    created_at: datetime
+    last_action_at: datetime | None
+
+
+class ModeratorList(_Model):  # D-R6
+    moderators: list[Moderator]
+
+
+class ModeratorCreate(_Model):  # D-M3 body (permissions keep their column defaults; editing them is D-M7)
+    mod_name: Annotated[StrictStr, AfterValidator(v.mod_name)]
+    telegram_user_id: Annotated[StrictStr | None, AfterValidator(v.mod_identifier)] = None
+    discord_user_id: Annotated[StrictStr | None, AfterValidator(v.mod_identifier)] = None
+
+    @model_validator(mode="after")
+    def _one_identifier(self):
+        if self.telegram_user_id is None and self.discord_user_id is None:
+            raise ValueError("telegram_user_id or discord_user_id is required")
+        return self
+
+
+class ModeratorRemoval(_Model):  # D-M4
+    result: Literal["removed", "unchanged"]
+    moderator: Moderator

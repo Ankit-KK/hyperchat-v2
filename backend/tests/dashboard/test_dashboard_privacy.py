@@ -35,6 +35,9 @@ ENDPOINTS = [
     ("GET", "/donations/export.csv?from=2026-10-01&to=2026-10-02", None),
     ("GET", "/moderation/queue?status=all", None),
     ("POST", "/donations/{donation}/moderation", lambda n: {"action": "hide_message" if n % 2 else "unhide_message"}),
+    ("GET", "/moderators", None),
+    ("POST", "/moderators", lambda n: {"mod_name": f"Mod {n}", "telegram_user_id": f"9{n:08d}"}),
+    ("DELETE", "/moderators/{moderator}", None),
 ]
 WRITES = [e for e in ENDPOINTS if e[0] != "GET"]
 READS = [e for e in ENDPOINTS if e[0] == "GET"]
@@ -48,7 +51,9 @@ def _fixtures(sid: str) -> dict:
     with db() as conn:
         conn.execute("UPDATE public.donations SET provider_order_id = %s, status_token_hash = %s, "
                      "upload_token_hash = %s, legacy_source_table = %s WHERE id = %s", (*PLANTED, donation))
-    return {"donation": donation}
+        moderator = conn.execute("INSERT INTO public.streamers_moderators (streamer_id, mod_name, telegram_user_id) "
+                                 "VALUES (%s, 'Fixture mod', '12345') RETURNING id::text", (sid,)).fetchone()[0]
+    return {"donation": donation, "moderator": moderator}
 
 
 def _call(browser, method: str, ref: str, path: str, body, ids: dict, headers: dict):

@@ -19,6 +19,10 @@ from app.dashboard.models import (
     DonationStats,
     ModerationRequest,
     ModerationResult,
+    Moderator,
+    ModeratorCreate,
+    ModeratorList,
+    ModeratorRemoval,
     QueuePage,
     SettingsPatch,
     SettingsUpdate,
@@ -105,3 +109,23 @@ async def moderation_queue(request: Request, status: Literal["pending", "approve
 async def moderate_donation(donation_id: str, body: ModerationRequest, request: Request,
                             access: StreamerAccess = Depends(require_streamer_access)) -> ModerationResult:
     return await _service(request).moderation.moderate(access, donation_id, body.action, body.reason)
+
+
+# ── G4 moderators ───────────────────────────────────────────────────────────────
+
+@dashboard_router.get("/moderators", response_model=ModeratorList)
+async def list_moderators(request: Request,
+                          access: StreamerAccess = Depends(require_streamer_access)) -> ModeratorList:
+    return await _service(request).moderators(access)
+
+
+@dashboard_router.post("/moderators", response_model=Moderator, status_code=201)
+async def add_moderator(body: ModeratorCreate, request: Request,
+                        access: StreamerAccess = Depends(require_streamer_access)) -> Moderator:
+    return await _service(request).add_moderator(access, body)
+
+
+@dashboard_router.delete("/moderators/{moderator_id}", response_model=ModeratorRemoval)
+async def remove_moderator(moderator_id: str, request: Request,
+                           access: StreamerAccess = Depends(require_streamer_access)) -> ModeratorRemoval:
+    return await _service(request).remove_moderator(access, moderator_id)

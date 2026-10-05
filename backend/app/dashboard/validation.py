@@ -96,6 +96,31 @@ def aware_timestamp(value: object) -> datetime | None:
     return parsed
 
 
+# ── moderators (A7) ─────────────────────────────────────────────────────────────
+# Compatibility-preserving: the legacy dashboard and manage-moderators only trimmed the values and
+# required a name plus at least one Telegram or Discord id; no id format was ever enforced (dev data
+# holds non-numeric ids). The length caps only bound the input: the longest stored values are a
+# 24-character name and 10 / 19-character ids. Existing rows are never re-validated.
+
+MOD_NAME_MAX = 100
+MOD_IDENTIFIER_MAX = 64
+
+
+def mod_name(value: str) -> str:
+    value = value.strip()
+    if not 1 <= len(value) <= MOD_NAME_MAX:
+        raise ValueError(f"must be 1-{MOD_NAME_MAX} characters")
+    return value
+
+
+def mod_identifier(value: str | None) -> str | None:
+    """A Telegram or Discord id as typed (trimmed); empty means "none"."""
+    value = (value or "").strip()
+    if len(value) > MOD_IDENTIFIER_MAX:
+        raise ValueError(f"must be at most {MOD_IDENTIFIER_MAX} characters")
+    return value or None
+
+
 # ── keyset pagination (newest first: created_at DESC, id DESC) ──────────────────
 
 CURSOR_MAX_LENGTH = 200

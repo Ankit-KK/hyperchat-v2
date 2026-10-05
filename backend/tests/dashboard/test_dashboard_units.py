@@ -382,3 +382,42 @@ def test_invalid_moderation_requests(body):
 def test_valid_moderation_requests():
     assert models.ModerationRequest.model_validate({"action": "ban_donor", "reason": "x" * 500}).reason == "x" * 500
     assert models.ModerationRequest.model_validate({"action": "approve"}).reason is None
+
+
+# ── G4 moderators: compatibility-preserving rules (A7) ──────────────────────────
+
+def _moderator(body: dict) -> tuple:
+    m = models.ModeratorCreate.model_validate(body)
+    return m.mod_name, m.telegram_user_id, m.discord_user_id
+
+
+@pytest.mark.parametrize("body,expected", [
+    ({"mod_name": "  Mod  ", "telegram_user_id": " 123456789 "}, ("Mod", "123456789", None)),
+    ({"mod_name": "Mod", "discord_user_id": "123456789012345678"}, ("Mod", None, "123456789012345678")),
+    ({"mod_name": "Mod", "telegram_user_id": "1", "discord_user_id": "2"}, ("Mod", "1", "2")),
+    ({"mod_name": "Mod", "telegram_user_id": "", "discord_user_id": "2"}, ("Mod", None, "2")),     # "" = none
+    ({"mod_name": "Mod", "telegram_user_id": None, "discord_user_id": " 2 "}, ("Mod", None, "2")),
+    # no format is enforced: the legacy product never required one (dev data has such ids)
+    ({"mod_name": "Mod", "telegram_user_id": "@handle_name"}, ("Mod", "@handle_name", None)),
+    ({"mod_name": "Mod", "telegram_user_id": "-1001234567890"}, ("Mod", "-1001234567890", None)),
+    ({"mod_name": "Mod", "discord_user_id": "someone#0001"}, ("Mod", None, "someone#0001")),
+    ({"mod_name": "x" * 100, "telegram_user_id": "1" * 64}, ("x" * 100, "1" * 64, None)),
+])
+def test_valid_moderators(body, expected):
+    assert _moderator(body) == expected
+
+
+@pytest.mark.parametrize("body", [
+    {"mod_name": "Mod"}, {"mod_name": "Mod", "telegram_user_id": "", "discord_user_id": "  "},
+    {"mod_name": "Mod", "telegram_user_id": None, "discord_user_id": None},
+    {"mod_name": "", "telegram_user_id": "1"}, {"mod_name": "   ", "telegram_user_id": "1"},
+    {"mod_name": "x" * 101, "telegram_user_id": "1"}, {"mod_name": "Mod", "telegram_user_id": "1" * 65},
+    {"mod_name": "Mod", "discord_user_id": "2" * 65}, {"mod_name": None, "telegram_user_id": "1"},
+    {"mod_name": "Mod", "telegram_user_id": 123456789}, {"telegram_user_id": "1"},
+    {"mod_name": "Mod", "telegram_user_id": "1", "can_ban": True},          # permissions are D-M7 (deferred)
+    {"mod_name": "Mod", "telegram_user_id": "1", "role": "owner"},
+    {"mod_name": "Mod", "telegram_user_id": "1", "streamer_id": "x"},
+])
+def test_invalid_moderators(body):
+    with pytest.raises(ValidationError):
+        models.ModeratorCreate.model_validate(body)

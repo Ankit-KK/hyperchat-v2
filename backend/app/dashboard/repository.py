@@ -7,11 +7,13 @@ Indexes used (no new index in Phase 5):
   stats / queue count  donations_streamer_status_idx (streamer_id, payment_status, moderation_status)
   is_donor_banned      banned_donors_name_idx (donor_name_lower) WHERE is_active = true
   donor totals         UNIQUE (streamer_id, donator_name_lower)
+  moderators           streamers_moderators_unique_active (streamer_id, telegram_user_id) prefix
 """
 
 from datetime import datetime
 from decimal import Decimal
 
+from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
 
 from app.dashboard.moderation import Step, transition
@@ -50,6 +52,21 @@ _DONATION_COLS = """d.id::text AS donation_id, d.donor_name, d.amount, d.currenc
 _QUEUE_COLS = _DONATION_COLS + """, d.approved_at, d.approved_by_label,
     EXISTS (SELECT 1 FROM public.banned_donors b WHERE b.streamer_id = d.streamer_id AND b.is_active = true
             AND b.donor_name_lower = lower(d.donor_name)) AS is_donor_banned"""
+
+
+_MODERATOR_COLS = """id::text AS moderator_id, mod_name, telegram_user_id, discord_user_id,
+    COALESCE(role::text, 'moderator') AS role, COALESCE(can_approve, true) AS can_approve,
+    COALESCE(can_reject, true) AS can_reject, COALESCE(can_hide_message, true) AS can_hide_message,
+    COALESCE(can_ban, false) AS can_ban, COALESCE(can_replay, true) AS can_replay, is_active, created_at,
+    last_action_at"""
+
+
+class DuplicateModerator(Exception):
+    """An active moderator of this creator already has the Telegram or Discord id."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind)
+        self.kind = kind  # "telegram" | "discord"
 
 
 def _db_value(value):
@@ -226,3 +243,52 @@ class DashboardRepository:
                 donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
             VALUES (%s, NULL, NULL, %s, %s, %s, 'dashboard', %s, %s, %s, %s)
         """, (streamer_id, actor_label, donation_id, action, previous, new, notes, actor_user_id))
+
+    # ── G4 moderators ──────────────────────────────────────────────────────
+    async def moderators(self, streamer_id: str) -> list[dict]:
+        """Active and removed moderators, newest first (legacy order)."""
+        return await self._all(f"SELECT {_MODERATOR_COLS} FROM public.streamers_moderators WHERE streamer_id = %s "
+                               "ORDER BY created_at DESC, id DESC", (streamer_id,))
+
+    async def add_moderator(self, streamer_id: str, mod_name: str, telegram_user_id: str | None,
+                            discord_user_id: str | None) -> dict:
+        """Insert an active moderator. Raises DuplicateModerator: Telegram ids through the existing unique
+        index (active rows only), Discord ids through a check made under a per-creator lock (there is no
+        Discord index: existing data already has duplicates, which stay untouched)."""
+        try:
+            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s::text, 0))",
+                                  (f"hyperchat:moderators:{streamer_id}",))
+                if discord_user_id is not None:
+                    await cur.execute("SELECT EXISTS (SELECT 1 FROM public.streamers_moderators WHERE streamer_id = %s "
+                                      "AND is_active = true AND discord_user_id = %s) AS taken",
+                                      (streamer_id, discord_user_id))
+                    if (await cur.fetchone())["taken"]:
+                        raise DuplicateModerator("discord")
+                return await self._insert_moderator(cur, streamer_id, mod_name, telegram_user_id, discord_user_id)
+        except pg_errors.UniqueViolation as exc:
+            if exc.diag.constraint_name == "streamers_moderators_unique_active":
+                raise DuplicateModerator("telegram") from None
+            raise
+
+    async def _insert_moderator(self, cur, streamer_id: str, mod_name: str, telegram_user_id: str | None,
+                                discord_user_id: str | None) -> dict:
+        await cur.execute(f"INSERT INTO public.streamers_moderators (streamer_id, mod_name, telegram_user_id, "
+                          f"discord_user_id) VALUES (%s, %s, %s, %s) RETURNING {_MODERATOR_COLS}",
+                          (streamer_id, mod_name, telegram_user_id, discord_user_id))
+        return await cur.fetchone()
+
+    async def remove_moderator(self, streamer_id: str, moderator_id: str) -> tuple[str, dict] | None:
+        """Soft removal (is_active = false). ("removed" | "unchanged", row), or None when this creator has
+        no such moderator."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(f"UPDATE public.streamers_moderators SET is_active = false WHERE id = %s "
+                              f"AND streamer_id = %s AND is_active = true RETURNING {_MODERATOR_COLS}",
+                              (moderator_id, streamer_id))
+            row = await cur.fetchone()
+            if row is not None:
+                return "removed", row
+            await cur.execute(f"SELECT {_MODERATOR_COLS} FROM public.streamers_moderators "
+                              "WHERE id = %s AND streamer_id = %s", (moderator_id, streamer_id))
+            row = await cur.fetchone()
+            return ("unchanged", row) if row else None

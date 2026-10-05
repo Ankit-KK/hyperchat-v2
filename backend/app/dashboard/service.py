@@ -12,10 +12,14 @@ from app.dashboard.models import (
     DonationItem,
     DonationPage,
     DonationStats,
+    Moderator,
+    ModeratorCreate,
+    ModeratorList,
+    ModeratorRemoval,
     SettingsUpdate,
 )
 from app.dashboard.moderation import ModerationService
-from app.dashboard.repository import DashboardRepository
+from app.dashboard.repository import DashboardRepository, DuplicateModerator
 from app.security.audit import security_event
 
 APPROVED = ("approved", "auto_approved")
@@ -82,3 +86,30 @@ class DashboardService:
         security_event("donations_exported", level=logging.INFO, user_id=access.current.user.id,
                        streamer_id=access.streamer.id, count=len(rows))
         return f"{access.streamer.slug}-donations-{first.isoformat()}-{last.isoformat()}.csv", rows
+
+    # ── G4 moderators ──────────────────────────────────────────────────────
+    async def moderators(self, access: StreamerAccess) -> ModeratorList:
+        return ModeratorList(moderators=[Moderator(**r) for r in await self.repo.moderators(access.streamer.id)])
+
+    async def add_moderator(self, access: StreamerAccess, body: ModeratorCreate) -> Moderator:
+        try:
+            row = await self.repo.add_moderator(access.streamer.id, body.mod_name, body.telegram_user_id,
+                                                body.discord_user_id)
+        except DuplicateModerator as exc:
+            platform = "Telegram" if exc.kind == "telegram" else "Discord"
+            raise ApiError(409, f"An active moderator with this {platform} ID already exists",
+                           f"duplicate_{exc.kind}_moderator") from None
+        security_event("moderator_added", level=logging.INFO, user_id=access.current.user.id,
+                       streamer_id=access.streamer.id)
+        return Moderator(**row)
+
+    async def remove_moderator(self, access: StreamerAccess, moderator_id: str) -> ModeratorRemoval:
+        moderator_id = v.parse_uuid(moderator_id)
+        outcome = await self.repo.remove_moderator(access.streamer.id, moderator_id) if moderator_id else None
+        if outcome is None:
+            raise ApiError(404, "Moderator not found", "moderator_not_found")
+        result, row = outcome
+        if result == "removed":
+            security_event("moderator_removed", level=logging.INFO, user_id=access.current.user.id,
+                           streamer_id=access.streamer.id)
+        return ModeratorRemoval(result=result, moderator=Moderator(**row))
