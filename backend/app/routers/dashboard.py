@@ -5,9 +5,11 @@ is admin-only); POST/PATCH/DELETE also pass require_user's Origin + CSRF check. 
 paths are never cached (install_no_store).
 """
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 
+from app.authz.dependencies import StreamerAccess, require_streamer_access
 from app.core.errors import ApiError
+from app.dashboard.models import DashboardSettings, SettingsPatch, SettingsUpdate
 from app.dashboard.service import DashboardService
 
 dashboard_router = APIRouter(prefix="/api/v1/dashboard/streamers/{streamer}", tags=["dashboard"])
@@ -37,3 +39,17 @@ def _service(request: Request) -> DashboardService:
     if service is None:
         raise ApiError(503, "Service unavailable", "dashboard_not_configured")
     return service
+
+
+# ── G1 settings ─────────────────────────────────────────────────────────────────
+
+@dashboard_router.get("/settings", response_model=DashboardSettings)
+async def read_settings(request: Request,
+                        access: StreamerAccess = Depends(require_streamer_access)) -> DashboardSettings:
+    return await _service(request).settings(access)
+
+
+@dashboard_router.patch("/settings", response_model=SettingsUpdate)
+async def update_settings(body: SettingsPatch, request: Request,
+                          access: StreamerAccess = Depends(require_streamer_access)) -> SettingsUpdate:
+    return await _service(request).update_settings(access, body.changes())

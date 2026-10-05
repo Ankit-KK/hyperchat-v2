@@ -69,6 +69,22 @@ def make_streamer(slug: str, user_id: str | None = None, name: str = "Auth Test"
                             "RETURNING id::text", (slug, name, user_id)).fetchone()[0]
 
 
+def update_streamer(streamer_id: str, **cols) -> None:
+    sets = ", ".join(f"{k} = %({k})s" for k in cols)
+    with db() as conn:
+        conn.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", {**cols, "id": streamer_id})
+
+
+def owned_creator(client, slug: str, email: str = "owner" + DOMAIN, **cols) -> tuple[str, dict]:
+    """A creator owned by a new user who is then signed in on `client`: (streamer id, CSRF headers)."""
+    sid = make_streamer(slug, user_id=make_user(email))
+    if cols:
+        update_streamer(sid, **cols)
+    resp = login(client, email)
+    assert resp.status_code == 200, resp.text
+    return sid, csrf_headers(resp)
+
+
 def make_donation(streamer_id: str, amount_inr=100, *, payment: str = "success", moderation: str = "pending",
                   name: str = "Donor", message: str | None = None, at: datetime | None = None,
                   currency: str = "INR", amount=None, visible: bool = True) -> str:
