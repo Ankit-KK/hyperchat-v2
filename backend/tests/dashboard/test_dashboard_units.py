@@ -10,9 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app.auth.repository import User
 from app.core.errors import ApiError
 from app.dashboard import csv_export, models
 from app.dashboard import validation as v
+from app.dashboard.moderation import ACTIONS, STATUSES, NotPaid, Step, actor_label, transition
 from app.dashboard.repository import SETTINGS_SQL_TYPES
 from app.dashboard.validation import parse_uuid
 from app.routers.dashboard import is_private_path
@@ -287,3 +289,96 @@ def test_csv_streams_in_chunks():
     chunks = list(csv_export.encode([row] * 1201))
     assert len(chunks) == 3 and sum(c.count("\r\n") for c in chunks) == 1202
     assert list(csv_export.encode([])) == ["created_at,donor_name,amount,currency,amount_inr\r\n"]
+
+
+# ── G3 moderation state machine (approved plan section 9) ───────────────────────
+
+A, U = "applied", "unchanged"
+# (status, action) -> expected step for a paid donation whose message is visible and donor not banned
+MATRIX = {
+    ("pending", "approve"): Step(A, "approved", True, approve=True, totals_delta=1),
+    ("pending", "reject"): Step(A, "rejected", False),
+    ("pending", "hide_message"): Step(A, "pending", False),
+    ("pending", "unhide_message"): Step(U, "pending", True),
+    ("pending", "ban_donor"): Step(A, "rejected", False, ban=True),
+    ("approved", "approve"): Step(U, "approved", True),
+    ("approved", "reject"): Step(A, "rejected", False, totals_delta=-1),
+    ("approved", "hide_message"): Step(A, "approved", False),
+    ("approved", "unhide_message"): Step(U, "approved", True),
+    ("approved", "ban_donor"): Step(A, "rejected", False, totals_delta=-1, ban=True),
+    ("auto_approved", "approve"): Step(U, "auto_approved", True),                      # A5
+    ("auto_approved", "reject"): Step(A, "rejected", False, totals_delta=-1),         # legacy forgot this debit
+    ("auto_approved", "hide_message"): Step(A, "auto_approved", False),
+    ("auto_approved", "unhide_message"): Step(U, "auto_approved", True),
+    ("auto_approved", "ban_donor"): Step(A, "rejected", False, totals_delta=-1, ban=True),
+    ("rejected", "approve"): Step(A, "approved", True, approve=True, totals_delta=1),
+    ("rejected", "reject"): Step(U, "rejected", True),
+    ("rejected", "hide_message"): Step(A, "rejected", False),
+    ("rejected", "unhide_message"): Step(U, "rejected", True),
+    ("rejected", "ban_donor"): Step(A, "rejected", True, ban=True),
+}
+
+
+def _step(status, action, *, visible=True, banned=False, payment="success") -> Step:
+    return transition(action, payment_status=payment, moderation_status=status, message_visible=visible,
+                      donor_banned=banned)
+
+
+def test_matrix_covers_every_status_and_action():
+    assert set(MATRIX) == {(s, a) for s in STATUSES for a in ACTIONS} and len(MATRIX) == 20
+    assert "unban_donor" not in ACTIONS and "replay" not in ACTIONS  # A3, Phase 10
+
+
+@pytest.mark.parametrize("status,action", sorted(MATRIX))
+def test_transition_matrix(status, action):
+    assert _step(status, action) == MATRIX[(status, action)]
+
+
+def test_hidden_messages_and_existing_bans():
+    assert _step("pending", "hide_message", visible=False) == Step(U, "pending", False)
+    assert _step("approved", "unhide_message", visible=False) == Step(A, "approved", True)
+    assert _step("rejected", "approve", visible=False) == Step(A, "approved", False, approve=True, totals_delta=1)
+    assert _step("pending", "ban_donor", banned=True) == Step(A, "rejected", False)          # no second ban
+    assert _step("approved", "ban_donor", banned=True) == Step(A, "rejected", False, totals_delta=-1)
+    assert _step("rejected", "ban_donor", banned=True) == Step(U, "rejected", True)
+
+
+@pytest.mark.parametrize("payment", ["pending", "failed"])
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("status", STATUSES)
+def test_unpaid_donations_cannot_be_moderated(payment, action, status):
+    with pytest.raises(NotPaid):
+        _step(status, action, payment=payment)
+
+
+def test_unknown_actions_and_statuses_are_errors():
+    for action in ("unban_donor", "replay", "delete", ""):
+        with pytest.raises(ValueError):
+            _step("pending", action)
+    with pytest.raises(ValueError):
+        _step("hidden", "approve")
+
+
+def _user(username, email="creator@example.test") -> User:
+    return User(id="u1", email=email, username=username, role="streamer", streamer_id=None, is_active=True,
+                password_hash=None, failed_login_attempts=0, locked_until=None)
+
+
+def test_actor_label_is_the_username_or_dashboard_never_the_email():
+    assert actor_label(_user("CreatorOne")) == "CreatorOne"
+    assert actor_label(_user("  Spaced  ")) == "Spaced"
+    for empty in (None, "", "   "):
+        assert actor_label(_user(empty)) == "Dashboard"
+
+
+@pytest.mark.parametrize("body", [{"action": "unban_donor"}, {"action": "replay"}, {"action": "APPROVE"}, {},
+                                  {"action": "ban_donor", "reason": "x" * 501}, {"action": "ban_donor", "reason": 5},
+                                  {"action": "approve", "streamer_id": "x"}, {"action": "approve", "moderator_id": "x"}])
+def test_invalid_moderation_requests(body):
+    with pytest.raises(ValidationError):
+        models.ModerationRequest.model_validate(body)
+
+
+def test_valid_moderation_requests():
+    assert models.ModerationRequest.model_validate({"action": "ban_donor", "reason": "x" * 500}).reason == "x" * 500
+    assert models.ModerationRequest.model_validate({"action": "approve"}).reason is None

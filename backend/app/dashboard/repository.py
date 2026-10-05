@@ -4,7 +4,9 @@ Every query is scoped by streamer_id: a donation or moderator id from another cr
 Indexes used (no new index in Phase 5):
   settings             streamers primary key                                    1 row
   donations / export   donations_streamer_created_idx (streamer_id, created_at DESC)
-  stats                donations_streamer_status_idx (streamer_id, payment_status, ...)
+  stats / queue count  donations_streamer_status_idx (streamer_id, payment_status, moderation_status)
+  is_donor_banned      banned_donors_name_idx (donor_name_lower) WHERE is_active = true
+  donor totals         UNIQUE (streamer_id, donator_name_lower)
 """
 
 from datetime import datetime
@@ -12,6 +14,7 @@ from decimal import Decimal
 
 from psycopg.rows import dict_row
 
+from app.dashboard.moderation import Step, transition
 from app.dashboard.validation import WRITABLE_SETTINGS
 
 # Nullable booleans / mode are served with their column default, as Phase 4 does for the public API.
@@ -44,6 +47,9 @@ SETTINGS_SQL_TYPES = {
 _DONATION_COLS = """d.id::text AS donation_id, d.donor_name, d.amount, d.currency, d.amount_inr, d.message,
     d.message_visible, d.is_hyperemote, d.voice_message_url, d.tts_audio_url, d.hypersound_url, d.media_url,
     d.media_type, d.moderation_status, d.created_at"""
+_QUEUE_COLS = _DONATION_COLS + """, d.approved_at, d.approved_by_label,
+    EXISTS (SELECT 1 FROM public.banned_donors b WHERE b.streamer_id = d.streamer_id AND b.is_active = true
+            AND b.donor_name_lower = lower(d.donor_name)) AS is_donor_banned"""
 
 
 def _db_value(value):
@@ -91,8 +97,9 @@ class DashboardRepository:
 
     # ── G2 donations (paid only) ───────────────────────────────────────────
     async def donations(self, streamer_id: str, *, statuses: tuple[str, ...] | None, limit: int,
-                        after: tuple[datetime, str] | None, columns: str = _DONATION_COLS) -> list[dict]:
-        """Paid donations, newest first (created_at DESC, id DESC), after the keyset position `after`."""
+                        after: tuple[datetime, str] | None, queue: bool = False) -> list[dict]:
+        """Paid donations, newest first (created_at DESC, id DESC), after the keyset position `after`.
+        `queue` adds the moderation columns (approved_at, approved_by_label, is_donor_banned)."""
         where = ["d.streamer_id = %(sid)s", "d.payment_status = 'success'"]
         params: dict = {"sid": streamer_id, "limit": limit}
         if statuses is not None:
@@ -101,6 +108,7 @@ class DashboardRepository:
         if after is not None:
             where.append("(d.created_at, d.id) < (%(after_at)s, %(after_id)s::uuid)")
             params.update(after_at=after[0], after_id=after[1])
+        columns = _QUEUE_COLS if queue else _DONATION_COLS
         return await self._all(f"SELECT {columns} FROM public.donations d WHERE {' AND '.join(where)} "
                                "ORDER BY d.created_at DESC, d.id DESC LIMIT %(limit)s", params)
 
@@ -123,3 +131,98 @@ class DashboardRepository:
             WHERE streamer_id = %s AND payment_status = 'success' AND created_at >= %s AND created_at < %s
             ORDER BY created_at DESC, id DESC LIMIT %s
         """, (streamer_id, start, end, limit))
+
+    # ── G3 moderation ──────────────────────────────────────────────────────
+    async def pending_count(self, streamer_id: str) -> int:
+        row = await self._one("SELECT count(*) AS n FROM public.donations WHERE streamer_id = %s "
+                              "AND payment_status = 'success' AND moderation_status = 'pending'", (streamer_id,))
+        return row["n"]
+
+    async def moderate(self, streamer_id: str, donation_id: str, action: str, *, actor_user_id: str | None,
+                       actor_label: str, notes: str | None) -> tuple[str, Step, dict] | None:
+        """One action in ONE transaction: lock the donation (scoped to the creator), decide with
+        transition(), then write the donation, the donor total, the ban and the audit row.
+
+        Returns (previous status, step, donation row), or None when this creator has no such donation.
+        NotPaid (raised by transition) rolls back with nothing written; so does any other error.
+        Concurrent actions on one donation serialise on the row lock: the second sees the new state.
+        """
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT donor_name, amount_inr, payment_status, moderation_status, message_visible "
+                              "FROM public.donations WHERE id = %s AND streamer_id = %s FOR UPDATE",
+                              (donation_id, streamer_id))
+            current = await cur.fetchone()
+            if current is None:
+                return None
+            banned = False
+            if action == "ban_donor":
+                # Two bans of one donor (e.g. on two of their donations) must not both insert a ban.
+                await cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s::text || lower(%s::text), 0))",
+                                  (f"hyperchat:ban:{streamer_id}:", current["donor_name"]))
+                banned = await self._donor_banned(cur, streamer_id, current["donor_name"])
+            step = transition(action, payment_status=current["payment_status"],
+                              moderation_status=current["moderation_status"],
+                              message_visible=current["message_visible"], donor_banned=banned)
+            if step.result == "applied":
+                await self._write_donation(cur, streamer_id, donation_id, current, step, actor_label)
+                if step.totals_delta:
+                    await self._change_totals(cur, streamer_id, current["donor_name"], current["amount_inr"],
+                                              step.totals_delta)
+                if step.ban:
+                    await self._insert_ban(cur, streamer_id, current["donor_name"], actor_label, notes)
+                await self._record_action(cur, streamer_id, donation_id, action, current["moderation_status"],
+                                          step.new_status, actor_user_id, actor_label, notes)
+            await cur.execute(f"SELECT {_QUEUE_COLS} FROM public.donations d WHERE d.id = %s", (donation_id,))
+            return current["moderation_status"], step, await cur.fetchone()
+
+    @staticmethod
+    async def _donor_banned(cur, streamer_id: str, donor_name: str) -> bool:
+        await cur.execute("SELECT EXISTS (SELECT 1 FROM public.banned_donors WHERE streamer_id = %s "
+                          "AND is_active = true AND donor_name_lower = lower(%s)) AS banned", (streamer_id, donor_name))
+        return (await cur.fetchone())["banned"]
+
+    async def _write_donation(self, cur, streamer_id: str, donation_id: str, current: dict, step: Step,
+                              actor_label: str) -> None:
+        if not step.approve and (step.new_status, step.message_visible) == (current["moderation_status"],
+                                                                            current["message_visible"]):
+            return  # e.g. a ban on an already rejected donation: only the ban row is new
+        sets = ["moderation_status = %(status)s", "message_visible = %(visible)s"]
+        if step.approve:
+            sets += ["approved_at = now()", "audio_scheduled_at = now()", "approved_by_label = %(label)s",
+                     "approved_by_moderator_id = NULL"]
+        await cur.execute(f"UPDATE public.donations SET {', '.join(sets)} WHERE id = %(id)s AND streamer_id = %(sid)s",
+                          {"status": step.new_status, "visible": step.message_visible, "label": actor_label,
+                           "id": donation_id, "sid": streamer_id})
+
+    async def _change_totals(self, cur, streamer_id: str, donor_name: str, amount_inr, delta: int) -> None:
+        """Credit (upsert) or debit (floored at 0) the donor's total, as legacy increment/decrement_donator_total
+        did, keyed by (streamer_id, lower(donor name))."""
+        if delta > 0:
+            await cur.execute("""
+                INSERT INTO public.streamer_donator_totals
+                    (streamer_id, donator_name, donator_name_lower, total_amount, donation_count)
+                VALUES (%(sid)s, %(name)s, lower(%(name)s), %(amount)s, 1)
+                ON CONFLICT (streamer_id, donator_name_lower) DO UPDATE SET
+                    total_amount = public.streamer_donator_totals.total_amount + EXCLUDED.total_amount,
+                    donation_count = public.streamer_donator_totals.donation_count + 1,
+                    donator_name = EXCLUDED.donator_name, updated_at = now()
+            """, {"sid": streamer_id, "name": donor_name, "amount": amount_inr})
+        else:
+            await cur.execute("""
+                UPDATE public.streamer_donator_totals SET total_amount = GREATEST(0, total_amount - %(amount)s),
+                       donation_count = GREATEST(0, donation_count - 1), updated_at = now()
+                WHERE streamer_id = %(sid)s AND donator_name_lower = lower(%(name)s)
+            """, {"sid": streamer_id, "name": donor_name, "amount": amount_inr})
+
+    async def _insert_ban(self, cur, streamer_id: str, donor_name: str, actor_label: str, notes: str | None) -> None:
+        await cur.execute("INSERT INTO public.banned_donors (streamer_id, donor_name, banned_by_moderator_id, "
+                          "banned_by_name, reason, is_active) VALUES (%s, %s, NULL, %s, %s, true)",
+                          (streamer_id, donor_name, actor_label, notes))
+
+    async def _record_action(self, cur, streamer_id: str, donation_id: str, action: str, previous: str, new: str,
+                             actor_user_id: str | None, actor_label: str, notes: str | None) -> None:
+        await cur.execute("""
+            INSERT INTO public.moderation_actions (streamer_id, moderator_id, moderator_telegram_id, moderator_name,
+                donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
+            VALUES (%s, NULL, NULL, %s, %s, %s, 'dashboard', %s, %s, %s, %s)
+        """, (streamer_id, actor_label, donation_id, action, previous, new, notes, actor_user_id))

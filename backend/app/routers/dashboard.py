@@ -5,6 +5,8 @@ is admin-only); POST/PATCH/DELETE also pass require_user's Origin + CSRF check. 
 paths are never cached (install_no_store).
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import StreamingResponse
 
@@ -15,6 +17,9 @@ from app.dashboard.models import (
     DashboardSettings,
     DonationPage,
     DonationStats,
+    ModerationRequest,
+    ModerationResult,
+    QueuePage,
     SettingsPatch,
     SettingsUpdate,
 )
@@ -85,3 +90,18 @@ async def export_donations(request: Request, start: str | None = Query(None, ali
     filename, rows = await _service(request).export_donations(access, start, end)
     return StreamingResponse(csv_export.encode(rows), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ── G3 moderation ───────────────────────────────────────────────────────────────
+
+@dashboard_router.get("/moderation/queue", response_model=QueuePage)
+async def moderation_queue(request: Request, status: Literal["pending", "approved", "rejected", "all"] = "pending",
+                           limit: int = Query(50, ge=1, le=100), cursor: str | None = None,
+                           access: StreamerAccess = Depends(require_streamer_access)) -> QueuePage:
+    return await _service(request).moderation.queue(access, status=status, limit=limit, cursor=cursor)
+
+
+@dashboard_router.post("/donations/{donation_id}/moderation", response_model=ModerationResult)
+async def moderate_donation(donation_id: str, body: ModerationRequest, request: Request,
+                            access: StreamerAccess = Depends(require_streamer_access)) -> ModerationResult:
+    return await _service(request).moderation.moderate(access, donation_id, body.action, body.reason)

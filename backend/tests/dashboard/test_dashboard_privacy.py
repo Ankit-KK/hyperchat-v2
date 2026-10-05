@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from tests.integration import (
     DOMAIN,
     ORIGIN,
+    creator_state,
     csrf_headers,
     db,
     login,
@@ -32,6 +33,8 @@ ENDPOINTS = [
     ("GET", "/donations", None),
     ("GET", "/donations/stats", None),
     ("GET", "/donations/export.csv?from=2026-10-01&to=2026-10-02", None),
+    ("GET", "/moderation/queue?status=all", None),
+    ("POST", "/donations/{donation}/moderation", lambda n: {"action": "hide_message" if n % 2 else "unhide_message"}),
 ]
 WRITES = [e for e in ENDPOINTS if e[0] != "GET"]
 READS = [e for e in ENDPOINTS if e[0] == "GET"]
@@ -55,18 +58,7 @@ def _call(browser, method: str, ref: str, path: str, body, ids: dict, headers: d
     return browser.request(method, f"{S}/{ref}{path.format(**ids)}", **kwargs)
 
 
-def state(sid: str) -> str:
-    """Everything a dashboard write could touch for one creator, as comparable text."""
-    with db() as conn:
-        return conn.execute("""
-            SELECT json_build_array(
-              (SELECT row_to_json(s) FROM public.streamers s WHERE s.id = %(s)s),
-              (SELECT json_agg(d ORDER BY d.id) FROM public.donations d WHERE d.streamer_id = %(s)s),
-              (SELECT json_agg(m ORDER BY m.id) FROM public.streamers_moderators m WHERE m.streamer_id = %(s)s),
-              (SELECT json_agg(b ORDER BY b.id) FROM public.banned_donors b WHERE b.streamer_id = %(s)s),
-              (SELECT json_agg(t ORDER BY t.id) FROM public.streamer_donator_totals t WHERE t.streamer_id = %(s)s),
-              (SELECT json_agg(a ORDER BY a.id) FROM public.moderation_actions a WHERE a.streamer_id = %(s)s)
-            )::text""", {"s": sid}).fetchone()[0]
+state = creator_state
 
 
 def _signed_in_browser(app, email: str) -> tuple:

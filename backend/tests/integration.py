@@ -98,6 +98,20 @@ def make_donation(streamer_id: str, amount_inr=100, *, payment: str = "success",
              currency, amount_inr, payment, moderation, message, visible, at or datetime.now(UTC))).fetchone()[0]
 
 
+def creator_state(streamer_id: str) -> str:
+    """Everything a dashboard write could touch for one creator, as comparable text."""
+    with db() as conn:
+        return conn.execute("""
+            SELECT json_build_array(
+              (SELECT row_to_json(s) FROM public.streamers s WHERE s.id = %(s)s),
+              (SELECT json_agg(d ORDER BY d.id) FROM public.donations d WHERE d.streamer_id = %(s)s),
+              (SELECT json_agg(m ORDER BY m.id) FROM public.streamers_moderators m WHERE m.streamer_id = %(s)s),
+              (SELECT json_agg(b ORDER BY b.id) FROM public.banned_donors b WHERE b.streamer_id = %(s)s),
+              (SELECT json_agg(t ORDER BY t.id) FROM public.streamer_donator_totals t WHERE t.streamer_id = %(s)s),
+              (SELECT json_agg(a ORDER BY a.id) FROM public.moderation_actions a WHERE a.streamer_id = %(s)s)
+            )::text""", {"s": streamer_id}).fetchone()[0]
+
+
 def cleanup_synthetic_rows() -> None:
     with db() as conn:
         conn.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))

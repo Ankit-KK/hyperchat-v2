@@ -135,6 +135,32 @@ class DonationPage(_Model):  # D-R2
     has_more: bool
 
 
+class QueueItem(DonationItem):  # D-R5 row and the D-M2 result
+    approved_at: datetime | None
+    approved_by_label: str | None
+    is_donor_banned: bool
+
+
+class QueuePage(_Model):  # D-R5
+    donations: list[QueueItem]
+    pending_count: int
+    next_cursor: str | None
+    has_more: bool
+
+
+class ModerationRequest(_Model):  # D-M2 body
+    action: Literal["approve", "reject", "hide_message", "unhide_message", "ban_donor"]
+    reason: Annotated[StrictStr, Field(max_length=500)] | None = None  # ban_donor only (stored as the ban reason)
+
+
+class ModerationResult(_Model):  # D-M2
+    result: Literal["applied", "unchanged"]
+    action: str
+    previous_status: str
+    new_status: str
+    donation: QueueItem
+
+
 class DonationStats(_Model):  # D-R3: every paid donation, any moderation status
     total_revenue_inr: float
     total_donations: int
