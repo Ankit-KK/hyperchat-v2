@@ -421,3 +421,13 @@ def test_valid_moderators(body, expected):
 def test_invalid_moderators(body):
     with pytest.raises(ValidationError):
         models.ModeratorCreate.model_validate(body)
+
+
+# ── G5 terms ────────────────────────────────────────────────────────────────────
+
+def test_terms_version_is_the_legacy_server_constant():
+    assert v.TERMS_VERSION == "2026-07-03"  # legacy src/config/terms.ts CURRENT_TERMS_VERSION
+    assert models.TermsAccept.model_validate({"version": "2026-07-03"}).version == "2026-07-03"
+    for body in ({}, {"version": None}, {"version": 1}, {"version": "x" * 41}, {"version": "v", "is_admin": True}):
+        with pytest.raises(ValidationError):
+            models.TermsAccept.model_validate(body)

@@ -209,3 +209,20 @@ class ModeratorCreate(_Model):  # D-M3 body (permissions keep their column defau
 class ModeratorRemoval(_Model):  # D-M4
     result: Literal["removed", "unchanged"]
     moderator: Moderator
+
+
+# ── G5 terms ────────────────────────────────────────────────────────────────────
+
+class TermsStatus(_Model):  # D-R7
+    current_version: str
+    accepted: bool
+    is_admin: bool
+
+
+class TermsAccept(_Model):  # D-M5 body: must name the current version (the client cannot pick another)
+    version: Annotated[StrictStr, Field(max_length=40)]
+
+
+class TermsAccepted(_Model):  # D-M5
+    accepted: bool
+    current_version: str

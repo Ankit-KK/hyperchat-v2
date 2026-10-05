@@ -121,6 +121,12 @@ def mod_identifier(value: str | None) -> str | None:
     return value or None
 
 
+# ── terms of service ────────────────────────────────────────────────────────────
+# Owned by the server (legacy src/config/terms.ts CURRENT_TERMS_VERSION); clients cannot choose it.
+TERMS_VERSION = "2026-07-03"
+USER_AGENT_MAX = 500
+
+
 # ── keyset pagination (newest first: created_at DESC, id DESC) ──────────────────
 
 CURSOR_MAX_LENGTH = 200

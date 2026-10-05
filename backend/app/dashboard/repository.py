@@ -292,3 +292,17 @@ class DashboardRepository:
                               "WHERE id = %s AND streamer_id = %s", (moderator_id, streamer_id))
             row = await cur.fetchone()
             return ("unchanged", row) if row else None
+
+    # ── G5 terms ───────────────────────────────────────────────────────────
+    async def terms_accepted(self, user_id: str, version: str) -> bool:
+        row = await self._one("SELECT EXISTS (SELECT 1 FROM public.terms_acceptances WHERE user_id = %s "
+                              "AND accepted_version = %s) AS accepted", (user_id, version))
+        return row["accepted"]
+
+    async def accept_terms(self, user_id: str, version: str, user_agent: str | None) -> bool:
+        """Idempotent (UNIQUE (user_id, accepted_version)): True only when this call recorded it."""
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("INSERT INTO public.terms_acceptances (user_id, accepted_version, user_agent) "
+                              "VALUES (%s, %s, %s) ON CONFLICT (user_id, accepted_version) DO NOTHING",
+                              (user_id, version, user_agent))
+            return cur.rowcount == 1

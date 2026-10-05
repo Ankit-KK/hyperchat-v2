@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+from app.auth.repository import User
 from app.authz.dependencies import StreamerAccess
 from app.core.errors import ApiError
 from app.dashboard import validation as v
@@ -17,6 +18,8 @@ from app.dashboard.models import (
     ModeratorList,
     ModeratorRemoval,
     SettingsUpdate,
+    TermsAccepted,
+    TermsStatus,
 )
 from app.dashboard.moderation import ModerationService
 from app.dashboard.repository import DashboardRepository, DuplicateModerator
@@ -113,3 +116,17 @@ class DashboardService:
             security_event("moderator_removed", level=logging.INFO, user_id=access.current.user.id,
                            streamer_id=access.streamer.id)
         return ModeratorRemoval(result=result, moderator=Moderator(**row))
+
+    # ── G5 terms (a client-side gate: no other API checks acceptance, A9) ───
+    async def terms_status(self, user: User) -> TermsStatus:
+        if user.role == "admin":  # admins are never asked to accept (legacy behaviour)
+            return TermsStatus(current_version=v.TERMS_VERSION, accepted=True, is_admin=True)
+        accepted = await self.repo.terms_accepted(user.id, v.TERMS_VERSION)
+        return TermsStatus(current_version=v.TERMS_VERSION, accepted=accepted, is_admin=False)
+
+    async def accept_terms(self, user: User, version: str, user_agent: str | None) -> TermsAccepted:
+        if version.strip() != v.TERMS_VERSION:
+            raise ApiError(409, "Terms version is not current", "terms_version_mismatch")
+        if await self.repo.accept_terms(user.id, v.TERMS_VERSION, (user_agent or "")[:v.USER_AGENT_MAX] or None):
+            security_event("terms_accepted", level=logging.INFO, user_id=user.id, reason=v.TERMS_VERSION)
+        return TermsAccepted(accepted=True, current_version=v.TERMS_VERSION)

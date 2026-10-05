@@ -10,6 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.responses import StreamingResponse
 
+from app.auth.dependencies import CurrentUser, require_user
 from app.authz.dependencies import StreamerAccess, require_streamer_access
 from app.core.errors import ApiError
 from app.dashboard import csv_export
@@ -26,6 +27,9 @@ from app.dashboard.models import (
     QueuePage,
     SettingsPatch,
     SettingsUpdate,
+    TermsAccept,
+    TermsAccepted,
+    TermsStatus,
 )
 from app.dashboard.service import DashboardService
 
@@ -129,3 +133,16 @@ async def add_moderator(body: ModeratorCreate, request: Request,
 async def remove_moderator(moderator_id: str, request: Request,
                            access: StreamerAccess = Depends(require_streamer_access)) -> ModeratorRemoval:
     return await _service(request).remove_moderator(access, moderator_id)
+
+
+# ── G5 terms (the signed-in user's own acceptance) ──────────────────────────────
+
+@me_router.get("/terms", response_model=TermsStatus)
+async def terms_status(request: Request, current: CurrentUser = Depends(require_user)) -> TermsStatus:
+    return await _service(request).terms_status(current.user)
+
+
+@me_router.post("/terms/accept", response_model=TermsAccepted)
+async def accept_terms(body: TermsAccept, request: Request,
+                       current: CurrentUser = Depends(require_user)) -> TermsAccepted:
+    return await _service(request).accept_terms(current.user, body.version, request.headers.get("user-agent"))
