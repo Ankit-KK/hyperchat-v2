@@ -6,7 +6,8 @@ default /var/run/postgresql) or a TCP host (CI's PostgreSQL service container). 
 helpers connect as hyperchat_app, the DML-only runtime role.
 
 Every synthetic row is recognizable and removed after each test: users/invites @authtest.invalid,
-streamers and partners with slugs starting "authtest-", nonces starting "authtest-".
+streamers (and their donations) and partners with slugs starting "authtest-", nonces starting
+"authtest-", platform soundboard slots with audio_key starting "authtest-".
 """
 
 import logging
@@ -67,7 +68,11 @@ def make_streamer(slug: str, user_id: str | None = None, name: str = "Auth Test"
 def cleanup_synthetic_rows() -> None:
     with db() as conn:
         conn.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+        # donations.streamer_id is ON DELETE RESTRICT: synthetic donations go first.
+        conn.execute("DELETE FROM public.donations WHERE streamer_id IN "
+                     "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (SLUG_PREFIX + "%",))
+        conn.execute("DELETE FROM public.platform_soundboard_slots WHERE audio_key LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions
         conn.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.request_nonces WHERE nonce LIKE %s OR nonce LIKE %s",

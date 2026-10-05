@@ -64,6 +64,11 @@ Telegram and Discord bots where features need them.
 - Moderators (Telegram/Discord bot identities, `streamers_moderators`) are authorized with the bot
   features, not as web users.
 
+## Public read API
+Unauthenticated, read-only endpoints for donation pages, overlays and the landing page — see
+[`public-api.md`](public-api.md). Only `active` creators, fixed response fields, Cache-Control,
+Nginx per-IP rate limiting.
+
 ## Database access
 - Runtime roles: `hyperchat_app` (API) and `hyperchat_worker`: DML only, no DDL, no access to
   `alembic_version`. `hyperchat_readonly` for reporting. All via Unix-socket peer authentication.

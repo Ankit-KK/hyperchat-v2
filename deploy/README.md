@@ -17,6 +17,7 @@ systemd/hyperchat-api.service   API unit (runs as user hyperchat, hardened, neve
 systemd/hyperchat-cleanup.{service,timer}  daily cleanup of expired auth/security rows (03:15 UTC)
 nginx/00-catchall.conf          drops unknown hostnames / bare-IP requests
 nginx/api.quicktestspace.site.conf   v2 development API vhost (TLS via Let's Encrypt)
+nginx/snippets/                 per-IP rate limit for the public read API (install to /etc/nginx/snippets/)
 postgres/setup_cluster.sh       create/check a cluster, roles and peer-auth mapping (idempotent)
 postgres/roles.sql              hyperchat_owner / migrator / app / worker / readonly
 postgres/pg_hba.conf, pg_ident.conf  Unix-socket peer auth only; PostgreSQL is never exposed
