@@ -1,10 +1,13 @@
 """Operator commands, run on the server (never exposed over HTTP).
 
     python -m app.cli --env-file /etc/hyperchat/api.env bootstrap-admin --email you@example.com
+    python -m app.cli --env-file /etc/hyperchat/api.env cleanup [--dry-run]
 
 bootstrap-admin creates the first admin account (or activates a password-less one) and refuses to run
 while any active admin can already sign in. The password is read without echo (or from stdin with
 --password-stdin) and is never printed or logged.
+cleanup deletes expired sessions, reset tokens, nonces, rate-limit windows and old unused invites
+(see app.maintenance); --dry-run only counts. It runs daily from deploy/systemd/hyperchat-cleanup.timer.
 """
 
 import argparse
@@ -18,6 +21,7 @@ import psycopg
 from app.admin.repository import AdminRepository, BootstrapRefused
 from app.auth.passwords import hash_password, validate_new_password
 from app.core.config import Settings
+from app.maintenance import run_cleanup
 from app.security.audit import security_event
 
 REFUSALS = {
@@ -70,12 +74,16 @@ def main(argv: list[str] | None = None) -> int:
     boot = sub.add_parser("bootstrap-admin", help="create the first admin account")
     boot.add_argument("--email", required=True)
     boot.add_argument("--password-stdin", action="store_true", help="read the password from stdin (no prompt)")
+    clean = sub.add_parser("cleanup", help="delete expired sessions, tokens, nonces and rate-limit windows")
+    clean.add_argument("--dry-run", action="store_true", help="only count what would be deleted")
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
     if not settings.db_enabled:
         print("Database is disabled by configuration.", file=sys.stderr)
         return 2
+    if args.command == "cleanup":
+        return asyncio.run(run_cleanup(settings, connection_factory(settings), dry_run=args.dry_run))
     return asyncio.run(bootstrap_admin(settings, args.email, read_password(args.password_stdin)))
 
 

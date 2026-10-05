@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily HyperChat v2 maintenance (expired sessions, tokens, nonces, rate-limit windows)
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
