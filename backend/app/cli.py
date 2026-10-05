@@ -21,6 +21,7 @@ import psycopg
 from app.admin.repository import AdminRepository, BootstrapRefused
 from app.auth.passwords import hash_password, validate_new_password
 from app.core.config import Settings
+from app.core.logging import configure_logging
 from app.maintenance import run_cleanup
 from app.security.audit import security_event
 
@@ -79,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
+    # Same JSON-lines logging as the API, so audit events (maintenance_cleanup, admin_bootstrapped)
+    # reach stdout -> journald when run from systemd.
+    configure_logging(settings.log_level)
     if not settings.db_enabled:
         print("Database is disabled by configuration.", file=sys.stderr)
         return 2

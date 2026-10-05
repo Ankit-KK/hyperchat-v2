@@ -1,6 +1,7 @@
 """Cleanup tooling against a scratch database only (it deletes rows it did not create)."""
 
 import asyncio
+import json
 
 from app.cli import connection_factory, main
 from app.core.config import Settings
@@ -98,4 +99,8 @@ def test_cleanup_command_prints_counts_only(strict_scratch_db, env, capsys):
     out = capsys.readouterr().out
     assert "would delete" in out and "sessions" in out and "authtest" not in out and DOMAIN not in out
     assert main(["cleanup"]) == 0
-    assert "deleted" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "deleted" in out and "authtest" not in out and DOMAIN not in out
+    events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    audit = [e for e in events if e.get("security_event") == "maintenance_cleanup"]
+    assert len(audit) == 1 and audit[0]["logger"] == "hyperchat.security" and audit[0]["count"] >= 1

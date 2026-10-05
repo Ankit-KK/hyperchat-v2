@@ -13,4 +13,6 @@ prepares the throwaway PostgreSQL it uses.
 | `e2e/smoke_auth.py` | a deployed API over public HTTPS: login, cookie flags, CSRF/Origin enforcement, session revocation, forgot-password, disabled Google, CORS, no secrets in the service journal |
 
 `e2e/smoke_auth.py` runs on the VPS (see its docstring); it creates one synthetic
-`@authtest.invalid` account in the target database and removes it afterwards.
+`@authtest.invalid` account in the target database and removes it afterwards. It expects the secure
+default `SameSite=Lax`; against the v2 dev API (cross-site development, `SameSite=None`) run it with
+`HYPERCHAT_SMOKE_SAMESITE=none`.
