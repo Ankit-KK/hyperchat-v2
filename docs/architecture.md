@@ -53,6 +53,17 @@ Telegram and Discord bots where features need them.
 | Partners | `x-api-key`, stored as SHA-256, revocable |
 | Webhooks (Razorpay, Telegram, Discord) | the provider's own signature/secret scheme, verified by the API |
 
+## Authorization
+- Admin: `users.role = 'admin'`, may act on every creator; managed through `/api/v1/admin`. The first
+  admin is created on the server with `python -m app.cli bootstrap-admin`.
+- Creator access: owner (`streamers.user_id`) or linked account (`users.streamer_id`); creators nobody
+  has claimed are admin-only. Enforced by `require_streamer_access` on every creator-scoped route.
+- Role, status or creator-link changes revoke the user's sessions immediately.
+- Browser trust is an explicit origin list (frontend + `HYPERCHAT_ALLOWED_ORIGINS`), shared by CORS,
+  the CSRF/Origin check and the OBS origin gate.
+- Moderators (Telegram/Discord bot identities, `streamers_moderators`) are authorized with the bot
+  features, not as web users.
+
 ## Database access
 - Runtime roles: `hyperchat_app` (API) and `hyperchat_worker`: DML only, no DDL, no access to
   `alembic_version`. `hyperchat_readonly` for reporting. All via Unix-socket peer authentication.
@@ -70,5 +81,6 @@ Telegram and Discord bots where features need them.
 ## Delivery plan
 Phases 0–15 are defined in [`migration-audit.md`](migration-audit.md), section M.
 Done: 0 (decisions), 1 (platform: clusters, roles, Alembic schema, ETL rehearsal, backups),
-2 (FastAPI-managed authentication). Next: 3 (authorization/security), then the feature APIs
-(4–12), the new frontend (13), cutover rehearsal (14) and Supabase decommissioning (15).
+2 (FastAPI-managed authentication), 3 (authorization, admin tooling, database-backed security
+primitives, explicit origins, cleanup, CI). Next: the feature APIs (4–12), the new frontend (13),
+cutover rehearsal (14) and Supabase decommissioning (15).

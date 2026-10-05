@@ -5,6 +5,8 @@ Unit and integration tests live next to the code they test:
 - `database/tests/` - Alembic migrations, role privileges, ETL mapping rules
 
 This directory holds checks that span components or run against a deployed environment.
+CI (`.github/workflows/ci.yml`) runs the backend and database suites; `.github/scripts/setup-test-db.sh`
+prepares the throwaway PostgreSQL it uses.
 
 | Path | What it checks |
 |---|---|

@@ -34,7 +34,8 @@ docs/       architecture, target schema, migration audit, history
 |---|---|
 | 1 Platform: PostgreSQL clusters, roles, Alembic schema (normalized `donations`), ETL rehearsal, backups | done |
 | 2 FastAPI-managed authentication | done; running on the v2 development API |
-| 3 Authorization/security, then feature APIs, new frontend, cutover | next — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
+| 3 Authorization (creator ownership), admin bootstrap + user management, database-backed security primitives, explicit origins, cleanup, CI | done; not yet deployed (dev runs Phase 2) |
+| 4–15 Feature APIs, new frontend, cutover | next — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
 
 Development API: `https://api.quicktestspace.site` (database `hyperchat_dev`).
 Production (`api.hyperchat.space`, database `hyperchat`) has the schema but takes no traffic yet.
@@ -45,7 +46,8 @@ cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements-dev
 cd ../database && ../backend/.venv/bin/pytest
 ```
 Database-backed tests are opt-in via environment variables and only ever use scratch databases;
-see `backend/README.md` and `database/README.md`.
+see `backend/README.md` and `database/README.md`. GitHub Actions (`.github/workflows/ci.yml`) runs
+the unit tests and the full database + integration suites against PostgreSQL 17 on every push.
 
 ## Documentation
 - [`docs/architecture.md`](docs/architecture.md) — components, trust boundaries, environments
