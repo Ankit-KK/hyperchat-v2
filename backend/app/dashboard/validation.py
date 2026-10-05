@@ -208,6 +208,11 @@ def parse_day(value: str | None, name: str) -> date:
         raise ValueError(f"{name} must be a date in YYYY-MM-DD format") from None
 
 
+def file_name_part(text: str) -> str:
+    """Header-safe piece of a Content-Disposition file name: only [a-z0-9_-]."""
+    return re.sub(r"[^a-z0-9_-]+", "-", text.lower()).strip("-") or "creator"
+
+
 def export_days(start: str | None, end: str | None) -> tuple[date, date]:
     """Whole IST days [from, to], at most EXPORT_MAX_DAYS of them."""
     first, last = parse_day(start, "from"), parse_day(end, "to")

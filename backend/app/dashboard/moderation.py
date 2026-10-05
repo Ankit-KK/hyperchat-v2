@@ -15,9 +15,9 @@ from app.dashboard.models import ModerationResult, QueueItem, QueuePage
 
 ACTIONS = ("approve", "reject", "hide_message", "unhide_message", "ban_donor")
 STATUSES = ("pending", "approved", "auto_approved", "rejected")
-CREDITED = frozenset({"approved", "auto_approved"})  # included in streamer_donator_totals
-QUEUE_FILTERS = {"pending": ("pending",), "approved": ("approved", "auto_approved"), "rejected": ("rejected",),
-                 "all": None}
+APPROVED_STATUSES = ("approved", "auto_approved")
+CREDITED = frozenset(APPROVED_STATUSES)  # included in streamer_donator_totals
+QUEUE_FILTERS = {"pending": ("pending",), "approved": APPROVED_STATUSES, "rejected": ("rejected",), "all": None}
 DASHBOARD_LABEL = "Dashboard"
 
 

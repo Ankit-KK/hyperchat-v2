@@ -21,11 +21,9 @@ from app.dashboard.models import (
     TermsAccepted,
     TermsStatus,
 )
-from app.dashboard.moderation import ModerationService
+from app.dashboard.moderation import APPROVED_STATUSES, ModerationService
 from app.dashboard.repository import DashboardRepository, DuplicateModerator
 from app.security.audit import security_event
-
-APPROVED = ("approved", "auto_approved")
 
 
 def streamer_gone() -> ApiError:
@@ -60,7 +58,7 @@ class DashboardService:
     # ── G2 donations ───────────────────────────────────────────────────────
     async def donations(self, access: StreamerAccess, *, limit: int, cursor: str | None) -> DonationPage:
         """Paid and approved (or auto-approved) donations, newest first: the legacy dashboard list."""
-        rows = await self.repo.donations(access.streamer.id, statuses=APPROVED, limit=limit + 1,
+        rows = await self.repo.donations(access.streamer.id, statuses=APPROVED_STATUSES, limit=limit + 1,
                                          after=v.cursor_position(cursor))
         items, next_cursor, has_more = v.keyset_page(rows, limit)
         return DonationPage(donations=[DonationItem(**r) for r in items], next_cursor=next_cursor, has_more=has_more)
@@ -88,7 +86,8 @@ class DashboardService:
                            "export_too_large")
         security_event("donations_exported", level=logging.INFO, user_id=access.current.user.id,
                        streamer_id=access.streamer.id, count=len(rows))
-        return f"{access.streamer.slug}-donations-{first.isoformat()}-{last.isoformat()}.csv", rows
+        name = v.file_name_part(access.streamer.slug)
+        return f"{name}-donations-{first.isoformat()}-{last.isoformat()}.csv", rows
 
     # ── G4 moderators ──────────────────────────────────────────────────────
     async def moderators(self, access: StreamerAccess) -> ModeratorList:

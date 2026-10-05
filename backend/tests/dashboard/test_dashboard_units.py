@@ -283,6 +283,12 @@ def test_csv_encoding_columns_values_and_quoting():
     assert "secret" not in text and text.endswith("\r\n")
 
 
+def test_export_file_name_is_header_safe():
+    assert v.file_name_part("nomercy") == "nomercy" and v.file_name_part("abhi_berg-2") == "abhi_berg-2"
+    assert v.file_name_part('Evil"\r\nSet-Cookie: x=1') == "evil-set-cookie-x-1"
+    assert v.file_name_part("\"';") == "creator"
+
+
 def test_csv_streams_in_chunks():
     row = {"created_at": _utc(2026, 1, 1), "donor_name": "D", "amount": Decimal(1), "currency": "INR",
            "amount_inr": Decimal(1)}
