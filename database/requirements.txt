@@ -1,0 +1,3 @@
+# Alembic migrations and the ETL tooling use the same pinned environment as the backend
+# (alembic, SQLAlchemy, psycopg, pytest), so a single virtualenv serves both.
+-r ../backend/requirements-dev.txt
