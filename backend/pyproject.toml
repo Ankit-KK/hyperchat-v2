@@ -1,0 +1,26 @@
+[project]
+name = "hyperchat-api"
+version = "0.1.0"
+description = "HyperChat v2 API (FastAPI)"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.142,<0.143",
+    "uvicorn[standard]>=0.54,<0.55",
+    "pydantic-settings>=2.15,<3",
+    "psycopg[binary,pool]>=3.3,<3.4",
+    "httpx>=0.28,<0.29",
+    "PyJWT[crypto]>=2.15,<3",
+    "alembic>=1.20,<2",
+    "SQLAlchemy>=2.1,<2.2",
+    "argon2-cffi>=25.1,<26",
+    "bcrypt>=5,<6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
