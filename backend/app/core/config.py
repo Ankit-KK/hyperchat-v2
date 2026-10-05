@@ -7,10 +7,13 @@ Every value comes from environment variables prefixed with ``HYPERCHAT_`` (on th
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.origins import OriginError, is_development_origin, normalize_origin, parse_origins
 
 # Written by the deploy step next to the code (see deploy/README in backend/README.md).
 _RELEASE_FILE = Path(__file__).resolve().parents[2] / "RELEASE"
@@ -47,8 +50,13 @@ class Settings(BaseSettings):
     # Signs CSRF tokens and the short-lived OAuth state cookie. Without it, no sessions are issued.
     auth_secret: SecretStr | None = None
     frontend_url: str = "https://hyperchat.space"  # reset/invite links and OAuth redirects
+    # Extra browser origins trusted for credentialed CORS and the Origin check, besides the frontend's
+    # own origin: comma-separated exact origins, e.g. "http://localhost:5173" for local development.
+    allowed_origins: str = ""
     session_cookie_name: str = "__Host-hc_session"  # __Host-: Secure, Path=/, no Domain
-    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"  # "none" only for cross-site dev
+    # "lax" whenever frontend and API are same-site (production). "none" only for cross-site development
+    # and never in production.
+    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     session_idle_days: int = 7
     session_absolute_days: int = 30
     login_lockout_threshold: int = 5
@@ -77,6 +85,26 @@ class Settings(BaseSettings):
         if self.app_env == "production" and ("TEST" in label or "DEV" in label):
             raise ValueError("Refusing to start: production environment pointed at a TEST/DEV database.")
         return self
+
+    @model_validator(mode="after")
+    def _validate_browser_origins(self) -> "Settings":
+        try:
+            origins = self.browser_origins
+        except OriginError as exc:
+            raise ValueError(str(exc)) from None
+        if self.app_env == "production":
+            dev = [o for o in origins if is_development_origin(o)]
+            if dev:
+                raise ValueError(f"Refusing to start: development origins in production: {dev}")
+            if self.session_cookie_samesite == "none":
+                raise ValueError("Refusing to start: SameSite=None is not allowed in production.")
+        return self
+
+    @property
+    def browser_origins(self) -> frozenset[str]:
+        """Every origin trusted for credentialed browser requests (frontend + HYPERCHAT_ALLOWED_ORIGINS)."""
+        front = urlsplit(self.frontend_url)
+        return frozenset((normalize_origin(f"{front.scheme}://{front.netloc}"), *parse_origins(self.allowed_origins)))
 
     @property
     def release(self) -> str:

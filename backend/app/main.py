@@ -2,7 +2,6 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -100,8 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(streamers.router)
     app.include_router(admin.router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.
-    front = urlparse(settings.frontend_url)
-    app.add_middleware(CorsMiddleware, extra_origins=(f"{front.scheme}://{front.netloc}",))
+    app.add_middleware(CorsMiddleware, allowed_origins=settings.browser_origins)
     return app
 
 

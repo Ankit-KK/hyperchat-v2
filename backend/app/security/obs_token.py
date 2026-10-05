@@ -2,17 +2,16 @@
 
 OBS browser sources authenticate with a long random token (x-obs-token header, ?token= or
 body.obs_token). Only its SHA-256 is stored (obs_tokens.token_hash). OBS browser sources (CEF)
-send no Origin header, so "no Origin" is accepted; an Origin that is present must be the frontend.
+send no Origin header, so "no Origin" is accepted; an Origin that is present must be one of the
+configured browser origins (Settings.browser_origins).
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
-from urllib.parse import urlparse
 
 from app.security.crypto import sha256_hex
 
-OBS_ORIGIN_HOSTS = frozenset({"hyperchat.space", "www.hyperchat.space"})
 DEFAULT_CHANNELS = ("alerts", "settings", "audio", "leaderboard", "goal")
 
 
@@ -44,15 +43,8 @@ def get_obs_token(headers: Mapping[str, str], query: Mapping[str, str], body: Ma
     return headers.get("x-obs-token") or query.get("token") or (body or {}).get("obs_token") or ""
 
 
-def is_obs_origin_allowed(origin: str | None) -> bool:
-    if not origin:
-        return True
-    try:
-        parsed = urlparse(origin)
-        port = parsed.port
-    except ValueError:
-        return False
-    return parsed.scheme == "https" and port is None and (parsed.hostname or "") in OBS_ORIGIN_HOSTS
+def is_obs_origin_allowed(origin: str | None, allowed_origins: frozenset[str]) -> bool:
+    return not origin or origin in allowed_origins
 
 
 def default_scope_for_obs(slug: str) -> list[str]:

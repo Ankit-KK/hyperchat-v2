@@ -64,7 +64,7 @@ def _secret(value) -> str | None:
 
 
 async def require_obs_token(request: Request) -> ObsCaller:
-    if not is_obs_origin_allowed(request.headers.get("origin")):
+    if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.browser_origins):
         raise SecurityError(403, "Request origin not allowed", "bad_origin")
     token = get_obs_token(request.headers, request.query_params)
     result = await validate_obs_token(_stores(request).obs_tokens, token)

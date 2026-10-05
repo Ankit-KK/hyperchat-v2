@@ -4,7 +4,6 @@ import ipaddress
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from urllib.parse import urlparse
 
 from app.auth.email import DisabledSender, EmailSender, ResendSender, render
 from app.auth.google import GoogleAuthError, GoogleOAuth
@@ -13,7 +12,6 @@ from app.auth.repository import AuthRepository, InviteConflict, Session, User
 from app.auth.tokens import csrf_token_for, new_hex_token, new_token, sha256_hex
 from app.core.config import Settings
 from app.security.audit import security_event
-from app.security.cors import is_allowed_origin
 
 GENERIC_LOGIN_ERROR = "Invalid email or password"
 TOO_MANY = "Too many attempts. Please try again later."
@@ -67,12 +65,8 @@ class AuthService:
             raise AuthError(503, "Authentication is not configured", "auth_secret_missing")
         return self.settings.auth_secret.get_secret_value()
 
-    def frontend_origin(self) -> str:
-        u = urlparse(self.settings.frontend_url)
-        return f"{u.scheme}://{u.netloc}"
-
     def origin_allowed(self, origin: str | None) -> bool:
-        return bool(origin) and (origin == self.frontend_origin() or is_allowed_origin(origin))
+        return bool(origin) and origin in self.settings.browser_origins
 
     def csrf_token(self, session: Session) -> str:
         return csrf_token_for(self.secret, session.id)
