@@ -10,12 +10,14 @@ import psycopg
 import pytest
 
 TARGET = os.environ.get("HYPERCHAT_TEST_ROLE_DB", "")
+# Unix-socket directory (peer auth on the VPS) or a TCP host (CI's PostgreSQL service container).
+PG_HOST = os.environ.get("HYPERCHAT_TEST_PG_HOST", "/var/run/postgresql")
 pytestmark = pytest.mark.skipif(not TARGET, reason="HYPERCHAT_TEST_ROLE_DB not set")
 
 
 def _conn(role: str) -> psycopg.Connection:
     db, port = TARGET.split(":")
-    return psycopg.connect(f"host=/var/run/postgresql port={port} dbname={db} user={role}")
+    return psycopg.connect(f"host={PG_HOST} port={port} dbname={db} user={role}")
 
 
 @pytest.fixture(scope="module", autouse=True)

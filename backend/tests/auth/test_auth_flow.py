@@ -1,166 +1,23 @@
-"""End-to-end auth through the real app (create_app + lifespan) against a SCRATCH database.
+"""End-to-end auth through the real app (create_app + lifespan) against a scratch database.
 
-Enabled when HYPERCHAT_TEST_AUTH_DB is "<dbname>:<port>" of an Alembic-migrated scratch database
-(e.g. hyperchat_authtest:5432), or hyperchat_dev:5433 with HYPERCHAT_TEST_AUTH_ALLOW_DEV=1 and the test runs as an OS user mapped to hyperchat_app by pg_ident
-(root on the VPS). The app connects as hyperchat_app, the same DML-only role it uses in production.
-Fixture accounts use @authtest.invalid and are deleted after each test. No email or Google call
-leaves the process: the sender and the Google client are replaced with in-memory fakes.
+See tests/integration.py for how the database is selected and which rows are synthetic. No email or
+Google call leaves the process: the sender and the Google client are in-memory fakes.
 """
 
-import logging
-import os
 from urllib.parse import parse_qs, urlparse
 
 import bcrypt
-import httpx
-import psycopg
-import pytest
-from fastapi.testclient import TestClient
 
-from app.auth.google import GoogleAuthError, GoogleIdentity
-from app.auth.passwords import hash_password
-from app.auth.tokens import new_token, sha256_hex
-from app.core.config import get_settings
+from app.auth.google import GoogleIdentity
+from app.auth.tokens import sha256_hex
+from tests.integration import DOMAIN, FRONT, ORIGIN, PASSWORD, requires_db
+from tests.integration import csrf_headers as _csrf
+from tests.integration import db as _db
+from tests.integration import login as _login
+from tests.integration import make_user as _user
+from tests.integration import new_browser as _new_client
 
-TARGET = os.environ.get("HYPERCHAT_TEST_AUTH_DB", "")
-pytestmark = pytest.mark.skipif(not TARGET, reason="HYPERCHAT_TEST_AUTH_DB not set")
-
-FRONT = "https://hyperchat.space"
-ORIGIN = {"origin": FRONT}
-DOMAIN = "@authtest.invalid"
-PASSWORD = "Correct-Horse-9"
-
-
-def _db():
-    db, port = TARGET.split(":")
-    return psycopg.connect(f"host=/var/run/postgresql port={port} dbname={db} user=hyperchat_app", autocommit=True)
-
-
-class CaptureSender:
-    def __init__(self) -> None:
-        self.sent = []
-
-    async def send(self, email) -> None:
-        self.sent.append(email)
-
-    def last_token(self) -> str:
-        return parse_qs(urlparse(self.sent[-1].text.split("\n")[3]).query)["token"][0]
-
-
-class FakeGoogle:
-    """Stands in for GoogleOAuth: the id_token checks themselves are unit-tested separately."""
-
-    def __init__(self) -> None:
-        self.identity: GoogleIdentity | None = None
-        self.seen = []
-
-    def authorization_url(self, state, nonce, verifier) -> str:
-        return "https://accounts.google.invalid/auth?state=" + state
-
-    async def exchange(self, code, verifier, nonce) -> GoogleIdentity:
-        self.seen.append((code, verifier, nonce))
-        if self.identity is None:
-            raise GoogleAuthError("invalid_id_token")
-        return self.identity
-
-
-class LogCapture(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(logging.DEBUG)
-        self.records = []
-
-    def emit(self, record) -> None:
-        self.records.append(str(record.__dict__))
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _scratch_only():
-    with _db() as conn:
-        name = conn.execute("SELECT current_database()").fetchone()[0]
-    assert name not in ("hyperchat", "hyperchat_restore_test"), "never production or the restore source"
-    # hyperchat_dev (dev API database) only on explicit opt-in; fixture rows are synthetic and removed.
-    if name == "hyperchat_dev":
-        assert os.environ.get("HYPERCHAT_TEST_AUTH_ALLOW_DEV") == "1", "set HYPERCHAT_TEST_AUTH_ALLOW_DEV=1"
-
-
-@pytest.fixture
-def env(monkeypatch):
-    db, port = TARGET.split(":")
-    for key, value in {
-        "HYPERCHAT_DB_NAME": db, "HYPERCHAT_DB_PORT": port, "HYPERCHAT_DB_USER": "hyperchat_app",
-        "HYPERCHAT_DB_HOST": "/var/run/postgresql", "HYPERCHAT_DB_LABEL": "TEST-AUTH-SCRATCH",
-        "HYPERCHAT_AUTH_SECRET": new_token(32),  # random per test, never printed
-        "HYPERCHAT_FRONTEND_URL": FRONT, "HYPERCHAT_EMAIL_BACKEND": "disabled",
-        "HYPERCHAT_AUTH_RETURN_INVITE_LINKS": "false", "HYPERCHAT_LOG_LEVEL": "DEBUG",
-    }.items():
-        monkeypatch.setenv(key, value)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-    with _db() as conn:
-        conn.execute(f"DELETE FROM public.user_invites WHERE email::text LIKE '%%{DOMAIN}'")
-        conn.execute(f"DELETE FROM public.users WHERE email::text LIKE '%%{DOMAIN}'")  # cascades sessions etc.
-        conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'authtest-streamer'")
-        conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%'")
-
-
-@pytest.fixture
-def app(env):
-    from app.main import create_app
-
-    application = create_app()
-    capture = LogCapture()
-    logging.getLogger().addHandler(capture)
-    with TestClient(application, base_url="https://testserver") as client:
-        application.state.auth.sender = CaptureSender()
-        application.state.auth.google = FakeGoogle()
-        application.state.log_capture = capture
-        client.app_state = application.state
-        yield client
-    logging.getLogger().removeHandler(capture)
-
-
-def _user(email: str, password: str | None = PASSWORD, role: str = "streamer", hashed: str | None = None) -> str:
-    with _db() as conn:
-        h = hashed if hashed is not None else (hash_password(password) if password else None)
-        return conn.execute("INSERT INTO public.users (email, password_hash, role) VALUES (%s, %s, %s) "
-                            "RETURNING id::text", (email, h, role)).fetchone()[0]
-
-
-def _login(client, email, password=PASSWORD, headers=ORIGIN):
-    return client.post("/api/v1/auth/login", json={"email": email, "password": password}, headers=headers)
-
-
-def _csrf(resp) -> dict:
-    return {**ORIGIN, "x-csrf-token": resp.json()["csrf_token"]}
-
-
-class Browser:
-    """A second browser (own cookie jar) on the SAME TestClient: the async DB pool is bound to the
-    started client's event loop, so a separately constructed TestClient cannot be used."""
-
-    def __init__(self, client: TestClient) -> None:
-        self._client = client
-        self.cookies = httpx.Cookies()
-
-    def request(self, method: str, url: str, **kwargs):
-        saved = httpx.Cookies(self._client.cookies)
-        self._client.cookies = self.cookies
-        try:
-            return self._client.request(method, url, **kwargs)
-        finally:
-            self.cookies = httpx.Cookies(self._client.cookies)
-            self._client.cookies = saved
-
-    def get(self, url: str, **kwargs):
-        return self.request("GET", url, **kwargs)
-
-    def post(self, url: str, **kwargs):
-        return self.request("POST", url, **kwargs)
-
-
-def _new_client(app) -> Browser:
-    return Browser(app)
+pytestmark = requires_db
 
 
 # ── login / session / cookie ────────────────────────────────────────────────────
