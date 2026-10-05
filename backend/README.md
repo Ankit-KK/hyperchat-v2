@@ -13,12 +13,16 @@ app/db/pool.py         psycopg 3 async pool + ping
 app/auth/              FastAPI-managed authentication (sessions, CSRF, passwords, invites, Google)
 app/authz/             authorization: creator (streamer) ownership, require_streamer_access
 app/admin/             user / invite administration, admin bootstrap
+app/public/            public read API (Phase 4): creator profile, pricing, overlay config, soundboard,
+                       leaderboard, goal, platform/showcase metrics (see ../docs/public-api.md)
+app/core/errors.py     ApiError -> {"error": ...} for non-auth errors
 app/security/          non-browser callers: HMAC-signed requests, nonces, upload grants, OBS tokens,
                        shared secrets, partner keys (+ PostgreSQL stores and FastAPI dependencies),
                        CORS, security logging
 app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit windows, invites
 app/cli.py             operator commands: bootstrap-admin, cleanup
-app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*
+app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*,
+                       /api/v1/public/streamers/*, /api/v1/metrics/*
 tests/                 unit tests + end-to-end tests against a scratch database
 ```
 The database schema and migrations live in `../database`, deployment files in `../deploy`.
