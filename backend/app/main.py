@@ -9,10 +9,11 @@ from fastapi.responses import JSONResponse
 
 from app.auth.repository import AuthRepository
 from app.auth.service import AuthError, AuthService
+from app.authz.repository import AuthzRepository
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.pool import Database
-from app.routers import auth, health
+from app.routers import auth, health, streamers
 from app.security.audit import security_event
 from app.security.cors import CorsMiddleware
 
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
     await app.state.db.open()
     if app.state.db.enabled:
         app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection))
+        app.state.authz = AuthzRepository(app.state.db.connection)
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
@@ -84,6 +86,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(streamers.router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.
     front = urlparse(settings.frontend_url)
     app.add_middleware(CorsMiddleware, extra_origins=(f"{front.scheme}://{front.netloc}",))
