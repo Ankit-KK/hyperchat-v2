@@ -1,0 +1,12 @@
+[Unit]
+Description=HyperChat PostgreSQL logical backup
+After=postgresql@17-hyperchat.service
+Requires=postgresql@17-hyperchat.service
+
+[Service]
+Type=oneshot
+# Installed copy (install -m 750 hyperchat-pgbackup.sh /usr/local/sbin/hyperchat-pgbackup),
+# so backups do not depend on which API release is current.
+ExecStart=/usr/local/sbin/hyperchat-pgbackup
+Nice=10
+IOSchedulingClass=idle
