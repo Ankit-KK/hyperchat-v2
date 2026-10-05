@@ -7,13 +7,19 @@ talks to this API, and only this API talks to PostgreSQL and the external servic
 ```
 app/main.py            app factory, lifespan, request logging, CORS
 app/core/config.py     HYPERCHAT_* environment settings
+app/core/origins.py    trusted browser origins (frontend + HYPERCHAT_ALLOWED_ORIGINS)
 app/core/logging.py    JSON-lines logging (no query strings, headers or bodies)
 app/db/pool.py         psycopg 3 async pool + ping
 app/auth/              FastAPI-managed authentication (sessions, CSRF, passwords, invites, Google)
-app/security/          server-to-server building blocks (HMAC signing, nonces, upload grants,
-                       OBS tokens, shared secrets, partner keys, CORS, security logging)
-app/routers/           GET /health, /api/v1/auth/*
-tests/                 unit tests + end-to-end auth tests (scratch database)
+app/authz/             authorization: creator (streamer) ownership, require_streamer_access
+app/admin/             user / invite administration, admin bootstrap
+app/security/          non-browser callers: HMAC-signed requests, nonces, upload grants, OBS tokens,
+                       shared secrets, partner keys (+ PostgreSQL stores and FastAPI dependencies),
+                       CORS, security logging
+app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit windows, invites
+app/cli.py             operator commands: bootstrap-admin, cleanup
+app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*
+tests/                 unit tests + end-to-end tests against a scratch database
 ```
 The database schema and migrations live in `../database`, deployment files in `../deploy`.
 
@@ -45,11 +51,50 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 | `POST /api/v1/auth/invites`, `/invites/accept` | admin invite, accept invite |
 | `GET /api/v1/auth/google/start`, `/google/callback` | Google sign-in |
 
+## Authorization
+- Admins (`users.role = 'admin'`) may act on every creator. A creator nobody has claimed
+  (`streamers.user_id IS NULL`) is admin-only. Otherwise the user must own it (`streamers.user_id`)
+  or be linked to it (`users.streamer_id`). Creator-scoped routes use
+  `Depends(require_streamer_access)` with a `{streamer}` path parameter (UUID or slug).
+- Non-browser callers use `app.security.dependencies`: `require_obs_token` (hashed OBS tokens,
+  frontend Origin or none), `require_partner_key`, `require_signed_request` (HMAC + single-use
+  nonce, previous key accepted during rotation), `require_cron_secret`.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/me/streamers` | creators the signed-in user owns or is linked to (+ `is_admin`) |
+| `GET /api/v1/streamers/{streamer}/access` | may the user open this creator's dashboard (`admin` / `owner` / `linked`) |
+| `GET /api/v1/admin/users` | search users (`q`, `role`, `active`, paging); never returns hashes |
+| `PATCH /api/v1/admin/users/{id}` | change `role`, `is_active`, `streamer_id`; revokes that user's sessions |
+| `POST /api/v1/admin/users/{id}/sessions/revoke` | sign a user out everywhere |
+| `GET /api/v1/admin/invites`, `POST /api/v1/admin/invites/{id}/revoke` | list / revoke invites |
+
+An admin cannot change their own role or status, and at least one active admin who can sign in
+(password or Google identity) always remains.
+
+## Trusted browser origins
+`Settings.browser_origins` = the origin of `HYPERCHAT_FRONTEND_URL` + `HYPERCHAT_ALLOWED_ORIGINS`
+(comma-separated exact origins). Only these get credentialed CORS and pass the login/CSRF and OBS
+Origin checks. No wildcards; plain http only for localhost; production refuses development origins
+and `SameSite=None`.
+
+## Operator commands (on the server)
+```
+cd /opt/hyperchat/current/backend
+# First admin (prompts for the password; refuses once any admin can sign in):
+../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env bootstrap-admin --email you@example.com
+# Housekeeping (also runs daily from hyperchat-cleanup.timer):
+../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env cleanup --dry-run
+```
+
 ## Tests
 ```
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest
 ```
-`tests/auth/test_auth_flow.py` runs only with `HYPERCHAT_TEST_AUTH_DB=<scratch_db>:<port>` (an
-Alembic-migrated scratch database; `hyperchat_dev` additionally needs `HYPERCHAT_TEST_AUTH_ALLOW_DEV=1`).
-It never runs against `hyperchat` (production) or `hyperchat_restore_test`.
+Database-backed tests run only with `HYPERCHAT_TEST_AUTH_DB=<scratch_db>:<port>` (an Alembic-migrated
+scratch database) and `HYPERCHAT_TEST_PG_HOST` (Unix-socket directory, default `/var/run/postgresql`,
+or a TCP host). They never run against `hyperchat` (production) or `hyperchat_restore_test`;
+`hyperchat_dev` needs `HYPERCHAT_TEST_AUTH_ALLOW_DEV=1`, and tests that delete rows they did not
+create (cleanup, bootstrap) refuse it entirely. CI (`.github/workflows/ci.yml`) runs everything
+against a PostgreSQL 17 service container.

@@ -14,6 +14,7 @@ production dump. It is a migration source only and never an application database
 ## Contents
 ```
 systemd/hyperchat-api.service   API unit (runs as user hyperchat, hardened, never root)
+systemd/hyperchat-cleanup.{service,timer}  daily cleanup of expired auth/security rows (03:15 UTC)
 nginx/00-catchall.conf          drops unknown hostnames / bare-IP requests
 nginx/api.quicktestspace.site.conf   v2 development API vhost (TLS via Let's Encrypt)
 postgres/setup_cluster.sh       create/check a cluster, roles and peer-auth mapping (idempotent)
@@ -39,6 +40,13 @@ api.env.example                 template for /etc/hyperchat/api.env (no secrets)
    `cd .../database && HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<db>?host=/var/run/postgresql&port=<port>" ../venv/bin/alembic upgrade head`
 5. `ln -sfn /opt/hyperchat/releases/<commit> /opt/hyperchat/current && systemctl restart hyperchat-api`
 6. `curl -fsS http://127.0.0.1:8000/health`, then the end-to-end check in `tests/e2e/`.
+
+First admin on a fresh environment (prompts for the password on the server, refuses once an admin
+can sign in): `cd .../current/backend && ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env
+bootstrap-admin --email <admin email>`.
+
+Cleanup timer: `install -m 644 deploy/systemd/hyperchat-cleanup.{service,timer} /etc/systemd/system/`,
+`systemctl daemon-reload && systemctl enable --now hyperchat-cleanup.timer`.
 
 Rollback: point `current` back to the previous release (and restore the previous
 `/etc/hyperchat/api.env` backup if it changed), then restart.

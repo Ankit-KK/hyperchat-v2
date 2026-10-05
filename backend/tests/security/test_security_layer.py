@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.core.logging import JsonFormatter
 from app.security.audit import security_event
-from app.security.cors import CorsMiddleware, is_allowed_origin
+from app.security.cors import CorsMiddleware, cors_headers
 from app.security.crypto import sha256_hex
 from app.security.nonce_store import InMemoryNonceStore
 from app.security.obs_token import (
@@ -147,13 +147,16 @@ def test_obs_token_precedence():
     assert get_obs_token({}, {}, None) == ""
 
 
+ALLOWED = frozenset({"https://hyperchat.space", "http://localhost:5173"})
+
+
 @pytest.mark.parametrize("origin, allowed", [
-    (None, True), ("", True), ("https://hyperchat.space", True), ("https://www.hyperchat.space", True),
-    ("http://hyperchat.space", False), ("https://hyperchat.space:8443", False), ("https://x.lovable.app", False),
-    ("https://hyperchat.space.evil.example", False), ("not a url", False),
+    (None, True), ("", True), ("https://hyperchat.space", True), ("http://localhost:5173", True),
+    ("https://www.hyperchat.space", False), ("http://hyperchat.space", False), ("https://hyperchat.space:8443", False),
+    ("https://x.lovable.app", False), ("https://hyperchat.space.evil.example", False), ("not a url", False),
 ])
 def test_obs_origin_gate(origin, allowed):
-    assert is_obs_origin_allowed(origin) is allowed
+    assert is_obs_origin_allowed(origin, ALLOWED) is allowed
 
 
 @pytest.mark.anyio
@@ -215,17 +218,20 @@ def _cors_app() -> TestClient:
     async def plain():
         return {"ok": True}
 
-    app.add_middleware(CorsMiddleware, extra_origins=("https://preview.example.test",))
+    app.add_middleware(CorsMiddleware, allowed_origins=frozenset({"https://hyperchat.space",
+                                                                  "https://preview.example.test"}))
     return TestClient(app)
 
 
 @pytest.mark.parametrize("origin, allowed", [
-    ("https://hyperchat.space", True), ("https://www.hyperchat.space", True), ("http://localhost:5173", True),
+    ("https://hyperchat.space", True), ("http://localhost:5173", True), ("https://www.hyperchat.space", False),
     ("https://x.lovable.app", False), ("https://x.lovableproject.com", False), ("https://hyperchat.site", False),
     ("http://hyperchat.space", False), ("https://evil.example", False), ("", False),
 ])
-def test_cors_allowlist(origin, allowed):
-    assert is_allowed_origin(origin) is allowed
+def test_cors_echoes_only_configured_origins(origin, allowed):
+    headers = cors_headers(origin, ALLOWED)
+    assert (headers.get("Access-Control-Allow-Origin") == origin) is allowed
+    assert headers["Vary"] == "Origin"
 
 
 def test_cors_preflight_and_response_headers():

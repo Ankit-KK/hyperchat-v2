@@ -10,7 +10,7 @@ log = logging.getLogger("hyperchat.security")
 # Field names that may be attached to a security event. Anything else is dropped.
 _ALLOWED_FIELDS = frozenset({
     "reason", "status", "path", "method", "request_id", "client_ip", "user_id",
-    "streamer_id", "streamer_slug", "partner_slug", "mechanism",
+    "streamer_id", "streamer_slug", "partner_slug", "mechanism", "target_user_id", "invite_id", "count",
 })
 
 
