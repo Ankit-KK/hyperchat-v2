@@ -4,6 +4,7 @@ The password comes from stdin here; the tests check it is never echoed to stdout
 """
 
 import io
+import json
 
 from app.cli import main
 from tests.integration import DOMAIN, db, login, make_user, new_browser, requires_db
@@ -23,6 +24,10 @@ def _run(monkeypatch, capsys, email, password=PASSWORD):
 def test_bootstrap_creates_admin_once(strict_scratch_db, app, monkeypatch, capsys):
     code, out = _run(monkeypatch, capsys, "first-admin" + DOMAIN)
     assert code == 0 and "Admin account ready" in out.out
+    events = [json.loads(line) for line in out.out.splitlines() if line.startswith("{")]
+    with db() as conn:
+        uid = conn.execute("SELECT id::text FROM public.users WHERE email = %s", ("first-admin" + DOMAIN,)).fetchone()[0]
+    assert [e["user_id"] for e in events if e.get("security_event") == "admin_bootstrapped"] == [uid]
     r = login(new_browser(app), "first-admin" + DOMAIN, PASSWORD)
     assert r.status_code == 200 and r.json()["user"]["role"] == "admin"
     code, out = _run(monkeypatch, capsys, "second-admin" + DOMAIN)

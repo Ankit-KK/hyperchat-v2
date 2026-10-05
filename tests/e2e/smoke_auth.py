@@ -6,6 +6,8 @@ to create one synthetic account):
 Environment (defaults = v2 development):
     HYPERCHAT_SMOKE_API   https://api.quicktestspace.site
     HYPERCHAT_SMOKE_DB    hyperchat_dev:5433   (never hyperchat or hyperchat_restore_test)
+    HYPERCHAT_SMOKE_SAMESITE  lax              expected SameSite of the session cookie: the secure
+                                               default; the v2 dev API uses "none" (cross-site dev)
 The synthetic account (@authtest.invalid) and its sessions are deleted afterwards; the password is
 random per run and nothing secret is printed. Exit code 0 = every check passed.
 """
@@ -27,6 +29,9 @@ API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").r
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 if DB_NAME in ("hyperchat", "hyperchat_restore_test"):
     sys.exit("refusing to create test accounts in production or the restore source")
+SAMESITE = os.environ.get("HYPERCHAT_SMOKE_SAMESITE", "lax").strip().lower()
+if SAMESITE not in ("lax", "strict", "none"):
+    sys.exit("HYPERCHAT_SMOKE_SAMESITE must be lax, strict or none")
 ORIGIN = {"origin": "https://hyperchat.space"}
 EMAIL = "devsmoke@authtest.invalid"
 PASSWORD = secrets.token_urlsafe(18)  # never printed
@@ -62,9 +67,9 @@ try:
         check("login -> 200", r.status_code == 200)
         ck = r.headers.get("set-cookie", "")
         low = ck.lower()
-        check("cookie __Host-hc_session; Secure; HttpOnly; SameSite=lax; Path=/; no Domain",
+        check(f"cookie __Host-hc_session; Secure; HttpOnly; SameSite={SAMESITE}; Path=/; no Domain",
               ck.startswith("__Host-hc_session=") and "secure" in low and "httponly" in low
-              and "samesite=lax" in low and "path=/" in low and "domain=" not in low)
+              and f"samesite={SAMESITE}" in low and "path=/" in low and "domain=" not in low)
         check("CORS echoes allowed origin with credentials",
               r.headers.get("access-control-allow-origin") == "https://hyperchat.space"
               and r.headers.get("access-control-allow-credentials") == "true")

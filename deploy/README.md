@@ -39,7 +39,8 @@ api.env.example                 template for /etc/hyperchat/api.env (no secrets)
 4. Migrations (as root, peer-mapped to hyperchat_migrator):
    `cd .../database && HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<db>?host=/var/run/postgresql&port=<port>" ../venv/bin/alembic upgrade head`
 5. `ln -sfn /opt/hyperchat/releases/<commit> /opt/hyperchat/current && systemctl restart hyperchat-api`
-6. `curl -fsS http://127.0.0.1:8000/health`, then the end-to-end check in `tests/e2e/`.
+6. `curl -fsS http://127.0.0.1:8000/health`, then the end-to-end check in `tests/e2e/`
+   (on the dev API: `HYPERCHAT_SMOKE_SAMESITE=none`, matching its cross-site cookie setting).
 
 First admin on a fresh environment (prompts for the password on the server, refuses once an admin
 can sign in): `cd .../current/backend && ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env
