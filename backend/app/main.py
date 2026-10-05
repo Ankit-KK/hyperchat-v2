@@ -18,6 +18,8 @@ from app.db.pool import Database
 from app.routers import admin, auth, health, streamers
 from app.security.audit import security_event
 from app.security.cors import CorsMiddleware
+from app.security.dependencies import SecurityStores, install_security_error_handler
+from app.security.pg_stores import PostgresNonceStore, PostgresObsTokenStore, PostgresPartnerKeyStore
 
 log = logging.getLogger("hyperchat.api")
 
@@ -37,6 +39,9 @@ async def lifespan(app: FastAPI):
         app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection))
         app.state.authz = AuthzRepository(app.state.db.connection)
         app.state.admin = AdminService(AdminRepository(app.state.db.connection))
+        conn = app.state.db.connection
+        app.state.security = SecurityStores(PostgresNonceStore(conn), PostgresObsTokenStore(conn),
+                                            PostgresPartnerKeyStore(conn))
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
@@ -61,6 +66,7 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json" if docs else None,
     )
 
+    app.state.settings = settings
     access = logging.getLogger("hyperchat.access")
 
     @app.middleware("http")
@@ -80,6 +86,8 @@ def create_app() -> FastAPI:
             },
         )
         return response
+
+    install_security_error_handler(app)
 
     @app.exception_handler(AuthError)
     async def _auth_error(request: Request, exc: AuthError) -> JSONResponse:

@@ -39,7 +39,8 @@ class Settings(BaseSettings):
     # ── Server-to-server security (app.security). Optional so the app still boots without
     #    them; every mechanism fails closed when its secret is missing. ──────────────────
     upload_grant_secret: SecretStr | None = None  # signs single-use donor upload grants
-    internal_service_secret: SecretStr | None = None  # internal services / workers shared secret
+    internal_service_secret: SecretStr | None = None  # internal services / workers: HMAC signing key
+    internal_service_secret_previous: SecretStr | None = None  # still accepted during key rotation
     cron_secret: SecretStr | None = None  # scheduled jobs calling the API
 
     # ── FastAPI-managed authentication (app.auth) ───────────────────────────────────
