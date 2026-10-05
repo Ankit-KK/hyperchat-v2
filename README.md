@@ -34,8 +34,10 @@ docs/       architecture, target schema, migration audit, history
 |---|---|
 | 1 Platform: PostgreSQL clusters, roles, Alembic schema (normalized `donations`), ETL rehearsal, backups | done |
 | 2 FastAPI-managed authentication | done; running on the v2 development API |
-| 3 Authorization (creator ownership), admin bootstrap + user management, database-backed security primitives, explicit origins, cleanup, CI | done; not yet deployed (dev runs Phase 2) |
-| 4–15 Feature APIs, new frontend, cutover | next — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
+| 3 Authorization (creator ownership), admin bootstrap + user management, database-backed security primitives, explicit origins, cleanup, CI | done; running on the v2 development API |
+| 4 Public read API (donation pages, overlays, landing page) | done; running on the v2 development API |
+| 5 Creator dashboard API (settings, donations, moderation, moderators, terms; migration 0009) | implemented and tested; not yet deployed |
+| 6–15 Remaining feature APIs, new frontend, cutover | next — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
 
 Development API: `https://api.quicktestspace.site` (database `hyperchat_dev`).
 Production (`api.hyperchat.space`, database `hyperchat`) has the schema but takes no traffic yet.
@@ -51,6 +53,8 @@ the unit tests and the full database + integration suites against PostgreSQL 17 
 
 ## Documentation
 - [`docs/architecture.md`](docs/architecture.md) — components, trust boundaries, environments
+- [`docs/public-api.md`](docs/public-api.md) — public read API (Phase 4)
+- [`docs/dashboard-api.md`](docs/dashboard-api.md) — creator dashboard API (Phase 5)
 - [`docs/target-schema.md`](docs/target-schema.md) — PostgreSQL schema and legacy → v2 data mapping
 - [`docs/migration-audit.md`](docs/migration-audit.md) — Supabase-exit audit and phase plan
 - [`docs/history.md`](docs/history.md) — relationship to the legacy repository

@@ -15,6 +15,8 @@ app/authz/             authorization: creator (streamer) ownership, require_stre
 app/admin/             user / invite administration, admin bootstrap
 app/public/            public read API (Phase 4): creator profile, pricing, overlay config, soundboard,
                        leaderboard, goal, platform/showcase metrics (see ../docs/public-api.md)
+app/dashboard/         creator dashboard API (Phase 5): settings, donations + stats + CSV export,
+                       moderation state machine, moderators, terms (see ../docs/dashboard-api.md)
 app/core/errors.py     ApiError -> {"error": ...} for non-auth errors
 app/security/          non-browser callers: HMAC-signed requests, nonces, upload grants, OBS tokens,
                        shared secrets, partner keys (+ PostgreSQL stores and FastAPI dependencies),
@@ -22,7 +24,8 @@ app/security/          non-browser callers: HMAC-signed requests, nonces, upload
 app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit windows, invites
 app/cli.py             operator commands: bootstrap-admin, cleanup
 app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*,
-                       /api/v1/public/streamers/*, /api/v1/metrics/*
+                       /api/v1/public/streamers/*, /api/v1/metrics/*, /api/v1/dashboard/streamers/*,
+                       /api/v1/me/terms
 tests/                 unit tests + end-to-end tests against a scratch database
 ```
 The database schema and migrations live in `../database`, deployment files in `../deploy`.
@@ -75,6 +78,18 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 
 An admin cannot change their own role or status, and at least one active admin who can sign in
 (password or Google identity) always remains.
+
+## Creator dashboard (`/api/v1/dashboard/streamers/{streamer}`, Phase 5)
+Owner, linked account or admin (`require_streamer_access`); CSRF + Origin on every change;
+`Cache-Control: no-store` on every response. Full contracts: [`../docs/dashboard-api.md`](../docs/dashboard-api.md).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET`, `PATCH .../settings` | creator settings (21 writable fields, strict validation, only changed values written) |
+| `GET .../donations`, `.../donations/stats`, `.../donations/export.csv` | approved donations (keyset pages), IST revenue stats, CSV export (≤ 366 days, ≤ 10,000 rows) |
+| `GET .../moderation/queue`, `POST .../donations/{id}/moderation` | queue + approve / reject / hide / unhide / ban in one transaction (database state only) |
+| `GET`, `POST .../moderators`, `DELETE .../moderators/{id}` | Telegram/Discord moderators |
+| `GET /api/v1/me/terms`, `POST /api/v1/me/terms/accept` | terms-of-service status and acceptance (server-owned version) |
 
 ## Trusted browser origins
 `Settings.browser_origins` = the origin of `HYPERCHAT_FRONTEND_URL` + `HYPERCHAT_ALLOWED_ORIGINS`

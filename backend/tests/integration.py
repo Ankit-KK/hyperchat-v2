@@ -7,11 +7,15 @@ helpers connect as hyperchat_app, the DML-only runtime role.
 
 Every synthetic row is recognizable and removed after each test: users/invites @authtest.invalid,
 streamers (and their donations) and partners with slugs starting "authtest-", nonces starting
-"authtest-", platform soundboard slots with audio_key starting "authtest-".
+"authtest-", platform soundboard slots with audio_key starting "authtest-". Rows owned by a synthetic
+creator (moderators, bans, donor totals, moderation actions) go with it (ON DELETE CASCADE); terms
+acceptances go with their synthetic user.
 """
 
 import logging
 import os
+import secrets
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -63,6 +67,49 @@ def make_streamer(slug: str, user_id: str | None = None, name: str = "Auth Test"
     with db() as conn:
         return conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) VALUES (%s, %s, %s) "
                             "RETURNING id::text", (slug, name, user_id)).fetchone()[0]
+
+
+def update_streamer(streamer_id: str, **cols) -> None:
+    sets = ", ".join(f"{k} = %({k})s" for k in cols)
+    with db() as conn:
+        conn.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", {**cols, "id": streamer_id})
+
+
+def owned_creator(client, slug: str, email: str = "owner" + DOMAIN, **cols) -> tuple[str, dict]:
+    """A creator owned by a new user who is then signed in on `client`: (streamer id, CSRF headers)."""
+    sid = make_streamer(slug, user_id=make_user(email))
+    if cols:
+        update_streamer(sid, **cols)
+    resp = login(client, email)
+    assert resp.status_code == 200, resp.text
+    return sid, csrf_headers(resp)
+
+
+def make_donation(streamer_id: str, amount_inr=100, *, payment: str = "success", moderation: str = "pending",
+                  name: str = "Donor", message: str | None = None, at: datetime | None = None,
+                  currency: str = "INR", amount=None, visible: bool = True) -> str:
+    """Insert a synthetic donation (order_id "authtest-...") and return its id."""
+    with db() as conn:
+        return conn.execute(
+            "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
+            "payment_status, moderation_status, message, message_visible, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id::text",
+            (streamer_id, SLUG_PREFIX + secrets.token_hex(6), name, amount if amount is not None else amount_inr,
+             currency, amount_inr, payment, moderation, message, visible, at or datetime.now(UTC))).fetchone()[0]
+
+
+def creator_state(streamer_id: str) -> str:
+    """Everything a dashboard write could touch for one creator, as comparable text."""
+    with db() as conn:
+        return conn.execute("""
+            SELECT json_build_array(
+              (SELECT row_to_json(s) FROM public.streamers s WHERE s.id = %(s)s),
+              (SELECT json_agg(d ORDER BY d.id) FROM public.donations d WHERE d.streamer_id = %(s)s),
+              (SELECT json_agg(m ORDER BY m.id) FROM public.streamers_moderators m WHERE m.streamer_id = %(s)s),
+              (SELECT json_agg(b ORDER BY b.id) FROM public.banned_donors b WHERE b.streamer_id = %(s)s),
+              (SELECT json_agg(t ORDER BY t.id) FROM public.streamer_donator_totals t WHERE t.streamer_id = %(s)s),
+              (SELECT json_agg(a ORDER BY a.id) FROM public.moderation_actions a WHERE a.streamer_id = %(s)s)
+            )::text""", {"s": streamer_id}).fetchone()[0]
 
 
 def cleanup_synthetic_rows() -> None:
@@ -158,6 +205,9 @@ class Browser:
 
     def patch(self, url: str, **kwargs):
         return self.request("PATCH", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
 
 
 def new_browser(client) -> Browser:

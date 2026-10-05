@@ -60,6 +60,33 @@ def test_round_trip_upgrade_downgrade_upgrade(monkeypatch):
     assert _tables() == EXPECTED_TABLES
 
 
+def _actor_user_id() -> tuple | None:
+    """(type, NOT NULL, has default, FK on-delete action, FK points at users) of moderation_actions.actor_user_id."""
+    with psycopg.connect(_libpq(DSN)) as conn:
+        # Catalog lookups only: the migrator has no USAGE on schema public outside SET ROLE.
+        return conn.execute("""
+            WITH t AS (SELECT oid, relname FROM pg_class WHERE relnamespace = 'public'::regnamespace
+                       AND relname IN ('moderation_actions', 'users'))
+            SELECT format_type(a.atttypid, a.atttypmod), a.attnotnull, a.atthasdef, c.confdeltype::text,
+                   c.confrelid = (SELECT oid FROM t WHERE relname = 'users')
+            FROM pg_attribute a
+            LEFT JOIN pg_constraint c ON c.conrelid = a.attrelid AND c.contype = 'f' AND c.conkey = ARRAY[a.attnum]
+            WHERE a.attrelid = (SELECT oid FROM t WHERE relname = 'moderation_actions')
+              AND a.attname = 'actor_user_id' AND NOT a.attisdropped
+        """).fetchone()
+
+
+def test_0009_actor_user_id_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    assert _actor_user_id() == ("uuid", False, False, "n", True)  # nullable, no default, ON DELETE SET NULL
+    command.downgrade(cfg, "0008")
+    assert _actor_user_id() is None
+    command.upgrade(cfg, "head")
+    assert _actor_user_id() == ("uuid", False, False, "n", True)
+
+
 def test_no_supabase_artifacts():
     with psycopg.connect(_libpq(DSN)) as conn:
         roles = {r[0] for r in conn.execute("SELECT rolname FROM pg_roles WHERE rolname IN "

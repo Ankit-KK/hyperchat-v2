@@ -69,6 +69,13 @@ Unauthenticated, read-only endpoints for donation pages, overlays and the landin
 [`public-api.md`](public-api.md). Only `active` creators, fixed response fields, Cache-Control,
 Nginx per-IP rate limiting.
 
+## Creator dashboard API
+Cookie-authenticated endpoints for creators (settings, donations, moderation, moderators, terms) —
+see [`dashboard-api.md`](dashboard-api.md). Every route is creator-scoped through
+`require_streamer_access`, every change needs CSRF + Origin, responses are `no-store`. Moderation
+is a transactional state machine that changes database state only; alerts, TTS, bots and replay
+react to that state in later phases.
+
 ## Database access
 - Runtime roles: `hyperchat_app` (API) and `hyperchat_worker`: DML only, no DDL, no access to
   `alembic_version`. `hyperchat_readonly` for reporting. All via Unix-socket peer authentication.
@@ -87,5 +94,6 @@ Nginx per-IP rate limiting.
 Phases 0–15 are defined in [`migration-audit.md`](migration-audit.md), section M.
 Done: 0 (decisions), 1 (platform: clusters, roles, Alembic schema, ETL rehearsal, backups),
 2 (FastAPI-managed authentication), 3 (authorization, admin tooling, database-backed security
-primitives, explicit origins, cleanup, CI). Next: the feature APIs (4–12), the new frontend (13),
-cutover rehearsal (14) and Supabase decommissioning (15).
+primitives, explicit origins, cleanup, CI), 4 (public read API). Phase 5 (creator dashboard API,
+migration 0009) is implemented and tested, not yet deployed. Next: the remaining feature APIs
+(6–12), the new frontend (13), cutover rehearsal (14) and Supabase decommissioning (15).

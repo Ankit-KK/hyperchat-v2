@@ -7,7 +7,7 @@ The full table-by-table design, including how every legacy column was mapped, is
 
 ## Layout
 ```
-alembic.ini, migrations/   Alembic environment and revisions 0001-0008 (SQL-first, op.execute)
+alembic.ini, migrations/   Alembic environment and revisions 0001-0009 (SQL-first, op.execute)
 etl/rehearsal.py           load the legacy data (restored dump) into the new schema
 etl/mapping.py             value mapping rules (currencies, roles, slugs, OBS token hashing, ...)
 etl/reconcile.py           post-load reconciliation (counts, per-creator sums, invariants)
@@ -24,6 +24,7 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0006 | integrity triggers |
 | 0007 | least-privilege grants for the runtime roles |
 | 0008 | `user_invites` (invite-only onboarding) |
+| 0009 | `moderation_actions.actor_user_id` (the signed-in user behind dashboard moderation) |
 
 ## Databases
 | Database | Cluster | Purpose |
