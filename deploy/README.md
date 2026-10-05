@@ -31,6 +31,8 @@ api.env.example                 template for /etc/hyperchat/api.env (no secrets)
 /opt/hyperchat/current -> releases/<commit>
 /etc/hyperchat/api.env                      (root:hyperchat 0640, never in Git)
 /etc/systemd/system/hyperchat-api.service   (from deploy/systemd)
+/etc/nginx/sites-available/api.quicktestspace.site   (from deploy/nginx)
+/etc/nginx/snippets/hyperchat-public-limit{,-zone}.conf   (from deploy/nginx/snippets)
 ```
 
 ## Deploy a commit
@@ -40,8 +42,20 @@ api.env.example                 template for /etc/hyperchat/api.env (no secrets)
 4. Migrations (as root, peer-mapped to hyperchat_migrator):
    `cd .../database && HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<db>?host=/var/run/postgresql&port=<port>" ../venv/bin/alembic upgrade head`
 5. `ln -sfn /opt/hyperchat/releases/<commit> /opt/hyperchat/current && systemctl restart hyperchat-api`
-6. `curl -fsS http://127.0.0.1:8000/health`, then the end-to-end check in `tests/e2e/`
-   (on the dev API: `HYPERCHAT_SMOKE_SAMESITE=none`, matching its cross-site cookie setting).
+6. Nginx (required from Phase 4 on: the public read API's per-IP rate limit; repeat whenever
+   `deploy/nginx/` changed). As root, with the files of the same `<commit>`:
+   - back up what is installed: `/etc/nginx/sites-available/api.quicktestspace.site` and any existing
+     `/etc/nginx/snippets/hyperchat-public-limit*.conf` (e.g. to `/root/...bak-<commit>`);
+   - install the snippets and the site file, owned by root, mode 0644:
+     `install -o root -g root -m 644 deploy/nginx/snippets/hyperchat-public-limit-zone.conf deploy/nginx/snippets/hyperchat-public-limit.conf /etc/nginx/snippets/`
+     `install -o root -g root -m 644 deploy/nginx/api.quicktestspace.site.conf /etc/nginx/sites-available/api.quicktestspace.site`;
+   - `nginx -t` must pass **before** anything is reloaded; then `systemctl reload nginx`
+     (a reload, not a restart: no dropped connections);
+   - if `nginx -t` fails: restore the backups (remove snippets that did not exist before), confirm
+     with `nginx -t` that the previous configuration is back, and do **not** reload.
+7. `curl -fsS http://127.0.0.1:8000/health`, then the end-to-end checks in `tests/e2e/`
+   (on the dev API: `HYPERCHAT_SMOKE_SAMESITE=none`, matching its cross-site cookie setting;
+   `nginx_ratelimit_check.sh` verifies the rate-limit snippets).
 
 First admin on a fresh environment (prompts for the password on the server, refuses once an admin
 can sign in): `cd .../current/backend && ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env
