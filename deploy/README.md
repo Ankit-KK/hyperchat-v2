@@ -41,7 +41,8 @@ api.env.example                 template for /etc/hyperchat/api.env (no secrets)
 3. `echo <commit> > .../backend/RELEASE`; `chown -R root:hyperchat .../<commit>`; `chmod -R g+rX,g-w,o-rwx .../<commit>`
 4. Migrations (as root, peer-mapped to hyperchat_migrator):
    `cd .../database && HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<db>?host=/var/run/postgresql&port=<port>" ../venv/bin/alembic upgrade head`
-   (Phase 5 brings `0009`: one nullable column, `moderation_actions.actor_user_id`, metadata-only.
+   (Phase 5 brings `0009`: one nullable column, `moderation_actions.actor_user_id`; no table rewrite,
+   its foreign key briefly locks `users` against writes (bounded by `lock_timeout` = 10 s).
    Apply it before step 5: the Phase 5 code writes the column, the previous release ignores it, so a
    code rollback needs no schema downgrade.)
 5. `ln -sfn /opt/hyperchat/releases/<commit> /opt/hyperchat/current && systemctl restart hyperchat-api`

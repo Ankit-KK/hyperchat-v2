@@ -90,7 +90,8 @@ async def donation_stats(request: Request,
     return await _service(request).donation_stats(access)
 
 
-@dashboard_router.get("/donations/export.csv", response_class=StreamingResponse)
+@dashboard_router.get("/donations/export.csv", response_class=StreamingResponse,
+                      responses={200: {"content": {"text/csv": {}}, "description": "CSV attachment"}})
 async def export_donations(request: Request, start: str | None = Query(None, alias="from"),
                            end: str | None = Query(None, alias="to"),
                            access: StreamerAccess = Depends(require_streamer_access)) -> StreamingResponse:

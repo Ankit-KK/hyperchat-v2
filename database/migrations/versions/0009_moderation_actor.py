@@ -4,8 +4,10 @@ Revision ID: 0009
 Revises: 0008
 
 moderation_actions only had bot-oriented actor columns (moderator_id, moderator_telegram_id,
-moderator_name). Dashboard actions (Phase 5) store the session user here. Nullable, no default:
-a metadata-only change; existing rows keep NULL. Grants come from the table-level grants (0007).
+moderator_name). Dashboard actions (Phase 5) store the session user here. Nullable, no default: no
+table rewrite and existing rows keep NULL; adding the foreign key checks the existing rows once (all
+NULL) and briefly locks users against writes (bounded by lock_timeout in env.py). Grants come from
+the table-level grants (0007).
 """
 
 from alembic import op

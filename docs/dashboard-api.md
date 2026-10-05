@@ -209,5 +209,6 @@ Sarvam transcription (D14).
 
 ## Schema
 Migration `0009_moderation_actor` adds `moderation_actions.actor_user_id uuid NULL REFERENCES
-users(id) ON DELETE SET NULL` (metadata-only; existing rows stay NULL; table grants from 0007 cover
-it). No new index: every query uses an existing one (see `backend/app/dashboard/repository.py`).
+users(id) ON DELETE SET NULL` (no table rewrite; existing rows stay NULL; the foreign key is checked
+once against the existing all-NULL rows and briefly locks `users` against writes; table grants from
+0007 cover the column). No new index: every query uses an existing one (see `backend/app/dashboard/repository.py`).
