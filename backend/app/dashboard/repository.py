@@ -3,8 +3,11 @@
 Every query is scoped by streamer_id: a donation or moderator id from another creator never matches.
 Indexes used (no new index in Phase 5):
   settings             streamers primary key                                    1 row
+  donations / export   donations_streamer_created_idx (streamer_id, created_at DESC)
+  stats                donations_streamer_status_idx (streamer_id, payment_status, ...)
 """
 
+from datetime import datetime
 from decimal import Decimal
 
 from psycopg.rows import dict_row
@@ -36,6 +39,11 @@ SETTINGS_SQL_TYPES = {
     "overlay_adjust_mode": "boolean", "leaderboard_bg_enabled": "boolean", "goal_overlay_id": "smallint",
     "brand_color": "text", "leaderboard_widget_enabled": "boolean", "el_voice_id": "text",
 }
+
+
+_DONATION_COLS = """d.id::text AS donation_id, d.donor_name, d.amount, d.currency, d.amount_inr, d.message,
+    d.message_visible, d.is_hyperemote, d.voice_message_url, d.tts_audio_url, d.hypersound_url, d.media_url,
+    d.media_type, d.moderation_status, d.created_at"""
 
 
 def _db_value(value):
@@ -80,3 +88,38 @@ class DashboardRepository:
                 await cur.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", params)
             await cur.execute(f"SELECT {_SETTINGS_COLS} FROM public.streamers WHERE id = %(id)s", params)
             return await cur.fetchone(), changed
+
+    # ── G2 donations (paid only) ───────────────────────────────────────────
+    async def donations(self, streamer_id: str, *, statuses: tuple[str, ...] | None, limit: int,
+                        after: tuple[datetime, str] | None, columns: str = _DONATION_COLS) -> list[dict]:
+        """Paid donations, newest first (created_at DESC, id DESC), after the keyset position `after`."""
+        where = ["d.streamer_id = %(sid)s", "d.payment_status = 'success'"]
+        params: dict = {"sid": streamer_id, "limit": limit}
+        if statuses is not None:
+            where.append("d.moderation_status = ANY(%(statuses)s)")
+            params["statuses"] = list(statuses)
+        if after is not None:
+            where.append("(d.created_at, d.id) < (%(after_at)s, %(after_id)s::uuid)")
+            params.update(after_at=after[0], after_id=after[1])
+        return await self._all(f"SELECT {columns} FROM public.donations d WHERE {' AND '.join(where)} "
+                               "ORDER BY d.created_at DESC, d.id DESC LIMIT %(limit)s", params)
+
+    async def donation_stats(self, streamer_id: str, *, day: tuple[datetime, datetime],
+                             month: tuple[datetime, datetime]) -> dict:
+        return await self._one("""
+            SELECT COALESCE(sum(amount_inr), 0) AS total_revenue_inr, count(*) AS total_donations,
+                   COALESCE(sum(amount_inr) FILTER (WHERE created_at >= %(day_start)s
+                                                     AND created_at < %(day_end)s), 0) AS today_revenue_inr,
+                   COALESCE(sum(amount_inr) FILTER (WHERE created_at >= %(month_start)s
+                                                     AND created_at < %(month_end)s), 0) AS month_revenue_inr
+            FROM public.donations WHERE streamer_id = %(sid)s AND payment_status = 'success'
+        """, {"sid": streamer_id, "day_start": day[0], "day_end": day[1], "month_start": month[0],
+              "month_end": month[1]})
+
+    async def export_rows(self, streamer_id: str, *, start: datetime, end: datetime, limit: int) -> list[dict]:
+        """Paid donations with start <= created_at < end, newest first (no order ids: D6)."""
+        return await self._all("""
+            SELECT created_at, donor_name, amount, currency, amount_inr FROM public.donations
+            WHERE streamer_id = %s AND payment_status = 'success' AND created_at >= %s AND created_at < %s
+            ORDER BY created_at DESC, id DESC LIMIT %s
+        """, (streamer_id, start, end, limit))

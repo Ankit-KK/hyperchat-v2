@@ -107,3 +107,38 @@ class SettingsPatch(_Model):  # D-M1 body
 class SettingsUpdate(_Model):  # D-M1 response
     settings: DashboardSettings
     changed: list[str]
+
+
+# ── G2 donations ────────────────────────────────────────────────────────────────
+
+class DonationItem(_Model):  # D-R2 row (hidden messages included: the creator moderates them, D8)
+    donation_id: str
+    donor_name: str
+    amount: float
+    currency: str
+    amount_inr: float
+    message: str | None
+    message_visible: bool
+    is_hyperemote: bool
+    voice_message_url: str | None
+    tts_audio_url: str | None
+    hypersound_url: str | None
+    media_url: str | None
+    media_type: str | None
+    moderation_status: str
+    created_at: datetime
+
+
+class DonationPage(_Model):  # D-R2
+    donations: list[DonationItem]
+    next_cursor: str | None
+    has_more: bool
+
+
+class DonationStats(_Model):  # D-R3: every paid donation, any moderation status
+    total_revenue_inr: float
+    total_donations: int
+    today_revenue_inr: float
+    month_revenue_inr: float
+    timezone: str
+    as_of: datetime

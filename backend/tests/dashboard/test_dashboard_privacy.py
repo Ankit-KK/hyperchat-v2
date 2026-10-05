@@ -5,6 +5,7 @@ ENDPOINTS lists each route once; the matrix tests below run all of them for ever
 
 import itertools
 import json
+from datetime import UTC, datetime
 
 from tests.integration import (
     DOMAIN,
@@ -12,6 +13,7 @@ from tests.integration import (
     csrf_headers,
     db,
     login,
+    make_donation,
     make_streamer,
     make_user,
     new_browser,
@@ -27,14 +29,23 @@ _n = itertools.count(1)
 ENDPOINTS = [
     ("GET", "/settings", None),
     ("PATCH", "/settings", lambda n: {"goal_overlay_id": n % 7}),
+    ("GET", "/donations", None),
+    ("GET", "/donations/stats", None),
+    ("GET", "/donations/export.csv?from=2026-10-01&to=2026-10-02", None),
 ]
 WRITES = [e for e in ENDPOINTS if e[0] != "GET"]
 READS = [e for e in ENDPOINTS if e[0] == "GET"]
+PLANTED = ("authtest-rzp-order", "authtest-status-hash", "authtest-upload-hash", "authtest_legacy_table")
 
 
 def _fixtures(sid: str) -> dict:
-    """Rows of this creator that the endpoints act on."""
-    return {}
+    """Rows of this creator that the endpoints act on (with internal columns that must never be served)."""
+    donation = make_donation(sid, 50, moderation="approved", at=datetime(2026, 10, 1, 12, tzinfo=UTC), name="Fan",
+                             message="authtest message")
+    with db() as conn:
+        conn.execute("UPDATE public.donations SET provider_order_id = %s, status_token_hash = %s, "
+                     "upload_token_hash = %s, legacy_source_table = %s WHERE id = %s", (*PLANTED, donation))
+    return {"donation": donation}
 
 
 def _call(browser, method: str, ref: str, path: str, body, ids: dict, headers: dict):
@@ -194,8 +205,11 @@ def test_no_private_data_in_any_read(app):
         if r.headers["content-type"].startswith("application/json"):
             assert not _keys(r.json()) & FORBIDDEN_KEYS, (path, _keys(r.json()) & FORBIDDEN_KEYS)
     blob = "\n".join(texts)
-    for secret in (owner, sid, DOMAIN, "authtestPRIVPFX", "authtest-secret-page", "authtest-discord-777",
-                   "authtest-rzp-ref", "authtest-rzp-secret", "authtest-reason", "authtest-obs-hash",
-                   "pusher_group", "password", "csrf"):
+    with db() as conn:
+        order_id = conn.execute("SELECT order_id FROM public.donations WHERE id = %s", (ids["donation"],)).fetchone()[0]
+    for secret in (owner, sid, DOMAIN, order_id, *PLANTED, "authtestPRIVPFX", "authtest-secret-page",
+                   "authtest-discord-777", "authtest-rzp-ref", "authtest-rzp-secret", "authtest-reason",
+                   "authtest-obs-hash", "pusher_group", "password", "csrf"):
         assert secret not in blob, secret
     assert json.loads(texts[0])["slug"] == "authtest-private"
+    assert "Fan" in blob and ids["donation"] in blob  # the creator does see its own donations

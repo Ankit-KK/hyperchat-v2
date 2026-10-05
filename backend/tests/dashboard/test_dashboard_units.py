@@ -1,12 +1,17 @@
 """Phase 5 pure logic and HTTP plumbing (no database)."""
 
-from datetime import UTC, datetime, timedelta, timezone
+import base64
+import csv
+import io
+from datetime import UTC, date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.dashboard import models
+from app.core.errors import ApiError
+from app.dashboard import csv_export, models
 from app.dashboard import validation as v
 from app.dashboard.repository import SETTINGS_SQL_TYPES
 from app.dashboard.validation import parse_uuid
@@ -163,3 +168,122 @@ def test_patch_reports_only_sent_fields_in_a_fixed_order():
     body = {"el_voice_id": None, "brand_color": "#000000", "moderation_mode": "manual"}
     assert list(_patch(body)) == ["moderation_mode", "brand_color", "el_voice_id"]
     assert _patch({}) == {}
+
+
+# ── G2 keyset cursor ────────────────────────────────────────────────────────────
+
+DID = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
+AT = datetime(2026, 10, 5, 18, 29, 59, 999999, tzinfo=UTC)
+
+
+def _b64(raw: str) -> str:
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def test_cursor_round_trip_keeps_microseconds_and_offset():
+    cursor = v.encode_cursor(AT, DID)
+    assert v.decode_cursor(cursor) == (AT, DID) and v.cursor_position(cursor) == (AT, DID)
+    ist = AT.astimezone(v.IST)
+    assert v.decode_cursor(v.encode_cursor(ist, DID)) == (ist, DID) and v.cursor_position(None) is None
+    assert "=" not in cursor and "|" not in cursor
+
+
+@pytest.mark.parametrize("bad", [
+    "", "x", "!!!!", "€uro", "a" * 201, _b64("no-separator"), _b64(f"{AT.isoformat()}|not-a-uuid"),
+    _b64(f"2026-10-05T18:29:59|{DID}"),            # no timezone
+    _b64(f"yesterday|{DID}"), _b64(f"{AT.isoformat()}|{DID.upper()}"), _b64(f"|{DID}"),
+    _b64(f"{AT.isoformat()}|{DID}|extra"),
+])
+def test_tampered_cursors_are_rejected(bad):
+    with pytest.raises(ValueError):
+        v.decode_cursor(bad)
+    with pytest.raises(ApiError) as err:
+        v.cursor_position(bad)
+    assert (err.value.status, err.value.error) == (400, "Invalid cursor")
+
+
+def test_keyset_page_uses_the_extra_row_only_for_has_more():
+    rows = [{"created_at": AT - timedelta(seconds=i), "donation_id": DID} for i in range(3)]
+    items, cursor, more = v.keyset_page(rows, 2)
+    assert len(items) == 2 and more and v.decode_cursor(cursor) == (rows[1]["created_at"], DID)
+    assert v.keyset_page(rows, 3) == (rows, None, False)
+    assert v.keyset_page([], 5) == ([], None, False)
+
+
+# ── G2 IST boundaries (UTC+05:30: an IST day starts at 18:30:00 UTC the previous day) ──
+
+def _utc(*args) -> datetime:
+    return datetime(*args, tzinfo=UTC)
+
+
+def test_ist_day_boundary_at_1830_utc():
+    assert v.ist_day_bounds(_utc(2026, 10, 5, 18, 29, 59, 999999)) == (_utc(2026, 10, 4, 18, 30), _utc(2026, 10, 5, 18, 30))
+    assert v.ist_day_bounds(_utc(2026, 10, 5, 18, 30)) == (_utc(2026, 10, 5, 18, 30), _utc(2026, 10, 6, 18, 30))
+    assert v.ist_day_bounds(_utc(2026, 10, 5, 0, 0)) == (_utc(2026, 10, 4, 18, 30), _utc(2026, 10, 5, 18, 30))
+
+
+def test_ist_month_and_year_rollover():
+    assert v.ist_month_bounds(_utc(2026, 9, 30, 18, 29, 59)) == (_utc(2026, 8, 31, 18, 30), _utc(2026, 9, 30, 18, 30))
+    assert v.ist_month_bounds(_utc(2026, 9, 30, 18, 30)) == (_utc(2026, 9, 30, 18, 30), _utc(2026, 10, 31, 18, 30))
+    assert v.ist_month_bounds(_utc(2026, 12, 31, 18, 30)) == (_utc(2026, 12, 31, 18, 30), _utc(2027, 1, 31, 18, 30))
+    assert v.ist_month_bounds(_utc(2028, 2, 10)) == (_utc(2028, 1, 31, 18, 30), _utc(2028, 2, 29, 18, 30))
+    assert v.ist_midnight(date(2026, 10, 6)).isoformat() == "2026-10-06T00:00:00+05:30"
+    assert v.TIMEZONE_NAME == "Asia/Kolkata"
+
+
+# ── G2 export range ─────────────────────────────────────────────────────────────
+
+def test_export_days_valid_ranges():
+    assert v.export_days("2026-10-01", "2026-10-01") == (date(2026, 10, 1), date(2026, 10, 1))
+    assert v.export_days("2024-01-01", "2024-12-31")[1] == date(2024, 12, 31)   # 366 days (leap year)
+    assert v.export_days("2025-01-01", "2026-01-01")[1] == date(2026, 1, 1)     # 366 days
+
+
+@pytest.mark.parametrize("start,end,message", [
+    (None, "2026-10-01", "from is required (YYYY-MM-DD)"),
+    ("2026-10-01", None, "to is required (YYYY-MM-DD)"),
+    ("", "2026-10-01", "from is required (YYYY-MM-DD)"),
+    ("2026-1-01", "2026-10-01", "from must be a date in YYYY-MM-DD format"),
+    ("20261001", "2026-10-01", "from must be a date in YYYY-MM-DD format"),
+    ("2026-10-01T00:00", "2026-10-02", "from must be a date in YYYY-MM-DD format"),
+    ("2026-02-30", "2026-03-01", "from must be a date in YYYY-MM-DD format"),
+    ("2026-10-01", "2026-10-01\n", "to must be a date in YYYY-MM-DD format"),
+    ("2026-10-02", "2026-10-01", "to must not be before from"),
+    ("2025-01-01", "2026-01-02", "The date range is limited to 366 days"),       # 367 days
+])
+def test_export_days_rejections(start, end, message):
+    with pytest.raises(ValueError) as err:
+        v.export_days(start, end)
+    assert str(err.value) == message
+
+
+# ── G2 CSV encoding ─────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text,expected", [
+    ("=HYPERLINK(\"http://x\")", "'=HYPERLINK(\"http://x\")"), ("+91 boss", "'+91 boss"), ("-1", "'-1"),
+    ("@SUM(A1)", "'@SUM(A1)"), ("\tTab", "'\tTab"), ("\rCR", "'\rCR"), ("Ravi", "Ravi"), ("a=b", "a=b"),
+    ("", ""), (" =x", " =x"),
+])
+def test_formula_cells_are_neutralised(text, expected):
+    assert csv_export.neutralize(text) == expected
+
+
+def test_csv_encoding_columns_values_and_quoting():
+    rows = [{"created_at": _utc(2026, 10, 5, 18, 30, 15, 123456), "donor_name": 'Quote "me", =now',
+             "amount": Decimal("10.50"), "currency": "USD", "amount_inr": Decimal("934.50"), "order_id": "secret"},
+            {"created_at": _utc(2026, 10, 5, 18, 29, 59), "donor_name": "=cmd|' /C calc'!A0", "amount": Decimal("1E+2"),
+             "currency": "INR", "amount_inr": Decimal("100"), "order_id": "secret"}]
+    text = "".join(csv_export.encode(rows))
+    parsed = list(csv.reader(io.StringIO(text)))
+    assert parsed == [["created_at", "donor_name", "amount", "currency", "amount_inr"],
+                      ["2026-10-06T00:00:15+05:30", 'Quote "me", =now', "10.50", "USD", "934.50"],
+                      ["2026-10-05T23:59:59+05:30", "'=cmd|' /C calc'!A0", "100", "INR", "100"]]
+    assert "secret" not in text and text.endswith("\r\n")
+
+
+def test_csv_streams_in_chunks():
+    row = {"created_at": _utc(2026, 1, 1), "donor_name": "D", "amount": Decimal(1), "currency": "INR",
+           "amount_inr": Decimal(1)}
+    chunks = list(csv_export.encode([row] * 1201))
+    assert len(chunks) == 3 and sum(c.count("\r\n") for c in chunks) == 1202
+    assert list(csv_export.encode([])) == ["created_at,donor_name,amount,currency,amount_inr\r\n"]

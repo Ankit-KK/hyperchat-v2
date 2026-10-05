@@ -5,11 +5,19 @@ is admin-only); POST/PATCH/DELETE also pass require_user's Origin + CSRF check. 
 paths are never cached (install_no_store).
 """
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi.responses import StreamingResponse
 
 from app.authz.dependencies import StreamerAccess, require_streamer_access
 from app.core.errors import ApiError
-from app.dashboard.models import DashboardSettings, SettingsPatch, SettingsUpdate
+from app.dashboard import csv_export
+from app.dashboard.models import (
+    DashboardSettings,
+    DonationPage,
+    DonationStats,
+    SettingsPatch,
+    SettingsUpdate,
+)
 from app.dashboard.service import DashboardService
 
 dashboard_router = APIRouter(prefix="/api/v1/dashboard/streamers/{streamer}", tags=["dashboard"])
@@ -53,3 +61,27 @@ async def read_settings(request: Request,
 async def update_settings(body: SettingsPatch, request: Request,
                           access: StreamerAccess = Depends(require_streamer_access)) -> SettingsUpdate:
     return await _service(request).update_settings(access, body.changes())
+
+
+# ── G2 donations ────────────────────────────────────────────────────────────────
+
+@dashboard_router.get("/donations", response_model=DonationPage)
+async def list_donations(request: Request, limit: int = Query(20, ge=1, le=100), cursor: str | None = None,
+                         access: StreamerAccess = Depends(require_streamer_access)) -> DonationPage:
+    return await _service(request).donations(access, limit=limit, cursor=cursor)
+
+
+@dashboard_router.get("/donations/stats", response_model=DonationStats)
+async def donation_stats(request: Request,
+                         access: StreamerAccess = Depends(require_streamer_access)) -> DonationStats:
+    return await _service(request).donation_stats(access)
+
+
+@dashboard_router.get("/donations/export.csv", response_class=StreamingResponse)
+async def export_donations(request: Request, start: str | None = Query(None, alias="from"),
+                           end: str | None = Query(None, alias="to"),
+                           access: StreamerAccess = Depends(require_streamer_access)) -> StreamingResponse:
+    # Rows are fetched first (the pooled connection is released), then encoded while streaming.
+    filename, rows = await _service(request).export_donations(access, start, end)
+    return StreamingResponse(csv_export.encode(rows), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})

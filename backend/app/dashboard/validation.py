@@ -1,8 +1,12 @@
 """Pure input rules for the dashboard API (no I/O), so every rule is unit-testable."""
 
+import base64
+import binascii
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
+
+from app.core.errors import ApiError
 
 
 def parse_uuid(value: str | None) -> str | None:
@@ -90,3 +94,94 @@ def aware_timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         raise ValueError("must include a timezone offset, e.g. Z or +05:30")
     return parsed
+
+
+# ── keyset pagination (newest first: created_at DESC, id DESC) ──────────────────
+
+CURSOR_MAX_LENGTH = 200
+
+
+def encode_cursor(created_at: datetime, donation_id: str) -> str:
+    raw = f"{created_at.isoformat()}|{donation_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str) -> tuple[datetime, str]:
+    """(created_at, id) of the last item already shown. ValueError for anything that is not our cursor."""
+    if not cursor or len(cursor) > CURSOR_MAX_LENGTH:
+        raise ValueError("bad cursor")
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise ValueError("bad cursor") from None
+    stamp, sep, donation_id = raw.partition("|")
+    parsed = datetime.fromisoformat(stamp) if sep else None  # ValueError when malformed
+    if parsed is None or parsed.tzinfo is None or parse_uuid(donation_id) != donation_id:
+        raise ValueError("bad cursor")
+    return parsed, donation_id
+
+
+def cursor_position(cursor: str | None) -> tuple[datetime, str] | None:
+    if cursor is None:
+        return None
+    try:
+        return decode_cursor(cursor)
+    except ValueError:
+        raise ApiError(400, "Invalid cursor", "bad_cursor") from None
+
+
+def keyset_page(rows: list[dict], limit: int) -> tuple[list[dict], str | None, bool]:
+    """`rows` was fetched with LIMIT limit + 1: the extra row only says whether there is more."""
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    next_cursor = encode_cursor(items[-1]["created_at"], items[-1]["donation_id"]) if has_more else None
+    return items, next_cursor, has_more
+
+
+# ── India Standard Time: fixed +05:30 (Asia/Kolkata has had no DST since 1945), as the legacy
+#    dashboard computed it. Boundaries are computed here and passed to SQL as timestamps. ─────────
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+TIMEZONE_NAME = "Asia/Kolkata"
+EXPORT_MAX_DAYS = 366
+EXPORT_MAX_ROWS = 10_000
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def ist_midnight(day: date) -> datetime:
+    return datetime.combine(day, time(), tzinfo=IST)
+
+
+def ist_day_bounds(now: datetime) -> tuple[datetime, datetime]:
+    """[start, end) of the IST calendar day containing `now`."""
+    today = now.astimezone(IST).date()
+    return ist_midnight(today), ist_midnight(today + timedelta(days=1))
+
+
+def ist_month_bounds(now: datetime) -> tuple[datetime, datetime]:
+    """[start, end) of the IST calendar month containing `now`."""
+    first = now.astimezone(IST).date().replace(day=1)
+    following = (first.replace(year=first.year + 1, month=1) if first.month == 12
+                 else first.replace(month=first.month + 1))
+    return ist_midnight(first), ist_midnight(following)
+
+
+def parse_day(value: str | None, name: str) -> date:
+    if not value:
+        raise ValueError(f"{name} is required (YYYY-MM-DD)")
+    if not _DAY.fullmatch(value):
+        raise ValueError(f"{name} must be a date in YYYY-MM-DD format")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{name} must be a date in YYYY-MM-DD format") from None
+
+
+def export_days(start: str | None, end: str | None) -> tuple[date, date]:
+    """Whole IST days [from, to], at most EXPORT_MAX_DAYS of them."""
+    first, last = parse_day(start, "from"), parse_day(end, "to")
+    if last < first:
+        raise ValueError("to must not be before from")
+    if (last - first).days + 1 > EXPORT_MAX_DAYS:
+        raise ValueError(f"The date range is limited to {EXPORT_MAX_DAYS} days")
+    return first, last
