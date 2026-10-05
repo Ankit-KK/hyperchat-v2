@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+backend/RELEASE
+
+# Frontend (later)
+node_modules/
+dist/
+.vercel/
+
+# Secrets and local environment: only *.example templates belong in Git.
+.env
+.env.*
+*.env
+!*.example
+!*.env.example
+
+# Database dumps, archives and ETL reports contain production data.
+*.dump
+*.7z
+*.sql.gz
+report*.txt
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

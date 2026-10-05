@@ -1,0 +1,5 @@
+# LF everywhere: everything is deployed to Linux (shell scripts and systemd units break with CRLF).
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
