@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily HyperChat v2 maintenance - PRODUCTION (expired sessions, tokens, nonces, rate-limit windows)
+
+# Runs after the nightly production backup (02:30 UTC) and after the DEV cleanup (03:15 UTC).
+[Timer]
+OnCalendar=*-*-* 03:45:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

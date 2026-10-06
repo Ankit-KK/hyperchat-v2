@@ -1,0 +1,37 @@
+[Unit]
+Description=HyperChat v2 maintenance - PRODUCTION: delete expired sessions, tokens, nonces and rate-limit windows
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+# Same unit as hyperchat-cleanup.service (DEV); only the user, paths and environment file differ.
+[Service]
+Type=oneshot
+User=hyperchat-prod
+Group=hyperchat-prod
+WorkingDirectory=/opt/hyperchat-prod/current/backend
+EnvironmentFile=/etc/hyperchat-prod/api.env
+ExecStart=/opt/hyperchat-prod/current/venv/bin/python -m app.cli cleanup
+TimeoutStartSec=300
+
+# Hardening (same profile as hyperchat-prod-api.service)
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+MemoryMax=256M

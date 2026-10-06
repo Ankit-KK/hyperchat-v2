@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Exercise the public-API rate limit with the REAL snippets (deploy/nginx/snippets/) in a throwaway nginx
-# bound to 127.0.0.1 (no TLS, no proxying, nothing installed). Also syntax-checks the dev site file with
-# its includes pointed at the repository snippets. Run on a host with nginx, e.g. the VPS:
+# bound to 127.0.0.1 (no TLS, no proxying, nothing installed): the DEV zone and the separate PRODUCTION
+# zone. Also syntax-checks the DEV site, the PRODUCTION site (bootstrap and full phase) and the catch-all
+# loaded TOGETHER, with includes pointed at the repository snippets and a throwaway self-signed
+# certificate standing in for Let's Encrypt. Run on a host with nginx and openssl, e.g. the VPS or CI:
 #     bash tests/e2e/nginx_ratelimit_check.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SNIP="$ROOT/deploy/nginx/snippets"
-T="$(mktemp -d)"; PORT="${HYPERCHAT_NGINX_TEST_PORT:-18089}"
+T="$(mktemp -d)"; PORT="${HYPERCHAT_NGINX_TEST_PORT:-18089}"; PORT_PROD=$((PORT + 1))
 cleanup() { nginx -p "$T" -c "$T/nginx.conf" -s quit 2>/dev/null || true; sleep 0.3; rm -rf "$T"; }
 trap cleanup EXIT
 mkdir -p "$T/logs" "$T/www" && echo ok > "$T/www/ok.txt"
@@ -21,6 +23,7 @@ http {
     access_log off;
     client_body_temp_path $T/cb; proxy_temp_path $T/px; fastcgi_temp_path $T/fc; uwsgi_temp_path $T/uw; scgi_temp_path $T/sc;
     include $SNIP/hyperchat-public-limit-zone.conf;
+    include $SNIP/hyperchat-prod-public-limit-zone.conf;
     server {
         listen 127.0.0.1:$PORT;
         # Serve a file (content phase, like proxy_pass in production): a "return" would run in the
@@ -36,15 +39,27 @@ http {
         }
         location / { try_files /ok.txt =404; }
     }
+    server {  # production zone, same behaviour, own counters
+        listen 127.0.0.1:$PORT_PROD;
+        root $T/www;
+        location ~ ^/api/v1/(public|metrics)/ {
+            include $SNIP/hyperchat-prod-public-limit.conf;
+            try_files /ok.txt =404;
+        }
+        location @hyperchat_rate_limited {
+            default_type application/json;
+            return 429 '{"error":"Too many requests"}';
+        }
+    }
 }
 EOF
 nginx -t -q -p "$T" -c "$T/nginx.conf"
 nginx -p "$T" -c "$T/nginx.conf"
 
-burst() {  # $1 = path, $2 = number of back-to-back requests -> "<200 count> <429 count>"
+burst() {  # $1 = path, $2 = number of back-to-back requests, $3 = port -> "<200 count> <429 count>"
     local ok=0 limited=0 code
     for _ in $(seq 1 "$2"); do
-        code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT$1")
+        code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${3:-$PORT}$1")
         if [ "$code" = 200 ]; then ok=$((ok + 1)); elif [ "$code" = 429 ]; then limited=$((limited + 1)); fi
     done
     echo "$ok $limited"
@@ -64,15 +79,31 @@ sleep 3
 read -r ok limited < <(burst /api/v1/public/streamers/x 5)
 echo "after 3s: $ok x 200, $limited x 429"
 [ "$ok" -eq 5 ] || { echo "FAIL recovery"; fail=1; }
+read -r ok limited < <(burst /api/v1/public/streamers/x 40 "$PORT_PROD")
+echo "production zone: $ok x 200, $limited x 429 (40 back-to-back)"
+{ [ "$ok" -ge 21 ] && [ "$ok" -le 25 ] && [ "$limited" -ge 15 ]; } || { echo "FAIL production burst"; fail=1; }
+body=$(curl -s "http://127.0.0.1:$PORT_PROD/api/v1/metrics/platform")
+[ "$body" = '{"error":"Too many requests"}' ] || { echo "FAIL production 429 body"; fail=1; }
 
-# Syntax-check the real dev site file with includes redirected to the repository snippets.
-sed "s#/etc/nginx/snippets/#$SNIP/#g" "$ROOT/deploy/nginx/api.quicktestspace.site.conf" > "$T/site.conf"
-cat > "$T/site-test.conf" <<EOF
+# Syntax-check the real site files, all loaded together as on the server: includes redirected to the
+# repository snippets, Let's Encrypt paths to a throwaway self-signed certificate.
+mkdir -p "$T/certs"
+openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=nginx-check.invalid" \
+    -keyout "$T/certs/privkey.pem" -out "$T/certs/fullchain.pem" >/dev/null 2>&1
+site() { sed -e "s#/etc/nginx/snippets/#$SNIP/#g" -e "s#/etc/letsencrypt/live/[^/]*/#$T/certs/#g" "$ROOT/deploy/nginx/$1"; }
+syntax() {  # $1 = label, $2... = site files loaded together
+    local label="$1"; shift; : > "$T/sites.conf"
+    for f in "$@"; do site "$f" >> "$T/sites.conf"; done
+    cat > "$T/site-test.conf" <<EOF
 pid $T/site.pid;
 error_log $T/logs/site-error.log warn;
 events {}
-http { include $T/site.conf; }
+http { include $T/sites.conf; }
 EOF
-if nginx -t -q -p "$T" -c "$T/site-test.conf"; then echo "site config syntax: ok"; else echo "FAIL site config"; fail=1; fi
+    if nginx -t -q -p "$T" -c "$T/site-test.conf"; then echo "syntax $label: ok"; else echo "FAIL syntax $label"; fail=1; fi
+}
+syntax "dev site" api.quicktestspace.site.conf
+syntax "catch-all + dev + production bootstrap (port 80)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.acme.conf
+syntax "catch-all + dev + production (80 + 443)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.conf
 
 [ "$fail" -eq 0 ] && echo "nginx rate-limit check: PASS" || { echo "nginx rate-limit check: FAIL"; exit 1; }
