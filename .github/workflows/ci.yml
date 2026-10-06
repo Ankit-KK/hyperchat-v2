@@ -43,6 +43,25 @@ jobs:
           docker run --rm -v "$PWD:/repo:ro" -w /repo nginx:1.28
           bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq curl openssl >/dev/null
           && bash tests/e2e/nginx_ratelimit_check.sh"
+      - name: Harness leaves the host nginx untouched (Ubuntu 26.04 nginx build, as on the VPS, run as root)
+        # The distro build keeps its temp directories in /var/lib/nginx (owned by www-data). The harness must
+        # pass without changing them; the control proves this environment would catch the old bug (an
+        # un-isolated `nginx -t` as root hands /var/lib/nginx/body to its default user).
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo ubuntu:26.04 bash -euo pipefail -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq >/dev/null && apt-get install -y -qq nginx curl openssl >/dev/null
+            before=$(stat -c "%U:%G %a" /var/lib/nginx/body)
+            echo "nginx $(nginx -v 2>&1 | cut -d/ -f2); /var/lib/nginx/body before: $before"
+            bash tests/e2e/nginx_ratelimit_check.sh
+            after=$(stat -c "%U:%G %a" /var/lib/nginx/body)
+            [ "$after" = "$before" ] || { echo "FAIL harness changed /var/lib/nginx/body: $after"; exit 1; }
+            d=$(mktemp -d); printf "pid %s/p;\nevents {}\nhttp {}\n" "$d" > "$d/c.conf"
+            nginx -t -q -e "$d/e.log" -p "$d" -c "$d/c.conf"
+            control=$(stat -c "%U:%G %a" /var/lib/nginx/body)
+            echo "control (un-isolated nginx -t as root): /var/lib/nginx/body -> $control"
+            [ "$control" != "$before" ] || { echo "FAIL control did not reproduce the bug"; exit 1; }
+            echo "isolation check: PASS"'
 
   integration:
     name: Database + integration tests (PostgreSQL 17)
