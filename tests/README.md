@@ -16,4 +16,6 @@ prepares the throwaway PostgreSQL it uses.
 `e2e/smoke_auth.py` runs on the VPS (see its docstring); it creates one synthetic
 `@authtest.invalid` account in the target database and removes it afterwards. It expects the secure
 default `SameSite=Lax`; against the v2 dev API (cross-site development, `SameSite=None`) run it with
-`HYPERCHAT_SMOKE_SAMESITE=none`.
+`HYPERCHAT_SMOKE_SAMESITE=none`. The frontend origin it signs in from is `HYPERCHAT_SMOKE_ORIGIN`
+(default `https://app.quicktestspace.site`, the origin the dev API trusts); the production origin is
+used only against the production API at cutover.

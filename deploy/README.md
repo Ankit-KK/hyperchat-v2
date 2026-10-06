@@ -5,8 +5,11 @@ later, the background worker. The frontend is deployed separately (Vercel).
 
 | Environment | API host | Database | Status |
 |---|---|---|---|
-| v2 development | `api.quicktestspace.site` | `hyperchat_dev` on cluster `15/restoretest` (port 5433) | running |
-| production | `api.hyperchat.space` | `hyperchat` on cluster `17/hyperchat` (port 5432) | schema only, no traffic |
+| v2 development | `api.quicktestspace.site` | `hyperchat_dev` on cluster `15/restoretest` (port 5433) | running; the only environment for development and testing |
+| production | `api.hyperchat.space` | `hyperchat` on cluster `17/hyperchat` (port 5432) | reserved: deployed and idle until the final cutover phase |
+
+The development API trusts only development frontend origins (`HYPERCHAT_FRONTEND_URL=https://app.quicktestspace.site`,
+`HYPERCHAT_ALLOWED_ORIGINS=http://localhost:5173`); it never trusts the production site.
 
 `hyperchat_restore_test` (also on `15/restoretest`) is the read-only restore of the legacy
 production dump. It is a migration source only and never an application database.
@@ -78,7 +81,8 @@ Rollback: point `current` back to the previous release (and restore the previous
 `/etc/hyperchat/api.env` backup if it changed), then restart.
 
 ## Production API (`api.hyperchat.space`)
-Production runs next to DEV on the same VPS, fully separated:
+Reserved for the final cutover phase: V2 is developed and tested against DEV only. Production runs
+next to DEV on the same VPS, fully separated:
 
 | | DEV | PRODUCTION |
 |---|---|---|
