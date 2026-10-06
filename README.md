@@ -36,10 +36,22 @@ docs/       architecture, target schema, migration audit, history
 | 2 FastAPI-managed authentication | done; running on the v2 development API |
 | 3 Authorization (creator ownership), admin bootstrap + user management, database-backed security primitives, explicit origins, cleanup, CI | done; running on the v2 development API |
 | 4 Public read API (donation pages, overlays, landing page) | done; running on the v2 development API |
-| 5 Creator dashboard API (settings, donations, moderation, moderators, terms; migration 0009) | implemented and tested; not yet deployed |
-| 6–15 Remaining feature APIs, new frontend, cutover | next — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
+| 5 Creator dashboard API (settings, donations, moderation, moderators, terms; migration 0009) | done; running on the v2 development API |
+| 6–13 Remaining feature APIs, new frontend | next — built and tested against the development API |
+| 14–15 Production deployment, data migration, cutover | final phase — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
 
-Development API: `https://api.quicktestspace.site` (database `hyperchat_dev`).
+**V2 is not production-ready.** All development, frontend integration, previews and testing target
+the development environment only:
+
+| | Development (active) | Production (reserved, final phase only) |
+|---|---|---|
+| Frontend | `https://app.quicktestspace.site` (+ `http://localhost:5173`) | `https://hyperchat.space` (still the legacy site) |
+| API | `https://api.quicktestspace.site` | `https://api.hyperchat.space` (deployed, idle, not used) |
+| Database | `hyperchat_dev` | `hyperchat` (empty apart from the first admin) |
+
+The production API was provisioned early so that it exists at cutover; its existence does not mean V2
+is ready. No frontend, preview or test points at `api.hyperchat.space` or the production database
+until the final cutover phase.
 Production (`api.hyperchat.space`, database `hyperchat`) has the schema but takes no traffic yet.
 
 ## Running the tests

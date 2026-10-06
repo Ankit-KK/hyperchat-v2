@@ -8,6 +8,8 @@ Environment (defaults = v2 development):
     HYPERCHAT_SMOKE_DB    hyperchat_dev:5433   (never hyperchat or hyperchat_restore_test)
     HYPERCHAT_SMOKE_SAMESITE  lax              expected SameSite of the session cookie: the secure
                                                default; the v2 dev API uses "none" (cross-site dev)
+    HYPERCHAT_SMOKE_ORIGIN    https://app.quicktestspace.site   the frontend origin the API trusts
+                                               (its HYPERCHAT_FRONTEND_URL); production only at cutover
 The synthetic account (@authtest.invalid) and its sessions are deleted afterwards; the password is
 random per run and nothing secret is printed. Exit code 0 = every check passed.
 """
@@ -32,7 +34,10 @@ if DB_NAME in ("hyperchat", "hyperchat_restore_test"):
 SAMESITE = os.environ.get("HYPERCHAT_SMOKE_SAMESITE", "lax").strip().lower()
 if SAMESITE not in ("lax", "strict", "none"):
     sys.exit("HYPERCHAT_SMOKE_SAMESITE must be lax, strict or none")
-ORIGIN = {"origin": "https://hyperchat.space"}
+FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.site").strip().rstrip("/")
+if not FRONT.startswith(("https://", "http://localhost")) or FRONT.count("/") != 2:
+    sys.exit("HYPERCHAT_SMOKE_ORIGIN must be an origin such as https://app.quicktestspace.site")
+ORIGIN = {"origin": FRONT}
 EMAIL = "devsmoke@authtest.invalid"
 PASSWORD = secrets.token_urlsafe(18)  # never printed
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
@@ -71,7 +76,7 @@ try:
               ck.startswith("__Host-hc_session=") and "secure" in low and "httponly" in low
               and f"samesite={SAMESITE}" in low and "path=/" in low and "domain=" not in low)
         check("CORS echoes allowed origin with credentials",
-              r.headers.get("access-control-allow-origin") == "https://hyperchat.space"
+              r.headers.get("access-control-allow-origin") == FRONT
               and r.headers.get("access-control-allow-credentials") == "true")
         csrf = r.json()["csrf_token"]
         token = c.cookies.get("__Host-hc_session")
@@ -107,7 +112,7 @@ try:
         pre = httpx.options(API + "/api/v1/auth/login", headers={**ORIGIN, "access-control-request-method": "POST"},
                             timeout=15)
         check("CORS preflight from frontend origin -> 200", pre.status_code == 200
-              and pre.headers.get("access-control-allow-origin") == "https://hyperchat.space")
+              and pre.headers.get("access-control-allow-origin") == FRONT)
 finally:
     with psycopg.connect(DSN, autocommit=True) as db:
         db.execute("DELETE FROM public.users WHERE email::text LIKE '%%@authtest.invalid'")

@@ -83,17 +83,25 @@ react to that state in later phases.
 - One normalized `donations` table replaces the 133 per-creator `<slug>_donations` tables.
 
 ## Environments
-| | Development | Production |
+| | Development (active) | Production (reserved) |
 |---|---|---|
-| API | `https://api.quicktestspace.site` | `https://api.hyperchat.space` |
+| Frontend | `https://app.quicktestspace.site`, `http://localhost:5173` | `https://hyperchat.space` (legacy site until cutover) |
+| API | `https://api.quicktestspace.site` (127.0.0.1:8000) | `https://api.hyperchat.space` (127.0.0.1:8001) |
 | Database | `hyperchat_dev` (cluster `15/restoretest`, 5433), rehearsal load of the legacy dump | `hyperchat` (cluster `17/hyperchat`, 5432) |
-| Cookie SameSite | `lax` | `lax` (frontend and API are same-site) |
-| Status | running (auth) | schema only; no traffic until cutover |
+| Trusted browser origins | `https://app.quicktestspace.site`, `http://localhost:5173` | `https://hyperchat.space` |
+| Cookie SameSite | `none` (localhost development is cross-site) | `lax` (frontend and API are same-site) |
+| Status | all development, previews and testing | deployed and idle; used only from the final cutover phase |
+
+All V2 work targets the development environment. The production API and database were provisioned
+early and stay isolated (own OS user, port, env file, database mapping and rate-limit zone); no
+frontend, preview or test uses them before the final cutover phase.
 
 ## Delivery plan
 Phases 0–15 are defined in [`migration-audit.md`](migration-audit.md), section M.
 Done: 0 (decisions), 1 (platform: clusters, roles, Alembic schema, ETL rehearsal, backups),
 2 (FastAPI-managed authentication), 3 (authorization, admin tooling, database-backed security
-primitives, explicit origins, cleanup, CI), 4 (public read API). Phase 5 (creator dashboard API,
-migration 0009) is implemented and tested, not yet deployed. Next: the remaining feature APIs
-(6–12), the new frontend (13), cutover rehearsal (14) and Supabase decommissioning (15).
+primitives, explicit origins, cleanup, CI), 4 (public read API), 5 (creator dashboard API,
+migration 0009) — all running on the development API. Next, against the development API only: the
+remaining feature APIs (6–12) and the new frontend (13), then integration, security and regression
+testing. Only then: production deployment and data migration (14) and the cutover and Supabase
+decommissioning (15).
