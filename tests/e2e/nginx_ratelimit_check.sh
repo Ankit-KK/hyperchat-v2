@@ -21,10 +21,12 @@ ngx() { nginx -e "$T/logs/startup-error.log" -p "$T" "$@"; }  # -e: even the pre
 cleanup() { ngx -c "$T/nginx.conf" -s quit 2>/dev/null || true; sleep 0.3; rm -rf "$T"; }
 trap cleanup EXIT
 mkdir -p "$T/logs" "$T/www" && echo ok > "$T/www/ok.txt"
-# The host's nginx state directories: the distro locations plus this build's compiled-in temp/log paths.
+# The host's nginx state directories: the distro locations plus this build's compiled-in temp/log paths
+# (all five temp paths incl. http-client-body-temp-path; non-absolute values such as "stderr" are skipped).
 host_dirs() {
     { printf '%s\n' /var/lib/nginx /var/log/nginx /var/cache/nginx
-      nginx -V 2>&1 | grep -oE -- '--(http-[a-z]+-temp-path|http-log-path|error-log-path)=[^ ]+' | cut -d= -f2 | xargs -r -n1 dirname
+      nginx -V 2>&1 | grep -oE -- '--(http-[a-z-]+-temp-path|http-log-path|error-log-path)=[^ ]+' | cut -d= -f2 \
+          | grep '^/' | xargs -r -n1 dirname
     } | sort -u
 }
 # Owner/group/mode of those directories and their direct entries (not contents or times: live traffic changes those).

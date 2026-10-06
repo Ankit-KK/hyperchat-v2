@@ -69,8 +69,10 @@ jobs:
               echo "FAIL harness changed the system nginx state:"; diff <(echo "$before") <(state) || true; exit 1
             fi
             echo "after the harness: system nginx state unchanged"
-            d=$(mktemp -d); printf "pid %s/p;\nevents {}\nhttp {}\n" "$d" > "$d/c.conf"
-            nginx -t -q -e "$d/e.log" -p "$d" -c "$d/c.conf"  # the old harness behaviour: no temp paths
+            # The old harness behaviour: a config with a server block but no temp paths (nginx registers its
+            # compiled-in temp paths while merging server/location configuration, then takes them over as root).
+            d=$(mktemp -d); printf "pid %s/p;\nevents {}\nhttp { server { listen 127.0.0.1:18099; } }\n" "$d" > "$d/c.conf"
+            nginx -t -q -e "$d/e.log" -p "$d" -c "$d/c.conf"
             control=$(stat -c "%U %a" /var/lib/nginx/body)
             echo "control (un-isolated nginx -t as root): /var/lib/nginx/body -> $control"
             [ "$control" != "www-data 700" ] || { echo "FAIL control did not reproduce the bug"; exit 1; }
