@@ -68,6 +68,10 @@ class PublicService:
             raise not_found()
         return row
 
+    async def active_creator(self, slug: str) -> dict:
+        """Active creator row (internal; id and settings stay server-side) or the D3 404."""
+        return await self._streamer(slug)
+
     async def profile(self, slug: str) -> PublicStreamer:
         s = await self._streamer(slug)
         return PublicStreamer(

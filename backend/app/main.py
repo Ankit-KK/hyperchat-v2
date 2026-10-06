@@ -19,11 +19,13 @@ from app.dashboard.service import DashboardService
 from app.db.pool import Database
 from app.public.repository import PublicRepository
 from app.public.service import PublicService
-from app.routers import admin, auth, dashboard, health, public, streamers
+from app.routers import admin, auth, dashboard, health, public, streamers, uploads
 from app.security.audit import security_event
 from app.security.cors import CorsMiddleware
 from app.security.dependencies import SecurityStores, install_security_error_handler
 from app.security.pg_stores import PostgresNonceStore, PostgresObsTokenStore, PostgresPartnerKeyStore
+from app.storage.r2 import build_object_store
+from app.uploads.service import PublicCreators, UploadService
 
 log = logging.getLogger("hyperchat.api")
 
@@ -48,9 +50,17 @@ async def lifespan(app: FastAPI):
         app.state.dashboard = DashboardService(DashboardRepository(conn))
         app.state.security = SecurityStores(PostgresNonceStore(conn), PostgresObsTokenStore(conn),
                                             PostgresPartnerKeyStore(conn))
+        # Donor uploads reuse the public creator lookup, the request_nonces store and the auth rate limiter.
+        app.state.uploads = UploadService(
+            grant_secret=settings.upload_grant_secret, creators=PublicCreators(app.state.public),
+            nonces=app.state.security.nonces, limiter=app.state.auth.repo, store=build_object_store(settings))
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
+    # Variable names only, never values.
+    log.info("uploads", extra={"upload_grants_configured": settings.upload_grants_configured,
+                               "r2_configured": settings.r2_configured,
+                               "r2_missing_or_invalid": settings.r2_config_problems()})
     try:
         yield
     finally:
@@ -109,6 +119,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(public.streamers_router)
     app.include_router(public.metrics_router)
+    app.include_router(uploads.router)
     app.include_router(dashboard.dashboard_router)
     app.include_router(dashboard.me_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.

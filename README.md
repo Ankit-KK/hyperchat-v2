@@ -67,6 +67,7 @@ the unit tests and the full database + integration suites against PostgreSQL 17 
 - [`docs/architecture.md`](docs/architecture.md) — components, trust boundaries, environments
 - [`docs/public-api.md`](docs/public-api.md) — public read API (Phase 4)
 - [`docs/dashboard-api.md`](docs/dashboard-api.md) — creator dashboard API (Phase 5)
+- [`docs/uploads-api.md`](docs/uploads-api.md) — donor upload grants and voice/media uploads to R2 (Phase 6, in progress)
 - [`docs/target-schema.md`](docs/target-schema.md) — PostgreSQL schema and legacy → v2 data mapping
 - [`docs/migration-audit.md`](docs/migration-audit.md) — Supabase-exit audit and phase plan
 - [`docs/history.md`](docs/history.md) — relationship to the legacy repository

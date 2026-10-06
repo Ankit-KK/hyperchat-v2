@@ -124,7 +124,8 @@ def cleanup_synthetic_rows() -> None:
         conn.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.request_nonces WHERE nonce LIKE %s OR nonce LIKE %s",
                      (SLUG_PREFIX + "%", "upload:" + SLUG_PREFIX + "%"))
-        conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%'")
+        conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%' "
+                     "OR endpoint LIKE 'upload:%'")
 
 
 def login(client, email, password=PASSWORD, headers=ORIGIN):

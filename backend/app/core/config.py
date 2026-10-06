@@ -4,23 +4,47 @@ Every value comes from environment variables prefixed with ``HYPERCHAT_`` (on th
 ``/etc/hyperchat/api.env``, loaded by systemd). Nothing secret is stored in the repository.
 """
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
 from psycopg.conninfo import make_conninfo
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.origins import OriginError, is_development_origin, normalize_origin, parse_origins
 
 # Written by the deploy step next to the code (see deploy/README in backend/README.md).
 _RELEASE_FILE = Path(__file__).resolve().parents[2] / "RELEASE"
+_R2_ACCOUNT = re.compile(r"^[A-Za-z0-9]{1,64}$")  # becomes part of a host name: no dots, slashes or ports
+_R2_BUCKET = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+
+
+def _secret_value(value: SecretStr | None) -> str:
+    return value.get_secret_value().strip() if value is not None else ""
+
+
+def _https_url(value: str, *, allow_path: bool) -> str | None:
+    """Normalized https URL without credentials, query or fragment (and without path unless allowed)."""
+    try:
+        parts = urlsplit(value)
+        port_ok = parts.port is None or 0 < parts.port < 65536
+    except ValueError:
+        return None
+    if (parts.scheme != "https" or not parts.hostname or parts.username is not None or parts.password is not None
+            or parts.query or parts.fragment or not port_ok or "\\" in value or any(c.isspace() for c in value)):
+        return None
+    path = parts.path.rstrip("/")
+    if path and not allow_path:
+        return None
+    return f"https://{parts.netloc}{path}"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="HYPERCHAT_", extra="ignore")
+    # hide_input_in_errors: a refused configuration must never echo the environment (secrets) into logs.
+    model_config = SettingsConfigDict(env_prefix="HYPERCHAT_", extra="ignore", hide_input_in_errors=True)
 
     app_env: Literal["development", "test", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
@@ -75,9 +99,64 @@ class Settings(BaseSettings):
     google_client_secret: SecretStr | None = None
     google_redirect_uri: str | None = None  # e.g. https://api.hyperchat.space/api/v1/auth/google/callback
 
+    # ── Cloudflare R2 object storage (app.storage). Uploads answer 503 until all of these are set.
+    #    One bucket per environment; the key must be scoped to that bucket only. ──────────────
+    r2_account_id: SecretStr | None = None
+    r2_access_key_id: SecretStr | None = None
+    r2_secret_access_key: SecretStr | None = None
+    r2_bucket: str | None = None
+    # Public read base of the bucket (r2.dev URL or a custom domain); object URLs are built from it.
+    r2_public_base_url: str | None = None
+    # S3 API endpoint; default https://<account_id>.r2.cloudflarestorage.com
+    r2_endpoint: str | None = None
+
     @property
     def google_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret and self.google_redirect_uri)
+
+    @field_validator("r2_bucket", "r2_public_base_url", "r2_endpoint", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None  # an empty line in the env file means "not set"
+        return value
+
+    @property
+    def r2_endpoint_url(self) -> str | None:
+        """S3 API endpoint (explicit, or derived from the account id); None when invalid or unset."""
+        if self.r2_endpoint:
+            return _https_url(self.r2_endpoint, allow_path=False)
+        account = _secret_value(self.r2_account_id)
+        return f"https://{account}.r2.cloudflarestorage.com" if account and _R2_ACCOUNT.match(account) else None
+
+    @property
+    def r2_public_base(self) -> str | None:
+        """Public read base for object URLs, without trailing slash; None when invalid or unset."""
+        return _https_url(self.r2_public_base_url, allow_path=True) if self.r2_public_base_url else None
+
+    def r2_config_problems(self) -> list[str]:
+        """Names (never values) of the R2 variables that are missing or invalid."""
+        problems = []
+        if not self.r2_endpoint_url:
+            problems.append("HYPERCHAT_R2_ENDPOINT" if self.r2_endpoint else "HYPERCHAT_R2_ACCOUNT_ID")
+        if not _secret_value(self.r2_access_key_id):
+            problems.append("HYPERCHAT_R2_ACCESS_KEY_ID")
+        if not _secret_value(self.r2_secret_access_key):
+            problems.append("HYPERCHAT_R2_SECRET_ACCESS_KEY")
+        if not (self.r2_bucket and _R2_BUCKET.match(self.r2_bucket)):
+            problems.append("HYPERCHAT_R2_BUCKET")
+        if not self.r2_public_base:
+            problems.append("HYPERCHAT_R2_PUBLIC_BASE_URL")
+        return problems
+
+    @property
+    def r2_configured(self) -> bool:
+        return not self.r2_config_problems()
+
+    @property
+    def upload_grants_configured(self) -> bool:
+        return bool(_secret_value(self.upload_grant_secret))
 
     @model_validator(mode="after")
     def _refuse_test_data_in_production(self) -> "Settings":
