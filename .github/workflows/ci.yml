@@ -31,6 +31,19 @@ jobs:
         working-directory: database
         run: python -m pytest -q
 
+  deploy-config:
+    name: Deployment configuration (nginx syntax + rate limits)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: DEV + production sites, snippets and catch-all in a throwaway nginx
+        # Official nginx image (>= 1.25 for "http2 on;", as on the VPS); nothing is installed on a server.
+        run: >-
+          docker run --rm -v "$PWD:/repo:ro" -w /repo nginx:1.28
+          bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq curl openssl >/dev/null
+          && bash tests/e2e/nginx_ratelimit_check.sh"
+
   integration:
     name: Database + integration tests (PostgreSQL 17)
     runs-on: ubuntu-24.04

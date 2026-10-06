@@ -1,0 +1,47 @@
+[Unit]
+Description=HyperChat v2 API (FastAPI) - PRODUCTION (api.hyperchat.space)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Same unit as hyperchat-api.service (DEV); only the user, paths, environment file and port differ.
+[Service]
+Type=exec
+User=hyperchat-prod
+Group=hyperchat-prod
+WorkingDirectory=/opt/hyperchat-prod/current/backend
+EnvironmentFile=/etc/hyperchat-prod/api.env
+ExecStart=/opt/hyperchat-prod/current/venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8001 --workers 2 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 \
+    --no-access-log --no-server-header
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
