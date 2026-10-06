@@ -10,7 +10,7 @@ prepares the throwaway PostgreSQL it uses.
 
 | Path | What it checks |
 |---|---|
-| `e2e/nginx_ratelimit_check.sh` | the public-API rate-limit snippets in a throwaway local nginx (burst, JSON 429, recovery, other paths unaffected) and a syntax check of the dev site file |
+| `e2e/nginx_ratelimit_check.sh` | the public-API rate-limit snippets in a throwaway local nginx (burst, JSON 429, recovery, other paths unaffected) and a syntax check of the site files; fully isolated in a temp directory (pid, logs, all temp paths) and fails if the host nginx's state directories change owner/mode (CI also proves this on the Ubuntu 26.04 nginx build) |
 | `e2e/smoke_auth.py` | a deployed API over public HTTPS: login, cookie flags, CSRF/Origin enforcement, session revocation, forgot-password, disabled Google, CORS, no secrets in the service journal |
 
 `e2e/smoke_auth.py` runs on the VPS (see its docstring); it creates one synthetic

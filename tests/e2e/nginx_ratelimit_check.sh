@@ -5,14 +5,35 @@
 # loaded TOGETHER, with includes pointed at the repository snippets and a throwaway self-signed
 # certificate standing in for Let's Encrypt. Run on a host with nginx and openssl, e.g. the VPS or CI:
 #     bash tests/e2e/nginx_ratelimit_check.sh
+#
+# Isolation: every nginx started or syntax-checked here uses ONLY paths under a fresh mktemp directory
+# (pid, startup and runtime error logs, access log, all five temp directories). nginx run as root takes
+# ownership of whatever temp directories its configuration names, so a config without them would fall back
+# to the compiled-in system ones (/var/lib/nginx/*) and hand them to its default user, breaking the host's
+# nginx (request bodies > 16 KB). A guard compares owner/mode of the host's nginx state directories
+# (distro paths + this build's compiled-in temp/log paths) before and after the run and fails on any change.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SNIP="$ROOT/deploy/nginx/snippets"
 T="$(mktemp -d)"; PORT="${HYPERCHAT_NGINX_TEST_PORT:-18089}"; PORT_PROD=$((PORT + 1))
-cleanup() { nginx -p "$T" -c "$T/nginx.conf" -s quit 2>/dev/null || true; sleep 0.3; rm -rf "$T"; }
+ngx() { nginx -e "$T/logs/startup-error.log" -p "$T" "$@"; }  # -e: even the pre-config error log stays in $T
+cleanup() { ngx -c "$T/nginx.conf" -s quit 2>/dev/null || true; sleep 0.3; rm -rf "$T"; }
 trap cleanup EXIT
 mkdir -p "$T/logs" "$T/www" && echo ok > "$T/www/ok.txt"
+# The host's nginx state directories: the distro locations plus this build's compiled-in temp/log paths
+# (all five temp paths incl. http-client-body-temp-path; non-absolute values such as "stderr" are skipped).
+host_dirs() {
+    { printf '%s\n' /var/lib/nginx /var/log/nginx /var/cache/nginx
+      nginx -V 2>&1 | grep -oE -- '--(http-[a-z-]+-temp-path|http-log-path|error-log-path)=[^ ]+' | cut -d= -f2 \
+          | grep '^/' | xargs -r -n1 dirname
+    } | sort -u
+}
+# Owner/group/mode of those directories and their direct entries (not contents or times: live traffic changes those).
+host_state() { for d in $(host_dirs); do [ -e "$d" ] && find "$d" -maxdepth 1 -exec stat -c '%n %U:%G %a' {} +; done 2>/dev/null | sort; }
+HOST_BEFORE="$(host_state)"
+# Paths that would otherwise default to the compiled-in system locations.
+ISOLATED="client_body_temp_path $T/cb; proxy_temp_path $T/px; fastcgi_temp_path $T/fc; uwsgi_temp_path $T/uw; scgi_temp_path $T/sc; access_log $T/logs/access.log;"
 chmod 755 "$T" "$T/www" && chmod 644 "$T/www/ok.txt"  # nginx workers (www-data) must read the file
 
 cat > "$T/nginx.conf" <<EOF
@@ -20,8 +41,7 @@ pid $T/nginx.pid;
 error_log $T/logs/error.log warn;
 events {}
 http {
-    access_log off;
-    client_body_temp_path $T/cb; proxy_temp_path $T/px; fastcgi_temp_path $T/fc; uwsgi_temp_path $T/uw; scgi_temp_path $T/sc;
+    $ISOLATED
     include $SNIP/hyperchat-public-limit-zone.conf;
     include $SNIP/hyperchat-prod-public-limit-zone.conf;
     server {
@@ -53,8 +73,8 @@ http {
     }
 }
 EOF
-nginx -t -q -p "$T" -c "$T/nginx.conf"
-nginx -p "$T" -c "$T/nginx.conf"
+ngx -t -q -c "$T/nginx.conf"
+ngx -c "$T/nginx.conf"
 
 burst() {  # $1 = path, $2 = number of back-to-back requests, $3 = port -> "<200 count> <429 count>"
     local ok=0 limited=0 code
@@ -98,12 +118,16 @@ syntax() {  # $1 = label, $2... = site files loaded together
 pid $T/site.pid;
 error_log $T/logs/site-error.log warn;
 events {}
-http { include $T/sites.conf; }
+http { $ISOLATED include $T/sites.conf; }
 EOF
-    if nginx -t -q -p "$T" -c "$T/site-test.conf"; then echo "syntax $label: ok"; else echo "FAIL syntax $label"; fail=1; fi
+    if ngx -t -q -c "$T/site-test.conf"; then echo "syntax $label: ok"; else echo "FAIL syntax $label"; fail=1; fi
 }
 syntax "dev site" api.quicktestspace.site.conf
 syntax "catch-all + dev + production bootstrap (port 80)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.acme.conf
 syntax "catch-all + dev + production (80 + 443)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.conf
+
+ngx -c "$T/nginx.conf" -s quit 2>/dev/null || true; sleep 0.3
+if [ "$(host_state)" = "$HOST_BEFORE" ]; then echo "host nginx state ($(host_dirs | tr '\n' ' ')): unchanged"
+else echo "FAIL host nginx state changed:"; diff <(echo "$HOST_BEFORE") <(host_state) || true; fail=1; fi
 
 [ "$fail" -eq 0 ] && echo "nginx rate-limit check: PASS" || { echo "nginx rate-limit check: FAIL"; exit 1; }
