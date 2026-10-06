@@ -44,23 +44,36 @@ jobs:
           bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq curl openssl >/dev/null
           && bash tests/e2e/nginx_ratelimit_check.sh"
       - name: Harness leaves the host nginx untouched (Ubuntu 26.04 nginx build, as on the VPS, run as root)
-        # The distro build keeps its temp directories in /var/lib/nginx (owned by www-data). The harness must
-        # pass without changing them; the control proves this environment would catch the old bug (an
-        # un-isolated `nginx -t` as root hands /var/lib/nginx/body to its default user).
+        # Ubuntu's package ships only /var/lib/nginx and /var/log/nginx. nginx itself creates its temp
+        # directories (body, proxy, fastcgi, uwsgi, scgi) the first time it initialises its configuration, as
+        # root, and hands them to the configured user (www-data). A fresh container never starts the service,
+        # so the VPS state is established with the system config's own `nginx -t` (no daemon) and asserted
+        # before it is relied on. The harness must leave /var/lib/nginx and /var/log/nginx unchanged; the
+        # control proves this environment catches the old bug (an un-isolated `nginx -t` as root hands
+        # /var/lib/nginx/body to nginx's default user).
         run: |
           docker run --rm -v "$PWD:/repo:ro" -w /repo ubuntu:26.04 bash -euo pipefail -c '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq >/dev/null && apt-get install -y -qq nginx curl openssl >/dev/null
-            before=$(stat -c "%U:%G %a" /var/lib/nginx/body)
-            echo "nginx $(nginx -v 2>&1 | cut -d/ -f2); /var/lib/nginx/body before: $before"
+            echo "nginx $(nginx -v 2>&1 | cut -d/ -f2); /var/lib/nginx after install: [$(ls -A /var/lib/nginx | tr "\n" " ")]"
+            nginx -t -q  # system config, as on the service first start: creates the temp directories
+            for t in body proxy fastcgi uwsgi scgi; do
+              s=$(stat -c "%U %a" "/var/lib/nginx/$t")
+              [ "$s" = "www-data 700" ] || { echo "FAIL setup: /var/lib/nginx/$t is \"$s\", expected www-data 700"; exit 1; }
+            done
+            state() { find /var/lib/nginx /var/log/nginx -maxdepth 1 -exec stat -c "%n %U:%G %a" {} + | sort; }
+            before=$(state)
+            echo "established (as on the VPS):"; echo "$before" | sed "s/^/  /"
             bash tests/e2e/nginx_ratelimit_check.sh
-            after=$(stat -c "%U:%G %a" /var/lib/nginx/body)
-            [ "$after" = "$before" ] || { echo "FAIL harness changed /var/lib/nginx/body: $after"; exit 1; }
+            if [ "$(state)" != "$before" ]; then
+              echo "FAIL harness changed the system nginx state:"; diff <(echo "$before") <(state) || true; exit 1
+            fi
+            echo "after the harness: system nginx state unchanged"
             d=$(mktemp -d); printf "pid %s/p;\nevents {}\nhttp {}\n" "$d" > "$d/c.conf"
-            nginx -t -q -e "$d/e.log" -p "$d" -c "$d/c.conf"
-            control=$(stat -c "%U:%G %a" /var/lib/nginx/body)
+            nginx -t -q -e "$d/e.log" -p "$d" -c "$d/c.conf"  # the old harness behaviour: no temp paths
+            control=$(stat -c "%U %a" /var/lib/nginx/body)
             echo "control (un-isolated nginx -t as root): /var/lib/nginx/body -> $control"
-            [ "$control" != "$before" ] || { echo "FAIL control did not reproduce the bug"; exit 1; }
+            [ "$control" != "www-data 700" ] || { echo "FAIL control did not reproduce the bug"; exit 1; }
             echo "isolation check: PASS"'
 
   integration:
