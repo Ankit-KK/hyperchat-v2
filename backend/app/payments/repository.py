@@ -7,9 +7,10 @@
   webhook idempotency        payment_webhook_events_event_key (provider, event_id)              1 row
 
 Completion (apply) is ONE transaction: the donation row is locked (FOR UPDATE), the transition decided on
-the locked state, the donor total credited, and, for a webhook, its event row inserted. A second delivery,
-a confirm or a poll racing it waits on the lock, then sees the committed state: a donation is completed
-and credited at most once, and one webhook event id is processed at most once.
+the locked state, the donor total credited, the realtime events written (Phase 9 outbox) and, for a webhook,
+its event row inserted. A second delivery, a confirm or a poll racing it waits on the lock, then sees the
+committed state: a donation is completed and credited at most once, and one webhook event id is processed
+at most once.
 """
 
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from psycopg.rows import dict_row
 from app.db.donor_totals import change_donor_total
 from app.jobs.queue import enqueue
 from app.payments import rules
+from app.realtime import outbox
 
 _DONATION = """d.id::text AS id, d.order_id, d.provider_order_id, d.amount, d.currency::text AS currency,
     d.payment_status, d.status_token_hash, d.provider_payment_id,
@@ -197,8 +199,11 @@ class PaymentRepository:
                 audio_scheduled_at = CASE WHEN %(auto)s THEN now() + make_interval(secs => %(delay)s) END
             WHERE id = %(id)s
         """, {"pid": payment_id, "auto": auto, "delay": rules.AUDIO_DELAY_SECONDS, "id": donation_id})
+        # Phase 9: the dashboard event commits with the payment (or neither does).
+        await outbox.emit(cur, row["streamer_id"], "new-donation", subject_id=donation_id)
         if auto:
             await change_donor_total(cur, row["streamer_id"], row["donor_name"], row["amount_inr"], +1)
             # Phase 8: the audio job commits with the approval (or neither does).
             await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
+            await outbox.emit_totals_changed(cur, row["streamer_id"])
         return Applied("completed", "success", auto)

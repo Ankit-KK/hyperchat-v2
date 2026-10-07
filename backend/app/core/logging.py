@@ -43,3 +43,6 @@ def configure_logging(level: str) -> None:
         uv.handlers[:] = []
         uv.propagate = True
     logging.getLogger("uvicorn.access").disabled = True
+    # httpx logs every request URL at INFO; Pusher REST URLs carry auth query parameters. Warnings only.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)

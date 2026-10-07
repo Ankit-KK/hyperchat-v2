@@ -46,6 +46,7 @@ class FakeRepo:
     def __init__(self, row: dict | None) -> None:
         self.row, self.commands, self.blocked, self.fail_probe = row, (0, False), 0, False
         self.blocks, self.hashes, self.urls, self.transcripts, self.command_queries = [], [], {}, {}, []
+        self.ready = []  # Phase 9: audio-ready outbox events written by the completion effects
 
     async def donation_context(self, did):
         return dict(self.row) if self.row and self.row["id"] == did else None
@@ -65,6 +66,10 @@ class FakeRepo:
 
     async def set_audio_url(self, cur, did, url):
         self.urls[did] = url
+
+    async def audio_ready(self, cur, did):
+        self.ready.append(did)
+        return True
 
     async def insert_transcript(self, cur, **kw):
         self.transcripts[kw["donation_id"]] = kw
@@ -137,17 +142,20 @@ def test_ineligible_donations_are_skipped(row, reason):
     w.repo.row = row
     done = w.run()
     assert done.result == {"outcome": "skipped", "reason": reason} and done.effects is None and w.provider_calls() == 0
+    assert w.repo.ready == []  # no audio-ready event for a skipped job
 
 
 def test_hypersound_plays_itself():
     w = World(donation(hypersound_url=f"{BASE}/hypersounds/Horn.mp3"))
     assert w.run().result == {"outcome": "hypersound"} and w.repo.urls == {} and w.provider_calls() == 0
+    assert w.repo.ready == [DID]  # Phase 9: its own audio is ready
 
 
 def test_voice_must_be_this_creators_existing_upload():
     w = World(donation(voice_message_url=f"{BASE}/{VOICE_KEY}"))
     w.store.objects[VOICE_KEY] = StoredObject(b"v", "audio/webm", "", {})
     assert w.run().result == {"outcome": "voice"} and w.repo.urls == {} and w.provider_calls() == 0
+    assert w.repo.ready == [DID]
 
 
 @pytest.mark.parametrize("url, reason", [
@@ -161,7 +169,7 @@ def test_bad_or_missing_voice_is_a_permanent_failure(url, reason):
     w = World(donation(voice_message_url=url))
     with pytest.raises(Permanent) as exc:
         w.run()
-    assert exc.value.reason == reason and w.provider_calls() == 0
+    assert exc.value.reason == reason and w.provider_calls() == 0 and w.repo.ready == []
 
 
 def test_text_donation_uses_minimax_and_a_deterministic_key():
@@ -169,6 +177,7 @@ def test_text_donation_uses_minimax_and_a_deterministic_key():
     done = w.run()
     assert done.result["outcome"] == "speech" and done.result["provider"] == "minimax"
     assert w.repo.urls == {DID: GEN_URL} and w.store.objects[f"tts-audio/{SID}/{DID}.mp3"].content_type == "audio/mpeg"
+    assert w.repo.ready == [DID]  # exactly one audio-ready, with the URL write
     ((text, voice, boost),) = w.minimax.calls
     assert voice == "moss_audio_creator" and boost == "Hindi" and "Ravi" in text and "100 rupees" in text
     assert SECRET_MESSAGE in text
@@ -203,6 +212,7 @@ def test_silent_cases(cols, reason):
     w = World(donation(**cols))
     done = w.run()
     assert done.result == {"outcome": "silent", "reason": reason} and w.repo.urls == {DID: SILENCE_URL}
+    assert w.repo.ready == [DID]
     assert w.store.objects[SILENCE_KEY].data == silent_mp3() and w.provider_calls() == 0
 
 
@@ -273,6 +283,7 @@ def test_existing_object_is_reused_without_a_provider_call():
     w.store.objects[f"tts-audio/{SID}/{DID}.mp3"] = StoredObject(MP3, "audio/mpeg", "", {})
     done = w.run()
     assert done.result == {"outcome": "speech", "reused": True} and w.repo.urls == {DID: GEN_URL}
+    assert w.repo.ready == [DID]
     assert w.provider_calls() == 0
 
 
@@ -369,7 +380,7 @@ def test_fallback_writes_silence_without_touching_r2():
     w.store.fail_with = "r2_InternalError"  # every R2 operation fails
     effects = asyncio.run(w.handler.fallback(make_job(), "provider_auth"))
     asyncio.run(effects(None))
-    assert w.repo.urls == {DID: SILENCE_URL}
+    assert w.repo.urls == {DID: SILENCE_URL} and w.repo.ready == [DID]  # the fallback also announces readiness
     assert asyncio.run(w.handler.fallback(make_job("bad", {"donation_id": "bad"}), "x")) is None
 
 

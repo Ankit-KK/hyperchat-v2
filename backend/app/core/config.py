@@ -21,6 +21,10 @@ _RELEASE_FILE = Path(__file__).resolve().parents[2] / "RELEASE"
 _R2_ACCOUNT = re.compile(r"^[A-Za-z0-9]{1,64}$")  # becomes part of a host name: no dots, slashes or ports
 _R2_BUCKET = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 RAZORPAY_ACCOUNTS = ("primary", "secondary")  # values of streamers.razorpay_account
+PUSHER_GROUPS = (1, 2, 3, 4)  # configurable Pusher apps (streamers.pusher_group 5..10 use group 1)
+_PUSHER_APP_ID = re.compile(r"^[0-9]{1,20}$")
+_PUSHER_KEY = re.compile(r"^[A-Za-z0-9]{1,64}$")
+_PUSHER_CLUSTER = re.compile(r"^[a-z0-9]{1,20}$")  # becomes part of a host name (api-<cluster>.pusher.com)
 
 
 def _secret_value(value: SecretStr | None) -> str:
@@ -134,6 +138,63 @@ class Settings(BaseSettings):
     tts_moderation_hash_key: SecretStr | None = None
     minimax_default_voice_id: str = "moss_audio_3e9334b7-e32a-11f0-ba34-ee3bcee0a7c9"  # legacy default voice
     worker_concurrency: int = 2
+
+    # ── Realtime (Phase 9: app.realtime). Events are always written to public.realtime_outbox with the change
+    #    that caused them; the worker publishes them to Pusher only when HYPERCHAT_REALTIME_ENABLED=true and the
+    #    creator's Pusher group (streamers.pusher_group) is configured (unconfigured groups use group 1).
+    #    Otherwise events are marked 'skipped' and the channel-auth/config endpoints answer 503. ──────────
+    realtime_enabled: bool = False
+    realtime_publish_rate: float = 50.0  # Pusher messages per second per worker process
+    pusher_app_id_1: str | None = None
+    pusher_key_1: str | None = None
+    pusher_secret_1: SecretStr | None = None
+    pusher_cluster_1: str | None = None
+    pusher_app_id_2: str | None = None
+    pusher_key_2: str | None = None
+    pusher_secret_2: SecretStr | None = None
+    pusher_cluster_2: str | None = None
+    pusher_app_id_3: str | None = None
+    pusher_key_3: str | None = None
+    pusher_secret_3: SecretStr | None = None
+    pusher_cluster_3: str | None = None
+    pusher_app_id_4: str | None = None
+    pusher_key_4: str | None = None
+    pusher_secret_4: SecretStr | None = None
+    pusher_cluster_4: str | None = None
+
+    @field_validator("realtime_publish_rate")
+    @classmethod
+    def _publish_rate_range(cls, value: float) -> float:
+        if not 1 <= value <= 1000:
+            raise ValueError("HYPERCHAT_REALTIME_PUBLISH_RATE must be between 1 and 1000")
+        return value
+
+    def pusher_group(self, group: int) -> tuple[str, str, str, str] | None:
+        """(app id, key, secret, cluster) of a configured and valid Pusher group 1..4, else None. Never log it."""
+        if group not in PUSHER_GROUPS:
+            return None
+        app_id = (getattr(self, f"pusher_app_id_{group}") or "").strip()
+        key = (getattr(self, f"pusher_key_{group}") or "").strip()
+        secret = _secret_value(getattr(self, f"pusher_secret_{group}"))
+        cluster = (getattr(self, f"pusher_cluster_{group}") or "").strip()
+        if not (_PUSHER_APP_ID.match(app_id) and _PUSHER_KEY.match(key) and secret and _PUSHER_CLUSTER.match(cluster)):
+            return None
+        return app_id, key, secret, cluster
+
+    def pusher_config_problems(self) -> list[str]:
+        """Names (never values) of the partly set or invalid Pusher groups' variables."""
+        problems = []
+        for g in PUSHER_GROUPS:
+            names = (f"app_id_{g}", f"key_{g}", f"secret_{g}", f"cluster_{g}")
+            values = [getattr(self, f"pusher_{n}") for n in names]
+            if any(v is not None and (_secret_value(v) if isinstance(v, SecretStr) else v.strip()) for v in values) \
+                    and self.pusher_group(g) is None:
+                problems.append(f"HYPERCHAT_PUSHER_*_{g}")
+        return problems
+
+    @property
+    def pusher_groups_configured(self) -> list[int]:
+        return [g for g in PUSHER_GROUPS if self.pusher_group(g) is not None]
 
     @field_validator("worker_concurrency")
     @classmethod

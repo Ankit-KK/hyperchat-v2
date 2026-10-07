@@ -23,6 +23,10 @@ RULES: dict[str, tuple[str, str]] = {
     # (legacy kept 90 days).
     "jobs": ("public.jobs", "status IN ('succeeded', 'failed') AND completed_at < now() - interval '30 days'"),
     "tts_moderation_audit": ("public.tts_moderation_audit", "created_at < now() - interval '90 days'"),
+    # Phase 9: finished realtime outbox rows (pending/publishing are never touched). Rows finish within minutes
+    # of their creation (10-minute expiry), so created_at dates them.
+    "realtime_outbox": ("public.realtime_outbox",
+                        "status IN ('published', 'failed', 'expired', 'skipped') AND created_at < now() - interval '7 days'"),
 }
 
 

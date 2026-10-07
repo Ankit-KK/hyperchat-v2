@@ -3,7 +3,9 @@
 Replaces the legacy Edge Functions `create-razorpay-order-unified`, `check-payment-status-unified` and
 `razorpay-webhook`. Payment completion only changes database state: alerts, TTS/music/SFX, Pusher events,
 the OBS audio queue and moderator notifications are later phases that react to the stored state
-(`payment_status`, `moderation_status`, `audio_scheduled_at`, `mod_notified`).
+(`payment_status`, `moderation_status`, `audio_scheduled_at`, `mod_notified`). Phase 9: completion also
+writes the realtime outbox rows (`new-donation`, and goal/leaderboard when auto-approved) in the same
+transaction; the worker publishes them ([`realtime.md`](realtime.md)).
 
 Base: `https://api.quicktestspace.site` (development, Razorpay **test mode** only). Errors are
 `{"error": "..."}`; 422 validation errors use FastAPI's `{"detail": [...]}`. Donor routes are public (no

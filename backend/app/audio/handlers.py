@@ -15,6 +15,8 @@ Generated audio goes to tts-audio/<creator id>/<donation id>.mp3 (deterministic)
 handler looks for that object: a previous attempt that generated and stored it but never reached the database
 is reused, never generated again. Every paid call is preceded by the moderation guard (fail closed). A
 permanent failure, or the last attempt failing, writes the silence URL instead (fallback): the alert is never lost.
+Phase 9: whenever the donation's audio is resolved (URL written, or its own voice message / hypersound), the
+same completion transaction writes the realtime 'audio-ready' event (app.realtime.outbox.emit_audio_ready).
 
 voice_transcription (requested from the dashboard). Reads only the donation's own voice object (validated
 key, size-capped read), sends it to Sarvam and stores the transcript once.
@@ -122,6 +124,13 @@ class DonationAudioHandler:
     def _set(self, donation_id: str, url: str) -> Effects:
         async def effects(cur) -> None:
             await self.repo.set_audio_url(cur, donation_id, url)
+            await self.repo.audio_ready(cur, donation_id)  # Phase 9: commits with the audio URL (or neither does)
+        return effects
+
+    def _ready(self, donation_id: str) -> Effects:
+        """Voice message / hypersound: nothing to generate, the donation's own audio is ready."""
+        async def effects(cur) -> None:
+            await self.repo.audio_ready(cur, donation_id)
         return effects
 
     async def _silence(self, donation_id: str, reason: str) -> Done:
@@ -141,7 +150,7 @@ class DonationAudioHandler:
         if d["tts_audio_url"]:
             return Done({"outcome": "skipped", "reason": "already_has_audio"})
         if d["hypersound_url"]:
-            return Done({"outcome": "hypersound"})
+            return Done({"outcome": "hypersound"}, self._ready(did))
         if d["voice_message_url"]:
             return await self._voice(d)
         plan = plan_audio(d)
@@ -186,7 +195,7 @@ class DonationAudioHandler:
             raise Retryable("storage_unavailable") from None
         if head is None:
             raise Permanent("voice_missing")
-        return Done({"outcome": "voice"})
+        return Done({"outcome": "voice"}, self._ready(d["id"]))
 
     @staticmethod
     def _spoken_message(d: dict, plan: Plan) -> str | None:

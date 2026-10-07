@@ -12,7 +12,7 @@ creator (moderators, bans, donor totals, moderation actions, payment health) go 
 order_lookup rows and transcripts with their donation; webhook events with event ids starting "authtest-";
 jobs of synthetic donations (or with dedupe keys starting "authtest-"); terms acceptances go with their
 synthetic user. TTS moderation audit rows of synthetic creators keep a NULL streamer (SET NULL) and are
-removed by their donation ids.
+removed by their donation ids. Realtime outbox rows go with their creator (ON DELETE CASCADE).
 """
 
 import logging
@@ -136,7 +136,7 @@ def cleanup_synthetic_rows() -> None:
                      (SLUG_PREFIX + "%", "upload:" + SLUG_PREFIX + "%"))
         conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%' "
                      "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%' OR endpoint LIKE 'payment:%' "
-                     "OR endpoint LIKE 'transcription:%'")
+                     "OR endpoint LIKE 'transcription:%' OR endpoint LIKE 'realtime:%'")
         # Webhook events of synthetic deliveries (their donations are gone already: donation_id SET NULL).
         conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
 

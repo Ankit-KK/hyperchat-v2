@@ -26,6 +26,9 @@ from app.payments.accounts import AccountHealth, PaymentAccounts
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
 from app.payments.service import PaymentService
+from app.realtime.auth import RealtimeService
+from app.realtime.payloads import RealtimeRepository
+from app.realtime.pusher import PusherApps
 from app.routers import (
     admin,
     auth,
@@ -33,6 +36,7 @@ from app.routers import (
     health,
     payments,
     public,
+    realtime,
     soundboard,
     streamers,
     transcriptions,
@@ -87,6 +91,10 @@ async def lifespan(app: FastAPI):
         app.state.payments = PaymentService(
             public=app.state.public, repo=PaymentRepository(conn), accounts=payment_accounts, client=razorpay,
             health=AccountHealth(razorpay), library=app.state.hypersounds, store=store, limiter=app.state.auth.repo)
+        # Phase 9: channel authorization and client config; events are published by the worker.
+        app.state.realtime = RealtimeService(
+            enabled=settings.realtime_enabled, apps=PusherApps.from_settings(settings), repo=RealtimeRepository(conn),
+            obs_tokens=app.state.security.obs_tokens, limiter=app.state.auth.repo)
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
@@ -98,6 +106,10 @@ async def lifespan(app: FastAPI):
     log.info("payments", extra={"razorpay_accounts": payment_accounts.summary()})
     log.info("audio", extra={"providers_enabled": settings.audio_providers_enabled,
                              "providers": settings.audio_provider_names()})
+    # Group numbers and variable names only, never keys or secrets.
+    log.info("realtime", extra={"realtime_enabled": settings.realtime_enabled,
+                                "pusher_groups": settings.pusher_groups_configured,
+                                "pusher_invalid": settings.pusher_config_problems()})
     try:
         yield
     finally:
@@ -163,6 +175,7 @@ def create_app() -> FastAPI:
     app.include_router(payments.webhooks_router)
     app.include_router(dashboard.dashboard_router)
     app.include_router(transcriptions.router)
+    app.include_router(realtime.router)
     app.include_router(dashboard.me_router)
     app.include_router(soundboard.soundboard_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.

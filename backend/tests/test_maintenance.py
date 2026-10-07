@@ -6,7 +6,7 @@ import json
 from app.cli import connection_factory, main
 from app.core.config import Settings
 from app.maintenance import cleanup
-from tests.integration import DOMAIN, db, make_user, requires_db
+from tests.integration import DOMAIN, db, make_streamer, make_user, requires_db
 
 pytestmark = requires_db
 
@@ -75,6 +75,13 @@ def _seed() -> dict[str, list[str]]:
             conn.execute("INSERT INTO public.tts_moderation_audit (supporter_identity_hash, blocked, rule_id, "
                          "moderation_version, normalization_version, created_at) VALUES (%s, true, 'x', 'v', 'v', "
                          "now() - make_interval(days => %s))", (marker, age))
+        # Phase 9: finished realtime outbox rows older than 7 days go; recent or still pending rows stay (the rows
+        # go with their synthetic creator in the shared cleanup).
+        sid = make_streamer("authtest-cleanup-rt")
+        for status, age in (("published", 8), ("skipped", 9), ("failed", 1), ("pending", 10)):
+            conn.execute("INSERT INTO public.realtime_outbox (streamer_id, channel, event, status, last_error, "
+                         "created_at) VALUES (%s, 'settings', 'settings-updated', %s, %s, "
+                         "now() - make_interval(days => %s))", (sid, status, f"authtest-o-{status}", age))
     return {"sessions": sessions, "resets": resets, "nonces": nonces, "limits": limits, "invites": invites}
 
 
@@ -90,6 +97,7 @@ def _left() -> dict[str, set[str]]:
             "jobs": q("SELECT dedupe_key FROM public.jobs WHERE dedupe_key LIKE 'authtest-j%'"),
             "audit": q("SELECT supporter_identity_hash FROM public.tts_moderation_audit "
                        "WHERE supporter_identity_hash LIKE 'authtest-a%'"),
+            "outbox": q("SELECT last_error FROM public.realtime_outbox WHERE last_error LIKE 'authtest-o-%'"),
         }
 
 
@@ -99,13 +107,14 @@ def test_cleanup_dry_run_then_delete_only_expired(strict_scratch_db, env):
     _seed()
     counts = asyncio.run(cleanup(factory, dry_run=True))
     assert counts == {"sessions": 2, "password_reset_tokens": 1, "request_nonces": 1, "rate_limits": 1,
-                      "user_invites": 2, "jobs": 2, "tts_moderation_audit": 1}
+                      "user_invites": 2, "jobs": 2, "tts_moderation_audit": 1, "realtime_outbox": 2}
     assert len(_left()["sessions"]) == 4  # dry run deleted nothing
     assert asyncio.run(cleanup(factory, dry_run=False)) == counts
     assert _left() == {
         "sessions": {"authtest-s3", "authtest-s4"}, "resets": {"authtest-r2"}, "nonces": {"authtest-n2"},
         "limits": {"auth:cleanup-new"}, "invites": {"authtest-i3", "authtest-i4"},
         "jobs": {"authtest-j3", "authtest-j4"}, "audit": {"authtest-a2"},
+        "outbox": {"authtest-o-failed", "authtest-o-pending"},
     }
     assert set(asyncio.run(cleanup(factory, dry_run=True)).values()) == {0}
 

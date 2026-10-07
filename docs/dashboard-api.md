@@ -19,6 +19,8 @@ repository, service) and `backend/app/routers/dashboard.py`.
   use strict JSON types (`"true"`, `1` or `"3"` are not booleans/integers).
 - **No side effects outside the database:** no Pusher, TTS/music/SFX, Telegram, Discord, OBS or
   replay calls. Overlays pick up setting changes through the public overlay config (30 s cache).
+  Phase 9: moderation and overlay-setting changes also write realtime outbox rows in the same transaction;
+  the worker publishes them to Pusher ([`realtime.md`](realtime.md)).
 
 ## Endpoints
 Creator paths are `/api/v1/dashboard/streamers/{streamer}/…`.

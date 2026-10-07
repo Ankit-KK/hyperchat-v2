@@ -2,7 +2,8 @@
 
 The legacy moderate-donation function is not ported. Moderation changes database state only: no
 alerts, TTS, Telegram/Discord, Pusher, OBS or replay calls (later phases react to the stored state,
-e.g. audio_scheduled_at). Every action runs in one transaction in DashboardRepository.moderate.
+e.g. audio_scheduled_at). Every action runs in one transaction in DashboardRepository.moderate, which also
+writes the donation_audio job (Phase 8) and the realtime outbox events (Phase 9) with it.
 """
 
 from dataclasses import dataclass
