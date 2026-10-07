@@ -122,6 +122,37 @@ class Settings(BaseSettings):
     razorpay_secondary_key_secret: SecretStr | None = None
     razorpay_secondary_webhook_secret: SecretStr | None = None
 
+    # ── Background jobs and audio (Phase 8: app.jobs, app.audio). Paid providers are only ever called by
+    #    the worker, and only when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true AND the provider's key is set;
+    #    otherwise every donation gets the silent fallback and transcription answers 503. ─────────
+    audio_providers_enabled: bool = False
+    minimax_api_key: SecretStr | None = None
+    elevenlabs_api_key: SecretStr | None = None
+    sarvam_api_key: SecretStr | None = None
+    # HMAC key pseudonymising supporter names in tts_moderation_audit. Without it moderation fails closed
+    # (no provider call: silent audio).
+    tts_moderation_hash_key: SecretStr | None = None
+    minimax_default_voice_id: str = "moss_audio_3e9334b7-e32a-11f0-ba34-ee3bcee0a7c9"  # legacy default voice
+    worker_concurrency: int = 2
+
+    @field_validator("worker_concurrency")
+    @classmethod
+    def _worker_concurrency_range(cls, value: int) -> int:
+        if not 1 <= value <= 16:
+            raise ValueError("HYPERCHAT_WORKER_CONCURRENCY must be between 1 and 16")
+        return value
+
+    def provider_key(self, name: str) -> str:
+        """The API key of 'minimax', 'elevenlabs' or 'sarvam' ("" when unset). Never log it."""
+        return _secret_value({"minimax": self.minimax_api_key, "elevenlabs": self.elevenlabs_api_key,
+                              "sarvam": self.sarvam_api_key}[name])
+
+    def audio_provider_names(self) -> list[str]:
+        """Providers the worker may call (names only, for logs)."""
+        if not self.audio_providers_enabled:
+            return []
+        return [n for n in ("minimax", "elevenlabs", "sarvam") if self.provider_key(n)]
+
     @property
     def google_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret and self.google_redirect_uri)

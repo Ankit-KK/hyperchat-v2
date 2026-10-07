@@ -24,7 +24,7 @@ EXPECTED_TABLES = {
     "partner_signups", "donations", "order_lookup", "moderation_actions", "telegram_callback_mapping",
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
-    "user_invites", "payment_webhook_events",
+    "user_invites", "payment_webhook_events", "jobs", "donation_transcripts",
 }
 
 
@@ -164,6 +164,42 @@ def test_0010_payments_round_trip_and_account_backfill(monkeypatch):
                                 "WHERE streamer_slug = 'migtest-new'").fetchone()[0] == "primary"
         finally:
             conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-new'")
+
+
+def test_0011_jobs_round_trip_and_constraints(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0010")
+    assert not {"jobs", "donation_transcripts"} & _tables()
+    command.upgrade(cfg, "head")
+    assert {"jobs", "donation_transcripts"} <= _tables()
+    ins = ("INSERT INTO public.jobs (kind, dedupe_key, payload, status, max_attempts, locked_by, locked_until) "
+           "VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s)")
+    with _owner() as conn:
+        try:
+            conn.execute(ins, ("donation_audio", "migtest-1", '{"donation_id": "x"}', "queued", 4, None, None))
+            with pytest.raises(psycopg.errors.UniqueViolation):  # one ACTIVE job per (kind, dedupe_key)
+                conn.execute(ins, ("donation_audio", "migtest-1", "{}", "queued", 4, None, None))
+            conn.execute("UPDATE public.jobs SET status = 'succeeded' WHERE dedupe_key = 'migtest-1'")
+            conn.execute(ins, ("donation_audio", "migtest-1", "{}", "queued", 4, None, None))  # allowed once finished
+            conn.execute(ins, ("voice_transcription", "migtest-1", "{}", "queued", 3, None, None))  # other kind
+            for bad in (("other_kind", "migtest-2", "{}", "queued", 4, None, None),
+                        ("donation_audio", "migtest-3", "{}", "paused", 4, None, None),
+                        ("donation_audio", "migtest-4", "[]", "queued", 4, None, None),
+                        ("donation_audio", "migtest-5", "{}", "queued", 0, None, None),
+                        ("donation_audio", "migtest-6", "{}", "running", 4, None, None),  # running needs a lease
+                        ("donation_audio", "", "{}", "queued", 4, None, None)):
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    conn.execute(ins, bad)
+            indexes = {r[0] for r in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'jobs'")}
+            assert {"jobs_active_dedupe_key", "jobs_queued_idx", "jobs_running_lease_idx", "jobs_finished_idx"} <= indexes
+            fks = conn.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = "
+                               "'public.donation_transcripts'::regclass AND contype = 'f' ORDER BY 1").fetchall()
+            assert [f[0] for f in fks] == ["FOREIGN KEY (donation_id) REFERENCES donations(id) ON DELETE CASCADE",
+                                           "FOREIGN KEY (streamer_id) REFERENCES streamers(id) ON DELETE CASCADE"]
+        finally:
+            conn.execute("DELETE FROM public.jobs WHERE dedupe_key LIKE 'migtest-%'")
 
 
 def test_no_supabase_artifacts():

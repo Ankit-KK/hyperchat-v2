@@ -19,11 +19,25 @@ from app.dashboard.service import DashboardService
 from app.db.pool import Database
 from app.public.repository import PublicRepository
 from app.public.service import PublicService
+from app.audio.repository import AudioRepository
+from app.audio.transcriptions import TranscriptionService
+from app.jobs.queue import JobQueue
 from app.payments.accounts import AccountHealth, PaymentAccounts
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
 from app.payments.service import PaymentService
-from app.routers import admin, auth, dashboard, health, payments, public, soundboard, streamers, uploads
+from app.routers import (
+    admin,
+    auth,
+    dashboard,
+    health,
+    payments,
+    public,
+    soundboard,
+    streamers,
+    transcriptions,
+    uploads,
+)
 from app.security.audit import security_event
 from app.security.cors import CorsMiddleware
 from app.security.dependencies import SecurityStores, install_security_error_handler
@@ -65,6 +79,10 @@ async def lifespan(app: FastAPI):
             grant_secret=settings.upload_grant_secret, creators=PublicCreators(app.state.public),
             nonces=app.state.security.nonces, limiter=app.state.auth.repo, store=store)
         app.state.soundboard = SoundboardService(SoundboardRepository(conn), store, limiter=app.state.auth.repo)
+        # Phase 8: the API only enqueues transcription jobs; the worker (python -m app.worker) runs them.
+        app.state.transcriptions = TranscriptionService(
+            AudioRepository(conn), JobQueue(conn), app.state.auth.repo,
+            available=store is not None and "sarvam" in settings.audio_provider_names())
         razorpay = RazorpayClient()
         app.state.payments = PaymentService(
             public=app.state.public, repo=PaymentRepository(conn), accounts=payment_accounts, client=razorpay,
@@ -78,6 +96,8 @@ async def lifespan(app: FastAPI):
                                "r2_missing_or_invalid": settings.r2_config_problems()})
     # Account names (primary/secondary) only, never key ids or secrets.
     log.info("payments", extra={"razorpay_accounts": payment_accounts.summary()})
+    log.info("audio", extra={"providers_enabled": settings.audio_providers_enabled,
+                             "providers": settings.audio_provider_names()})
     try:
         yield
     finally:
@@ -142,6 +162,7 @@ def create_app() -> FastAPI:
     app.include_router(payments.donations_router)
     app.include_router(payments.webhooks_router)
     app.include_router(dashboard.dashboard_router)
+    app.include_router(transcriptions.router)
     app.include_router(dashboard.me_router)
     app.include_router(soundboard.soundboard_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.

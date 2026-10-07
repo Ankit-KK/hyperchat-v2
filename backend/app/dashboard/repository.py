@@ -19,6 +19,7 @@ from psycopg.rows import dict_row
 from app.dashboard.moderation import Step, transition
 from app.dashboard.validation import WRITABLE_SETTINGS
 from app.db.donor_totals import change_donor_total
+from app.jobs.queue import enqueue
 
 # Nullable booleans / mode are served with their column default, as Phase 4 does for the public API.
 _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
@@ -188,6 +189,8 @@ class DashboardRepository:
                                               step.totals_delta)
                 if step.ban:
                     await self._insert_ban(cur, streamer_id, current["donor_name"], actor_label, notes)
+                if step.approve:  # Phase 8: the audio job commits with the approval (or neither does)
+                    await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
                 await self._record_action(cur, streamer_id, donation_id, action, current["moderation_status"],
                                           step.new_status, actor_user_id, actor_label, notes)
             await cur.execute(f"SELECT {_QUEUE_COLS} FROM public.donations d WHERE d.id = %s", (donation_id,))

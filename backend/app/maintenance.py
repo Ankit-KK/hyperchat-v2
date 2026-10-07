@@ -19,6 +19,10 @@ RULES: dict[str, tuple[str, str]] = {
     "user_invites": ("public.user_invites",
                      "accepted_at IS NULL AND (revoked_at < now() - interval '30 days' "
                      "OR expires_at < now() - interval '30 days')"),
+    # Phase 8: finished background jobs (queued/running are never touched) and the TTS moderation audit
+    # (legacy kept 90 days).
+    "jobs": ("public.jobs", "status IN ('succeeded', 'failed') AND completed_at < now() - interval '30 days'"),
+    "tts_moderation_audit": ("public.tts_moderation_audit", "created_at < now() - interval '90 days'"),
 }
 
 
