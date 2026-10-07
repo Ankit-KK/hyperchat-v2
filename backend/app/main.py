@@ -19,11 +19,14 @@ from app.dashboard.service import DashboardService
 from app.db.pool import Database
 from app.public.repository import PublicRepository
 from app.public.service import PublicService
-from app.routers import admin, auth, dashboard, health, public, streamers, uploads
+from app.routers import admin, auth, dashboard, health, public, soundboard, streamers, uploads
 from app.security.audit import security_event
 from app.security.cors import CorsMiddleware
 from app.security.dependencies import SecurityStores, install_security_error_handler
 from app.security.pg_stores import PostgresNonceStore, PostgresObsTokenStore, PostgresPartnerKeyStore
+from app.soundboard.library import HypersoundLibrary
+from app.soundboard.repository import SoundboardRepository
+from app.soundboard.service import SoundboardService
 from app.storage.r2 import build_object_store
 from app.uploads.service import PublicCreators, UploadService
 
@@ -41,6 +44,8 @@ async def lifespan(app: FastAPI):
         log.warning("non-production database", extra={"db_label": settings.db_label})
     app.state.db = Database(settings)
     await app.state.db.open()
+    store = build_object_store(settings)  # None until every R2 variable is set and valid
+    app.state.hypersounds = HypersoundLibrary(store)
     if app.state.db.enabled:
         app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection))
         app.state.authz = AuthzRepository(app.state.db.connection)
@@ -53,7 +58,8 @@ async def lifespan(app: FastAPI):
         # Donor uploads reuse the public creator lookup, the request_nonces store and the auth rate limiter.
         app.state.uploads = UploadService(
             grant_secret=settings.upload_grant_secret, creators=PublicCreators(app.state.public),
-            nonces=app.state.security.nonces, limiter=app.state.auth.repo, store=build_object_store(settings))
+            nonces=app.state.security.nonces, limiter=app.state.auth.repo, store=store)
+        app.state.soundboard = SoundboardService(SoundboardRepository(conn), store, limiter=app.state.auth.repo)
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
@@ -120,8 +126,10 @@ def create_app() -> FastAPI:
     app.include_router(public.streamers_router)
     app.include_router(public.metrics_router)
     app.include_router(uploads.router)
+    app.include_router(soundboard.hypersounds_router)
     app.include_router(dashboard.dashboard_router)
     app.include_router(dashboard.me_router)
+    app.include_router(soundboard.soundboard_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.
     app.add_middleware(CorsMiddleware, allowed_origins=settings.browser_origins)
     return app

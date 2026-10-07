@@ -45,7 +45,7 @@ def base_type(content_type: str | None) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
 
 
-def _looks_like_video(data: bytes) -> bool:
+def looks_like_video(data: bytes) -> bool:
     return (data[4:8] == b"ftyp"                                   # MP4 / MOV / 3GP
             or data[:4] == b"\x1a\x45\xdf\xa3"                      # Matroska / WebM
             or (data[:4] == b"RIFF" and data[8:11] == b"AVI")       # AVI
@@ -95,7 +95,7 @@ def sniff_image(data: bytes) -> str | None:
 
 
 def validate_image(data: bytes, declared: ImageKind) -> ImageKind:
-    if _looks_like_video(data):
+    if looks_like_video(data):
         raise unsupported(VIDEO_NOT_SUPPORTED, "video_rejected")
     sniffed = sniff_image(data)
     if sniffed is None or sniffed != declared.mime:
