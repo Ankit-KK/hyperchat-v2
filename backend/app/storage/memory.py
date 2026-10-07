@@ -15,6 +15,7 @@ from app.storage.r2 import (
     StorageError,
     check_listable_prefix,
     check_soundboard_key,
+    check_upload_key,
     check_writable_key,
     public_url_for,
 )
@@ -81,6 +82,12 @@ class InMemoryObjectStore:
         self._maybe_fail("head")
         obj = self.objects.get(key)
         return ObjectHead(len(obj.data), obj.content_type) if obj else None
+
+    async def head_upload(self, key: str) -> ObjectHead | None:
+        check_upload_key(key)
+        self._maybe_fail("head")
+        obj = self.objects.get(key)
+        return ObjectHead(len(obj.data), obj.content_type, dict(obj.metadata)) if obj else None
 
     async def get_object(self, key: str, *, max_bytes: int) -> bytes:
         check_soundboard_key(key)

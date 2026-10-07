@@ -11,6 +11,7 @@ log = logging.getLogger("hyperchat.security")
 _ALLOWED_FIELDS = frozenset({
     "reason", "status", "path", "method", "request_id", "client_ip", "user_id",
     "streamer_id", "streamer_slug", "partner_slug", "mechanism", "target_user_id", "invite_id", "count",
+    "order_id", "account",  # payments: our order id and the Razorpay account NAME (never a key)
 })
 
 

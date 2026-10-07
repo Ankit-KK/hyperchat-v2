@@ -8,7 +8,8 @@ helpers connect as hyperchat_app, the DML-only runtime role.
 Every synthetic row is recognizable and removed after each test: users/invites @authtest.invalid,
 streamers (and their donations) and partners with slugs starting "authtest-", nonces starting
 "authtest-", platform soundboard slots with audio_key starting "authtest-". Rows owned by a synthetic
-creator (moderators, bans, donor totals, moderation actions) go with it (ON DELETE CASCADE); terms
+creator (moderators, bans, donor totals, moderation actions, payment health) go with it (ON DELETE CASCADE),
+order_lookup rows with their donation; webhook events with event ids starting "authtest-"; terms
 acceptances go with their synthetic user.
 """
 
@@ -125,7 +126,9 @@ def cleanup_synthetic_rows() -> None:
         conn.execute("DELETE FROM public.request_nonces WHERE nonce LIKE %s OR nonce LIKE %s",
                      (SLUG_PREFIX + "%", "upload:" + SLUG_PREFIX + "%"))
         conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%' "
-                     "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%'")
+                     "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%' OR endpoint LIKE 'payment:%'")
+        # Webhook events of synthetic deliveries (their donations are gone already: donation_id SET NULL).
+        conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
 
 
 def login(client, email, password=PASSWORD, headers=ORIGIN):

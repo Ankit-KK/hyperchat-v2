@@ -18,6 +18,7 @@ from psycopg.rows import dict_row
 
 from app.dashboard.moderation import Step, transition
 from app.dashboard.validation import WRITABLE_SETTINGS
+from app.db.donor_totals import change_donor_total
 
 # Nullable booleans / mode are served with their column default, as Phase 4 does for the public API.
 _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
@@ -212,24 +213,7 @@ class DashboardRepository:
                            "id": donation_id, "sid": streamer_id})
 
     async def _change_totals(self, cur, streamer_id: str, donor_name: str, amount_inr, delta: int) -> None:
-        """Credit (upsert) or debit (floored at 0) the donor's total, as legacy increment/decrement_donator_total
-        did, keyed by (streamer_id, lower(donor name))."""
-        if delta > 0:
-            await cur.execute("""
-                INSERT INTO public.streamer_donator_totals
-                    (streamer_id, donator_name, donator_name_lower, total_amount, donation_count)
-                VALUES (%(sid)s, %(name)s, lower(%(name)s), %(amount)s, 1)
-                ON CONFLICT (streamer_id, donator_name_lower) DO UPDATE SET
-                    total_amount = public.streamer_donator_totals.total_amount + EXCLUDED.total_amount,
-                    donation_count = public.streamer_donator_totals.donation_count + 1,
-                    donator_name = EXCLUDED.donator_name, updated_at = now()
-            """, {"sid": streamer_id, "name": donor_name, "amount": amount_inr})
-        else:
-            await cur.execute("""
-                UPDATE public.streamer_donator_totals SET total_amount = GREATEST(0, total_amount - %(amount)s),
-                       donation_count = GREATEST(0, donation_count - 1), updated_at = now()
-                WHERE streamer_id = %(sid)s AND donator_name_lower = lower(%(name)s)
-            """, {"sid": streamer_id, "name": donor_name, "amount": amount_inr})
+        await change_donor_total(cur, streamer_id, donor_name, amount_inr, delta)
 
     async def _insert_ban(self, cur, streamer_id: str, donor_name: str, actor_label: str, notes: str | None) -> None:
         await cur.execute("INSERT INTO public.banned_donors (streamer_id, donor_name, banned_by_moderator_id, "

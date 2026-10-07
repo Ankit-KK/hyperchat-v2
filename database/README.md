@@ -25,6 +25,7 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0007 | least-privilege grants for the runtime roles |
 | 0008 | `user_invites` (invite-only onboarding) |
 | 0009 | `moderation_actions.actor_user_id` (the signed-in user behind dashboard moderation) |
+| 0010 | payments: `streamers.razorpay_account`, `donations.payment_account` / `provider_payment_id`, `payment_webhook_events` |
 
 ## Databases
 | Database | Cluster | Purpose |

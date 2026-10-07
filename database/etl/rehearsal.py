@@ -21,7 +21,14 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from etl.mapping import normalize_currency, obs_token_hash, slug_from_table, split_approved_by, user_role
+from etl.mapping import (
+    RAZORPAY_ACCOUNTS,
+    normalize_currency,
+    obs_token_hash,
+    slug_from_table,
+    split_approved_by,
+    user_role,
+)
 from etl.reconcile import reconcile
 
 DONATION_COLUMNS = (
@@ -116,7 +123,12 @@ class Loader:
         self.stats["users"]["passwords_loaded"] = 0
 
         tgt_cols = self.columns(self.tgt, "streamers")
-        src_expr = [{"razorpay_key_ref": '"razorpay-keyid"', "razorpay_secret_ref": '"razorpay-keysecret"'}
+        account = sql.SQL("CASE {} END").format(sql.SQL(" ").join(
+            sql.SQL('WHEN "razorpay-keyid" = {} AND "razorpay-keysecret" = {} THEN {}').format(
+                sql.Literal(key), sql.Literal(secret), sql.Literal(name))
+            for (key, secret), name in RAZORPAY_ACCOUNTS.items())).as_string(self.src)
+        src_expr = [{"razorpay_key_ref": '"razorpay-keyid"', "razorpay_secret_ref": '"razorpay-keysecret"',
+                     "razorpay_account": account}
                     .get(c, sql.Identifier(c).as_string(self.src)) for c in tgt_cols]
         streamers = self.fetch(f"SELECT {', '.join(src_expr)} FROM public.streamers")
         self.note("streamers", len(streamers), self.copy("streamers", tgt_cols, streamers))

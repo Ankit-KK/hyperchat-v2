@@ -41,7 +41,7 @@ def test_legacy_table_is_unchanged():
 
 def test_minimums_floors_and_inr_rounding():
     assert pricing.minimums(STREAMER, "INR") == {
-        "min_text": 20.0,        # floor 20, creator unset
+        "min_text": 40.0,        # floor 40 (Phase 7 D3), creator unset
         "min_tts": 80.0,         # max(40, 75) = 75 -> next 10
         "min_voice": 150.0,      # floor 0, creator 150
         "min_hypersound": 30.0,  # floor 30 beats creator 10
@@ -50,10 +50,10 @@ def test_minimums_floors_and_inr_rounding():
 
 
 @pytest.mark.parametrize("currency, expected_text, expected_tts", [
-    ("USD", 0.5, 1.0),   # 20/89=0.22 -> 0.5 ; 75/89=0.84 -> 1.0
-    ("AED", 1.0, 4.0),   # 20/24=0.83 -> 1 ; 75/24=3.13 -> 4
-    ("GBP", 0.5, 1.0),
-    ("PHP", 13.5, 50.0), # 20/1.5=13.33 -> 13.5 ; 75/1.5=50 -> 50.0
+    ("USD", 0.5, 1.0),   # 40/89=0.45 -> 0.5 ; 75/89=0.84 -> 1.0
+    ("AED", 2.0, 4.0),   # 40/24=1.67 -> 2 ; 75/24=3.13 -> 4
+    ("GBP", 0.5, 1.0),   # 40/113=0.35 -> 0.5
+    ("PHP", 27.0, 50.0), # 40/1.5=26.67 -> 27.0 ; 75/1.5=50 -> 50.0
 ])
 def test_conversion_rounding_matches_legacy(currency, expected_text, expected_tts):
     m = pricing.minimums(STREAMER, currency)

@@ -3,14 +3,14 @@
 Only the configured browser origins (Settings.browser_origins: the frontend's origin plus
 HYPERCHAT_ALLOWED_ORIGINS) are echoed, with credentials; any other origin gets no Allow-Origin header
 and the browser rejects the response. Preflight requests are answered directly with 200 "ok".
-Browsers only ever send the CSRF header (cookie sessions), an OBS overlay token or a donor upload
-grant; signed server-to-server requests do not go through CORS.
+Browsers only ever send the CSRF header (cookie sessions), an OBS overlay token, a donor upload
+grant or a donation status token; signed server-to-server requests do not go through CORS.
 """
 
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-ALLOWED_HEADERS = ", ".join(["content-type", "x-csrf-token", "x-obs-token", "x-upload-grant"])
+ALLOWED_HEADERS = ", ".join(["content-type", "x-csrf-token", "x-obs-token", "x-upload-grant", "x-status-token"])
 
 
 def cors_headers(origin: str, allowed_origins: frozenset[str]) -> dict[str, str]:

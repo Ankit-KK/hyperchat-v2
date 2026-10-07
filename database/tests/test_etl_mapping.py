@@ -2,7 +2,14 @@ import hashlib
 
 import pytest
 
-from etl.mapping import normalize_currency, obs_token_hash, slug_from_table, split_approved_by, user_role
+from etl.mapping import (
+    normalize_currency,
+    obs_token_hash,
+    razorpay_account,
+    slug_from_table,
+    split_approved_by,
+    user_role,
+)
 
 MOD = "6f0e8f2a-1c2b-4d3e-9f40-0a1b2c3d4e5f"
 
@@ -42,6 +49,18 @@ def test_user_role_folds_admin_emails_case_insensitively():
     assert user_role("user", "Admin@Example.Invalid", admins) == "admin"
     assert user_role("streamer", "s@example.invalid", admins) == "streamer"
     assert user_role(None, "u@example.invalid", admins) == "user"
+
+
+@pytest.mark.parametrize("key, secret, expected", [
+    ("razorpay-keyid", "razorpay-keysecret", "primary"),
+    ("razorpay-keyid(test)", "razorpay-keysecret(test)", "secondary"),
+    ("razorpay-keyid", "razorpay-keysecret(test)", None),  # mixed pair: no account
+    (None, None, None),
+    ("razorpay-keyid", None, None),
+    ("RAZORPAY-KEYID", "RAZORPAY-KEYSECRET", None),  # names are exact
+])
+def test_razorpay_account(key, secret, expected):
+    assert razorpay_account(key, secret) == expected
 
 
 def test_slug_from_table():

@@ -24,7 +24,7 @@ EXPECTED_TABLES = {
     "partner_signups", "donations", "order_lookup", "moderation_actions", "telegram_callback_mapping",
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
-    "user_invites",
+    "user_invites", "payment_webhook_events",
 }
 
 
@@ -85,6 +85,85 @@ def test_0009_actor_user_id_round_trip(monkeypatch):
     assert _actor_user_id() is None
     command.upgrade(cfg, "head")
     assert _actor_user_id() == ("uuid", False, False, "n", True)
+
+
+def _owner():
+    """Migrator connection acting as the schema owner (as env.py runs migrations)."""
+    conn = psycopg.connect(_libpq(DSN), autocommit=True)
+    conn.execute("SET ROLE hyperchat_owner")
+    return conn
+
+
+def _payment_columns() -> dict:
+    with _owner() as conn:
+        rows = conn.execute("""
+            SELECT table_name || '.' || column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns WHERE table_schema = 'public' AND (
+                (table_name = 'streamers' AND column_name = 'razorpay_account')
+                OR (table_name = 'donations' AND column_name IN ('payment_account', 'provider_payment_id')))
+        """).fetchall()
+    return {r[0]: r[1:] for r in rows}
+
+
+MIGTEST = ("migtest-primary", "migtest-secondary", "migtest-null", "migtest-other")
+
+
+def test_0010_payments_round_trip_and_account_backfill(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0009")
+    assert _payment_columns() == {} and "payment_webhook_events" not in _tables()
+    with _owner() as conn:
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug = ANY(%s)", (list(MIGTEST),))
+        for slug, key, secret in zip(MIGTEST, ("razorpay-keyid", "razorpay-keyid(test)", None, "razorpay-keyid"),
+                                     ("razorpay-keysecret", "razorpay-keysecret(test)", None, "other-secret")):
+            conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, razorpay_key_ref, "
+                         "razorpay_secret_ref) VALUES (%s, 'Migration Test', %s, %s)", (slug, key, secret))
+    try:
+        command.upgrade(cfg, "head")
+        assert _payment_columns() == {
+            "streamers.razorpay_account": ("text", "YES", "'primary'::text"),
+            "donations.payment_account": ("text", "YES", None),
+            "donations.provider_payment_id": ("text", "YES", None),
+        }
+        with _owner() as conn:
+            accounts = dict(conn.execute("SELECT streamer_slug, razorpay_account FROM public.streamers "
+                                         "WHERE streamer_slug = ANY(%s)", (list(MIGTEST),)).fetchall())
+            assert accounts == {"migtest-primary": "primary", "migtest-secondary": "secondary",
+                                "migtest-null": None, "migtest-other": None}
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute("UPDATE public.streamers SET razorpay_account = 'tertiary' WHERE streamer_slug = %s",
+                             (MIGTEST[0],))
+            event = ("INSERT INTO public.payment_webhook_events (event_id, event_type, account, outcome, received_at) "
+                     "VALUES (%s, 'payment.captured', 'primary', %s, now())")
+            conn.execute(event, ("migtest-evt", "completed"))
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                conn.execute(event, ("migtest-evt", "already_paid"))  # same event id twice
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(event, ("migtest-evt-2", "not-an-outcome"))
+            unique = conn.execute("SELECT indexdef FROM pg_indexes WHERE indexname = "
+                                  "'donations_provider_payment_key'").fetchone()[0]
+            assert "UNIQUE" in unique and "WHERE (provider_payment_id IS NOT NULL)" in unique
+        command.downgrade(cfg, "0009")
+        assert _payment_columns() == {} and "payment_webhook_events" not in _tables()
+        with _owner() as conn:  # the legacy name columns are untouched by the round trip
+            refs = conn.execute("SELECT streamer_slug, razorpay_key_ref, razorpay_secret_ref FROM public.streamers "
+                                "WHERE streamer_slug = ANY(%s) ORDER BY 1", (list(MIGTEST),)).fetchall()
+            assert refs == [("migtest-null", None, None), ("migtest-other", "razorpay-keyid", "other-secret"),
+                            ("migtest-primary", "razorpay-keyid", "razorpay-keysecret"),
+                            ("migtest-secondary", "razorpay-keyid(test)", "razorpay-keysecret(test)")]
+    finally:
+        command.upgrade(cfg, "head")
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = ANY(%s)", (list(MIGTEST),))
+    with _owner() as conn:  # new creators get the primary account
+        conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('migtest-new', 'New')")
+        try:
+            assert conn.execute("SELECT razorpay_account FROM public.streamers "
+                                "WHERE streamer_slug = 'migtest-new'").fetchone()[0] == "primary"
+        finally:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-new'")
 
 
 def test_no_supabase_artifacts():
