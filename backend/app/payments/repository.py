@@ -18,6 +18,7 @@ from datetime import datetime
 from psycopg.rows import dict_row
 
 from app.db.donor_totals import change_donor_total
+from app.jobs.queue import enqueue
 from app.payments import rules
 
 _DONATION = """d.id::text AS id, d.order_id, d.provider_order_id, d.amount, d.currency::text AS currency,
@@ -145,7 +146,7 @@ class PaymentRepository:
         """Apply one verified payment outcome ("captured", "failed" or a mismatch, which counts as failed).
 
             current \\ outcome   captured                          failed / mismatch
-            pending             paid (+ auto-approve, credit)     failed, rejected
+            pending             paid (+ auto-approve, credit, audio job)  failed, rejected
             failed              paid (+ auto-approve, credit)     unchanged
             success             unchanged (never failed again)    unchanged
         """
@@ -198,4 +199,6 @@ class PaymentRepository:
         """, {"pid": payment_id, "auto": auto, "delay": rules.AUDIO_DELAY_SECONDS, "id": donation_id})
         if auto:
             await change_donor_total(cur, row["streamer_id"], row["donor_name"], row["amount_inr"], +1)
+            # Phase 8: the audio job commits with the approval (or neither does).
+            await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
         return Applied("completed", "success", auto)

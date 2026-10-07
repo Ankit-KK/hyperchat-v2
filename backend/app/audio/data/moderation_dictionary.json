@@ -1,0 +1,2200 @@
+{
+ "DICTIONARY_VERSION": "dict-1.2.0",
+ "MODERATION_VERSION": "mod-1.1.0+dict-1.2.0",
+ "NORMALIZATION_VERSION": "norm-1.0.0",
+ "TERMS": [
+  {
+   "id": "rac.nword.0",
+   "term": "nigger",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.1",
+   "term": "niggers",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.2",
+   "term": "niggas",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.3",
+   "term": "nigga",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.4",
+   "term": "niggaz",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.5",
+   "term": "nigguh",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.6",
+   "term": "niggah",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.7",
+   "term": "nigguhs",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.8",
+   "term": "niggerz",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.9",
+   "term": "nigar",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.10",
+   "term": "niggar",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.11",
+   "term": "nigha",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.12",
+   "term": "niqqa",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.13",
+   "term": "niqqer",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.14",
+   "term": "nibba",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.15",
+   "term": "negga",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.16",
+   "term": "neger",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.17",
+   "term": "nigg",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.18",
+   "term": "niggr",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.19",
+   "term": "nigr",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.20",
+   "term": "nikka",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.21",
+   "term": "nigra",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.22",
+   "term": "niglet",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.23",
+   "term": "nignog",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.24",
+   "term": "sandnigger",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.25",
+   "term": "niggerlover",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.26",
+   "term": "nigers",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.nword.27",
+   "term": "nigerz",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true,
+   "substring": true
+  },
+  {
+   "id": "rac.slur.0",
+   "term": "chink",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.1",
+   "term": "chinks",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.2",
+   "term": "gook",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.3",
+   "term": "gooks",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.4",
+   "term": "spic",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.5",
+   "term": "spics",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.6",
+   "term": "kike",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.7",
+   "term": "kikes",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.8",
+   "term": "wetback",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.9",
+   "term": "wetbacks",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.10",
+   "term": "beaner",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.11",
+   "term": "beaners",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.12",
+   "term": "raghead",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.13",
+   "term": "towelhead",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.14",
+   "term": "coon",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.15",
+   "term": "coons",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.16",
+   "term": "jigaboo",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.17",
+   "term": "porchmonkey",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.18",
+   "term": "junglebunny",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.19",
+   "term": "zipperhead",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.20",
+   "term": "darkie",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.21",
+   "term": "darky",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.22",
+   "term": "sambo",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "rac.slur.23",
+   "term": "golliwog",
+   "category": "racial",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "eth.slur.0",
+   "term": "chinki",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.1",
+   "term": "chinky",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.2",
+   "term": "paki",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.3",
+   "term": "pakis",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.4",
+   "term": "habshi",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.5",
+   "term": "kallu",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.6",
+   "term": "kaalu",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.7",
+   "term": "gypsy scum",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.8",
+   "term": "madrasi",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "eth.slur.9",
+   "term": "bangladeshi ghuspaithiya",
+   "category": "ethnic",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "cst.slur.0",
+   "term": "chamar",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.1",
+   "term": "chamaar",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.2",
+   "term": "bhangi",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.3",
+   "term": "chuhra",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.4",
+   "term": "chuda",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.5",
+   "term": "neech jaat",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.6",
+   "term": "nichi jaat",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.7",
+   "term": "chamari",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.8",
+   "term": "चमार",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.9",
+   "term": "भंगी",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "cst.slur.10",
+   "term": "चूहड़ा",
+   "category": "caste",
+   "severity": "HIGH_RISK",
+   "highRisk": true
+  },
+  {
+   "id": "rel.slur.0",
+   "term": "katua",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.1",
+   "term": "katuwa",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.2",
+   "term": "katwa",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.3",
+   "term": "mulle",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.4",
+   "term": "sulla",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.5",
+   "term": "sulle",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.6",
+   "term": "jihadi",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.7",
+   "term": "terrorist muslim",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.8",
+   "term": "christ killer",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.9",
+   "term": "raghead",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.10",
+   "term": "bhakt chutiya",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.11",
+   "term": "andhbhakt",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.12",
+   "term": "kafir",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.13",
+   "term": "kaafir",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.14",
+   "term": "kuffar",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.15",
+   "term": "कटुआ",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "rel.slur.16",
+   "term": "मुल्ले",
+   "category": "religious",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "sex.explicit.0",
+   "term": "pussy",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.1",
+   "term": "pussies",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.2",
+   "term": "cock",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.3",
+   "term": "cocks",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.4",
+   "term": "dick",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.5",
+   "term": "dicks",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.6",
+   "term": "cum",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.7",
+   "term": "cumming",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.8",
+   "term": "cumshot",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.9",
+   "term": "blowjob",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.10",
+   "term": "handjob",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.11",
+   "term": "boobs",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.12",
+   "term": "boobies",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.13",
+   "term": "tits",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.14",
+   "term": "titties",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.15",
+   "term": "porn",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.16",
+   "term": "porno",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.17",
+   "term": "nudes",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.18",
+   "term": "nude",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.19",
+   "term": "horny",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.20",
+   "term": "dildo",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.21",
+   "term": "vagina",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.22",
+   "term": "penis",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.23",
+   "term": "anal",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.24",
+   "term": "orgasm",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.25",
+   "term": "masturbate",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.26",
+   "term": "jerkoff",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.27",
+   "term": "fap",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.28",
+   "term": "milf",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.29",
+   "term": "sex",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.30",
+   "term": "sexy",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.31",
+   "term": "boob",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.32",
+   "term": "nipples",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.33",
+   "term": "creampie",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.34",
+   "term": "gangbang",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.35",
+   "term": "deepthroat",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.36",
+   "term": "onlyfans",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.37",
+   "term": "chut",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.38",
+   "term": "choot",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.39",
+   "term": "lund",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.40",
+   "term": "lauda",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.41",
+   "term": "lawda",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.42",
+   "term": "loda",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.43",
+   "term": "lodu",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.44",
+   "term": "gaand",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.45",
+   "term": "gand",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.46",
+   "term": "chuchi",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.47",
+   "term": "chuchiyan",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.48",
+   "term": "mamme",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.49",
+   "term": "chudai",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.50",
+   "term": "chudo",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.51",
+   "term": "chodna",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.52",
+   "term": "chodu",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.53",
+   "term": "chodunga",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.54",
+   "term": "sexting",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.55",
+   "term": "xxx",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.56",
+   "term": "boobies",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.57",
+   "term": "चूत",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.58",
+   "term": "लंड",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.59",
+   "term": "लौड़ा",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.60",
+   "term": "गांड",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.61",
+   "term": "चुदाई",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.explicit.62",
+   "term": "चोद",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.0",
+   "term": "madarchod",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.1",
+   "term": "maderchod",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.2",
+   "term": "madarchood",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.3",
+   "term": "behenchod",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.4",
+   "term": "bhenchod",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.5",
+   "term": "benchod",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.6",
+   "term": "bhencho",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.7",
+   "term": "bhosdike",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.8",
+   "term": "bhosdi",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.9",
+   "term": "bhosda",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.10",
+   "term": "bhosdiwale",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.11",
+   "term": "bhosadpappu",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.12",
+   "term": "chutiya",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.13",
+   "term": "chutiye",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.14",
+   "term": "chutiyapa",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.15",
+   "term": "chootiya",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.16",
+   "term": "randi",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.17",
+   "term": "randikhana",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.18",
+   "term": "raand",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.19",
+   "term": "harami",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.20",
+   "term": "haramkhor",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.21",
+   "term": "gandu",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.22",
+   "term": "gaandu",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.23",
+   "term": "lodu",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.24",
+   "term": "betichod",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.25",
+   "term": "tatte",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.26",
+   "term": "jhaant",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.27",
+   "term": "jhant",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.28",
+   "term": "मादरचोद",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.29",
+   "term": "बहनचोद",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.30",
+   "term": "भोसड़ी",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.31",
+   "term": "भोसड़ीके",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.32",
+   "term": "चूतिया",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.33",
+   "term": "रंडी",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.34",
+   "term": "गांडू",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sex.gaali.35",
+   "term": "हरामी",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "sv.rape.0",
+   "term": "rape",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.1",
+   "term": "raped",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.2",
+   "term": "rapes",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.3",
+   "term": "raping",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.4",
+   "term": "rapist",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.5",
+   "term": "rapists",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.6",
+   "term": "rapey",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.7",
+   "term": "raep",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.8",
+   "term": "rayp",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.9",
+   "term": "reyp",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.10",
+   "term": "raype",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.11",
+   "term": "rap3",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.12",
+   "term": "molest",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.13",
+   "term": "molested",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.14",
+   "term": "molesting",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.15",
+   "term": "molester",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.16",
+   "term": "gangrape",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.17",
+   "term": "gangraped",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.18",
+   "term": "balatkar",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.19",
+   "term": "balaatkar",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.20",
+   "term": "baltkar",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.21",
+   "term": "bltkr",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.22",
+   "term": "rapeing",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.23",
+   "term": "rapped her",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.24",
+   "term": "rep kar",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.25",
+   "term": "बलात्कार",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "sv.rape.26",
+   "term": "रेप",
+   "category": "sexual_violence",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.0",
+   "term": "loli",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.1",
+   "term": "lolicon",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.2",
+   "term": "shotacon",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.3",
+   "term": "pedo",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.4",
+   "term": "pedophile",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.5",
+   "term": "paedophile",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.6",
+   "term": "pedophilia",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.7",
+   "term": "childporn",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.8",
+   "term": "cp porn",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.9",
+   "term": "kiddieporn",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.10",
+   "term": "jailbait",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.11",
+   "term": "preteen porn",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "cs.term.12",
+   "term": "pthc",
+   "category": "child_safety",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "thr.term.0",
+   "term": "kys",
+   "category": "threats",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "thr.term.1",
+   "term": "kms you",
+   "category": "threats",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "thr.term.2",
+   "term": "unalive yourself",
+   "category": "threats",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "hate.term.0",
+   "term": "heil hitler",
+   "category": "hate",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "hate.term.1",
+   "term": "sieg heil",
+   "category": "hate",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "hate.term.2",
+   "term": "1488",
+   "category": "hate",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "hate.term.3",
+   "term": "white power",
+   "category": "hate",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "hate.term.4",
+   "term": "gas the jews",
+   "category": "hate",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "hate.term.5",
+   "term": "kkk",
+   "category": "hate",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "hate.term.6",
+   "term": "zionist pigs",
+   "category": "hate",
+   "severity": "CRITICAL",
+   "highRisk": true
+  },
+  {
+   "id": "har.term.0",
+   "term": "whore",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.1",
+   "term": "whores",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.2",
+   "term": "slut",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.3",
+   "term": "sluts",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.4",
+   "term": "bitch",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.5",
+   "term": "bitches",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.6",
+   "term": "hoe",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.7",
+   "term": "skank",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.8",
+   "term": "cunt",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.9",
+   "term": "cunts",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.10",
+   "term": "twat",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.11",
+   "term": "motherfucker",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.12",
+   "term": "randwa",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.13",
+   "term": "kutiya",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.14",
+   "term": "kamini",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.15",
+   "term": "kutta",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.16",
+   "term": "kutte",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.17",
+   "term": "suar",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.18",
+   "term": "saala kutta",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.term.19",
+   "term": "कुतिया",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "har.slur.0",
+   "term": "retard",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.1",
+   "term": "retarded",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.2",
+   "term": "faggot",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.3",
+   "term": "fag",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.4",
+   "term": "fags",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.5",
+   "term": "tranny",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.6",
+   "term": "chhakka",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.7",
+   "term": "hijra",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  },
+  {
+   "id": "har.slur.8",
+   "term": "छक्का",
+   "category": "hate",
+   "severity": "MEDIUM_RISK"
+  }
+ ],
+ "PHRASES": [
+  {
+   "id": "ph.kys1",
+   "phrase": "kill yourself",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.kys2",
+   "phrase": "kill urself",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.kys3",
+   "phrase": "go die",
+   "category": "threats",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.kys4",
+   "phrase": "hang yourself",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.kys5",
+   "phrase": "mar ja",
+   "category": "threats",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.kys6",
+   "phrase": "marja",
+   "category": "threats",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.kys7",
+   "phrase": "suicide kar",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr1",
+   "phrase": "jaan se maar",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr2",
+   "phrase": "goli maar",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr3",
+   "phrase": "maar dunga",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr4",
+   "phrase": "maar dalunga",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr5",
+   "phrase": "maar denge",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr6",
+   "phrase": "kaat dunga",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr7",
+   "phrase": "i know where you live",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr8",
+   "phrase": "bomb your house",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr9",
+   "phrase": "acid attack",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.thr10",
+   "phrase": "acid throw",
+   "category": "threats",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.sv1",
+   "phrase": "rape kar",
+   "category": "sexual_violence",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.sv2",
+   "phrase": "rep kar",
+   "category": "sexual_violence",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.sv3",
+   "phrase": "force her",
+   "category": "sexual_violence",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.sex1",
+   "phrase": "suck my",
+   "category": "sexual",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "ph.sex2",
+   "phrase": "send nudes",
+   "category": "sexual",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.sex3",
+   "phrase": "show boobs",
+   "category": "sexual",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.sex4",
+   "phrase": "teri maa",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "ph.sex5",
+   "phrase": "teri behen",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "ph.sex6",
+   "phrase": "maa ki",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "ph.sex7",
+   "phrase": "behen ki",
+   "category": "harassment",
+   "severity": "LOW_RISK"
+  },
+  {
+   "id": "ph.hate1",
+   "phrase": "hitler was right",
+   "category": "hate",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.hate2",
+   "phrase": "go back to pakistan",
+   "category": "hate",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.hate3",
+   "phrase": "all muslims are terrorists",
+   "category": "hate",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.hate4",
+   "phrase": "death to",
+   "category": "hate",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.hate5",
+   "phrase": "white supremacy",
+   "category": "hate",
+   "severity": "HIGH_RISK"
+  },
+  {
+   "id": "ph.cs1",
+   "phrase": "child porn",
+   "category": "child_safety",
+   "severity": "CRITICAL"
+  },
+  {
+   "id": "ph.cs2",
+   "phrase": "kiddie porn",
+   "category": "child_safety",
+   "severity": "CRITICAL"
+  }
+ ],
+ "ALLOWLIST": [
+  "grape",
+  "grapes",
+  "drape",
+  "drapes",
+  "draped",
+  "scrape",
+  "scraped",
+  "scraper",
+  "trapeze",
+  "therapist",
+  "therapists",
+  "rapeseed",
+  "parapet",
+  "skyscraper",
+  "rapper",
+  "rappers",
+  "rapid",
+  "niger",
+  "nigeria",
+  "nigerian",
+  "nigerians",
+  "snigger",
+  "sniggers",
+  "sniggering",
+  "niggard",
+  "niggardly",
+  "nagger",
+  "naggers",
+  "bigger",
+  "digger",
+  "trigger",
+  "jigger",
+  "ginger",
+  "night",
+  "nights",
+  "tonight",
+  "midnight",
+  "knight",
+  "knights",
+  "nightmare",
+  "overnight",
+  "ignite",
+  "ignited",
+  "signal",
+  "signals",
+  "design",
+  "resign",
+  "benign",
+  "malign",
+  "scunthorpe",
+  "assassin",
+  "assassins",
+  "cocktail",
+  "cockpit",
+  "peacock",
+  "hancock",
+  "shuttlecock",
+  "dickens",
+  "dickson",
+  "cumulative",
+  "cucumber",
+  "document",
+  "circumstance",
+  "sextant",
+  "sussex",
+  "essex",
+  "middlesex",
+  "analysis",
+  "analyst",
+  "canal",
+  "banal",
+  "titan",
+  "titanic",
+  "title",
+  "constitution",
+  "spice",
+  "spicy",
+  "hoedown",
+  "shoe",
+  "shoes",
+  "coonoor",
+  "raccoon",
+  "tycoon",
+  "cocoon",
+  "chinkara",
+  "pakistan",
+  "grand",
+  "gandhi",
+  "chutney",
+  "chandigarh",
+  "lundy",
+  "loda",
+  "hancock",
+  "dickinson",
+  "cockroach",
+  "skunk",
+  "classic",
+  "bassist",
+  "passion",
+  "mcdonalds",
+  "mcd",
+  "bcci",
+  "abc",
+  "mcq"
+ ],
+ "THREAT_VERBS": [
+  "kill",
+  "murder",
+  "shoot",
+  "stab",
+  "hang",
+  "lynch",
+  "behead",
+  "rape",
+  "hurt",
+  "choke",
+  "strangle",
+  "slaughter",
+  "kidnap",
+  "torture",
+  "maarunga",
+  "marunga",
+  "thokunga",
+  "kaatunga"
+ ],
+ "DIE_MARKERS": [
+  "should",
+  "must",
+  "deserve",
+  "deserves",
+  "hope",
+  "gonna",
+  "will",
+  "go",
+  "shall",
+  "wish"
+ ],
+ "DIE_WORDS": [
+  "die",
+  "dies",
+  "dead",
+  "death",
+  "marja",
+  "mar",
+  "marega",
+  "maregi"
+ ],
+ "TARGET_WORDS": [
+  "you",
+  "u",
+  "ya",
+  "yall",
+  "her",
+  "him",
+  "them",
+  "your",
+  "ur",
+  "urself",
+  "yourself",
+  "she",
+  "he",
+  "tu",
+  "tum",
+  "tujhe",
+  "tujhko",
+  "tera",
+  "teri",
+  "tere",
+  "tumhe",
+  "isko",
+  "usko",
+  "iski",
+  "uski",
+  "streamer",
+  "family",
+  "mom",
+  "sister",
+  "mother",
+  "maa",
+  "behen"
+ ],
+ "MINOR_WORDS": [
+  "child",
+  "children",
+  "kid",
+  "kids",
+  "minor",
+  "minors",
+  "underage",
+  "preteen",
+  "toddler",
+  "baby",
+  "girl child",
+  "schoolgirl",
+  "schoolboy",
+  "baccha",
+  "bacchi",
+  "bachi",
+  "bachcha",
+  "nabalig",
+  "loli",
+  "shota",
+  "teen",
+  "teens",
+  "boy",
+  "girl"
+ ],
+ "CHILD_SEXUAL_WORDS": [
+  "sex",
+  "sexy",
+  "nude",
+  "nudes",
+  "naked",
+  "porn",
+  "fuck",
+  "fucking",
+  "horny",
+  "rape",
+  "molest",
+  "boobs",
+  "dick",
+  "pussy",
+  "cock",
+  "cum",
+  "chudai",
+  "lund",
+  "chut",
+  "suck",
+  "blowjob"
+ ],
+ "TARGETED_SEXUAL_WORDS": [
+  "fuck",
+  "fck",
+  "fuk",
+  "chodunga",
+  "pelunga"
+ ]
+}

@@ -18,6 +18,7 @@ production dump. It is a migration source only and never an application database
 ```
 systemd/hyperchat-api.service   API unit (runs as user hyperchat, hardened, never root)
 systemd/hyperchat-cleanup.{service,timer}  daily cleanup of expired auth/security rows (03:15 UTC)
+systemd/hyperchat-worker.service  DEV background worker (Phase 8: donation audio, voice transcription)
 systemd/hyperchat-prod-api.service, hyperchat-prod-cleanup.{service,timer}  PRODUCTION API + cleanup (03:45 UTC)
 nginx/00-catchall.conf          drops unknown hostnames / bare-IP requests
 nginx/api.quicktestspace.site.conf   v2 development API vhost (TLS via Let's Encrypt)
@@ -55,6 +56,11 @@ api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUC
    Apply it before step 5: the Phase 5 code writes the column, the previous release ignores it, so a
    code rollback needs no schema downgrade.)
 5. `ln -sfn /opt/hyperchat/releases/<commit> /opt/hyperchat/current && systemctl restart hyperchat-api`
+   From Phase 8 on, also the worker (same release, environment file and user):
+   first time `install -o root -g root -m 644 deploy/systemd/hyperchat-worker.service /etc/systemd/system/`,
+   `systemctl daemon-reload && systemctl enable --now hyperchat-worker`; afterwards
+   `systemctl restart hyperchat-worker` with every release switch. (Phase 8 brings `0011`: two new tables,
+   `jobs` and `donation_transcripts`, no change to existing ones; the previous release ignores them.)
 6. Nginx (required from Phase 4 on: the public read API's per-IP rate limit; repeat whenever
    `deploy/nginx/` changed). As root, with the files of the same `<commit>`:
    - back up what is installed: `/etc/nginx/sites-available/api.quicktestspace.site` and any existing
@@ -78,7 +84,8 @@ Cleanup timer: `install -m 644 deploy/systemd/hyperchat-cleanup.{service,timer} 
 `systemctl daemon-reload && systemctl enable --now hyperchat-cleanup.timer`.
 
 Rollback: point `current` back to the previous release (and restore the previous
-`/etc/hyperchat/api.env` backup if it changed), then restart.
+`/etc/hyperchat/api.env` backup if it changed), then restart `hyperchat-api` (and, from Phase 8 on,
+`hyperchat-worker`; a release before Phase 8 has no `app.worker`: `systemctl stop hyperchat-worker` instead).
 
 ## Production API (`api.hyperchat.space`)
 Reserved for the final cutover phase: V2 is developed and tested against DEV only. Production runs
@@ -91,7 +98,7 @@ next to DEV on the same VPS, fully separated:
 | OS user | `hyperchat` | `hyperchat-prod` |
 | Releases / current | `/opt/hyperchat/releases/<commit>`, `/opt/hyperchat/current` | `/opt/hyperchat-prod/releases/<commit>`, `/opt/hyperchat-prod/current` |
 | Environment file | `/etc/hyperchat/api.env` | `/etc/hyperchat-prod/api.env` (root:hyperchat-prod 0640) |
-| systemd | `hyperchat-api`, `hyperchat-cleanup.timer` | `hyperchat-prod-api`, `hyperchat-prod-cleanup.timer` |
+| systemd | `hyperchat-api`, `hyperchat-worker` (Phase 8), `hyperchat-cleanup.timer` | `hyperchat-prod-api`, `hyperchat-prod-cleanup.timer` |
 | Database | `hyperchat_dev`, cluster `15/restoretest` :5433 | `hyperchat`, cluster `17/hyperchat` :5432 |
 | Ident map | `pg_ident.conf` | `pg_ident.production.conf` (the DEV user has no mapping) |
 | Rate-limit zone | `hyperchat_public` | `hyperchat_public_prod` |

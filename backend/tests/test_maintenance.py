@@ -62,6 +62,19 @@ def _seed() -> dict[str, list[str]]:
             ins("INSERT INTO public.user_invites (email, token_hash, expires_at) VALUES "
                 "('recent-invite' || %s, 'authtest-i4', now() - interval '1 day') RETURNING token_hash", DOMAIN),
         ]
+        # Phase 8: finished jobs older than 30 days go; recent or still active jobs stay. The jobs' dedupe keys
+        # start with "authtest-" (removed by the shared cleanup too).
+        for key, status, age in (("authtest-j1", "succeeded", 31), ("authtest-j2", "failed", 40),
+                                 ("authtest-j3", "succeeded", 1), ("authtest-j4", "queued", 60)):
+            conn.execute("INSERT INTO public.jobs (kind, dedupe_key, payload, status, max_attempts, completed_at, "
+                         "created_at) VALUES ('donation_audio', %s, '{}'::jsonb, %s, 4, "
+                         "CASE WHEN %s <> 'queued' THEN now() - make_interval(days => %s) END, "
+                         "now() - make_interval(days => %s))", (key, status, status, age, age))
+        # TTS moderation audit: 90 days.
+        for marker, age in (("authtest-a1", 91), ("authtest-a2", 89)):
+            conn.execute("INSERT INTO public.tts_moderation_audit (supporter_identity_hash, blocked, rule_id, "
+                         "moderation_version, normalization_version, created_at) VALUES (%s, true, 'x', 'v', 'v', "
+                         "now() - make_interval(days => %s))", (marker, age))
     return {"sessions": sessions, "resets": resets, "nonces": nonces, "limits": limits, "invites": invites}
 
 
@@ -74,6 +87,9 @@ def _left() -> dict[str, set[str]]:
             "nonces": q("SELECT nonce FROM public.request_nonces WHERE nonce LIKE 'authtest-%'"),
             "limits": q("SELECT endpoint FROM public.rate_limits WHERE endpoint LIKE 'auth:cleanup-%'"),
             "invites": q("SELECT token_hash FROM public.user_invites WHERE token_hash LIKE 'authtest-%'"),
+            "jobs": q("SELECT dedupe_key FROM public.jobs WHERE dedupe_key LIKE 'authtest-j%'"),
+            "audit": q("SELECT supporter_identity_hash FROM public.tts_moderation_audit "
+                       "WHERE supporter_identity_hash LIKE 'authtest-a%'"),
         }
 
 
@@ -83,12 +99,13 @@ def test_cleanup_dry_run_then_delete_only_expired(strict_scratch_db, env):
     _seed()
     counts = asyncio.run(cleanup(factory, dry_run=True))
     assert counts == {"sessions": 2, "password_reset_tokens": 1, "request_nonces": 1, "rate_limits": 1,
-                      "user_invites": 2}
+                      "user_invites": 2, "jobs": 2, "tts_moderation_audit": 1}
     assert len(_left()["sessions"]) == 4  # dry run deleted nothing
     assert asyncio.run(cleanup(factory, dry_run=False)) == counts
     assert _left() == {
         "sessions": {"authtest-s3", "authtest-s4"}, "resets": {"authtest-r2"}, "nonces": {"authtest-n2"},
         "limits": {"auth:cleanup-new"}, "invites": {"authtest-i3", "authtest-i4"},
+        "jobs": {"authtest-j3", "authtest-j4"}, "audit": {"authtest-a2"},
     }
     assert set(asyncio.run(cleanup(factory, dry_run=True)).values()) == {0}
 

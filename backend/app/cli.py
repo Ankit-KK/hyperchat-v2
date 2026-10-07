@@ -6,14 +6,19 @@
 bootstrap-admin creates the first admin account (or activates a password-less one) and refuses to run
 while any active admin can already sign in. The password is read without echo (or from stdin with
 --password-stdin) and is never printed or logged.
-cleanup deletes expired sessions, reset tokens, nonces, rate-limit windows and old unused invites
-(see app.maintenance); --dry-run only counts. It runs daily from deploy/systemd/hyperchat-cleanup.timer.
+cleanup deletes expired sessions, reset tokens, nonces, rate-limit windows, old unused invites, finished
+jobs (30 days) and TTS moderation audit rows (90 days) (see app.maintenance); --dry-run only counts. It runs
+daily from deploy/systemd/hyperchat-cleanup.timer.
+
+enqueue-donation-audio <donation id> queues one donation's audio job for the worker (manual/controlled cases;
+historical donations are never enqueued automatically).
 """
 
 import argparse
 import asyncio
 import getpass
 import sys
+import uuid
 from contextlib import asynccontextmanager
 
 import psycopg
@@ -22,6 +27,7 @@ from app.admin.repository import AdminRepository, BootstrapRefused
 from app.auth.passwords import hash_password, validate_new_password
 from app.core.config import Settings
 from app.core.logging import configure_logging
+from app.jobs.queue import enqueue
 from app.maintenance import run_cleanup
 from app.security.audit import security_event
 
@@ -68,6 +74,28 @@ async def bootstrap_admin(settings: Settings, email: str, password: str) -> int:
     return 0
 
 
+async def enqueue_donation_audio(settings: Settings, donation_id: str) -> int:
+    """Controlled/manual audio job for one donation (never enqueued automatically for historical rows). The
+    worker re-checks eligibility (paid, approved, no audio yet) when it runs the job."""
+    try:
+        donation_id = str(uuid.UUID(donation_id))
+    except (ValueError, AttributeError):
+        print("A donation UUID is required.", file=sys.stderr)
+        return 2
+    async with connection_factory(settings)() as conn, conn.transaction(), conn.cursor() as cur:
+        await cur.execute("SELECT 1 FROM public.donations WHERE id = %s", (donation_id,))
+        if await cur.fetchone() is None:
+            print("No such donation.", file=sys.stderr)
+            return 1
+        job_id = await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
+    if job_id is None:
+        print(f"An audio job for donation {donation_id} is already queued or running.")
+    else:
+        security_event("audio_job_enqueued", level=20, reason="cli")
+        print(f"Queued audio job {job_id} for donation {donation_id} (database label: {settings.db_label}).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--env-file", help="read HYPERCHAT_* settings from this file (e.g. /etc/hyperchat/api.env)")
@@ -77,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     boot.add_argument("--password-stdin", action="store_true", help="read the password from stdin (no prompt)")
     clean = sub.add_parser("cleanup", help="delete expired sessions, tokens, nonces and rate-limit windows")
     clean.add_argument("--dry-run", action="store_true", help="only count what would be deleted")
+    audio = sub.add_parser("enqueue-donation-audio", help="queue the audio job of one donation (manual cases)")
+    audio.add_argument("donation_id")
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
@@ -88,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "cleanup":
         return asyncio.run(run_cleanup(settings, connection_factory(settings), dry_run=args.dry_run))
+    if args.command == "enqueue-donation-audio":
+        return asyncio.run(enqueue_donation_audio(settings, args.donation_id))
     return asyncio.run(bootstrap_admin(settings, args.email, read_password(args.password_stdin)))
 
 

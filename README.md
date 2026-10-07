@@ -70,6 +70,7 @@ the unit tests and the full database + integration suites against PostgreSQL 17 
 - [`docs/uploads-api.md`](docs/uploads-api.md) — donor upload grants and voice/media uploads to R2 (Phase 6, in progress)
 - [`docs/soundboard-api.md`](docs/soundboard-api.md) — creator soundboard and hypersound library (Phase 6, in progress)
 - [`docs/payments-api.md`](docs/payments-api.md) — Razorpay checkout, payment status, confirmation and webhooks (Phase 7)
+- [`docs/audio-jobs.md`](docs/audio-jobs.md) — background jobs, worker, donation audio/TTS, moderation, voice transcription (Phase 8)
 - [`docs/target-schema.md`](docs/target-schema.md) — PostgreSQL schema and legacy → v2 data mapping
 - [`docs/migration-audit.md`](docs/migration-audit.md) — Supabase-exit audit and phase plan
 - [`docs/history.md`](docs/history.md) — relationship to the legacy repository

@@ -1,0 +1,48 @@
+# DEV background worker (Phase 8): donation audio and voice transcription jobs. Same release, environment
+# file, OS user and database role (hyperchat_app) as hyperchat-api. No listening port; outbound HTTPS only
+# (R2, and the paid audio providers only when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true).
+[Unit]
+Description=HyperChat v2 background worker (jobs: donation audio, voice transcription)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+User=hyperchat
+Group=hyperchat
+WorkingDirectory=/opt/hyperchat/current/backend
+EnvironmentFile=/etc/hyperchat/api.env
+ExecStart=/opt/hyperchat/current/venv/bin/python -m app.worker
+Restart=always
+RestartSec=3
+# On SIGTERM running jobs get up to 50 s to finish (app.jobs.runner), then are released for another claim.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

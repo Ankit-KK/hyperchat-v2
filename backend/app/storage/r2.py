@@ -10,6 +10,10 @@ Every operation is limited to the key patterns it needs, so a bug can never touc
   read (head_object, get_object)    creator soundboard keys
   metadata (head_upload)            donor upload keys (voice-messages/, donation-media/): existence, size,
                                     type and stored metadata only, never the bytes (Phase 7 checkout)
+  write (put_object)                + generated donation audio tts-audio/<creator uuid>/<donation uuid>.mp3
+                                    and the silent fallback system/silence.mp3 (Phase 8 worker)
+  metadata (head_generated)         generated audio + silence: lets a retried job reuse an existing object
+  read (get_voice)                  donor voice messages only, size-capped (Phase 8 transcription)
   delete (delete_object)            creator soundboard keys ONLY (never hypersounds/, hypersound-thumbs/,
                                     voice-messages/, donation-media/ or anything else)
   list (list_keys)                  the platform library prefixes hypersounds/ and hypersound-thumbs/
@@ -41,8 +45,14 @@ SOUNDBOARD_KEY = re.compile(rf"^soundboards/(?P<slug>{_SLUG})/{_UUID}\.(?P<ext>m
 _UPLOAD = (rf"voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm"
            rf"|donation-media/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.(jpg|png|webp|gif)")
 UPLOAD_KEY = re.compile(rf"^({_UPLOAD})$")
-# Server-generated keys: donor uploads and soundboard objects.
-WRITABLE_KEY = re.compile(rf"^({_UPLOAD}|soundboards/{_SLUG}/{_UUID}\.(mp3|jpg|png|webp|gif))$")
+VOICE_KEY = re.compile(rf"^voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm$")
+# Generated donation audio (Phase 8, legacy layout): tts-audio/<creator uuid>/<donation uuid>.mp3, and the
+# silent fallback. Both are written only by the worker, at keys it derives from database ids.
+SILENCE_KEY = "system/silence.mp3"
+_GENERATED = rf"tts-audio/{_UUID}/{_UUID}\.mp3|system/silence\.mp3"
+GENERATED_KEY = re.compile(rf"^({_GENERATED})$")
+# Server-generated keys: donor uploads, soundboard objects and generated audio.
+WRITABLE_KEY = re.compile(rf"^({_UPLOAD}|soundboards/{_SLUG}/{_UUID}\.(mp3|jpg|png|webp|gif)|{_GENERATED})$")
 LISTABLE_PREFIXES = ("hypersounds/", "hypersound-thumbs/")
 IMMUTABLE = "public, max-age=31536000, immutable"  # keys are unique and never rewritten
 PRESIGN_SECONDS = 300
@@ -73,6 +83,10 @@ class ObjectStore(Protocol):
 
     async def head_upload(self, key: str) -> ObjectHead | None: ...
 
+    async def head_generated(self, key: str) -> ObjectHead | None: ...
+
+    async def get_voice(self, key: str, *, max_bytes: int) -> bytes: ...
+
     async def get_object(self, key: str, *, max_bytes: int) -> bytes: ...
 
     async def delete_object(self, key: str) -> None: ...
@@ -95,6 +109,17 @@ def check_upload_key(key: str) -> None:
     """head_upload only ever looks at donor upload objects."""
     if not isinstance(key, str) or not UPLOAD_KEY.match(key):
         raise ValueError("refusing to inspect an object outside the donor upload patterns")
+
+
+def check_generated_key(key: str) -> None:
+    if not isinstance(key, str) or not GENERATED_KEY.match(key):
+        raise ValueError("refusing to inspect an object outside the generated audio patterns")
+
+
+def check_voice_key(key: str) -> None:
+    """get_voice only ever reads donor voice messages."""
+    if not isinstance(key, str) or not VOICE_KEY.match(key):
+        raise ValueError("refusing to read an object outside voice-messages/<slug>_<ms>_<hex>.webm")
 
 
 def check_listable_prefix(prefix: str) -> None:
@@ -235,10 +260,31 @@ class R2Store:
                               {str(k).lower(): str(v) for k, v in meta.items()})
         return await self._call(head)
 
+    async def head_generated(self, key: str) -> ObjectHead | None:
+        """Size and type of generated audio / the silence object; None when it does not exist."""
+        check_generated_key(key)
+
+        def head():
+            try:
+                r = self._s3().head_object(Bucket=self._config.bucket, Key=key)
+            except Exception as exc:  # noqa: BLE001
+                if _not_found(exc):
+                    return None
+                raise
+            return ObjectHead(int(r.get("ContentLength", 0)), str(r.get("ContentType", "")))
+        return await self._call(head)
+
+    async def get_voice(self, key: str, *, max_bytes: int) -> bytes:
+        """A donor voice message's bytes; StorageError("too_large") above max_bytes (never read past it)."""
+        check_voice_key(key)
+        return await self._read(key, max_bytes)
+
     async def get_object(self, key: str, *, max_bytes: int) -> bytes:
         """The object's bytes; StorageError("too_large") if it is bigger than max_bytes (never read past it)."""
         check_soundboard_key(key)
+        return await self._read(key, max_bytes)
 
+    async def _read(self, key: str, max_bytes: int) -> bytes:
         def get():
             r = self._s3().get_object(Bucket=self._config.bucket, Key=key, Range=f"bytes=0-{max_bytes}")
             body = r["Body"]

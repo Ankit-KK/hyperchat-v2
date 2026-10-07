@@ -9,8 +9,10 @@ Every synthetic row is recognizable and removed after each test: users/invites @
 streamers (and their donations) and partners with slugs starting "authtest-", nonces starting
 "authtest-", platform soundboard slots with audio_key starting "authtest-". Rows owned by a synthetic
 creator (moderators, bans, donor totals, moderation actions, payment health) go with it (ON DELETE CASCADE),
-order_lookup rows with their donation; webhook events with event ids starting "authtest-"; terms
-acceptances go with their synthetic user.
+order_lookup rows and transcripts with their donation; webhook events with event ids starting "authtest-";
+jobs of synthetic donations (or with dedupe keys starting "authtest-"); terms acceptances go with their
+synthetic user. TTS moderation audit rows of synthetic creators keep a NULL streamer (SET NULL) and are
+removed by their donation ids.
 """
 
 import logging
@@ -116,6 +118,13 @@ def creator_state(streamer_id: str) -> str:
 def cleanup_synthetic_rows() -> None:
     with db() as conn:
         conn.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+        conn.execute("DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
+                     "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s) "
+                     "OR supporter_identity_hash LIKE %s", (SLUG_PREFIX + "%", SLUG_PREFIX + "%"))
+        # Jobs reference donations by id only (no FK): the synthetic donations' jobs go first.
+        conn.execute("DELETE FROM public.jobs WHERE dedupe_key IN (SELECT d.id::text FROM public.donations d "
+                     "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s) "
+                     "OR dedupe_key LIKE %s", (SLUG_PREFIX + "%", SLUG_PREFIX + "%"))
         # donations.streamer_id is ON DELETE RESTRICT: synthetic donations go first.
         conn.execute("DELETE FROM public.donations WHERE streamer_id IN "
                      "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))
@@ -126,7 +135,8 @@ def cleanup_synthetic_rows() -> None:
         conn.execute("DELETE FROM public.request_nonces WHERE nonce LIKE %s OR nonce LIKE %s",
                      (SLUG_PREFIX + "%", "upload:" + SLUG_PREFIX + "%"))
         conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%' "
-                     "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%' OR endpoint LIKE 'payment:%'")
+                     "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%' OR endpoint LIKE 'payment:%' "
+                     "OR endpoint LIKE 'transcription:%'")
         # Webhook events of synthetic deliveries (their donations are gone already: donation_id SET NULL).
         conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
 

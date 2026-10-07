@@ -26,6 +26,7 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0008 | `user_invites` (invite-only onboarding) |
 | 0009 | `moderation_actions.actor_user_id` (the signed-in user behind dashboard moderation) |
 | 0010 | payments: `streamers.razorpay_account`, `donations.payment_account` / `provider_payment_id`, `payment_webhook_events` |
+| 0011 | background jobs: `jobs` (durable queue), `donation_transcripts` |
 
 ## Databases
 | Database | Cluster | Purpose |
