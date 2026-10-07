@@ -24,7 +24,7 @@ Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):
 | `auth_sessions` | `sessions` | new design (cookie + CSRF); legacy rows not migrated |
 | — | `user_invites` | new (0008): invite-only onboarding, only the token's SHA-256 stored |
 | `password_reset_tokens` | `password_reset_tokens` | FK → users; expired rows not migrated |
-| `streamers` | `streamers` | `donation_table_id` dropped; Razorpay name columns → `razorpay_key_ref` / `razorpay_secret_ref`; `user_id` FK added |
+| `streamers` | `streamers` | `donation_table_id` dropped; Razorpay name columns → `razorpay_key_ref` / `razorpay_secret_ref`; `user_id` FK added; `razorpay_account` (0010) derived from the two name pairs (`etl.mapping.RAZORPAY_ACCOUNTS`) |
 | `obs_tokens` | `obs_tokens` | plaintext `token` → `token_hash` (SHA-256); streamer_id NOT NULL |
 | `order_lookup` | `order_lookup` | `streamer_slug`, `donation_table_id` dropped; FK → donations |
 | `moderation_actions` | `moderation_actions` | `donation_table` dropped; `donation_id` without FK (audit, orphans kept); `actor_user_id` (0009, FK `users` ON DELETE SET NULL): the web user behind a dashboard action |

@@ -96,7 +96,7 @@ def test_pricing_inr_default_creator_tiers_and_char_tiers(app):
                      "is_active) VALUES (%s, 0, 10, true), (%s, 200, 20, true), (%s, 500, 60, false)", (sid, sid, sid))
     r = app.get(f"{P}/authtest-price/pricing")
     assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=60"
-    assert r.json() == {"currency": "INR", "min_text": 20.0, "min_tts": 80.0, "min_voice": 150.0,
+    assert r.json() == {"currency": "INR", "min_text": 40.0, "min_tts": 80.0, "min_voice": 150.0,
                         "min_hypersound": 30.0, "min_media": 100.0, "tts_enabled": True,
                         "message_char_tiers": [{"min_amount": 50.0, "max_chars": 100},
                                                {"min_amount": 160.0, "max_chars": 200}],

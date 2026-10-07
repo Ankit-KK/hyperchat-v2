@@ -20,6 +20,7 @@ from app.core.origins import OriginError, is_development_origin, normalize_origi
 _RELEASE_FILE = Path(__file__).resolve().parents[2] / "RELEASE"
 _R2_ACCOUNT = re.compile(r"^[A-Za-z0-9]{1,64}$")  # becomes part of a host name: no dots, slashes or ports
 _R2_BUCKET = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+RAZORPAY_ACCOUNTS = ("primary", "secondary")  # values of streamers.razorpay_account
 
 
 def _secret_value(value: SecretStr | None) -> str:
@@ -110,6 +111,17 @@ class Settings(BaseSettings):
     # S3 API endpoint; default https://<account_id>.r2.cloudflarestorage.com
     r2_endpoint: str | None = None
 
+    # ── Razorpay (app.payments): up to two accounts; each creator uses the one named in
+    #    streamers.razorpay_account. Checkout for an account is "on hold" until its key id and key secret
+    #    are set; its webhooks are refused (401) until its webhook secret is set. Live keys (rzp_live_)
+    #    are refused outside production: DEV uses Razorpay test mode only. ─────────────────────────
+    razorpay_primary_key_id: SecretStr | None = None
+    razorpay_primary_key_secret: SecretStr | None = None
+    razorpay_primary_webhook_secret: SecretStr | None = None
+    razorpay_secondary_key_id: SecretStr | None = None
+    razorpay_secondary_key_secret: SecretStr | None = None
+    razorpay_secondary_webhook_secret: SecretStr | None = None
+
     @property
     def google_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret and self.google_redirect_uri)
@@ -157,6 +169,23 @@ class Settings(BaseSettings):
     @property
     def upload_grants_configured(self) -> bool:
         return bool(_secret_value(self.upload_grant_secret))
+
+    def razorpay_credentials(self, account: str) -> tuple[str, str, str]:
+        """(key id, key secret, webhook secret) of 'primary' or 'secondary'; "" for unset values."""
+        if account not in RAZORPAY_ACCOUNTS:
+            raise ValueError("unknown Razorpay account")
+        return (_secret_value(getattr(self, f"razorpay_{account}_key_id")),
+                _secret_value(getattr(self, f"razorpay_{account}_key_secret")),
+                _secret_value(getattr(self, f"razorpay_{account}_webhook_secret")))
+
+    @model_validator(mode="after")
+    def _refuse_live_razorpay_keys_outside_production(self) -> "Settings":
+        if self.app_env != "production":
+            live = [f"HYPERCHAT_RAZORPAY_{a.upper()}_KEY_ID" for a in RAZORPAY_ACCOUNTS
+                    if self.razorpay_credentials(a)[0].startswith("rzp_live_")]
+            if live:  # variable names only, never the values
+                raise ValueError(f"Refusing to start: live Razorpay keys outside production: {live}")
+        return self
 
     @model_validator(mode="after")
     def _refuse_test_data_in_production(self) -> "Settings":

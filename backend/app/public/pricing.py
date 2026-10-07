@@ -4,12 +4,15 @@ Same rules as the legacy get-streamer-pricing (decision D4): effective minimum =
 creator minimum), converted with the fixed 8-currency table and rounded "nicely" for display.
 Voice tiers: active creator tiers, else active platform tiers, else the built-in fallback.
 Unlike legacy, unsupported currencies are rejected instead of silently priced as INR.
+
+Checkout (Phase 7) enforces exactly these minimums. The text floor is Rs 40 (Phase 7 decision D3): legacy
+showed 20 here but charged 40 at checkout; every creator's own minimum was already >= 40.
 """
 
 import math
 from decimal import Decimal
 
-PLATFORM_FLOORS_INR = {"text": 20, "tts": 40, "voice": 0, "hypersound": 30, "media": 0}
+PLATFORM_FLOORS_INR = {"text": 40, "tts": 40, "voice": 0, "hypersound": 30, "media": 0}
 EXCHANGE_RATES_TO_INR: dict[str, float] = {
     "INR": 1, "USD": 89, "EUR": 94, "GBP": 113, "AED": 24, "AUD": 57, "CAD": 64, "PHP": 1.5,
 }

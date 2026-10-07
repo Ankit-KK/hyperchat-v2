@@ -8,6 +8,8 @@ so network calls run in a worker thread. Presigned URLs are computed locally and
 Every operation is limited to the key patterns it needs, so a bug can never touch an unexpected object:
   write (put_object, presign_put)   server-generated donor upload and creator soundboard keys
   read (head_object, get_object)    creator soundboard keys
+  metadata (head_upload)            donor upload keys (voice-messages/, donation-media/): existence, size,
+                                    type and stored metadata only, never the bytes (Phase 7 checkout)
   delete (delete_object)            creator soundboard keys ONLY (never hypersounds/, hypersound-thumbs/,
                                     voice-messages/, donation-media/ or anything else)
   list (list_keys)                  the platform library prefixes hypersounds/ and hypersound-thumbs/
@@ -17,7 +19,7 @@ import asyncio
 import logging
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import quote
 
@@ -35,11 +37,12 @@ _SLUG = r"[a-z0-9][a-z0-9_-]{0,63}"
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 # Creator soundboard objects (Phase 6): soundboards/<creator slug>/<uuid>.<ext>
 SOUNDBOARD_KEY = re.compile(rf"^soundboards/(?P<slug>{_SLUG})/{_UUID}\.(?P<ext>mp3|jpg|png|webp|gif)$")
-# Server-generated keys: donor uploads (<prefix>/<slug>_<epoch ms>_<uuid4 hex>.<ext>) and soundboard objects.
-WRITABLE_KEY = re.compile(
-    rf"^(voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm"
-    rf"|donation-media/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.(jpg|png|webp|gif)"
-    rf"|soundboards/{_SLUG}/{_UUID}\.(mp3|jpg|png|webp|gif))$")
+# Donor uploads (Phase 6): <prefix>/<slug>_<epoch ms>_<uuid4 hex>.<ext>
+_UPLOAD = (rf"voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm"
+           rf"|donation-media/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.(jpg|png|webp|gif)")
+UPLOAD_KEY = re.compile(rf"^({_UPLOAD})$")
+# Server-generated keys: donor uploads and soundboard objects.
+WRITABLE_KEY = re.compile(rf"^({_UPLOAD}|soundboards/{_SLUG}/{_UUID}\.(mp3|jpg|png|webp|gif))$")
 LISTABLE_PREFIXES = ("hypersounds/", "hypersound-thumbs/")
 IMMUTABLE = "public, max-age=31536000, immutable"  # keys are unique and never rewritten
 PRESIGN_SECONDS = 300
@@ -54,6 +57,7 @@ class StorageError(Exception):
 class ObjectHead:
     size: int
     content_type: str
+    metadata: dict[str, str] = field(default_factory=dict)  # user metadata (head_upload only)
 
 
 class ObjectStore(Protocol):
@@ -66,6 +70,8 @@ class ObjectStore(Protocol):
                     expires_in: int = PRESIGN_SECONDS) -> str: ...
 
     async def head_object(self, key: str) -> ObjectHead | None: ...
+
+    async def head_upload(self, key: str) -> ObjectHead | None: ...
 
     async def get_object(self, key: str, *, max_bytes: int) -> bytes: ...
 
@@ -83,6 +89,12 @@ def check_soundboard_key(key: str) -> None:
     """Read and delete are only ever allowed on creator soundboard objects."""
     if not isinstance(key, str) or not SOUNDBOARD_KEY.match(key):
         raise ValueError("refusing to read or delete an object outside soundboards/<slug>/<uuid>.<ext>")
+
+
+def check_upload_key(key: str) -> None:
+    """head_upload only ever looks at donor upload objects."""
+    if not isinstance(key, str) or not UPLOAD_KEY.match(key):
+        raise ValueError("refusing to inspect an object outside the donor upload patterns")
 
 
 def check_listable_prefix(prefix: str) -> None:
@@ -205,6 +217,22 @@ class R2Store:
                     return None
                 raise
             return ObjectHead(int(r.get("ContentLength", 0)), str(r.get("ContentType", "")))
+        return await self._call(head)
+
+    async def head_upload(self, key: str) -> ObjectHead | None:
+        """Size, type and user metadata of a donor upload; None when it does not exist."""
+        check_upload_key(key)
+
+        def head():
+            try:
+                r = self._s3().head_object(Bucket=self._config.bucket, Key=key)
+            except Exception as exc:  # noqa: BLE001
+                if _not_found(exc):
+                    return None
+                raise
+            meta = r.get("Metadata") or {}
+            return ObjectHead(int(r.get("ContentLength", 0)), str(r.get("ContentType", "")),
+                              {str(k).lower(): str(v) for k, v in meta.items()})
         return await self._call(head)
 
     async def get_object(self, key: str, *, max_bytes: int) -> bytes:

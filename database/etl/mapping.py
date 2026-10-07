@@ -6,6 +6,12 @@ import re
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 DONATION_TABLE_SUFFIX = "_donations"
+# Legacy streamers."razorpay-keyid"/"razorpay-keysecret" held the NAMES of secrets; only these two pairs exist.
+# Same mapping as migration 0010; any other pair has no payment account (checkout on hold).
+RAZORPAY_ACCOUNTS = {
+    ("razorpay-keyid", "razorpay-keysecret"): "primary",
+    ("razorpay-keyid(test)", "razorpay-keysecret(test)"): "secondary",
+}
 
 
 def split_approved_by(value: str | None, moderator_ids: set[str]) -> tuple[str | None, str | None]:
@@ -36,6 +42,10 @@ def user_role(source_role: str | None, email: str, admin_emails: set[str]) -> st
     if email.lower() in admin_emails:
         return "admin"
     return source_role or "user"
+
+
+def razorpay_account(key_ref: str | None, secret_ref: str | None) -> str | None:
+    return RAZORPAY_ACCOUNTS.get((key_ref, secret_ref))
 
 
 def slug_from_table(table_name: str) -> str:
