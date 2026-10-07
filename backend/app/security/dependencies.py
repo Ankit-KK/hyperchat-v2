@@ -19,6 +19,7 @@ from app.security.obs_token import (
     ObsTokenStore,
     get_obs_token,
     is_obs_origin_allowed,
+    own_origin,
     validate_obs_token,
 )
 from app.security.request_signing import verify_hmac_request
@@ -64,7 +65,8 @@ def _secret(value) -> str | None:
 
 
 async def require_obs_token(request: Request) -> ObsCaller:
-    if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.browser_origins):
+    if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.browser_origins,
+                                 own_origin(request.headers.get("host"))):
         raise SecurityError(403, "Request origin not allowed", "bad_origin")
     token = get_obs_token(request.headers, request.query_params)
     result = await validate_obs_token(_stores(request).obs_tokens, token)

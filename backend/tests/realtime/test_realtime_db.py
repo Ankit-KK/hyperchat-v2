@@ -313,7 +313,7 @@ def test_constraints(clean):
     sid = make_streamer("authtest-p9-ck")
     ins = "INSERT INTO public.realtime_outbox (streamer_id, channel, event, facts, status, locked_by) VALUES (%s, %s, %s, %s, %s, %s)"
     with db() as conn:
-        for bad in (("alerts", "new-donation", "{}", "pending", None), ("dashboard", "stats-update", "{}", "pending", None),
+        for bad in (("overlay", "new-donation", "{}", "pending", None), ("dashboard", "stats-update", "{}", "pending", None),
                     ("dashboard", "new-donation", "[]", "pending", None),
                     ("dashboard", "new-donation", json.dumps({"x": "y" * 600}), "pending", None),
                     ("dashboard", "new-donation", "{}", "publishing", None), ("dashboard", "new-donation", "{}", "sent", None)):

@@ -1,7 +1,7 @@
 """Pusher channel names (kept from legacy, D3).
 
   private-{slug}-dashboard     creator dashboard (session: owner / linked account / admin)
-  private-{slug}-alerts        OBS alerts overlay (OBS token)        - published from Phase 10
+  private-{slug}-alerts        OBS alerts overlay (OBS token)        audio-now-playing, vaani-celebration (Phase 10)
   private-{slug}-audio         OBS audio player (OBS token)
   private-{slug}-settings      OBS overlays (OBS token)
   private-{slug}-leaderboard   OBS leaderboard widget (OBS token)
@@ -15,7 +15,7 @@ itself contains "-alerts" can never be confused with another creator's channel.
 import re
 
 PRIVATE_SUFFIXES = ("dashboard", "alerts", "audio", "settings", "leaderboard")
-OUTBOX_CHANNELS = ("dashboard", "audio", "settings", "leaderboard", "goal")
+OUTBOX_CHANNELS = ("dashboard", "alerts", "audio", "settings", "leaderboard", "goal")
 MAX_CHANNEL_LENGTH = 164  # Pusher's limit
 _PRIVATE = re.compile(r"private-(?P<slug>[a-z0-9][a-z0-9_-]{0,63})-(?P<suffix>" + "|".join(PRIVATE_SUFFIXES) + r")")
 _SOCKET_ID = re.compile(r"[0-9]{1,20}\.[0-9]{1,20}")

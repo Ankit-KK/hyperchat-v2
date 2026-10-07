@@ -162,6 +162,14 @@ class Settings(BaseSettings):
     pusher_secret_4: SecretStr | None = None
     pusher_cluster_4: str | None = None
 
+    # Phase 10 (P10-D13): creators whose "!vaani" donations play the celebration instead of an alert (comma-separated
+    # slugs; legacy: ankit and captain_vaani). Empty = nobody.
+    vaani_creators: str = "ankit,captain_vaani"
+
+    @property
+    def vaani_slugs(self) -> frozenset[str]:
+        return frozenset(s.strip().lower() for s in self.vaani_creators.split(",") if s.strip())
+
     @field_validator("realtime_publish_rate")
     @classmethod
     def _publish_rate_range(cls, value: float) -> float:

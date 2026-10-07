@@ -62,7 +62,7 @@ def test_only_state_events_coalesce(event, key):
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"event": "stats-update"}, {"event": "donation-approved"}, {"event": "audio-now-playing"},
+    {"event": "stats-update"}, {"event": "donation-approved"}, {"event": "now-playing"},
     {"streamer_id": "ankit"}, {"subject_id": "not-a-uuid"},
     {"facts": {"message": "hello"}}, {"facts": {"action": "Approve!"}}, {"facts": {"action": DONOR}},
     {"facts": {"action": "x" * 33}}, {"facts": {"token": "abc"}}, {"facts": {"action": 1}},
@@ -184,7 +184,8 @@ def test_hidden_message_is_never_broadcast():
 
 @pytest.mark.parametrize("event", list(outbox.EVENT_CHANNELS))
 def test_no_payload_carries_forbidden_keys(event):
-    r = render(make_event(event, facts={"action": "approve"} if event == "donation-updated" else None),
+    facts = {"donation-updated": {"action": "approve"}, "audio-now-playing": {"kind": "tts"}}.get(event)
+    r = render(make_event(event, facts=facts),
                top={"name": DONOR, "total_amount": Decimal("10")},
                latest={"name": DONOR, "amount": Decimal("5"), "currency": "INR", "created_at": datetime.now(UTC)})
     found = {k for k in keys(r.data) for bad in FORBIDDEN if bad in k.lower().split("_")}

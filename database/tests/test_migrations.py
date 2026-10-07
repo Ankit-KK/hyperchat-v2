@@ -224,7 +224,7 @@ def test_0012_realtime_outbox_round_trip_and_constraints(monkeypatch):
             conn.execute(ins, (sid, "goal", "goal-progress", "{}", "k1", "pending", None, None))  # allowed again
             conn.execute(ins, (sid, "dashboard", "new-donation", "{}", None, "pending", None, None))
             conn.execute(ins, (sid, "dashboard", "new-donation", "{}", None, "pending", None, None))  # NULL keys
-            for bad in ((sid, "alerts", "new-donation", "{}", None, "pending", None, None),       # channel (Phase 10)
+            for bad in ((sid, "overlay", "new-donation", "{}", None, "pending", None, None),      # unknown channel
                         (sid, "dashboard", "stats-update", "{}", None, "pending", None, None),    # event
                         (sid, "dashboard", "new-donation", "[]", None, "pending", None, None),    # facts object
                         (sid, "dashboard", "new-donation", '{"x": "%s"}' % ("y" * 600), None, "pending", None, None),
@@ -250,6 +250,39 @@ def test_0012_realtime_outbox_round_trip_and_constraints(monkeypatch):
         finally:
             conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))  # its outbox rows cascade
         assert conn.execute("SELECT count(*) FROM public.realtime_outbox WHERE streamer_id = %s", (sid,)).fetchone()[0] == 0
+
+
+def test_0013_obs_audio_events_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    ins = "INSERT INTO public.realtime_outbox (streamer_id, channel, event) VALUES (%s, %s, %s)"
+    with _owner() as conn:
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-obs'")
+        sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('migtest-obs', 'O') "
+                           "RETURNING id").fetchone()[0]
+    try:
+        with _owner() as conn:
+            conn.execute(ins, (sid, "alerts", "audio-now-playing"))
+            conn.execute(ins, (sid, "alerts", "vaani-celebration"))
+            conn.execute(ins, (sid, "dashboard", "new-donation"))
+            for bad in (("alerts", "stats-update"), ("overlay", "audio-now-playing")):
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    conn.execute(ins, (sid, *bad))
+        command.downgrade(cfg, "0012")
+        with _owner() as conn:  # the new events are removed by the downgrade; older rows stay
+            events = [r[0] for r in conn.execute("SELECT event FROM public.realtime_outbox WHERE streamer_id = %s",
+                                                 (sid,))]
+            assert events == ["new-donation"]
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(ins, (sid, "alerts", "audio-now-playing"))
+        command.upgrade(cfg, "head")
+        with _owner() as conn:
+            conn.execute(ins, (sid, "alerts", "audio-now-playing"))
+    finally:
+        command.upgrade(cfg, "head")
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
 
 
 def test_no_supabase_artifacts():

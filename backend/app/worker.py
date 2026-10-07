@@ -26,7 +26,7 @@ from app.realtime.outbox import OutboxQueue
 from app.realtime.payloads import Renderer, RealtimeRepository
 from app.realtime.publisher import OutboxPublisher
 from app.realtime.pusher import PusherApps, PusherClient
-from app.storage.r2 import StorageError, build_object_store
+from app.storage.r2 import SILENCE_KEY, StorageError, build_object_store
 
 log = logging.getLogger("hyperchat.worker")
 
@@ -55,7 +55,9 @@ def build_handlers(settings: Settings, connection_factory, store) -> dict:
 
 
 def build_publisher(settings: Settings, connection_factory) -> OutboxPublisher:
-    return OutboxPublisher(OutboxQueue(connection_factory), Renderer(RealtimeRepository(connection_factory)),
+    silence_url = f"{settings.r2_public_base}/{SILENCE_KEY}" if settings.r2_public_base else None  # Phase 10
+    return OutboxPublisher(OutboxQueue(connection_factory),
+                           Renderer(RealtimeRepository(connection_factory), silence_url=silence_url),
                            PusherClient(), PusherApps.from_settings(settings), enabled=settings.realtime_enabled,
                            rate=settings.realtime_publish_rate)
 

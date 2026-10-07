@@ -3,7 +3,8 @@
 OBS browser sources authenticate with a long random token (x-obs-token header, ?token= or
 body.obs_token). Only its SHA-256 is stored (obs_tokens.token_hash). OBS browser sources (CEF)
 send no Origin header, so "no Origin" is accepted; an Origin that is present must be one of the
-configured browser origins (Settings.browser_origins).
+configured browser origins (Settings.browser_origins) or the API's own origin (the Phase 10 OBS player
+page is served by the API itself, so its requests are same-origin).
 """
 
 from collections.abc import Mapping
@@ -43,8 +44,13 @@ def get_obs_token(headers: Mapping[str, str], query: Mapping[str, str], body: Ma
     return headers.get("x-obs-token") or query.get("token") or (body or {}).get("obs_token") or ""
 
 
-def is_obs_origin_allowed(origin: str | None, allowed_origins: frozenset[str]) -> bool:
-    return not origin or origin in allowed_origins
+def is_obs_origin_allowed(origin: str | None, allowed_origins: frozenset[str], own_origin: str | None = None) -> bool:
+    return not origin or origin in allowed_origins or (own_origin is not None and origin == own_origin)
+
+
+def own_origin(host: str | None) -> str | None:
+    """https://<Host header>: the API's own origin (nginx forwards the requested host; the API is HTTPS-only)."""
+    return f"https://{host}" if host and "/" not in host and "@" not in host else None
 
 
 def default_scope_for_obs(slug: str) -> list[str]:

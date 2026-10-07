@@ -26,6 +26,9 @@ from app.payments.accounts import AccountHealth, PaymentAccounts
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
 from app.payments.service import PaymentService
+from app.obs.queue import AudioQueue
+from app.obs.service import ObsService
+from app.obs.tokens import TokenRepository
 from app.realtime.auth import RealtimeService
 from app.realtime.payloads import RealtimeRepository
 from app.realtime.pusher import PusherApps
@@ -34,6 +37,7 @@ from app.routers import (
     auth,
     dashboard,
     health,
+    obs,
     payments,
     public,
     realtime,
@@ -89,12 +93,17 @@ async def lifespan(app: FastAPI):
             available=store is not None and "sarvam" in settings.audio_provider_names())
         razorpay = RazorpayClient()
         app.state.payments = PaymentService(
-            public=app.state.public, repo=PaymentRepository(conn), accounts=payment_accounts, client=razorpay,
+            public=app.state.public, repo=PaymentRepository(conn, vaani_creators=settings.vaani_slugs), accounts=payment_accounts, client=razorpay,
             health=AccountHealth(razorpay), library=app.state.hypersounds, store=store, limiter=app.state.auth.repo)
         # Phase 9: channel authorization and client config; events are published by the worker.
         app.state.realtime = RealtimeService(
             enabled=settings.realtime_enabled, apps=PusherApps.from_settings(settings), repo=RealtimeRepository(conn),
             obs_tokens=app.state.security.obs_tokens, limiter=app.state.auth.repo)
+        # Phase 10: OBS token management, the audio queue (claim / Media Source / replay) and the player's session.
+        app.state.obs = ObsService(
+            tokens=TokenRepository(conn), queue=AudioQueue(conn), realtime=RealtimeRepository(conn),
+            apps=PusherApps.from_settings(settings), realtime_enabled=settings.realtime_enabled,
+            public_base=settings.r2_public_base if store is not None else None, limiter=app.state.auth.repo)
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
@@ -110,6 +119,7 @@ async def lifespan(app: FastAPI):
     log.info("realtime", extra={"realtime_enabled": settings.realtime_enabled,
                                 "pusher_groups": settings.pusher_groups_configured,
                                 "pusher_invalid": settings.pusher_config_problems()})
+    log.info("obs", extra={"audio_queue_window_hours": 24, "vaani_creators": len(settings.vaani_slugs)})
     try:
         yield
     finally:
@@ -176,6 +186,9 @@ def create_app() -> FastAPI:
     app.include_router(dashboard.dashboard_router)
     app.include_router(transcriptions.router)
     app.include_router(realtime.router)
+    app.include_router(obs.obs_router)
+    app.include_router(obs.dashboard_router)
+    app.include_router(obs.player_router)
     app.include_router(dashboard.me_router)
     app.include_router(soundboard.soundboard_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.

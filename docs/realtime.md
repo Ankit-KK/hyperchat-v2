@@ -119,6 +119,8 @@ disabled.
 
 ## Phase 10 (OBS) contract
 
+Implemented in Phase 10: see [`obs-audio.md`](obs-audio.md).
+
 Phase 10 consumes:
 - `private-{slug}-audio` `audio-ready {donation_id}`: an item is ready. The player then calls the Phase 10
   claim endpoint (token-authenticated) instead of OBS reloading a URL every few seconds.

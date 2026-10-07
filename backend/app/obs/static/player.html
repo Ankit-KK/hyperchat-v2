@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>HyperChat OBS audio</title>
+<link rel="stylesheet" href="/obs/player.css">
+</head>
+<body>
+<!-- HyperChat OBS audio player (Phase 10). Add as an OBS Browser Source with the URL from the dashboard
+     (…/obs/player#token=…). The token stays in the #fragment: browsers never send it to any server. -->
+<main>
+  <p id="status" aria-live="polite">Starting…</p>
+  <button id="start" type="button" hidden>Click to enable audio</button>
+  <audio id="audio" preload="auto"></audio>
+</main>
+<script src="/obs/player.js"></script>
+</body>
+</html>
