@@ -85,11 +85,23 @@ burst() {  # $1 = path, $2 = number of back-to-back requests, $3 = port -> "<200
     echo "$ok $limited"
 }
 
+limited_body() {  # $1 = port -> the body of the first 429 among up to 10 quick requests ("none" if no 429)
+    # Sampling until a 429 avoids a timing race: on a slow runner the bucket can refill one token between
+    # the burst and a single follow-up request, which is then (correctly) allowed with 200.
+    local out code
+    for _ in $(seq 1 10); do
+        out=$(curl -s -w '\n%{http_code}' "http://127.0.0.1:$1/api/v1/metrics/platform")
+        code=${out##*$'\n'}
+        if [ "$code" = 429 ]; then echo "${out%$'\n'*}"; return; fi
+    done
+    echo none
+}
+
 fail=0
 read -r ok limited < <(burst /api/v1/public/streamers/x 40)
 echo "public: $ok x 200, $limited x 429 (40 back-to-back)"
 { [ "$ok" -ge 21 ] && [ "$ok" -le 25 ] && [ "$limited" -ge 15 ]; } || { echo "FAIL public burst"; fail=1; }
-body=$(curl -s "http://127.0.0.1:$PORT/api/v1/metrics/platform")
+body=$(limited_body "$PORT")
 echo "429 body: $body"
 [ "$body" = '{"error":"Too many requests"}' ] || { echo "FAIL 429 body"; fail=1; }
 read -r ok limited < <(burst /api/v1/auth/session 40)
@@ -102,7 +114,7 @@ echo "after 3s: $ok x 200, $limited x 429"
 read -r ok limited < <(burst /api/v1/public/streamers/x 40 "$PORT_PROD")
 echo "production zone: $ok x 200, $limited x 429 (40 back-to-back)"
 { [ "$ok" -ge 21 ] && [ "$ok" -le 25 ] && [ "$limited" -ge 15 ]; } || { echo "FAIL production burst"; fail=1; }
-body=$(curl -s "http://127.0.0.1:$PORT_PROD/api/v1/metrics/platform")
+body=$(limited_body "$PORT_PROD")
 [ "$body" = '{"error":"Too many requests"}' ] || { echo "FAIL production 429 body"; fail=1; }
 
 # Syntax-check the real site files, all loaded together as on the server: includes redirected to the
