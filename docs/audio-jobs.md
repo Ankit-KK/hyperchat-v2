@@ -3,7 +3,8 @@
 Replaces the legacy Edge Functions `generate-donation-tts`, `generate-donation-music`, `generate-donation-sfx`
 and `transcribe-voice-sarvam` (and the fire-and-forget calls to them from the payment and moderation paths)
 with a durable PostgreSQL job queue and a worker process. Pusher, the OBS audio queue and the bots are later
-phases: they read the state Phase 8 writes (`donations.tts_audio_url`).
+phases: they read the state Phase 8 writes (`donations.tts_audio_url`). Phase 9: the job's completion also
+writes the realtime `audio-ready` event in the same transaction ([`realtime.md`](realtime.md)).
 
 ```
 approval transaction (Phase 7 auto-approve / Phase 5 dashboard approve)

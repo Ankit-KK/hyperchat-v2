@@ -20,6 +20,7 @@ from app.dashboard.moderation import Step, transition
 from app.dashboard.validation import WRITABLE_SETTINGS
 from app.db.donor_totals import change_donor_total
 from app.jobs.queue import enqueue
+from app.realtime import outbox
 
 # Nullable booleans / mode are served with their column default, as Phase 4 does for the public API.
 _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
@@ -111,6 +112,7 @@ class DashboardRepository:
             if changed:
                 sets = ", ".join(f"{c} = %({c})s::{SETTINGS_SQL_TYPES[c]}" for c in changed)
                 await cur.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", params)
+                await outbox.emit_settings_changed(cur, streamer_id, changed)  # Phase 9: live overlay settings
             await cur.execute(f"SELECT {_SETTINGS_COLS} FROM public.streamers WHERE id = %(id)s", params)
             return await cur.fetchone(), changed
 
@@ -191,6 +193,11 @@ class DashboardRepository:
                     await self._insert_ban(cur, streamer_id, current["donor_name"], actor_label, notes)
                 if step.approve:  # Phase 8: the audio job commits with the approval (or neither does)
                     await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
+                # Phase 9: the realtime events commit with the action (or neither does).
+                await outbox.emit(cur, streamer_id, "donation-updated", subject_id=donation_id,
+                                  facts={"action": action, "previous_status": current["moderation_status"]})
+                if step.totals_delta:
+                    await outbox.emit_totals_changed(cur, streamer_id)
                 await self._record_action(cur, streamer_id, donation_id, action, current["moderation_status"],
                                           step.new_status, actor_user_id, actor_label, notes)
             await cur.execute(f"SELECT {_QUEUE_COLS} FROM public.donations d WHERE d.id = %s", (donation_id,))

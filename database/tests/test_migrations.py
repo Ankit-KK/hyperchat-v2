@@ -24,7 +24,7 @@ EXPECTED_TABLES = {
     "partner_signups", "donations", "order_lookup", "moderation_actions", "telegram_callback_mapping",
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
-    "user_invites", "payment_webhook_events", "jobs", "donation_transcripts",
+    "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox",
 }
 
 
@@ -200,6 +200,56 @@ def test_0011_jobs_round_trip_and_constraints(monkeypatch):
                                            "FOREIGN KEY (streamer_id) REFERENCES streamers(id) ON DELETE CASCADE"]
         finally:
             conn.execute("DELETE FROM public.jobs WHERE dedupe_key LIKE 'migtest-%'")
+
+
+def test_0012_realtime_outbox_round_trip_and_constraints(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0011")
+    assert "realtime_outbox" not in _tables() and {"jobs", "donation_transcripts"} <= _tables()
+    command.upgrade(cfg, "head")
+    assert "realtime_outbox" in _tables()
+    ins = ("INSERT INTO public.realtime_outbox (streamer_id, channel, event, facts, coalesce_key, status, locked_by, "
+           "locked_until) VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)")
+    with _owner() as conn:
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-rt'")
+        sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('migtest-rt', 'RT') "
+                           "RETURNING id").fetchone()[0]
+        try:
+            conn.execute(ins, (sid, "goal", "goal-progress", "{}", "k1", "pending", None, None))
+            with pytest.raises(psycopg.errors.UniqueViolation):  # one PENDING row per coalesce key
+                conn.execute(ins, (sid, "goal", "goal-progress", "{}", "k1", "pending", None, None))
+            conn.execute("UPDATE public.realtime_outbox SET status = 'published' WHERE coalesce_key = 'k1'")
+            conn.execute(ins, (sid, "goal", "goal-progress", "{}", "k1", "pending", None, None))  # allowed again
+            conn.execute(ins, (sid, "dashboard", "new-donation", "{}", None, "pending", None, None))
+            conn.execute(ins, (sid, "dashboard", "new-donation", "{}", None, "pending", None, None))  # NULL keys
+            for bad in ((sid, "alerts", "new-donation", "{}", None, "pending", None, None),       # channel (Phase 10)
+                        (sid, "dashboard", "stats-update", "{}", None, "pending", None, None),    # event
+                        (sid, "dashboard", "new-donation", "[]", None, "pending", None, None),    # facts object
+                        (sid, "dashboard", "new-donation", '{"x": "%s"}' % ("y" * 600), None, "pending", None, None),
+                        (sid, "dashboard", "new-donation", "{}", "", "pending", None, None),      # empty key
+                        (sid, "dashboard", "new-donation", "{}", None, "sent", None, None),       # status
+                        (sid, "dashboard", "new-donation", "{}", None, "publishing", None, None)):  # needs a lease
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    conn.execute(ins, bad)
+            ids = [r[0] for r in conn.execute("SELECT id FROM public.realtime_outbox WHERE streamer_id = %s ORDER BY id",
+                                              (sid,))]
+            assert ids == sorted(ids) and len(ids) == 4
+            indexes = {r[0] for r in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'realtime_outbox'")}
+            assert {"realtime_outbox_coalesce", "realtime_outbox_open", "realtime_outbox_due", "realtime_outbox_lease",
+                    "realtime_outbox_finished"} <= indexes
+            fk = conn.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = "
+                              "'public.realtime_outbox'::regclass AND contype = 'f'").fetchone()[0]
+            assert fk == "FOREIGN KEY (streamer_id) REFERENCES streamers(id) ON DELETE CASCADE"
+            privileges = conn.execute("SELECT has_table_privilege('hyperchat_app', 'public.realtime_outbox', 'INSERT'), "
+                                      "has_table_privilege('hyperchat_app', 'public.realtime_outbox', 'DELETE'), "
+                                      "has_sequence_privilege('hyperchat_app', pg_get_serial_sequence("
+                                      "'public.realtime_outbox', 'id'), 'USAGE')").fetchone()
+            assert privileges == (True, True, True)
+        finally:
+            conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))  # its outbox rows cascade
+        assert conn.execute("SELECT count(*) FROM public.realtime_outbox WHERE streamer_id = %s", (sid,)).fetchone()[0] == 0
 
 
 def test_no_supabase_artifacts():

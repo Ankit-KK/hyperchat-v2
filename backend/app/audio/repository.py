@@ -3,8 +3,10 @@
   set_audio_url      tts_audio_url only while it is NULL, the donation is still paid + approved and has no
                      voice message / hypersound of its own (those play themselves): never overwritten
   insert_transcript  once per donation (ON CONFLICT DO NOTHING)
+  audio_ready        Phase 9: the realtime 'audio-ready' event, only while the donation is paid + approved and
+                     its audio is resolved (app.realtime.outbox.emit_audio_ready)
 
-Both run inside the job's completion transaction (app.jobs.queue.finish), fenced by the job lease.
+All run inside the job's completion transaction (app.jobs.queue.finish), fenced by the job lease.
 """
 
 import hashlib
@@ -14,6 +16,7 @@ import unicodedata
 from psycopg.rows import dict_row
 
 from app.audio.moderation import MODERATION_VERSION, NORMALIZATION_VERSION, Decision
+from app.realtime.outbox import emit_audio_ready
 
 APPROVED = ("approved", "auto_approved")
 PROBE_LIMIT = 3            # blocked messages per supporter per hour before every further one is blocked
@@ -86,6 +89,10 @@ class AudioRepository:
               AND payment_status = 'success' AND moderation_status IN ('approved', 'auto_approved')
         """, (url, donation_id))
         return cur.rowcount == 1
+
+    @staticmethod
+    async def audio_ready(cur, donation_id: str) -> bool:
+        return await emit_audio_ready(cur, donation_id)
 
     @staticmethod
     async def insert_transcript(cur, *, donation_id: str, streamer_id: str, transcript: str, model: str) -> None:

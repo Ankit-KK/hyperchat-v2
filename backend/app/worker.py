@@ -2,6 +2,8 @@
 
 Reads the same environment as the API (EnvironmentFile), connects as the same DML-only role (hyperchat_app,
 D6) and processes donation_audio and voice_transcription jobs with HYPERCHAT_WORKER_CONCURRENCY slots.
+Next to them, one loop publishes the realtime outbox to Pusher (Phase 9, app.realtime.publisher); while
+HYPERCHAT_REALTIME_ENABLED is false it only marks events 'skipped'.
 Paid providers are only constructed when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true and their key is set (D7);
 otherwise donation audio resolves to the silent fallback and transcription jobs fail as unavailable.
 SIGTERM/SIGINT stop it gracefully (see app.jobs.runner). Logs carry names and reason codes only.
@@ -20,6 +22,10 @@ from app.core.logging import configure_logging
 from app.db.pool import Database
 from app.jobs.queue import JobQueue
 from app.jobs.runner import Worker
+from app.realtime.outbox import OutboxQueue
+from app.realtime.payloads import Renderer, RealtimeRepository
+from app.realtime.publisher import OutboxPublisher
+from app.realtime.pusher import PusherApps, PusherClient
 from app.storage.r2 import StorageError, build_object_store
 
 log = logging.getLogger("hyperchat.worker")
@@ -48,6 +54,12 @@ def build_handlers(settings: Settings, connection_factory, store) -> dict:
     return handlers
 
 
+def build_publisher(settings: Settings, connection_factory) -> OutboxPublisher:
+    return OutboxPublisher(OutboxQueue(connection_factory), Renderer(RealtimeRepository(connection_factory)),
+                           PusherClient(), PusherApps.from_settings(settings), enabled=settings.realtime_enabled,
+                           rate=settings.realtime_publish_rate)
+
+
 async def run(settings: Settings, stop: asyncio.Event | None = None) -> int:
     stop = stop or asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -74,7 +86,13 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> int:
             "providers_enabled": settings.audio_providers_enabled, "providers": settings.audio_provider_names(),
             "r2_configured": store is not None, "moderation_key_set": bool(settings.tts_moderation_hash_key),
             "kinds": sorted(handlers)})
-        await Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency).run(stop)
+        publisher = build_publisher(settings, db.connection)
+        log.info("realtime configuration", extra={
+            "realtime_enabled": settings.realtime_enabled, "pusher_groups": settings.pusher_groups_configured,
+            "pusher_invalid": settings.pusher_config_problems()})
+        await asyncio.gather(
+            Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency).run(stop),
+            publisher.run(stop))
     finally:
         await db.close()
     return 0
