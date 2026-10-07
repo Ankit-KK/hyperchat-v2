@@ -28,6 +28,7 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0010 | payments: `streamers.razorpay_account`, `donations.payment_account` / `provider_payment_id`, `payment_webhook_events` |
 | 0011 | background jobs: `jobs` (durable queue), `donation_transcripts` |
 | 0012 | realtime: `realtime_outbox` (transactional outbox published to Pusher by the worker) |
+| 0013 | OBS audio: `realtime_outbox` CHECKs allow the `alerts` channel, `audio-now-playing` and `vaani-celebration` |
 
 ## Databases
 | Database | Cluster | Purpose |

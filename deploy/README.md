@@ -62,7 +62,9 @@ api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUC
    `systemctl restart hyperchat-worker` with every release switch. (Phase 8 brings `0011`: two new tables,
    `jobs` and `donation_transcripts`, no change to existing ones; the previous release ignores them.
    Phase 9 brings `0012`: one new table, `realtime_outbox`; the previous release ignores it. Realtime stays
-   off until `HYPERCHAT_REALTIME_ENABLED=true` and a Pusher app is configured, see `docs/realtime.md`.)
+   off until `HYPERCHAT_REALTIME_ENABLED=true` and a Pusher app is configured, see `docs/realtime.md`.
+   Phase 10 brings `0013`: two widened CHECK constraints on `realtime_outbox`; the previous release ignores the
+   new values. The DEV nginx site changed (query-free logging of `/api/v1/obs/` and `/api/v1/realtime/`): repeat step 6.)
 6. Nginx (required from Phase 4 on: the public read API's per-IP rate limit; repeat whenever
    `deploy/nginx/` changed). As root, with the files of the same `<commit>`:
    - back up what is installed: `/etc/nginx/sites-available/api.quicktestspace.site` and any existing

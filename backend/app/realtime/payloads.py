@@ -14,6 +14,8 @@ ids, emails, secrets, provider responses, moderator identities.
                                        latest{name, amount, currency, created_at}|null}  (approved only)
   settings-updated (private)          {event_id, v, <overlay display settings>}
   audio-ready (private audio)         {event_id, v, donation_id}
+  audio-now-playing (private alerts)  {event_id, v, donation: now_playing(...)}   (Phase 10, see app.obs)
+  vaani-celebration (private alerts)  {event_id, v, donation_id, name, amount, currency, created_at}
 
 A rendered payload larger than SIZE_LIMIT is replaced by {event_id, v, donation_id?, truncated: true}: the
 client refetches.
@@ -54,6 +56,25 @@ def _number(value):
 
 def _time(value):
     return value.isoformat() if value is not None else None
+
+
+AUDIO_KINDS = ("hypersound", "voice", "tts", "silence")
+
+
+def audio_url_for(d: dict, kind: str, silence_url: str | None) -> str | None:
+    """The URL a claimed item plays, for its kind (chosen and allow-listed by the claim)."""
+    return {"hypersound": d.get("hypersound_url"), "voice": d.get("voice_message_url"),
+            "tts": d.get("tts_audio_url"), "silence": silence_url}.get(kind)
+
+
+def now_playing(d: dict, kind: str, audio_url: str | None) -> dict:
+    """The donation as the alerts overlay shows it while its audio plays (claim response and audio-now-playing).
+    A hidden message is null."""
+    return {"id": d["id"], "name": d["name"], "amount": _number(d["amount"]), "currency": d["currency"],
+            "message": d["message"] if d["message_visible"] else None, "is_hyperemote": bool(d["is_hyperemote"]),
+            "kind": kind, "audio_url": audio_url, "voice_message_url": d["voice_message_url"],
+            "hypersound_url": d["hypersound_url"], "media_url": d["media_url"], "media_type": d["media_type"],
+            "created_at": _time(d["created_at"])}
 
 
 class RealtimeRepository:
@@ -109,8 +130,8 @@ class RealtimeRepository:
 
 
 class Renderer:
-    def __init__(self, repo: RealtimeRepository) -> None:
-        self.repo = repo
+    def __init__(self, repo: RealtimeRepository, silence_url: str | None = None) -> None:
+        self.repo, self.silence_url = repo, silence_url
 
     async def render(self, event: Event) -> Rendered | Skip:
         s = await self.repo.streamer(event.streamer_id)
@@ -121,6 +142,10 @@ class Renderer:
             data = await self._donation(event, base)
         elif event.event == "audio-ready":
             data = await self._audio_ready(event, base)
+        elif event.event == "audio-now-playing":
+            data = await self._now_playing(event, base)
+        elif event.event == "vaani-celebration":
+            data = await self._vaani(event, base)
         elif event.event == "goal-progress":
             data = await self._goal(event, s, base)
         elif event.event == "leaderboard-updated":
@@ -160,6 +185,28 @@ class Renderer:
         if d["payment_status"] != "success" or d["moderation_status"] not in APPROVED:
             return Skip("not_approved")
         return {**base, "donation_id": d["id"]}
+
+    async def _now_playing(self, event: Event, base: dict) -> dict | Skip:
+        kind = (event.facts or {}).get("kind")
+        if event.subject_id is None or kind not in AUDIO_KINDS:
+            return Skip("subject_missing")
+        d = await self.repo.donation(event.subject_id, event.streamer_id)
+        if d is None:
+            return Skip("subject_missing")
+        if d["payment_status"] != "success" or d["moderation_status"] not in APPROVED:
+            return Skip("not_approved")
+        return {**base, "donation": now_playing(d, kind, audio_url_for(d, kind, self.silence_url))}
+
+    async def _vaani(self, event: Event, base: dict) -> dict | Skip:
+        if event.subject_id is None:
+            return Skip("subject_missing")
+        d = await self.repo.donation(event.subject_id, event.streamer_id)
+        if d is None:
+            return Skip("subject_missing")
+        if d["payment_status"] != "success" or d["moderation_status"] not in APPROVED:
+            return Skip("not_approved")
+        return {**base, "donation_id": d["id"], "name": d["name"], "amount": _number(d["amount"]),
+                "currency": d["currency"], "created_at": _time(d["created_at"])}
 
     async def _goal(self, event: Event, s: dict, base: dict) -> dict | Skip:
         if s["status"] != "active":

@@ -57,8 +57,8 @@ class _Duplicate(Exception):
 
 
 class PaymentRepository:
-    def __init__(self, connection_factory) -> None:
-        self._conn = connection_factory
+    def __init__(self, connection_factory, vaani_creators: frozenset[str] = rules.VAANI_CREATORS) -> None:
+        self._conn, self.vaani_creators = connection_factory, vaani_creators
 
     async def _one(self, sql: str, params: tuple | dict) -> dict | None:
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -158,7 +158,7 @@ class PaymentRepository:
                     SELECT d.streamer_id::text AS streamer_id, d.donor_name, d.amount_inr, d.payment_status,
                            d.is_hyperemote, d.voice_message_url IS NOT NULL AS has_voice,
                            d.hypersound_url IS NOT NULL AS has_hypersound, d.media_url IS NOT NULL AS has_media,
-                           s.moderation_mode, s.media_moderation_enabled
+                           s.moderation_mode, s.media_moderation_enabled, s.streamer_slug, d.message
                     FROM public.donations d JOIN public.streamers s ON s.id = d.streamer_id
                     WHERE d.id = %s FOR UPDATE OF d
                 """, (donation_id,))
@@ -175,8 +175,7 @@ class PaymentRepository:
         except _Duplicate:
             return Applied("duplicate", None)
 
-    @staticmethod
-    async def _transition(cur, donation_id: str, row: dict, outcome: str, payment_id: str | None) -> Applied:
+    async def _transition(self, cur, donation_id: str, row: dict, outcome: str, payment_id: str | None) -> Applied:
         status = row["payment_status"]
         if status == "success":
             return Applied("already_paid", "success")
@@ -186,6 +185,11 @@ class PaymentRepository:
             await cur.execute("UPDATE public.donations SET payment_status = 'failed', moderation_status = 'rejected' "
                               "WHERE id = %s", (donation_id,))
             return Applied("failed", "failed")
+        vaani = rules.is_vaani_celebration(
+            slug=row["streamer_slug"], message=row["message"], has_voice=row["has_voice"],
+            has_hypersound=row["has_hypersound"], has_media=row["has_media"], creators=self.vaani_creators)
+        if vaani:
+            return await self._vaani(cur, donation_id, row, payment_id)
         auto = rules.auto_approves(
             is_hyperemote=row["is_hyperemote"], has_hypersound=row["has_hypersound"], has_voice=row["has_voice"],
             has_media=row["has_media"], moderation_mode=row["moderation_mode"],
@@ -207,3 +211,21 @@ class PaymentRepository:
             await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
             await outbox.emit_totals_changed(cur, row["streamer_id"])
         return Applied("completed", "success", auto)
+
+    @staticmethod
+    async def _vaani(cur, donation_id: str, row: dict, payment_id: str | None) -> Applied:
+        """Phase 10 (P10-D13): the legacy "!vaani" celebration, on every completion path (legacy: webhook only).
+        Auto-approved whatever the moderation mode and credited like any approved donation (goal, leaderboard),
+        but no audio: no audio_scheduled_at (never queued), no donation_audio job. The overlay plays the
+        celebration on `vaani-celebration` (private alerts channel), written in this transaction."""
+        await cur.execute("""
+            UPDATE public.donations SET payment_status = 'success', provider_payment_id = %s,
+                moderation_status = 'auto_approved', approved_at = now(), approved_by_label = 'system',
+                approved_by_moderator_id = NULL, audio_scheduled_at = NULL
+            WHERE id = %s
+        """, (payment_id, donation_id))
+        await change_donor_total(cur, row["streamer_id"], row["donor_name"], row["amount_inr"], +1)
+        await outbox.emit(cur, row["streamer_id"], "new-donation", subject_id=donation_id)
+        await outbox.emit_totals_changed(cur, row["streamer_id"])
+        await outbox.emit(cur, row["streamer_id"], "vaani-celebration", subject_id=donation_id)
+        return Applied("completed", "success", True)

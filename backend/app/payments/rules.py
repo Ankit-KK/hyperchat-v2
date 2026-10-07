@@ -19,6 +19,16 @@ MESSAGE_MAX = 500
 # Sanity cap: Rs 5,00,000 per donation (in INR at the fixed rates), Razorpay's default per-payment ceiling.
 AMOUNT_CAP_INR = Decimal("500000")
 AUDIO_DELAY_SECONDS = 10  # auto-approved donations play 10 s after payment (legacy)
+VAANI_CREATORS = frozenset({"ankit", "captain_vaani"})  # legacy default (HYPERCHAT_VAANI_CREATORS overrides)
+
+
+def is_vaani_celebration(*, slug: str, message: str | None, has_voice: bool, has_hypersound: bool, has_media: bool,
+                         creators: frozenset[str]) -> bool:
+    """Legacy razorpay-webhook rule (P10-D13): the message is exactly "!vaani" (trimmed, any case), the donation has
+    no voice message, hypersound or media, and the creator is one of the configured creators. Such a donation is
+    a purely visual celebration: auto-approved whatever the moderation mode, no audio job, never queued."""
+    return (slug in creators and (message or "").strip().lower() == "!vaani"
+            and not (has_voice or has_hypersound or has_media))
 VOICE_DURATION_TOLERANCE_MS = 100  # same slack as the Phase 6 upload check
 STATUS_TOKEN = re.compile(r"^[0-9a-f]{64}$")
 ORDER_REF = re.compile(r"^[A-Za-z0-9_-]{1,100}$")  # our order ids, as path parameters

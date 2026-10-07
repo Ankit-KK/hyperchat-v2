@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from app.auth.dependencies import auth_service, client_ip, enforce_csrf, optional_user
 from app.realtime.auth import RATE_CONFIG, RATE_IP, RealtimeService
 from app.security.dependencies import SecurityError
-from app.security.obs_token import is_obs_origin_allowed, validate_obs_token
+from app.security.obs_token import is_obs_origin_allowed, own_origin, validate_obs_token
 
 router = APIRouter(prefix="/api/v1/realtime", tags=["realtime"])
 MAX_BODY = 2048
@@ -58,7 +58,8 @@ async def pusher_auth(request: Request):
         raise SecurityError(400, "Use one credential", "two_credentials")
     slug, suffix = svc.parse(socket_id, channel)
     if token:
-        if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.browser_origins):
+        if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.browser_origins,
+                                     own_origin(request.headers.get("host"))):  # Phase 10: the API-served player
             raise SecurityError(403, "Request origin not allowed", "bad_origin")
         result = await validate_obs_token(svc.obs_tokens, token)
         if not result.ok:

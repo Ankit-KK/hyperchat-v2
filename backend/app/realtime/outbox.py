@@ -9,7 +9,8 @@ Publishing (OutboxQueue, used by app.realtime.publisher):
            OLDER row of that creator is still open: per-creator FIFO. FOR UPDATE SKIP LOCKED + a lease.
   finish   published / failed / skipped; retry: back to pending after a backoff; release: on shutdown,
            without counting the attempt. All fenced on locked_by + status 'publishing'.
-  expire   open rows older than the max age become 'expired' (a stale alert is worse than none).
+  expire   open rows older than the max age (10 min; audio-now-playing 30 s) become 'expired' (a stale alert is
+           worse than none).
   skip     realtime disabled: pending rows become 'skipped' (realtime_disabled).
 """
 
@@ -27,12 +28,16 @@ EVENT_CHANNELS = {
     "settings-updated": "settings",
     "leaderboard-updated": "leaderboard",
     "goal-progress": "goal",
+    "audio-now-playing": "alerts",   # Phase 10: written by the OBS audio claim
+    "vaani-celebration": "alerts",   # Phase 10: written by payment completion (configured creators only)
 }
 COALESCED = frozenset({"settings-updated", "leaderboard-updated", "goal-progress"})  # only the latest state matters
-FACT_KEYS = frozenset({"action", "previous_status"})
+FACT_KEYS = frozenset({"action", "previous_status", "kind"})  # kind: hypersound | voice | tts | silence
 MAX_ATTEMPTS = 6
 LEASE_SECONDS = 30
 MAX_AGE_SECONDS = 600
+# A late "now playing" alert would show long after its audio: Phase 10 (P10-D11) expires it after 30 s.
+EVENT_MAX_AGE_SECONDS = {"audio-now-playing": 30}
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")  # used with fullmatch
 _FACT = re.compile(r"[a-z_]{1,32}")
 
@@ -129,9 +134,10 @@ class OutboxQueue:
             await cur.execute("""
                 UPDATE public.realtime_outbox SET status = 'expired', locked_by = NULL, locked_until = NULL,
                     last_error = 'max_age'
-                WHERE created_at < now() - make_interval(secs => %s)
+                WHERE created_at < now() - make_interval(
+                        secs => CASE event WHEN 'audio-now-playing' THEN %s ELSE %s END)
                   AND (status = 'pending' OR (status = 'publishing' AND locked_until < now()))
-            """, (self.max_age_seconds,))
+            """, (min(EVENT_MAX_AGE_SECONDS["audio-now-playing"], self.max_age_seconds), self.max_age_seconds))
             return cur.rowcount
 
     async def skip_pending(self, reason: str) -> int:
