@@ -261,7 +261,10 @@ def test_payment_auto_approval_enqueues_atomically_and_the_worker_speaks(clean):
     with db() as conn:  # back to an unpaid order, then complete it through the Phase 7 repository
         conn.execute("UPDATE public.donations SET payment_status = 'pending' WHERE id = %s", (did,))
     applied = run(PaymentRepository(factory()).apply(did, "captured", "pay_TESTp8" + secrets.token_hex(4)))
-    assert applied.auto_approved and jobs(did) == [("queued", 0, None, "donation_audio")]
+    # Phase 11 also enqueues the moderator notification in the same transaction (tests/bots).
+    audio_jobs = [j for j in jobs(did) if j[3] == "donation_audio"]
+    assert applied.auto_approved and audio_jobs == [("queued", 0, None, "donation_audio")]
+    assert sorted(j[3] for j in jobs(did)) == ["donation_audio", "moderator_notify"]
     store = InMemoryObjectStore()
     handler, speech = audio_handler(store)
     work(handler, did)
