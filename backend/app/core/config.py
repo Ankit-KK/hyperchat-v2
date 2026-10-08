@@ -170,6 +170,33 @@ class Settings(BaseSettings):
     def vaani_slugs(self) -> frozenset[str]:
         return frozenset(s.strip().lower() for s in self.vaani_creators.split(",") if s.strip())
 
+    # ── Moderation bots (Phase 11: app.bots). OFF by default. Outside production, messages go ONLY to the recipient
+    #    ids in HYPERCHAT_BOT_RECIPIENT_ALLOWLIST (Telegram chat ids, Discord user / channel ids): the DEV database
+    #    holds real moderators' ids. DEV uses its own test bots: never the legacy production bot or application. ──
+    bots_enabled: bool = False
+    telegram_bot_token: SecretStr | None = None
+    telegram_webhook_secret: SecretStr | None = None  # X-Telegram-Bot-Api-Secret-Token (setWebhook secret_token)
+    discord_bot_token: SecretStr | None = None
+    discord_public_key: str | None = None  # the application's Ed25519 public key (hex)
+    discord_application_id: str | None = None
+    bot_recipient_allowlist: str = ""
+
+    @property
+    def bot_recipients(self) -> frozenset[str] | None:
+        """None = no restriction (production only); otherwise the allow-listed recipient ids (possibly empty)."""
+        if self.app_env == "production":
+            return None
+        return frozenset(i.strip() for i in self.bot_recipient_allowlist.split(",") if i.strip())
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(_secret_value(self.telegram_bot_token) and _secret_value(self.telegram_webhook_secret))
+
+    @property
+    def discord_configured(self) -> bool:
+        key = (self.discord_public_key or "").strip()
+        return bool(_secret_value(self.discord_bot_token) and re.fullmatch(r"[0-9a-fA-F]{64}", key))
+
     @field_validator("realtime_publish_rate")
     @classmethod
     def _publish_rate_range(cls, value: float) -> float:

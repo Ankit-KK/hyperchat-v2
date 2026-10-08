@@ -73,6 +73,7 @@ the unit tests and the full database + integration suites against PostgreSQL 17 
 - [`docs/audio-jobs.md`](docs/audio-jobs.md) — background jobs, worker, donation audio/TTS, moderation, voice transcription (Phase 8)
 - [`docs/realtime.md`](docs/realtime.md) — realtime outbox, Pusher publishing, channel authorization, the Phase 10 OBS contract (Phase 9)
 - [`docs/obs-audio.md`](docs/obs-audio.md) — OBS audio queue and player, OBS tokens, replay, `!vaani` (Phase 10)
+- [`docs/bots.md`](docs/bots.md) — Telegram / Discord moderation bots and moderator notifications (Phase 11)
 - [`docs/target-schema.md`](docs/target-schema.md) — PostgreSQL schema and legacy → v2 data mapping
 - [`docs/migration-audit.md`](docs/migration-audit.md) — Supabase-exit audit and phase plan
 - [`docs/history.md`](docs/history.md) — relationship to the legacy repository

@@ -233,7 +233,7 @@ def work(handler, target_key: str, rounds: int = 60):
         w = Worker(JobQueue(factory()), {handler.kind: handler}, poll_seconds=0.01)
         for _ in range(rounds):
             job = await w.run_once()
-            state = jobs(target_key)
+            state = [j for j in jobs(target_key) if j[3] == handler.kind]  # Phase 11: other kinds share the key
             if state and state[-1][0] in ("succeeded", "failed"):
                 return
             if job is None:
@@ -261,11 +261,15 @@ def test_payment_auto_approval_enqueues_atomically_and_the_worker_speaks(clean):
     with db() as conn:  # back to an unpaid order, then complete it through the Phase 7 repository
         conn.execute("UPDATE public.donations SET payment_status = 'pending' WHERE id = %s", (did,))
     applied = run(PaymentRepository(factory()).apply(did, "captured", "pay_TESTp8" + secrets.token_hex(4)))
-    assert applied.auto_approved and jobs(did) == [("queued", 0, None, "donation_audio")]
+    # Phase 11 also enqueues the moderator notification in the same transaction (tests/bots).
+    audio_jobs = [j for j in jobs(did) if j[3] == "donation_audio"]
+    assert applied.auto_approved and audio_jobs == [("queued", 0, None, "donation_audio")]
+    assert sorted(j[3] for j in jobs(did)) == ["donation_audio", "moderator_notify"]
     store = InMemoryObjectStore()
     handler, speech = audio_handler(store)
     work(handler, did)
-    assert jobs(did)[0][0] == "succeeded" and len(speech.calls) == 1 and SECRET_MESSAGE in speech.calls[0]
+    audio_job = [j for j in jobs(did) if j[3] == "donation_audio"]
+    assert audio_job[0][0] == "succeeded" and len(speech.calls) == 1 and SECRET_MESSAGE in speech.calls[0]
     assert donation_audio(did) == f"https://media.example.test/tts-audio/{sid}/{did}.mp3"
     assert store.objects[f"tts-audio/{sid}/{did}.mp3"].data == MP3
 

@@ -17,6 +17,9 @@ from app.audio.handlers import DonationAudioHandler, VoiceTranscriptionHandler
 from app.audio.providers import ElevenLabsProvider, MiniMaxProvider, SarvamProvider
 from app.audio.repository import AudioRepository
 from app.audio.silence import ensure_silence
+from app.bots.clients import DiscordClient, TelegramClient
+from app.bots.notify import ModeratorNotifyHandler
+from app.bots.repository import BotRepository
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.pool import Database
@@ -47,6 +50,15 @@ def build_handlers(settings: Settings, connection_factory, store) -> dict:
         "voice_transcription": VoiceTranscriptionHandler(
             repo, store, SarvamProvider(sarvam_key) if enabled and sarvam_key else None),
     }
+    # Phase 11: moderator notifications. Clients only exist when bots are enabled and the platform is configured
+    # (D13); otherwise every job finishes as skipped (bots_disabled) without sending anything.
+    telegram = TelegramClient(settings.telegram_bot_token.get_secret_value().strip())         if settings.bots_enabled and settings.telegram_configured else None
+    discord = DiscordClient(settings.discord_bot_token.get_secret_value().strip())         if settings.bots_enabled and settings.discord_configured else None
+    handlers["moderator_notify"] = ModeratorNotifyHandler(
+        BotRepository(connection_factory), telegram=telegram, discord=discord,
+        enabled=settings.bots_enabled and (telegram is not None or discord is not None),
+        recipients=settings.bot_recipients, frontend_url=settings.frontend_url,
+        public_base=settings.r2_public_base if store is not None else None)
     if store is not None:  # donation audio needs R2 (generated audio and the silence object)
         handlers["donation_audio"] = DonationAudioHandler(
             repo, store, speech=speech, sound_effects=elevenlabs, music=elevenlabs, moderation_key=moderation_key,
@@ -87,7 +99,8 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> int:
             "release": settings.release, "db_label": settings.db_label, "concurrency": settings.worker_concurrency,
             "providers_enabled": settings.audio_providers_enabled, "providers": settings.audio_provider_names(),
             "r2_configured": store is not None, "moderation_key_set": bool(settings.tts_moderation_hash_key),
-            "kinds": sorted(handlers)})
+            "kinds": sorted(handlers), "bots_enabled": settings.bots_enabled,
+            "telegram_configured": settings.telegram_configured, "discord_configured": settings.discord_configured})
         publisher = build_publisher(settings, db.connection)
         log.info("realtime configuration", extra={
             "realtime_enabled": settings.realtime_enabled, "pusher_groups": settings.pusher_groups_configured,

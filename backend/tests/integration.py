@@ -136,7 +136,8 @@ def cleanup_synthetic_rows() -> None:
                      (SLUG_PREFIX + "%", "upload:" + SLUG_PREFIX + "%"))
         conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%' "
                      "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%' OR endpoint LIKE 'payment:%' "
-                     "OR endpoint LIKE 'transcription:%' OR endpoint LIKE 'realtime:%' OR endpoint LIKE 'obs:%'")
+                     "OR endpoint LIKE 'transcription:%' OR endpoint LIKE 'realtime:%' OR endpoint LIKE 'obs:%' "
+                     "OR endpoint LIKE 'bot:%'")
         # Webhook events of synthetic deliveries (their donations are gone already: donation_id SET NULL).
         conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
 

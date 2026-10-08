@@ -15,7 +15,7 @@ from psycopg.types.json import Jsonb
 
 from app.jobs.retry import Effects
 
-KINDS = {"donation_audio": 4, "voice_transcription": 3}  # kind -> max attempts
+KINDS = {"donation_audio": 4, "voice_transcription": 3, "moderator_notify": 5}  # kind -> max attempts
 LEASE_SECONDS = 180
 PAYLOAD_KEYS = frozenset({"donation_id"})  # every job kind identifies its subject by database ids only
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")

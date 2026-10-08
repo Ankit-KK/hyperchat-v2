@@ -10,6 +10,7 @@ Indexes used (no new index in Phase 5):
   moderators           streamers_moderators_unique_active (streamer_id, telegram_user_id) prefix
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
@@ -62,6 +63,15 @@ _MODERATOR_COLS = """id::text AS moderator_id, mod_name, telegram_user_id, disco
     COALESCE(can_reject, true) AS can_reject, COALESCE(can_hide_message, true) AS can_hide_message,
     COALESCE(can_ban, false) AS can_ban, COALESCE(can_replay, true) AS can_replay, is_active, created_at,
     last_action_at"""
+
+
+@dataclass(frozen=True)
+class BotActor:
+    """A moderator acting through a bot (Phase 11): recorded as action_source telegram | discord with the moderator
+    row and the platform user id; the moderator's last_action_at / total_actions are updated in the same transaction."""
+    platform: str        # "telegram" | "discord"
+    moderator_id: str
+    platform_user_id: str
 
 
 class DuplicateModerator(Exception):
@@ -160,9 +170,12 @@ class DashboardRepository:
         return row["n"]
 
     async def moderate(self, streamer_id: str, donation_id: str, action: str, *, actor_user_id: str | None,
-                       actor_label: str, notes: str | None) -> tuple[str, Step, dict] | None:
+                       actor_label: str, notes: str | None, bot: BotActor | None = None) -> tuple[str, Step, dict] | None:
         """One action in ONE transaction: lock the donation (scoped to the creator), decide with
         transition(), then write the donation, the donor total, the ban and the audit row.
+
+        The SHARED moderation core (Phase 11): the dashboard (bot=None) and the Telegram / Discord bots (bot=BotActor)
+        all moderate through here, with the same state machine, audio job and realtime events.
 
         Returns (previous status, step, donation row), or None when this creator has no such donation.
         NotPaid (raised by transition) rolls back with nothing written; so does any other error.
@@ -198,8 +211,12 @@ class DashboardRepository:
                                   facts={"action": action, "previous_status": current["moderation_status"]})
                 if step.totals_delta:
                     await outbox.emit_totals_changed(cur, streamer_id)
-                await self._record_action(cur, streamer_id, donation_id, action, current["moderation_status"],
-                                          step.new_status, actor_user_id, actor_label, notes)
+                if bot is None:
+                    await self._record_action(cur, streamer_id, donation_id, action, current["moderation_status"],
+                                              step.new_status, actor_user_id, actor_label, notes)
+                else:
+                    await self._record_bot_action(cur, streamer_id, donation_id, action, current["moderation_status"],
+                                                  step.new_status, bot, actor_label)
             await cur.execute(f"SELECT {_QUEUE_COLS} FROM public.donations d WHERE d.id = %s", (donation_id,))
             return current["moderation_status"], step, await cur.fetchone()
 
@@ -237,6 +254,21 @@ class DashboardRepository:
                 donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
             VALUES (%s, NULL, NULL, %s, %s, %s, 'dashboard', %s, %s, %s, %s)
         """, (streamer_id, actor_label, donation_id, action, previous, new, notes, actor_user_id))
+
+    @staticmethod
+    async def _record_bot_action(cur, streamer_id: str, donation_id: str, action: str, previous: str, new: str,
+                                 bot: BotActor, actor_label: str) -> None:
+        # The unique bot index (donation, action, source, platform user) keeps one audit row per moderator and action.
+        await cur.execute("""
+            INSERT INTO public.moderation_actions (streamer_id, moderator_id, moderator_telegram_id, moderator_name,
+                donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL)
+            ON CONFLICT DO NOTHING
+        """, (streamer_id, bot.moderator_id, bot.platform_user_id, actor_label, donation_id, action, bot.platform,
+              previous, new))
+        await cur.execute("UPDATE public.streamers_moderators SET last_action_at = now(), "
+                          "total_actions = COALESCE(total_actions, 0) + 1 WHERE id = %s AND streamer_id = %s",
+                          (bot.moderator_id, streamer_id))
 
     # ── G4 moderators ──────────────────────────────────────────────────────
     async def moderators(self, streamer_id: str) -> list[dict]:

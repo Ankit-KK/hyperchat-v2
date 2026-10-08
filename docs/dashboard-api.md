@@ -146,7 +146,7 @@ totals change. Concurrent actions on one donation serialise on the row lock (two
 approvals credit once); any error rolls everything back.
 
 ## G4 moderators
-Moderators are Telegram/Discord identities used by the bots (Phase 11); they have no web access.
+Moderators are Telegram/Discord identities used by the bots (Phase 11, [`bots.md`](bots.md)); they have no web access.
 - **D-R6:** all moderators of the creator, active and removed, newest first: `moderator_id,
   mod_name, telegram_user_id, discord_user_id, role, can_approve, can_reject, can_hide_message,
   can_ban, can_replay, is_active, created_at, last_action_at`.

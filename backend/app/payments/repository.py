@@ -205,6 +205,10 @@ class PaymentRepository:
         """, {"pid": payment_id, "auto": auto, "delay": rules.AUDIO_DELAY_SECONDS, "id": donation_id})
         # Phase 9: the dashboard event commits with the payment (or neither does).
         await outbox.emit(cur, row["streamer_id"], "new-donation", subject_id=donation_id)
+        # Phase 11: moderator notification (pending: now; auto-approved: when its audio is due, as legacy). Only
+        # donations completed from now on are ever enqueued: there is no scan of older unnotified rows.
+        await enqueue(cur, "moderator_notify", donation_id, {"donation_id": donation_id},
+                      delay_seconds=rules.AUDIO_DELAY_SECONDS if auto else 0)
         if auto:
             await change_donor_total(cur, row["streamer_id"], row["donor_name"], row["amount_inr"], +1)
             # Phase 8: the audio job commits with the approval (or neither does).
