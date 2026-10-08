@@ -26,6 +26,10 @@ from app.payments.accounts import AccountHealth, PaymentAccounts
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
 from app.payments.service import PaymentService
+from app.bots.clients import TelegramClient
+from app.bots.discord import DiscordBot
+from app.bots.repository import BotRepository
+from app.bots.telegram import TelegramBot
 from app.obs.queue import AudioQueue
 from app.obs.service import ObsService
 from app.obs.tokens import TokenRepository
@@ -35,6 +39,7 @@ from app.realtime.pusher import PusherApps
 from app.routers import (
     admin,
     auth,
+    bots,
     dashboard,
     health,
     obs,
@@ -104,6 +109,18 @@ async def lifespan(app: FastAPI):
             tokens=TokenRepository(conn), queue=AudioQueue(conn), realtime=RealtimeRepository(conn),
             apps=PusherApps.from_settings(settings), realtime_enabled=settings.realtime_enabled,
             public_base=settings.r2_public_base if store is not None else None, limiter=app.state.auth.repo)
+        # Phase 11: bot webhooks only exist while bots are enabled AND the platform is configured (D13).
+        bot_repo, moderation_repo = BotRepository(conn), DashboardRepository(conn)
+        public_base = settings.r2_public_base if store is not None else None
+        if settings.bots_enabled and settings.telegram_configured:
+            app.state.telegram_bot = TelegramBot(
+                secret=settings.telegram_webhook_secret.get_secret_value().strip(),
+                client=TelegramClient(settings.telegram_bot_token.get_secret_value().strip()), repo=bot_repo,
+                moderation=moderation_repo, nonces=app.state.security.nonces, limiter=app.state.auth.repo,
+                recipients=settings.bot_recipients, frontend_url=settings.frontend_url, public_base=public_base)
+        if settings.bots_enabled and settings.discord_configured:
+            app.state.discord_bot = DiscordBot(public_key=settings.discord_public_key.strip(), repo=bot_repo,
+                                               moderation=moderation_repo, nonces=app.state.security.nonces)
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
@@ -119,6 +136,10 @@ async def lifespan(app: FastAPI):
     log.info("realtime", extra={"realtime_enabled": settings.realtime_enabled,
                                 "pusher_groups": settings.pusher_groups_configured,
                                 "pusher_invalid": settings.pusher_config_problems()})
+    # Booleans and counts only, never tokens, secrets or recipient ids.
+    log.info("bots", extra={"bots_enabled": settings.bots_enabled, "telegram_configured": settings.telegram_configured,
+                            "discord_configured": settings.discord_configured,
+                            "recipient_allowlist": None if settings.bot_recipients is None else len(settings.bot_recipients)})
     log.info("obs", extra={"audio_queue_window_hours": 24, "vaani_creators": len(settings.vaani_slugs)})
     try:
         yield
@@ -189,6 +210,7 @@ def create_app() -> FastAPI:
     app.include_router(obs.obs_router)
     app.include_router(obs.dashboard_router)
     app.include_router(obs.player_router)
+    app.include_router(bots.router)
     app.include_router(dashboard.me_router)
     app.include_router(soundboard.soundboard_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.

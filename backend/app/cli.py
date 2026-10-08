@@ -12,6 +12,11 @@ daily from deploy/systemd/hyperchat-cleanup.timer.
 
 enqueue-donation-audio <donation id> queues one donation's audio job for the worker (manual/controlled cases;
 historical donations are never enqueued automatically).
+
+bots-set-telegram-webhook --url URL --expect-bot USERNAME and bots-set-discord-endpoint --url URL
+--expect-application-id ID register this environment's bot webhooks (Phase 11). Both refuse unless the bot behind
+the configured token is exactly the one named (so the legacy production bot / application can never be re-pointed
+by mistake, D14) and the URL is this API's https webhook path. Tokens and secrets are never printed.
 """
 
 import argparse
@@ -24,6 +29,7 @@ from contextlib import asynccontextmanager
 import psycopg
 
 from app.admin.repository import AdminRepository, BootstrapRefused
+from app.bots.clients import DiscordClient, TelegramClient
 from app.auth.passwords import hash_password, validate_new_password
 from app.core.config import Settings
 from app.core.logging import configure_logging
@@ -96,6 +102,48 @@ async def enqueue_donation_audio(settings: Settings, donation_id: str) -> int:
     return 0
 
 
+def _webhook_url(url: str, path: str) -> bool:
+    return url.startswith("https://") and url.endswith(path) and "?" not in url and "#" not in url
+
+
+async def set_telegram_webhook(settings: Settings, url: str, expect_bot: str) -> int:
+    if not settings.telegram_configured:
+        print("HYPERCHAT_TELEGRAM_BOT_TOKEN and HYPERCHAT_TELEGRAM_WEBHOOK_SECRET must be set.", file=sys.stderr)
+        return 2
+    if not _webhook_url(url, "/api/v1/webhooks/telegram"):
+        print("The URL must be https://<api host>/api/v1/webhooks/telegram.", file=sys.stderr)
+        return 2
+    client = TelegramClient(settings.telegram_bot_token.get_secret_value().strip())
+    me = await client.get_me()
+    username = str((me or {}).get("username") or "")
+    if username.lower() != expect_bot.lstrip("@").lower():
+        print(f"Refusing: the configured token belongs to @{username}, not @{expect_bot.lstrip('@')}.", file=sys.stderr)
+        return 1
+    await client.set_webhook(url, settings.telegram_webhook_secret.get_secret_value().strip())
+    security_event("bot_webhook_registered", level=20, reason="telegram")
+    print(f"Telegram webhook of @{username} set to {url} (with its secret token).")
+    return 0
+
+
+async def set_discord_endpoint(settings: Settings, url: str, expect_application_id: str) -> int:
+    if not settings.discord_configured:
+        print("HYPERCHAT_DISCORD_BOT_TOKEN and HYPERCHAT_DISCORD_PUBLIC_KEY must be set.", file=sys.stderr)
+        return 2
+    if not _webhook_url(url, "/api/v1/webhooks/discord"):
+        print("The URL must be https://<api host>/api/v1/webhooks/discord.", file=sys.stderr)
+        return 2
+    client = DiscordClient(settings.discord_bot_token.get_secret_value().strip())
+    app_id = str((await client.get_application()).get("id") or "")
+    if app_id != expect_application_id.strip():
+        print(f"Refusing: the configured token belongs to application {app_id}, not {expect_application_id}.",
+              file=sys.stderr)
+        return 1
+    await client.set_interactions_endpoint(url)
+    security_event("bot_webhook_registered", level=20, reason="discord")
+    print(f"Discord interactions endpoint of application {app_id} set to {url}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--env-file", help="read HYPERCHAT_* settings from this file (e.g. /etc/hyperchat/api.env)")
@@ -107,12 +155,22 @@ def main(argv: list[str] | None = None) -> int:
     clean.add_argument("--dry-run", action="store_true", help="only count what would be deleted")
     audio = sub.add_parser("enqueue-donation-audio", help="queue the audio job of one donation (manual cases)")
     audio.add_argument("donation_id")
+    tg = sub.add_parser("bots-set-telegram-webhook", help="register this environment's Telegram bot webhook")
+    tg.add_argument("--url", required=True)
+    tg.add_argument("--expect-bot", required=True, help="username of the bot the configured token must belong to")
+    dc = sub.add_parser("bots-set-discord-endpoint", help="register this environment's Discord interactions URL")
+    dc.add_argument("--url", required=True)
+    dc.add_argument("--expect-application-id", required=True)
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
     # Same JSON-lines logging as the API, so audit events (maintenance_cleanup, admin_bootstrapped)
     # reach stdout -> journald when run from systemd.
     configure_logging(settings.log_level)
+    if args.command == "bots-set-telegram-webhook":
+        return asyncio.run(set_telegram_webhook(settings, args.url, args.expect_bot))
+    if args.command == "bots-set-discord-endpoint":
+        return asyncio.run(set_discord_endpoint(settings, args.url, args.expect_application_id))
     if not settings.db_enabled:
         print("Database is disabled by configuration.", file=sys.stderr)
         return 2

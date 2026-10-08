@@ -82,6 +82,18 @@ def _seed() -> dict[str, list[str]]:
             conn.execute("INSERT INTO public.realtime_outbox (streamer_id, channel, event, status, last_error, "
                          "created_at) VALUES (%s, 'settings', 'settings-updated', %s, %s, "
                          "now() - make_interval(days => %s))", (sid, status, f"authtest-o-{status}", age))
+        # Phase 11: bot buttons a week after they expired, delivery records after 30 days.
+        did = conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, amount_inr) "
+                           "VALUES (%s, 'authtest-cleanup-bot', 'D', 1, 1) RETURNING id", (sid,)).fetchone()[0]
+        for table, short_id, days in (("telegram_callback_mapping", "authtest-cb-old", 8),
+                                      ("telegram_callback_mapping", "authtest-cb-new", 1),
+                                      ("discord_callback_mapping", "authtest-dcb-old", 8)):
+            conn.execute(f"INSERT INTO public.{table} (short_id, donation_id, streamer_id, action_type, expires_at) "
+                         "VALUES (%s, %s, %s, 'approve', now() - make_interval(days => %s))", (short_id, did, sid, days))
+        for target, days in (("authtest-n-old", 31), ("authtest-n-new", 2)):
+            conn.execute("INSERT INTO public.moderator_notifications (donation_id, streamer_id, platform, target_kind, "
+                         "target_id, created_at) VALUES (%s, %s, 'telegram', 'dm', %s, now() - make_interval(days => %s))",
+                         (did, sid, target, days))
     return {"sessions": sessions, "resets": resets, "nonces": nonces, "limits": limits, "invites": invites}
 
 
@@ -98,6 +110,9 @@ def _left() -> dict[str, set[str]]:
             "audit": q("SELECT supporter_identity_hash FROM public.tts_moderation_audit "
                        "WHERE supporter_identity_hash LIKE 'authtest-a%'"),
             "outbox": q("SELECT last_error FROM public.realtime_outbox WHERE last_error LIKE 'authtest-o-%'"),
+            "callbacks": q("SELECT short_id FROM public.telegram_callback_mapping WHERE short_id LIKE 'authtest-%' "
+                           "UNION ALL SELECT short_id FROM public.discord_callback_mapping WHERE short_id LIKE 'authtest-%'"),
+            "notifications": q("SELECT target_id FROM public.moderator_notifications WHERE target_id LIKE 'authtest-%'"),
         }
 
 
@@ -107,7 +122,8 @@ def test_cleanup_dry_run_then_delete_only_expired(strict_scratch_db, env):
     _seed()
     counts = asyncio.run(cleanup(factory, dry_run=True))
     assert counts == {"sessions": 2, "password_reset_tokens": 1, "request_nonces": 1, "rate_limits": 1,
-                      "user_invites": 2, "jobs": 2, "tts_moderation_audit": 1, "realtime_outbox": 2}
+                      "user_invites": 2, "jobs": 2, "tts_moderation_audit": 1, "telegram_callback_mapping": 1,
+                      "discord_callback_mapping": 1, "moderator_notifications": 1, "realtime_outbox": 2}
     assert len(_left()["sessions"]) == 4  # dry run deleted nothing
     assert asyncio.run(cleanup(factory, dry_run=False)) == counts
     assert _left() == {
@@ -115,6 +131,7 @@ def test_cleanup_dry_run_then_delete_only_expired(strict_scratch_db, env):
         "limits": {"auth:cleanup-new"}, "invites": {"authtest-i3", "authtest-i4"},
         "jobs": {"authtest-j3", "authtest-j4"}, "audit": {"authtest-a2"},
         "outbox": {"authtest-o-failed", "authtest-o-pending"},
+        "callbacks": {"authtest-cb-new"}, "notifications": {"authtest-n-new"},
     }
     assert set(asyncio.run(cleanup(factory, dry_run=True)).values()) == {0}
 

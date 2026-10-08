@@ -24,7 +24,7 @@ EXPECTED_TABLES = {
     "partner_signups", "donations", "order_lookup", "moderation_actions", "telegram_callback_mapping",
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
-    "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox",
+    "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
 }
 
 
@@ -282,6 +282,63 @@ def test_0013_obs_audio_events_round_trip(monkeypatch):
     finally:
         command.upgrade(cfg, "head")
         with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
+
+
+def test_0014_moderation_bots_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    assert "moderator_notifications" in _tables()
+    with _owner() as conn:
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-bots'")
+        sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('migtest-bots', 'B') "
+                           "RETURNING id").fetchone()[0]
+        did = conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, amount_inr) "
+                           "VALUES (%s, 'migtest-bots-1', 'D', 1, 1) RETURNING id", (sid,)).fetchone()[0]
+    try:
+        with _owner() as conn:
+            conn.execute("INSERT INTO public.jobs (kind, dedupe_key, max_attempts) VALUES ('moderator_notify', %s, 5)",
+                         (str(did),))
+            conn.execute("INSERT INTO public.moderation_actions (streamer_id, donation_id, action_type, action_source) "
+                         "VALUES (%s, %s, 'approve', 'discord')", (sid, did))
+            ins = ("INSERT INTO public.moderator_notifications (donation_id, streamer_id, platform, target_kind, "
+                   "target_id, status) VALUES (%s, %s, %s, %s, %s, %s)")
+            conn.execute(ins, (did, sid, "telegram", "dm", "123", "pending"))
+            with pytest.raises(psycopg.errors.UniqueViolation):  # one delivery per donation x recipient
+                conn.execute(ins, (did, sid, "telegram", "dm", "123", "pending"))
+            for bad in (("sms", "dm", "1", "pending"), ("telegram", "group", "1", "pending"),
+                        ("telegram", "dm", "", "pending"), ("telegram", "dm", "2", "delivered")):
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    conn.execute(ins, (did, sid, *bad))
+            conn.execute("INSERT INTO public.telegram_callback_mapping (short_id, donation_id, streamer_id, action_type, "
+                         "recipient_id) VALUES ('ABCDEFGHIJKLMNOP', %s, %s, 'approve', '123')", (did, sid))
+            for bad in (("other_kind", "dashboard"), ("donation_audio", "sms")):
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    if bad[1] == "dashboard":
+                        conn.execute("INSERT INTO public.jobs (kind, dedupe_key, max_attempts) VALUES (%s, 'x', 1)",
+                                     (bad[0],))
+                    else:
+                        conn.execute("INSERT INTO public.moderation_actions (streamer_id, donation_id, action_type, "
+                                     "action_source) VALUES (%s, %s, 'approve', %s)", (sid, did, bad[1]))
+        command.downgrade(cfg, "0013")
+        assert "moderator_notifications" not in _tables()
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*) FROM public.jobs WHERE kind = 'moderator_notify'").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM public.moderation_actions WHERE action_source = 'discord'"
+                                ).fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM public.telegram_callback_mapping WHERE donation_id = %s",
+                                (did,)).fetchone()[0] == 0  # 16-character ids cannot go back to varchar(8)
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute("INSERT INTO public.jobs (kind, dedupe_key, max_attempts) VALUES ('moderator_notify', 'y', 5)")
+        command.upgrade(cfg, "head")
+        assert "moderator_notifications" in _tables()
+    finally:
+        command.upgrade(cfg, "head")
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.jobs WHERE dedupe_key = %s", (str(did),))
+            conn.execute("DELETE FROM public.moderation_actions WHERE streamer_id = %s", (sid,))
+            conn.execute("DELETE FROM public.donations WHERE streamer_id = %s", (sid,))
             conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
 
 
