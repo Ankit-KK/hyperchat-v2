@@ -264,7 +264,9 @@ class DashboardRepository:
         """Lift a ban by id, in ONE transaction: every active ban of that donor name for this creator becomes
         inactive (legacy data can hold duplicates; leaving one active would keep the donor banned) and records who
         and when. Takes the same per-creator, per-donor lock as ban_donor, so a ban and an unban of one donor never
-        interleave. Returns (bans deactivated, the ban row), or None when this creator has no such ban."""
+        interleave. Only a ban that is still active acts: a stale id (lifted already, e.g. a retried request or an old
+        page) changes nothing, so it can never lift a NEWER ban of the same donor made since. Returns (bans
+        deactivated, the ban row), or None when this creator has no such ban."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             # No row lock before the per-donor lock: two unbans of different ban ids of one name (legacy duplicates)
             # would otherwise each hold a row the other's UPDATE needs while waiting for the lock (a deadlock). The
@@ -276,6 +278,11 @@ class DashboardRepository:
                 return None
             await cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s::text || lower(%s::text), 0))",
                               (f"hyperchat:ban:{streamer_id}:", ban["donor_name"]))
+            # Every write to this donor's bans holds the lock above, so this read is current.
+            await cur.execute(f"SELECT {_BAN_COLS} FROM public.banned_donors WHERE id = %s", (ban_id,))
+            row = await cur.fetchone()
+            if not row["is_active"]:
+                return 0, row
             await cur.execute("""
                 UPDATE public.banned_donors SET is_active = false, updated_at = now(), unbanned_at = now(),
                     unbanned_by_label = %s, unbanned_by_user_id = %s

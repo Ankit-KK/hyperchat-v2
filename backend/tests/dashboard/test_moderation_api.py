@@ -440,8 +440,15 @@ def test_unban_lifts_every_active_ban_of_the_name_records_who_and_is_idempotent(
     assert (again["result"], again["bans_lifted"]) == ("unchanged", 0)
     # the donor can be banned again afterwards (a new, active ban row)
     assert _moderate(app, "authtest-unban", did, "ban_donor", headers).json()["result"] == "applied"
+    listed = app.get(f"{S}/authtest-unban/moderation/banned-donors").json()["banned_donors"]
+    assert [b["donor_name"] for b in listed] == ["troll", "Someone Else"]
+    # a STALE unban (the old, already lifted id: a retry or an old page) must not lift the newer ban
+    stale = _unban(app, "authtest-unban", first, headers).json()
+    assert (stale["result"], stale["bans_lifted"], stale["ban"]["ban_id"]) == ("unchanged", 0, first)
     assert [b["donor_name"] for b in app.get(f"{S}/authtest-unban/moderation/banned-donors").json()["banned_donors"]] \
-        == ["troll", "Someone Else"]
+        == ["troll", "Someone Else"] and queue()[did] is True
+    newer = listed[0]["ban_id"]  # lifting the newer ban by its own id works
+    assert _unban(app, "authtest-unban", newer, headers).json()["bans_lifted"] == 1 and queue()[did] is False
 
 
 def test_unban_is_scoped_to_the_creator_and_needs_a_session_and_csrf(app):
