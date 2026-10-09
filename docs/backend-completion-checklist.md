@@ -37,6 +37,8 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | **D9** | **Media access model.** Donor voice messages and media are readable by anyone holding the URL (unguessable key). Accept, or move to signed URLs? | SEC review | Accept for launch (same as legacy), documented as a residual risk. |
 | **D10** | **Leaderboard latest-donations feed.** Approved as dropped in Phase 4 (D2: "top donor only, no latest feed"). Revisit? | OBS-6 | Keep the approved decision unless the new overlay design needs it. |
 | **D11** | **Admin email change** (legacy `admin-update-email`). Needed? | AUTH-9 | Yes, small: admin-only endpoint with session revocation. |
+| **D12** | **Razorpay account for new creators.** Onboarding currently requires the admin to name a *configured* account per creator (no default). Keep that, or default to one account? | CRE-2 | Keep it explicit until D6 settles the second account. |
+| **D13** | **Creator ownership transfer.** Owner assignment only claims an *unclaimed* creator; a claimed creator answers 409. Allow admin transfers (and what happens to the old owner's sessions)? | CRE-2 | Not for launch; transfers stay a manual, reviewed operation. |
 
 ## Capabilities
 
@@ -60,7 +62,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | ID | Capability | Status | Required change → acceptance | Tests | DEV | Blockers | Evidence |
 |---|---|---|---|---|---|---|---|
 | CRE-1 | Creators a user may manage; access check | VERIFIED | – | authz tests | DEV | – | A+D |
-| CRE-2 | **Create / onboard a creator** | MISSING | Admin-only endpoint: validated unique slug, default settings, Razorpay account assignment, optional link to a user/invite; never grants access to another creator; idempotent on retry → PostgreSQL tests incl. slug races and cross-creator isolation | new | DEV with a synthetic `authtest-` creator | – | – |
+| CRE-2 | **Create / onboard a creator** | TESTED | `POST /api/v1/admin/creators` (admin + CSRF): slug 3–64 `[a-z0-9_-]`, lowercased, reserved site paths refused; name; **explicit configured Razorpay account (no default, D12)**; optional `#RRGGBB` colour and legacy-shape `order_prefix`; legacy launch defaults (`docs/ADD_NEW_STREAMER.md` step 3); least-loaded configured Pusher group (legacy rule); unclaimed; `creator_created` event. **Gap found while testing:** an unclaimed creator is admin-only and nothing set `streamers.user_id`, so a new creator could never be handed over → `POST /api/v1/admin/creators/{id}/owner` claims an **unclaimed** creator for an active user (409 when claimed: no transfers, D13), `creator_owner_assigned` event | 7 PostgreSQL tests (+15 validation cases): defaults written exactly, public page works, admin-only until owned then the owner gets access; validation; slug / prefix conflicts; 401/403/CSRF; extra fields (`user_id`, `status`) refused; concurrent same-slug creations → one; owner assignment rules; concurrent assignments → one winner | DEV after deploy approval | D12, D13 (current behaviour is the conservative default) | A (G2, PostgreSQL 17: backend 4,464 / database 46; 5 clean repeats) |
 
 ### Donations and payments
 
@@ -92,7 +94,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | DASH-8 | Voice transcription (Sarvam) | IMPLEMENTED_UNVERIFIED | Live Sarvam call on a synthetic voice message | existing | Sarvam | D8 | A |
 | DASH-9 | **Payout account submit / status** | BLOCKED | Port legacy (submit once, immutable, AES-GCM, status pending/verified) per D2 → tests incl. no decrypted value ever returned | new | DEV with synthetic data | **D2** | – |
 | DASH-10 | Soundboard management | VERIFIED | – | soundboard tests | DEV R2 | – | A+X |
-| DASH-12 | **Moderator permission editing** (D-M7, deferred in Phase 5; missed by the audit) | MISSING | Edit a moderator's role / `can_*` flags (legacy `manage-moderators`); bots read them at click time | new | DEV | – | – |
+| DASH-12 | **Moderator permission editing** (D-M7, deferred in Phase 5; missed by the audit; **new in v2**: legacy never edited them) | TESTED | `PATCH …/moderators/{id}` (owner / linked / admin + CSRF): `role` and the five `can_*` flags the bots check (not `can_manage_mods`, unused); compared with effective values (NULL = default) under the row lock; only changed columns written; removed → 409, other creator → 404; `moderator_permissions_changed` event | 4 PostgreSQL tests (+9 invalid-body cases): NULL legacy rows, only diffs written, effect on `app.bots.permissions.can`, unchanged repeat, scoping/403/CSRF/401, concurrent edits no lost update | DEV after deploy approval | – | A (G2) |
 | DASH-11 | **Soundboard terms acceptance** | BLOCKED | Status + accept endpoints; uploads refused until accepted (legacy) | new | – | D3 | table exists, no endpoint |
 
 ### Audio, OBS, realtime
@@ -153,9 +155,9 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 ## Work groups
 | Group | Scope | Status |
 |---|---|---|
-| G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | done (TESTED; DEV deploy needs approval) |
-| G2 | CRE-2 creator onboarding (admin); DASH-12 moderator permission editing | next |
-| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2, SEC-L3, DOC-1 | planned |
+| G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | merged into `main` (#18, `7b21cad`); TESTED; not deployed (DEV deploy needs approval) |
+| G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | done in #19 (TESTED; not merged yet; DEV deploy needs approval) |
+| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2, SEC-L3, DOC-1 | in #20 (not merged) |
 | G4 | OBS-4 URL mapping + cutover compatibility checklist; PAY-11 | planned |
 | G5+ | Items unblocked by decisions D1–D11 | waiting |
 | SEC | Full backend security audit (`docs/backend-security-audit.md`) after G1–G4 | planned |

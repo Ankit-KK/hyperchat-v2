@@ -81,7 +81,9 @@ async def lifespan(app: FastAPI):
     if app.state.db.enabled:
         app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection))
         app.state.authz = AuthzRepository(app.state.db.connection)
-        app.state.admin = AdminService(AdminRepository(app.state.db.connection))
+        app.state.admin = AdminService(AdminRepository(app.state.db.connection),
+                                       payment_accounts=frozenset(payment_accounts.summary()["payments"]),
+                                       pusher_groups=tuple(settings.pusher_groups_configured))
         conn = app.state.db.connection
         app.state.public = PublicService(PublicRepository(conn))
         app.state.dashboard = DashboardService(DashboardRepository(conn))

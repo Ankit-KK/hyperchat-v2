@@ -1,9 +1,10 @@
-"""SQL for user / invite administration (runs as hyperchat_app; DML only)."""
+"""SQL for user / invite / creator administration (runs as hyperchat_app; DML only)."""
 
 from datetime import datetime
 
 from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 _ADMIN_USER_COLS = """id::text, email::text, username, role, streamer_id::text, is_active,
     password_hash IS NOT NULL AS has_password, (locked_until IS NOT NULL AND locked_until > now()) AS locked,
@@ -29,6 +30,31 @@ class UnknownStreamerError(Exception):
     """users.streamer_id must reference an existing creator."""
 
 
+class CreatorConflict(Exception):
+    """The slug or the order prefix is already used by another creator."""
+
+    def __init__(self, field: str) -> None:
+        super().__init__(field)
+        self.field = field  # "slug" | "order_prefix"
+
+
+# The legacy launch defaults for a new creator (legacy docs/ADD_NEW_STREAMER.md, step 3 "Recommended: one insert
+# with every launch default"). Written explicitly: some column defaults differ (e.g. telegram_moderation_enabled
+# defaults to true in the schema, false at launch).
+LAUNCH_DEFAULTS = {
+    "status": "active", "moderation_mode": "auto_approve", "tts_enabled": True,
+    "telegram_moderation_enabled": False, "discord_moderation_enabled": False, "leaderboard_widget_enabled": True,
+    "hyperemotes_enabled": True, "media_upload_enabled": True, "media_moderation_enabled": False,
+    "min_text_amount_inr": 40, "min_tts_amount_inr": 40, "min_voice_amount_inr": 150,
+    "min_hypersound_amount_inr": 30, "media_min_amount": 100, "media_max_file_size_mb": 10,
+    "message_char_tiers": [{"min_amount": 40, "max_chars": 200}, {"min_amount": 100, "max_chars": 300},
+                           {"min_amount": 500, "max_chars": 500}],
+    "goal_is_active": False,
+}
+_CREATOR_COLS = """id::text, streamer_slug AS slug, streamer_name AS name, status, razorpay_account, pusher_group,
+    order_prefix, brand_color, moderation_mode, user_id IS NOT NULL AS claimed, created_at"""
+
+
 class BootstrapRefused(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -42,6 +68,56 @@ def _like(term: str) -> str:
 class AdminRepository:
     def __init__(self, connection_factory) -> None:
         self._conn = connection_factory
+
+    # ── creators ───────────────────────────────────────────────────────────
+    async def create_creator(self, fields: dict, pusher_groups: tuple[int, ...]) -> dict:
+        """Insert a new, unclaimed creator with the legacy launch defaults, in one transaction. The Pusher group is
+        the least-loaded configured group (legacy rule; ties -> the lowest), 1 when none is configured. Raises
+        CreatorConflict when the slug or the order prefix is taken (the unique constraints decide, so two
+        concurrent creations of one slug can never both succeed)."""
+        row = {**LAUNCH_DEFAULTS, **fields}
+        row["message_char_tiers"] = Jsonb(row["message_char_tiers"])
+        try:
+            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                group = 1
+                if pusher_groups:
+                    await cur.execute("""
+                        SELECT g FROM unnest(%s::int[]) AS g
+                        ORDER BY (SELECT count(*) FROM public.streamers s WHERE s.pusher_group = g), g LIMIT 1
+                    """, (list(pusher_groups),))
+                    group = (await cur.fetchone())["g"]
+                row["pusher_group"] = group
+                cols = ", ".join(row)
+                await cur.execute(f"INSERT INTO public.streamers ({cols}) VALUES "
+                                  f"({', '.join(f'%({c})s' for c in row)}) RETURNING {_CREATOR_COLS}", row)
+                return await cur.fetchone()
+        except pg_errors.UniqueViolation as exc:
+            name = exc.diag.constraint_name or ""
+            if "order_prefix" in name:
+                raise CreatorConflict("order_prefix") from None
+            if "slug" in name:
+                raise CreatorConflict("slug") from None
+            raise
+
+    async def assign_owner(self, streamer_id: str, user_id: str) -> tuple[str, dict | None]:
+        """Make an existing, active user the owner of an UNCLAIMED creator (streamers.user_id, which the access
+        rules require: an unclaimed creator is admin-only). Never replaces an owner. One transaction with the creator
+        row locked, so two concurrent assignments cannot both win. Returns ("ok" | "not_found" | "claimed" |
+        "bad_user", the creator row)."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT user_id FROM public.streamers WHERE id = %s FOR UPDATE", (streamer_id,))
+            current = await cur.fetchone()
+            if current is None:
+                return "not_found", None
+            if current["user_id"] is not None:
+                await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
+                return "claimed", await cur.fetchone()
+            await cur.execute("SELECT 1 FROM public.users WHERE id = %s AND is_active", (user_id,))
+            if await cur.fetchone() is None:
+                return "bad_user", None
+            await cur.execute(f"UPDATE public.streamers SET user_id = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
+                              (user_id, streamer_id))
+            return "ok", await cur.fetchone()
 
     # ── users ──────────────────────────────────────────────────────────────
     async def list_users(self, *, query: str | None, role: str | None, active: bool | None,

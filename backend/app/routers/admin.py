@@ -1,12 +1,12 @@
-"""/api/v1/admin — user and invite administration (admins only; CSRF on every change).
+"""/api/v1/admin — user, invite and creator administration (admins only; CSRF on every change).
 
-Invites are still created with POST /api/v1/auth/invites.
+Invites are still created with POST /api/v1/auth/invites (with streamer_id to give the invitee a new creator).
 """
 
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from app.admin.service import AdminService
 from app.auth.dependencies import CurrentUser, require_admin
@@ -20,6 +20,20 @@ class UserPatch(BaseModel):
     role: Literal["streamer", "admin", "user"] | None = None
     is_active: bool | None = None
     streamer_id: str | None = None  # explicit null unlinks the account from its creator
+
+
+class CreatorCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # never user_id, status or other columns: those are not settable here
+    slug: StrictStr = Field(max_length=64)
+    name: StrictStr = Field(max_length=200)
+    razorpay_account: Literal["primary", "secondary"]  # required: no default account for new creators (D12)
+    brand_color: StrictStr | None = Field(default=None, max_length=7)
+    order_prefix: StrictStr | None = Field(default=None, max_length=14)
+
+
+class OwnerAssign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: StrictStr = Field(max_length=64)
 
 
 def admin_service(request: Request) -> AdminService:
@@ -51,6 +65,17 @@ async def update_user(user_id: str, body: UserPatch, request: Request,
 @router.post("/users/{user_id}/sessions/revoke")
 async def revoke_user_sessions(user_id: str, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
     return await admin_service(request).revoke_sessions(current.user, user_id)
+
+
+@router.post("/creators", status_code=201)
+async def create_creator(body: CreatorCreate, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
+    return await admin_service(request).create_creator(current.user, body.model_dump())
+
+
+@router.post("/creators/{streamer_id}/owner")
+async def assign_creator_owner(streamer_id: str, body: OwnerAssign, request: Request,
+                               current: CurrentUser = Depends(require_admin)) -> dict:
+    return await admin_service(request).assign_creator_owner(current.user, streamer_id, body.user_id)
 
 
 @router.get("/invites")
