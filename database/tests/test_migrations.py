@@ -385,6 +385,49 @@ def test_0015_bot_audit_repeats_round_trip(monkeypatch):
             conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
 
 
+def test_0016_banned_donor_unban_round_trip(monkeypatch):
+    """0016 adds the nullable unban audit columns to banned_donors (existing rows keep NULL); downgrade drops them."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    cols = ("unbanned_at", "unbanned_by_label", "unbanned_by_user_id")
+
+    def present():
+        with _owner() as conn:
+            return {r[0] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE "
+                                               "table_name = 'banned_donors' AND column_name = ANY(%s)", (list(cols),))}
+
+    assert present() == set(cols)
+    with _owner() as conn:
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-unban'")
+        sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('migtest-unban', 'U') "
+                           "RETURNING id").fetchone()[0]
+        uid = conn.execute("INSERT INTO public.users (email) VALUES ('migtest-unban@authtest.invalid') "
+                           "RETURNING id").fetchone()[0]
+    try:
+        with _owner() as conn:
+            ban = conn.execute("INSERT INTO public.banned_donors (streamer_id, donor_name, is_active, unbanned_at, "
+                               "unbanned_by_label, unbanned_by_user_id) VALUES (%s, 'D', false, now(), 'L', %s) "
+                               "RETURNING id", (sid, uid)).fetchone()[0]
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute("INSERT INTO public.banned_donors (streamer_id, donor_name, unbanned_by_label) "
+                             "VALUES (%s, 'E', %s)", (sid, "x" * 101))
+            conn.execute("DELETE FROM public.users WHERE id = %s", (uid,))  # ON DELETE SET NULL keeps the history
+            assert conn.execute("SELECT unbanned_by_user_id, unbanned_by_label FROM public.banned_donors "
+                                "WHERE id = %s", (ban,)).fetchone() == (None, "L")
+        command.downgrade(cfg, "0015")
+        assert present() == set()
+        with _owner() as conn:  # the ban row itself survives the downgrade
+            assert conn.execute("SELECT count(*) FROM public.banned_donors WHERE id = %s", (ban,)).fetchone()[0] == 1
+        command.upgrade(cfg, "head")
+        assert present() == set(cols)
+    finally:
+        command.upgrade(cfg, "head")
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.users WHERE email = 'migtest-unban@authtest.invalid'")
+            conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
+
+
 def test_no_supabase_artifacts():
     with psycopg.connect(_libpq(DSN)) as conn:
         roles = {r[0] for r in conn.execute("SELECT rolname FROM pg_roles WHERE rolname IN "
