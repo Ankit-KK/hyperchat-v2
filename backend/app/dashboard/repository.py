@@ -58,6 +58,9 @@ _QUEUE_COLS = _DONATION_COLS + """, d.approved_at, d.approved_by_label,
             AND b.donor_name_lower = lower(d.donor_name)) AS is_donor_banned"""
 
 
+_BAN_COLS = """id::text AS ban_id, donor_name, banned_by_name, reason, is_active, created_at, unbanned_at,
+    unbanned_by_label"""
+
 # D-M7: what a creator may change on a moderator (exactly what the bots check at click time, app.bots.permissions).
 MODERATOR_PERMISSIONS = ("role", "can_approve", "can_reject", "can_hide_message", "can_ban", "can_replay")
 
@@ -249,6 +252,48 @@ class DashboardRepository:
         await cur.execute("INSERT INTO public.banned_donors (streamer_id, donor_name, banned_by_moderator_id, "
                           "banned_by_name, reason, is_active) VALUES (%s, %s, NULL, %s, %s, true)",
                           (streamer_id, donor_name, actor_label, notes))
+
+    # ── D-R8 / D-M6 ban list and unban by id ───────────────────────────────
+    async def banned_donors(self, streamer_id: str, limit: int) -> tuple[list[dict], int]:
+        """The creator's active bans, newest first (at most `limit`), and how many there are in total."""
+        rows = await self._all(f"SELECT {_BAN_COLS} FROM public.banned_donors WHERE streamer_id = %s "
+                               "AND is_active = true ORDER BY created_at DESC, id DESC LIMIT %s", (streamer_id, limit))
+        total = await self._one("SELECT count(*) AS n FROM public.banned_donors WHERE streamer_id = %s "
+                                "AND is_active = true", (streamer_id,))
+        return rows, total["n"]
+
+    async def unban(self, streamer_id: str, ban_id: str, *, actor_user_id: str | None,
+                    actor_label: str) -> tuple[int, dict] | None:
+        """Lift a ban by id, in ONE transaction: every active ban of that donor name for this creator becomes
+        inactive (legacy data can hold duplicates; leaving one active would keep the donor banned) and records who
+        and when. Takes the same per-creator, per-donor lock as ban_donor, so a ban and an unban of one donor never
+        interleave. Only a ban that is still active acts: a stale id (lifted already, e.g. a retried request or an old
+        page) changes nothing, so it can never lift a NEWER ban of the same donor made since. Returns (bans
+        deactivated, the ban row), or None when this creator has no such ban."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            # No row lock before the per-donor lock: two unbans of different ban ids of one name (legacy duplicates)
+            # would otherwise each hold a row the other's UPDATE needs while waiting for the lock (a deadlock). The
+            # donor name of a ban never changes, so reading it unlocked is safe.
+            await cur.execute("SELECT donor_name FROM public.banned_donors WHERE id = %s AND streamer_id = %s",
+                              (ban_id, streamer_id))
+            ban = await cur.fetchone()
+            if ban is None:
+                return None
+            await cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s::text || lower(%s::text), 0))",
+                              (f"hyperchat:ban:{streamer_id}:", ban["donor_name"]))
+            # Every write to this donor's bans holds the lock above, so this read is current.
+            await cur.execute(f"SELECT {_BAN_COLS} FROM public.banned_donors WHERE id = %s", (ban_id,))
+            row = await cur.fetchone()
+            if not row["is_active"]:
+                return 0, row
+            await cur.execute("""
+                UPDATE public.banned_donors SET is_active = false, updated_at = now(), unbanned_at = now(),
+                    unbanned_by_label = %s, unbanned_by_user_id = %s
+                WHERE streamer_id = %s AND is_active = true AND donor_name_lower = lower(%s)
+            """, (actor_label, actor_user_id, streamer_id, ban["donor_name"]))
+            deactivated = cur.rowcount
+            await cur.execute(f"SELECT {_BAN_COLS} FROM public.banned_donors WHERE id = %s", (ban_id,))
+            return deactivated, await cur.fetchone()
 
     async def _record_action(self, cur, streamer_id: str, donation_id: str, action: str, previous: str, new: str,
                              actor_user_id: str | None, actor_label: str, notes: str | None) -> None:

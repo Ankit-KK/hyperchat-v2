@@ -373,3 +373,129 @@ def test_queue_ban_flags_ignore_inactive_and_other_creators_bans(app):
     flags = {d["donation_id"]: d["is_donor_banned"] for d in
              app.get(f"{S}/authtest-flags/moderation/queue").json()["donations"]}
     assert flags == {banned: True, old: False, elsewhere: False}
+
+
+# ── D-R8 ban list and D-M6 unban by id ──────────────────────────────────────────
+
+BAN_FIELDS = {"ban_id", "donor_name", "banned_by_name", "reason", "is_active", "created_at", "unbanned_at",
+              "unbanned_by_label"}
+
+
+def _insert_ban(sid: str, name: str, *, active: bool = True, at: str = "now()") -> str:
+    with db() as conn:
+        return conn.execute(f"INSERT INTO public.banned_donors (streamer_id, donor_name, banned_by_name, reason, "
+                            f"is_active, created_at) VALUES (%s, %s, 'Old Mod', 'spam', %s, {at}) RETURNING id::text",
+                            (sid, name, active)).fetchone()[0]
+
+
+def _ban_rows(sid: str) -> list[tuple]:
+    with db() as conn:
+        return conn.execute("SELECT donor_name, is_active, unbanned_at IS NOT NULL, unbanned_by_label, "
+                            "unbanned_by_user_id::text FROM public.banned_donors WHERE streamer_id = %s "
+                            "ORDER BY created_at, id", (sid,)).fetchall()
+
+
+def _unban(client, ref, ban_id, headers):
+    return client.post(f"{S}/{ref}/moderation/banned-donors/{ban_id}/unban", headers=headers)
+
+
+def test_banned_list_is_this_creators_active_bans_newest_first(app):
+    sid, headers = owned_creator(app, "authtest-banlist")
+    other = make_streamer("authtest-banlist-other", user_id=make_user("other" + DOMAIN))
+    _insert_ban(sid, "Older", at="now() - interval '2 days'")
+    _insert_ban(sid, "Lifted", active=False)
+    _insert_ban(other, "Elsewhere")
+    spam = make_donation(sid, 10, name="Spammer")
+    assert _moderate(app, "authtest-banlist", spam, "ban_donor", headers, reason="ads").json()["result"] == "applied"
+    r = app.get(f"{S}/authtest-banlist/moderation/banned-donors")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    body = r.json()
+    assert (body["total"], body["truncated"]) == (2, False)
+    assert [(b["donor_name"], b["reason"], b["banned_by_name"], b["is_active"]) for b in body["banned_donors"]] == [
+        ("Spammer", "ads", "Dashboard", True), ("Older", "spam", "Old Mod", True)]
+    assert all(set(b) == BAN_FIELDS for b in body["banned_donors"])
+
+
+def test_unban_lifts_every_active_ban_of_the_name_records_who_and_is_idempotent(app):
+    sid, headers = owned_creator(app, "authtest-unban")
+    owner_id = _user_id("owner" + DOMAIN)
+    first = _insert_ban(sid, "Troll", at="now() - interval '1 day'")
+    _insert_ban(sid, "TROLL")          # a legacy duplicate of the same donor (case-insensitive)
+    _insert_ban(sid, "Someone Else")   # untouched
+    did = make_donation(sid, 10, name="troll")
+    queue = lambda: {d["donation_id"]: d["is_donor_banned"] for d in  # noqa: E731
+                     app.get(f"{S}/authtest-unban/moderation/queue", params={"status": "all"}).json()["donations"]}
+    assert queue()[did] is True
+    r = _unban(app, "authtest-unban", first, headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["result"], body["bans_lifted"]) == ("applied", 2)
+    assert (body["ban"]["ban_id"], body["ban"]["is_active"], body["ban"]["unbanned_by_label"]) == (first, False,
+                                                                                                    "Dashboard")
+    assert body["ban"]["unbanned_at"] is not None
+    assert _ban_rows(sid) == [("Troll", False, True, "Dashboard", owner_id), ("TROLL", False, True, "Dashboard", owner_id),
+                              ("Someone Else", True, False, None, None)]
+    assert queue()[did] is False
+    again = _unban(app, "authtest-unban", first, headers).json()  # already lifted: nothing changes
+    assert (again["result"], again["bans_lifted"]) == ("unchanged", 0)
+    # the donor can be banned again afterwards (a new, active ban row)
+    assert _moderate(app, "authtest-unban", did, "ban_donor", headers).json()["result"] == "applied"
+    listed = app.get(f"{S}/authtest-unban/moderation/banned-donors").json()["banned_donors"]
+    assert [b["donor_name"] for b in listed] == ["troll", "Someone Else"]
+    # a STALE unban (the old, already lifted id: a retry or an old page) must not lift the newer ban
+    stale = _unban(app, "authtest-unban", first, headers).json()
+    assert (stale["result"], stale["bans_lifted"], stale["ban"]["ban_id"]) == ("unchanged", 0, first)
+    assert [b["donor_name"] for b in app.get(f"{S}/authtest-unban/moderation/banned-donors").json()["banned_donors"]] \
+        == ["troll", "Someone Else"] and queue()[did] is True
+    newer = listed[0]["ban_id"]  # lifting the newer ban by its own id works
+    assert _unban(app, "authtest-unban", newer, headers).json()["bans_lifted"] == 1 and queue()[did] is False
+
+
+def test_unban_is_scoped_to_the_creator_and_needs_a_session_and_csrf(app):
+    sid, headers = owned_creator(app, "authtest-unban-mine")
+    other = make_streamer("authtest-unban-theirs", user_id=make_user("other" + DOMAIN))
+    theirs = _insert_ban(other, "Theirs")
+    mine = _insert_ban(sid, "Mine")
+    for ban_id in (theirs, "00000000-0000-4000-8000-000000000000", "not-a-uuid"):
+        r = _unban(app, "authtest-unban-mine", ban_id, headers)
+        assert (r.status_code, r.json()) == (404, {"error": "Ban not found"}), ban_id
+    assert _unban(app, "authtest-unban-theirs", theirs, headers).status_code == 403  # their creator: not mine
+    assert app.get(f"{S}/authtest-unban-theirs/moderation/banned-donors").status_code == 403
+    assert app.post(f"{S}/authtest-unban-mine/moderation/banned-donors/{mine}/unban",
+                    headers={"origin": headers["origin"]}).status_code == 403  # no CSRF token
+    app.cookies.clear()
+    assert app.get(f"{S}/authtest-unban-mine/moderation/banned-donors").status_code == 401
+    assert _unban(app, "authtest-unban-mine", mine, headers).status_code == 401
+    assert _ban_rows(other) == [("Theirs", True, False, None, None)] and _ban_rows(sid)[0][1] is True
+
+
+def test_concurrent_unbans_lift_once_and_a_racing_ban_is_never_lost(env):
+    sid = make_streamer("authtest-race-unban", user_id=make_user("owner" + DOMAIN))
+    ban = _insert_ban(sid, "Spammer")
+    repo = DashboardRepository(connection_factory(Settings()))
+
+    async def unbans():
+        return await asyncio.gather(*(repo.unban(sid, ban, actor_user_id=None, actor_label="Race") for _ in range(4)))
+    assert sorted(lifted for lifted, _ in asyncio.run(unbans())) == [0, 0, 0, 1]
+
+    # unbans of DIFFERENT ban ids of one donor name (legacy duplicates) at once: no deadlock, both lifted exactly once
+    dup_a, dup_b = _insert_ban(sid, "Dupe"), _insert_ban(sid, "DUPE")
+
+    async def dupes():
+        return await asyncio.gather(*(repo.unban(sid, b, actor_user_id=None, actor_label="Race")
+                                      for b in (dup_a, dup_b, dup_a, dup_b)))
+    assert sorted(lifted for lifted, _ in asyncio.run(dupes())) == [0, 0, 0, 2]
+    assert [r[1] for r in _ban_rows(sid) if r[0].lower() == "dupe"] == [False, False]
+
+    # ban (on a donation) racing an unban of the same donor: they serialise on the per-donor lock, so the outcome
+    # is one of the two serial orders, never a lost or duplicated ban.
+    again = _insert_ban(sid, "Spammer")
+    did = make_donation(sid, 10, name="spammer")
+
+    async def race():
+        return await asyncio.gather(
+            repo.moderate(sid, did, "ban_donor", actor_user_id=None, actor_label="Race", notes=None),
+            repo.unban(sid, again, actor_user_id=None, actor_label="Race"))
+    asyncio.run(race())
+    active = [r for r in _ban_rows(sid) if r[1]]
+    assert len(active) <= 1 and _donation(did)["status"] == "rejected"

@@ -155,9 +155,9 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 ## Work groups
 | Group | Scope | Status |
 |---|---|---|
-| G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | done (TESTED; DEV deploy needs approval) |
-| G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | done (TESTED; DEV deploy needs approval) |
-| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2, SEC-L3, DOC-1 | next |
+| G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | merged into `main` (#18, `7b21cad`); TESTED; not deployed (DEV deploy needs approval) |
+| G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | done in #19 (TESTED; not merged yet; DEV deploy needs approval) |
+| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2, SEC-L3, DOC-1 | in #20 (not merged) |
 | G4 | OBS-4 URL mapping + cutover compatibility checklist; PAY-11 | planned |
 | G5+ | Items unblocked by decisions D1–D11 | waiting |
 | SEC | Full backend security audit (`docs/backend-security-audit.md`) after G1–G4 | planned |
