@@ -342,6 +342,49 @@ def test_0014_moderation_bots_round_trip(monkeypatch):
             conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
 
 
+def test_0015_bot_audit_repeats_round_trip(monkeypatch):
+    """0015 drops the UNIQUE bot audit index: a decision repeated after a reversal gets its own row. The round trip
+    works WITH such rows present (downgrade deliberately does not rebuild the UNIQUE index)."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0003")  # 0015's downgrade keeps the index dropped: rebuild 0004 for a real 0014 schema
+    command.upgrade(cfg, "0014")
+
+    def bot_index():
+        with _owner() as conn:
+            return conn.execute("SELECT indexdef FROM pg_indexes WHERE indexname = 'moderation_actions_unique_bot'"
+                                ).fetchone()
+
+    assert "UNIQUE" in bot_index()[0]
+    command.upgrade(cfg, "head")
+    assert bot_index() is None
+    with _owner() as conn:
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-audit'")
+        sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('migtest-audit', 'A') "
+                           "RETURNING id").fetchone()[0]
+        did = conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, amount_inr) "
+                           "VALUES (%s, 'migtest-audit-1', 'D', 1, 1) RETURNING id", (sid,)).fetchone()[0]
+    try:
+        with _owner() as conn:
+            for _ in range(2):  # reject, (approve), reject again: same donation, action, source and user
+                conn.execute("INSERT INTO public.moderation_actions (streamer_id, donation_id, action_type, "
+                             "action_source, moderator_telegram_id) VALUES (%s, %s, 'reject', 'telegram', '1')",
+                             (sid, did))
+        command.downgrade(cfg, "0014")
+        assert bot_index() is None
+        command.upgrade(cfg, "head")
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*) FROM public.moderation_actions WHERE donation_id = %s",
+                                (did,)).fetchone()[0] == 2
+    finally:
+        command.upgrade(cfg, "head")
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.moderation_actions WHERE streamer_id = %s", (sid,))
+            conn.execute("DELETE FROM public.donations WHERE streamer_id = %s", (sid,))
+            conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
+
+
 def test_no_supabase_artifacts():
     with psycopg.connect(_libpq(DSN)) as conn:
         roles = {r[0] for r in conn.execute("SELECT rolname FROM pg_roles WHERE rolname IN "

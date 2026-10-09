@@ -30,6 +30,7 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0012 | realtime: `realtime_outbox` (transactional outbox published to Pusher by the worker) |
 | 0014 | moderation bots: `jobs.kind` + `moderator_notify`, `moderation_actions` source `discord`, `moderator_notifications`, callback-table columns |
 | 0013 | OBS audio: `realtime_outbox` CHECKs allow the `alerts` channel, `audio-now-playing` and `vaani-celebration` |
+| 0015 | bot audit: drops the UNIQUE `moderation_actions_unique_bot` index so a decision repeated after a reversal is recorded (no data change; downgrade does not rebuild it) |
 
 ## Databases
 | Database | Cluster | Purpose |

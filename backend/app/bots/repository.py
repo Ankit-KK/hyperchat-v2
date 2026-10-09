@@ -17,6 +17,9 @@ CALLBACK_TABLE = {"telegram": "telegram_callback_mapping", "discord": "discord_c
 _ID_ALPHABET = string.ascii_letters + string.digits
 CALLBACK_ID_LENGTH = 16
 NOTIFY_WINDOW_HOURS = 24
+# Creators one Telegram user's commands cover. A safety bound (each creator is at least one message, /pending up to
+# six), far above real use; past it the commands SAY the list was cut (never silently, as the old LIMIT 10 did).
+MAX_ASSIGNMENTS = 50
 _MOD_COLS = """m.id::text AS id, m.streamer_id::text AS streamer_id, m.mod_name, m.telegram_user_id, m.discord_user_id,
     COALESCE(m.role::text, 'moderator') AS role, m.can_approve, m.can_reject, m.can_hide_message, m.can_ban,
     m.is_active, COALESCE(m.total_actions, 0) AS total_actions, m.created_at"""
@@ -129,13 +132,19 @@ class BotRepository:
             ORDER BY m.created_at LIMIT 1
         """, (streamer_id, platform_user_id))
 
-    async def telegram_assignments(self, telegram_user_id: str, *, active_only: bool = True) -> list[dict]:
+    async def telegram_assignments(self, telegram_user_id: str, *, active_only: bool = True,
+                                   slugs: frozenset[str] | None = None) -> list[dict]:
+        """The user's moderator rows (one per creator), by creator name. `slugs` (the non-production creator
+        allowlist) is applied here, BEFORE the bound, so an allow-listed creator is never cut off by others.
+        At most MAX_ASSIGNMENTS + 1 rows: one more than commands show, so they can say the list was cut."""
         active = "AND m.is_active = true" if active_only else ""
+        scope = "AND lower(s.streamer_slug) = ANY(%(slugs)s)" if slugs is not None else ""
         return await self._all(f"""
             SELECT {_MOD_COLS}, {_STREAMER_COLS} FROM public.streamers_moderators m
             JOIN public.streamers s ON s.id = m.streamer_id
-            WHERE m.telegram_user_id = %s {active} ORDER BY s.streamer_name, m.created_at LIMIT 10
-        """, (telegram_user_id,))
+            WHERE m.telegram_user_id = %(uid)s {active} {scope}
+            ORDER BY s.streamer_name, m.created_at LIMIT %(limit)s
+        """, {"uid": telegram_user_id, "slugs": sorted(slugs or ()), "limit": MAX_ASSIGNMENTS + 1})
 
     # ── commands ────────────────────────────────────────────────────────────
     async def pending_donations(self, streamer_id: str, limit: int = 5) -> list[dict]:
