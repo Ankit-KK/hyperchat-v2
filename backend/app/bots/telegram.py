@@ -12,7 +12,8 @@ reports the real result. Legacy callback formats are refused.
 Commands (D10, private chats only, 20 per minute per user): /start, /pending, /recent, /status, /settings across
 every creator the user moderates; /stats shows the pending count and the user's own action count, never revenue.
 
-Outside production nothing is sent to a chat that is not allow-listed (D13). Logs: update kind and reason codes;
+Outside production nothing is sent to a chat that is not allow-listed (D13), and only allow-listed creators
+(HYPERCHAT_BOT_CREATOR_ALLOWLIST) are listed by commands or moderated by buttons. Logs: update kind and reason codes;
 user ids only as short hashes; never update bodies, donor text, the token or the secret.
 """
 
@@ -23,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.bots import format as fmt
 from app.bots.clients import TelegramClient, parse_json
-from app.bots.notify import allowed
+from app.bots.notify import allowed, creator_allowed
 from app.bots.permissions import BOT_ACTIONS, can
 from app.bots.repository import BotRepository
 from app.dashboard.moderation import NotPaid
@@ -49,9 +50,9 @@ def user_hash(user_id: str) -> str:
 class TelegramBot:
     def __init__(self, *, secret: str, client: TelegramClient, repo: BotRepository, moderation: DashboardRepository,
                  nonces: NonceStore, limiter, recipients: frozenset[str] | None, frontend_url: str,
-                 public_base: str | None) -> None:
+                 public_base: str | None, creators: frozenset[str] | None = None) -> None:
         self.secret, self.client, self.repo, self.moderation = secret, client, repo, moderation
-        self.nonces, self.limiter, self.recipients = nonces, limiter, recipients
+        self.nonces, self.limiter, self.recipients, self.creators = nonces, limiter, recipients, creators
         self.frontend_url, self.public_base = frontend_url, public_base
 
     def authentic(self, presented: str | None) -> bool:
@@ -109,6 +110,8 @@ class TelegramBot:
         moderator = await self.repo.moderator_for("telegram", row["streamer_id"], user_id)
         if moderator is None:
             return "not_moderator", "❌ You are not a registered moderator for this streamer"
+        if not creator_allowed(self.creators, moderator["streamer_slug"]):
+            return "creator_not_allowlisted", "❌ Invalid or expired action"
         if not moderator["telegram_enabled"]:
             return "telegram_disabled", "❌ Telegram moderation is disabled"
         action = row["action_type"]
@@ -175,8 +178,11 @@ class TelegramBot:
     async def _unknown(self, chat_id: str, user_id: str) -> None:
         await self._say(chat_id, "❓ Unknown command.\n\n" + HELP.split("<b>Commands:</b>\n", 1)[1])
 
+    def _scoped(self, rows: list[dict]) -> list[dict]:
+        return [m for m in rows if creator_allowed(self.creators, m["streamer_slug"])]
+
     async def _assignments(self, chat_id: str, user_id: str) -> list[dict]:
-        rows = await self.repo.telegram_assignments(user_id)
+        rows = self._scoped(await self.repo.telegram_assignments(user_id))
         if not rows:
             await self._say(chat_id, "❌ You are not registered as a moderator.\n\nContact the streamer to add you.")
         return rows
@@ -224,7 +230,7 @@ class TelegramBot:
                                      f"⏳ Pending: {pending}\n🛡️ Your Actions: {m['total_actions']}")
 
     async def _status(self, chat_id: str, user_id: str) -> None:
-        rows = await self.repo.telegram_assignments(user_id, active_only=False)
+        rows = self._scoped(await self.repo.telegram_assignments(user_id, active_only=False))
         if not rows:
             await self._say(chat_id, "❌ You are not registered as a moderator.\n\nContact the streamer to add you.")
             return
