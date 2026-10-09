@@ -15,6 +15,7 @@ from app.authz.dependencies import StreamerAccess, require_streamer_access
 from app.core.errors import ApiError
 from app.dashboard import csv_export
 from app.dashboard.models import (
+    BannedDonorList,
     DashboardSettings,
     DonationPage,
     DonationStats,
@@ -30,6 +31,7 @@ from app.dashboard.models import (
     TermsAccept,
     TermsAccepted,
     TermsStatus,
+    UnbanResult,
 )
 from app.dashboard.service import DashboardService
 
@@ -108,6 +110,18 @@ async def moderation_queue(request: Request, status: Literal["pending", "approve
                            limit: int = Query(50, ge=1, le=100), cursor: str | None = None,
                            access: StreamerAccess = Depends(require_streamer_access)) -> QueuePage:
     return await _service(request).moderation.queue(access, status=status, limit=limit, cursor=cursor)
+
+
+@dashboard_router.get("/moderation/banned-donors", response_model=BannedDonorList)
+async def banned_donors(request: Request,
+                        access: StreamerAccess = Depends(require_streamer_access)) -> BannedDonorList:
+    return await _service(request).moderation.banned_donors(access)
+
+
+@dashboard_router.post("/moderation/banned-donors/{ban_id}/unban", response_model=UnbanResult)
+async def unban_donor(ban_id: str, request: Request,
+                      access: StreamerAccess = Depends(require_streamer_access)) -> UnbanResult:
+    return await _service(request).moderation.unban(access, ban_id)
 
 
 @dashboard_router.post("/donations/{donation_id}/moderation", response_model=ModerationResult)
