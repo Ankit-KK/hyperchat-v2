@@ -37,6 +37,7 @@ Creator paths are `/api/v1/dashboard/streamers/{streamer}/…`.
 | D-R6 | `GET …/moderators` | 200 `{moderators}` | 401, 403, 404 |
 | D-M3 | `POST …/moderators` | 201 `Moderator` | 409 duplicate, 422 |
 | D-M4 | `DELETE …/moderators/{moderator_id}` | 200 `{result, moderator}` | 404 |
+| D-M7 | `PATCH …/moderators/{moderator_id}` | 200 `{result, changed, moderator}` | 403 CSRF, 404, 409 removed, 422 |
 | D-R7 | `GET /api/v1/me/terms` | 200 `{current_version, accepted, is_admin}` | 401 |
 | D-M5 | `POST /api/v1/me/terms/accept` | 200 `{accepted, current_version}` | 403 CSRF, 409 version, 422 |
 
@@ -156,14 +157,23 @@ Moderators are Telegram/Discord identities used by the bots (Phase 11, [`bots.md
   ids). `mod_name` is trimmed, 1–100 characters; each id is an optional string, trimmed, at most 64
   characters, `""` meaning none; at least one id is required. The caps only bound input (the longest
   stored values are a 24-character name and 10/19-character ids). Existing rows are never
-  re-validated or rewritten. Permissions keep their column defaults (editing them is D-M7, deferred).
+  re-validated or rewritten. New moderators get the column defaults; D-M7 edits them.
 - **Duplicates (409):** an active moderator of the same creator with the same Telegram id
   (`An active moderator with this Telegram ID already exists`, enforced by the existing
   `streamers_moderators_unique_active` index) or Discord id (`… Discord ID …`, checked under a
   per-creator advisory lock; there is no Discord index because existing data already holds a
   duplicate, which stays untouched). Removed moderators do not count.
 - **D-M4:** soft removal (`is_active = false`): `"removed"`, then `"unchanged"` on repeat.
-- Additions and removals are logged (`moderator_added`, `moderator_removed`).
+- **D-M7 permission editing** (new in v2: legacy only ever had the column defaults): body with any of `role`
+  (`owner` / `moderator` / `viewer`), `can_approve`, `can_reject`, `can_hide_message`, `can_ban`, `can_replay`
+  (strict booleans; at least one field, no nulls, nothing else — not `can_manage_mods`, which nothing reads, nor
+  names or ids). Exactly what the bots check at click time (`app.bots.permissions`: owner = all, viewer = none,
+  otherwise the flags), so it takes effect on the moderator's next Telegram / Discord action. Under the row lock
+  the request is compared with the **effective** values (NULL = the column default, as every read does) and only
+  differing columns are written: `"applied"` with `changed`, or `"unchanged"`. A removed moderator is 409; another
+  creator's moderator, an unknown or malformed id is 404. Concurrent edits serialise (no lost update).
+- Additions, removals and permission changes are logged (`moderator_added`, `moderator_removed`,
+  `moderator_permissions_changed` with the changed field names).
 
 ## G5 terms
 The current version is a server constant, `2026-07-03` (legacy `src/config/terms.ts`).
@@ -204,7 +214,7 @@ OBS tokens, order ids (`order_id`, `provider_order_id`), `status_token_hash`, `u
 | Request format | POST with `streamerId`/`action` in the body | REST paths with the creator in the URL |
 
 ## Deferred (not in Phase 5)
-Ban list and unban by id (D-R8/D-M6), moderator permission editing (D-M7), OBS tokens and replay
+Ban list and unban by id (D-R8/D-M6), OBS tokens and replay
 (Phase 10), soundboard (Phase 6), Pusher broadcasts and the live feed (Phase 9), TTS/music/SFX on
 approval (Phase 8), Telegram/Discord moderation and notifications (Phase 11), payouts (Phase 12),
 Sarvam transcription (D14).

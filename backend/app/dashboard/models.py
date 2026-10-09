@@ -206,6 +206,29 @@ class ModeratorCreate(_Model):  # D-M3 body (permissions keep their column defau
         return self
 
 
+class ModeratorPermissionsPatch(_Model):  # D-M7 body: only the fields to change; none may be null
+    role: Literal["owner", "moderator", "viewer"] | None = None
+    can_approve: StrictBool | None = None
+    can_reject: StrictBool | None = None
+    can_hide_message: StrictBool | None = None
+    can_ban: StrictBool | None = None
+    can_replay: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def _not_empty_no_nulls(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one of role, can_approve, can_reject, can_hide_message, can_ban, can_replay")
+        if any(getattr(self, f) is None for f in self.model_fields_set):
+            raise ValueError("fields cannot be null")
+        return self
+
+
+class ModeratorPermissionsResult(_Model):  # D-M7
+    result: Literal["applied", "unchanged"]
+    changed: list[str]
+    moderator: Moderator
+
+
 class ModeratorRemoval(_Model):  # D-M4
     result: Literal["removed", "unchanged"]
     moderator: Moderator

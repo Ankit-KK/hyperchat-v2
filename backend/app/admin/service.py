@@ -1,13 +1,28 @@
 """Admin use-cases. Every rule lives here; the router stays thin."""
 
+import re
 import uuid
 
-from app.admin.repository import AdminRepository, LastAdminError, UnknownStreamerError, iso
+from app.admin.repository import AdminRepository, CreatorConflict, LastAdminError, UnknownStreamerError, iso
 from app.auth.repository import User
 from app.auth.service import AuthError
 from app.security.audit import security_event
 
 ROLES = ("streamer", "admin", "user")
+
+# New creator slugs: lowercase letters, digits, "_" and "-", 3-64 characters, starting with a letter or digit (the
+# platform-wide slug shape, at least 3 long). Reserved: the site's own top-level paths (legacy routes and the
+# planned generic /:slug routing), so a creator page can never shadow one.
+NEW_SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{2,63}")
+RESERVED_SLUGS = frozenset({
+    "about", "account", "admin", "api", "app", "assets", "auth", "blog", "cancellation-refunds", "contact",
+    "dashboard", "docs", "feature-showcase", "health", "help", "invite", "login", "logout", "me", "obs",
+    "privacy-policy", "public", "register", "renew-hyperchat-brand-ambassador", "reset-password",
+    "reset-password-request", "selected-as-hyperchat-brand-ambassador", "settings", "signup", "sitemap", "static",
+    "status", "support", "terms", "terms-and-conditions", "www",
+})
+ORDER_PREFIX = re.compile(r"[a-z0-9]{1,10}_rp_")  # legacy shape ("sx_rp_"); our order ids stay <= 40 characters
+CREATOR_NAME_MAX = 100
 
 
 def _uuid_or_404(value: str, what: str) -> str:
@@ -26,8 +41,66 @@ def public_invite(row: dict) -> dict:
 
 
 class AdminService:
-    def __init__(self, repo: AdminRepository) -> None:
+    def __init__(self, repo: AdminRepository, *, payment_accounts: frozenset[str] = frozenset(),
+                 pusher_groups: tuple[int, ...] = ()) -> None:
         self.repo = repo
+        self.payment_accounts = payment_accounts  # Razorpay account names that can take payments here
+        self.pusher_groups = pusher_groups        # configured Pusher groups
+
+    # ── creators ───────────────────────────────────────────────────────────
+    async def create_creator(self, admin: User, body: dict) -> dict:
+        """Onboard a creator (legacy: a manual SQL insert, docs/ADD_NEW_STREAMER.md step 3). The new creator is
+        unclaimed: only admins can manage it until an invite with its streamer_id is accepted (step 16). The
+        Razorpay account is never defaulted (owner decision D12): the admin names it, and it must be configured."""
+        slug = body["slug"].strip().lower()
+        if not NEW_SLUG.fullmatch(slug):
+            raise AuthError(400, "Slug must be 3-64 characters: a-z, 0-9, '_' or '-', starting with a letter or "
+                                 "digit", "bad_slug")
+        if slug in RESERVED_SLUGS:
+            raise AuthError(400, "This slug is reserved", "reserved_slug")
+        name = " ".join(body["name"].split())
+        if not 1 <= len(name) <= CREATOR_NAME_MAX:
+            raise AuthError(400, f"Name must be 1-{CREATOR_NAME_MAX} characters", "bad_name")
+        account = body["razorpay_account"]
+        if account not in self.payment_accounts:
+            raise AuthError(400, "That Razorpay account is not configured on this server", "account_not_configured")
+        fields = {"streamer_slug": slug, "streamer_name": name, "razorpay_account": account,
+                  "custom_page_path": f"/{slug}"}
+        if body.get("brand_color") is not None:
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", body["brand_color"]):
+                raise AuthError(400, "brand_color must be #RRGGBB", "bad_brand_color")
+            fields["brand_color"] = body["brand_color"].lower()
+        if body.get("order_prefix") is not None:
+            if not ORDER_PREFIX.fullmatch(body["order_prefix"]):
+                raise AuthError(400, "order_prefix must look like 'abc_rp_' (1-10 of a-z/0-9, then _rp_)",
+                                "bad_order_prefix")
+            fields["order_prefix"] = body["order_prefix"]
+        try:
+            row = await self.repo.create_creator(fields, self.pusher_groups)
+        except CreatorConflict as exc:
+            raise AuthError(409, f"That {exc.field.replace('_', ' ')} is already used", f"{exc.field}_taken") from None
+        security_event("creator_created", level=20, user_id=admin.id, streamer_id=row["id"], streamer_slug=slug,
+                       account=account)
+        return {"creator": {**row, "created_at": iso(row["created_at"])}}
+
+    async def assign_creator_owner(self, admin: User, streamer_id: str, user_id: str) -> dict:
+        """Hand an unclaimed creator to its owner (legacy step 16 set streamers.user_id by hand). Ownership is never
+        transferred here: a claimed creator answers 409 (a transfer is an owner policy decision)."""
+        streamer_id = _uuid_or_404(streamer_id, "Creator")
+        try:
+            user_id = str(uuid.UUID(user_id))
+        except (ValueError, AttributeError, TypeError):
+            raise AuthError(400, "Unknown or inactive user", "bad_user") from None
+        result, row = await self.repo.assign_owner(streamer_id, user_id)
+        if result == "not_found":
+            raise AuthError(404, "Creator not found", "creator_not_found")
+        if result == "claimed":
+            raise AuthError(409, "This creator already has an owner", "creator_claimed")
+        if result == "bad_user":
+            raise AuthError(400, "Unknown or inactive user", "bad_user")
+        security_event("creator_owner_assigned", level=20, user_id=admin.id, target_user_id=user_id,
+                       streamer_id=streamer_id)
+        return {"creator": {**row, "created_at": iso(row["created_at"])}}
 
     async def list_users(self, *, query: str | None, role: str | None, active: bool | None,
                          limit: int, offset: int) -> dict:

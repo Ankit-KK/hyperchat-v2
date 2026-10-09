@@ -23,6 +23,8 @@ from app.dashboard.models import (
     Moderator,
     ModeratorCreate,
     ModeratorList,
+    ModeratorPermissionsPatch,
+    ModeratorPermissionsResult,
     ModeratorRemoval,
     QueuePage,
     SettingsPatch,
@@ -128,6 +130,12 @@ async def list_moderators(request: Request,
 async def add_moderator(body: ModeratorCreate, request: Request,
                         access: StreamerAccess = Depends(require_streamer_access)) -> Moderator:
     return await _service(request).add_moderator(access, body)
+
+
+@dashboard_router.patch("/moderators/{moderator_id}", response_model=ModeratorPermissionsResult)
+async def update_moderator(moderator_id: str, body: ModeratorPermissionsPatch, request: Request,
+                           access: StreamerAccess = Depends(require_streamer_access)) -> ModeratorPermissionsResult:
+    return await _service(request).update_moderator(access, moderator_id, body)
 
 
 @dashboard_router.delete("/moderators/{moderator_id}", response_model=ModeratorRemoval)

@@ -58,6 +58,9 @@ _QUEUE_COLS = _DONATION_COLS + """, d.approved_at, d.approved_by_label,
             AND b.donor_name_lower = lower(d.donor_name)) AS is_donor_banned"""
 
 
+# D-M7: what a creator may change on a moderator (exactly what the bots check at click time, app.bots.permissions).
+MODERATOR_PERMISSIONS = ("role", "can_approve", "can_reject", "can_hide_message", "can_ban", "can_replay")
+
 _MODERATOR_COLS = """id::text AS moderator_id, mod_name, telegram_user_id, discord_user_id,
     COALESCE(role::text, 'moderator') AS role, COALESCE(can_approve, true) AS can_approve,
     COALESCE(can_reject, true) AS can_reject, COALESCE(can_hide_message, true) AS can_hide_message,
@@ -308,6 +311,29 @@ class DashboardRepository:
                           f"discord_user_id) VALUES (%s, %s, %s, %s) RETURNING {_MODERATOR_COLS}",
                           (streamer_id, mod_name, telegram_user_id, discord_user_id))
         return await cur.fetchone()
+
+    async def update_moderator(self, streamer_id: str, moderator_id: str,
+                               changes: dict) -> tuple[str, list[str], dict] | None:
+        """D-M7: change an ACTIVE moderator's role / can_* flags, in one transaction under the row lock. Values are
+        compared with the effective ones (NULL = the column default, as every read COALESCEs) and only differing
+        columns are written. Returns ("applied" | "unchanged" | "removed", changed columns, row), or None when this
+        creator has no such moderator. A removed (inactive) moderator is never changed."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(f"SELECT {_MODERATOR_COLS} FROM public.streamers_moderators WHERE id = %s "
+                              "AND streamer_id = %s FOR UPDATE", (moderator_id, streamer_id))
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            if not row["is_active"]:
+                return "removed", [], row
+            changed = [c for c in MODERATOR_PERMISSIONS if c in changes and changes[c] != row[c]]
+            if not changed:
+                return "unchanged", [], row
+            sets = ", ".join(f"{c} = %({c})s" + ("::public.moderator_role" if c == "role" else "") for c in changed)
+            await cur.execute(f"UPDATE public.streamers_moderators SET {sets} "
+                              f"WHERE id = %(id)s AND streamer_id = %(sid)s RETURNING {_MODERATOR_COLS}",
+                              {**{c: changes[c] for c in changed}, "id": moderator_id, "sid": streamer_id})
+            return "applied", changed, await cur.fetchone()
 
     async def remove_moderator(self, streamer_id: str, moderator_id: str) -> tuple[str, dict] | None:
         """Soft removal (is_active = false). ("removed" | "unchanged", row), or None when this creator has
