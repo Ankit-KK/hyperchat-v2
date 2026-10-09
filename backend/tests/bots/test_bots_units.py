@@ -20,7 +20,7 @@ from app.bots.clients import DiscordClient, TelegramClient, verify_discord
 from app.bots.discord import DiscordBot
 from app.bots.notify import ModeratorNotifyHandler
 from app.bots.permissions import can
-from app.bots.repository import Target, new_callback_id
+from app.bots.repository import MAX_ASSIGNMENTS, Target, new_callback_id
 from app.bots.telegram import TelegramBot
 from app.dashboard.moderation import NotPaid, Step
 from app.jobs.queue import Job
@@ -388,6 +388,7 @@ class Moderation:
 class BotRepo:
     def __init__(self, row=None, mod=None, assignments=()):
         self.row, self.mod, self.assignments, self.callbacks = row, mod, list(assignments), []
+        self.assignment_calls = []
 
     async def callback(self, platform, short_id):
         return self.row
@@ -396,8 +397,10 @@ class BotRepo:
         return self.mod if self.mod and (self.mod.get("telegram_user_id") == user_id or
                                          self.mod.get("discord_user_id") == user_id) else None
 
-    async def telegram_assignments(self, user_id, active_only=True):
-        return self.assignments
+    async def telegram_assignments(self, user_id, active_only=True, slugs=None):
+        self.assignment_calls.append((active_only, slugs))
+        rows = [m for m in self.assignments if active_only is False or m["is_active"]]
+        return rows[:MAX_ASSIGNMENTS + 1]  # as the SQL: one row more than the commands show
 
     async def pending_count(self, sid):
         return 3
@@ -496,6 +499,37 @@ def test_commands_only_cover_allowlisted_creators(text):
                        for kw in repo.callbacks)
         if creators == frozenset():
             assert repo.callbacks == [] and all("reply_markup" not in m for m in sent)
+
+
+def many_creators(n):
+    """n creators the user moderates, named so that name order is creator number order."""
+    return [moderator(id=str(uuid.uuid4()), streamer_id=str(uuid.uuid4()), streamer_slug=f"creator-{i:02d}",
+                      streamer_name=f"Creator {i:02d}") for i in range(1, n + 1)]
+
+
+@pytest.mark.parametrize("text, marker", [("/pending", "Pending</b>"), ("/recent", "Recent Donations - "),
+                                          ("/stats", "Stats - "), ("/status", "🎮 <b>"), ("/settings", "Streamer: ")])
+def test_commands_cover_more_than_ten_creators(text, marker):
+    sent, repo = [], BotRepo(assignments=many_creators(11))
+    run(tbot(repo, sent=sent).handle(command(text)))
+    out = "\n".join(m["text"] for m in sent)
+    assert all(f"Creator {i:02d}" in out for i in range(1, 12)), out  # the 11th creator is included
+    assert "more than" not in out
+    assert repo.assignment_calls == [(text != "/status", None)]  # /status also lists inactive assignments
+
+
+def test_commands_say_when_the_creator_list_is_cut():
+    sent = []
+    run(tbot(BotRepo(assignments=many_creators(MAX_ASSIGNMENTS + 5)), sent=sent).handle(command("/stats")))
+    assert f"more than {MAX_ASSIGNMENTS} creators" in sent[0]["text"]
+    stats = [m["text"] for m in sent if "Stats - " in m["text"]]
+    assert len(stats) == MAX_ASSIGNMENTS and f"Creator {MAX_ASSIGNMENTS:02d}" in stats[-1]
+
+
+def test_creator_allowlist_is_passed_to_the_lookup():
+    repo = BotRepo(assignments=many_creators(3))
+    run(tbot(repo, creators=frozenset({"creator-02"})).handle(command("/stats")))
+    assert repo.assignment_calls == [(True, frozenset({"creator-02"}))]
 
 
 def test_telegram_not_paid_and_unchanged():

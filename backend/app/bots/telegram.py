@@ -26,7 +26,7 @@ from app.bots import format as fmt
 from app.bots.clients import TelegramClient, parse_json
 from app.bots.notify import allowed, creator_allowed
 from app.bots.permissions import BOT_ACTIONS, can
-from app.bots.repository import BotRepository
+from app.bots.repository import MAX_ASSIGNMENTS, BotRepository
 from app.dashboard.moderation import NotPaid
 from app.dashboard.repository import BotActor, DashboardRepository
 from app.jobs.retry import JobError
@@ -181,8 +181,19 @@ class TelegramBot:
     def _scoped(self, rows: list[dict]) -> list[dict]:
         return [m for m in rows if creator_allowed(self.creators, m["streamer_slug"])]
 
+    async def _creators(self, chat_id: str, user_id: str, *, active_only: bool = True) -> list[dict]:
+        """Every creator the user moderates (allowlist applied in SQL and again here), by creator name. Past
+        MAX_ASSIGNMENTS the user is told the list was cut: never a silent truncation."""
+        rows = self._scoped(await self.repo.telegram_assignments(user_id, active_only=active_only,
+                                                                 slugs=self.creators))
+        if len(rows) > MAX_ASSIGNMENTS:
+            await self._say(chat_id, f"⚠️ You moderate more than {MAX_ASSIGNMENTS} creators: showing the first "
+                                     f"{MAX_ASSIGNMENTS}. Use the dashboard for the others.")
+            rows = rows[:MAX_ASSIGNMENTS]
+        return rows
+
     async def _assignments(self, chat_id: str, user_id: str) -> list[dict]:
-        rows = self._scoped(await self.repo.telegram_assignments(user_id))
+        rows = await self._creators(chat_id, user_id)
         if not rows:
             await self._say(chat_id, "❌ You are not registered as a moderator.\n\nContact the streamer to add you.")
         return rows
@@ -230,7 +241,7 @@ class TelegramBot:
                                      f"⏳ Pending: {pending}\n🛡️ Your Actions: {m['total_actions']}")
 
     async def _status(self, chat_id: str, user_id: str) -> None:
-        rows = self._scoped(await self.repo.telegram_assignments(user_id, active_only=False))
+        rows = await self._creators(chat_id, user_id, active_only=False)
         if not rows:
             await self._say(chat_id, "❌ You are not registered as a moderator.\n\nContact the streamer to add you.")
             return

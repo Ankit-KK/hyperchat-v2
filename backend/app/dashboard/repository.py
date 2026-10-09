@@ -258,12 +258,14 @@ class DashboardRepository:
     @staticmethod
     async def _record_bot_action(cur, streamer_id: str, donation_id: str, action: str, previous: str, new: str,
                                  bot: BotActor, actor_label: str) -> None:
-        # The unique bot index (donation, action, source, platform user) keeps one audit row per moderator and action.
+        # One audit row per APPLIED action, so a decision repeated after a reversal (reject, approve, reject) is
+        # recorded every time (migration 0015 dropped the unique index that silently swallowed it). Duplicates never
+        # get here: a redelivered webhook is dropped by its update / interaction id nonce, and the same action on a
+        # donation already in that state is "unchanged" (no audit row, no counter).
         await cur.execute("""
             INSERT INTO public.moderation_actions (streamer_id, moderator_id, moderator_telegram_id, moderator_name,
                 donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL)
-            ON CONFLICT DO NOTHING
         """, (streamer_id, bot.moderator_id, bot.platform_user_id, actor_label, donation_id, action, bot.platform,
               previous, new))
         await cur.execute("UPDATE public.streamers_moderators SET last_action_at = now(), "

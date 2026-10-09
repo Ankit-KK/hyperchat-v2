@@ -228,7 +228,9 @@ def keypair():
 
 PRIVATE, PUBLIC = keypair()
 # Outside production the bots only act for these creators (HYPERCHAT_BOT_CREATOR_ALLOWLIST).
-ALLOWED_CREATORS = ("authtest-p11-tg", "authtest-p11-view", "authtest-p11-dc", "authtest-p11-log")
+MANY = [f"authtest-p11-many-{i:02d}" for i in range(1, 13)]  # 11 active assignments + 1 inactive (12)
+ALLOWED_CREATORS = ("authtest-p11-tg", "authtest-p11-view", "authtest-p11-dc", "authtest-p11-log",
+                    "authtest-p11-repeat", "authtest-p11-repeat-dc", "authtest-p11-not-mine", *MANY)
 
 
 @pytest.fixture
@@ -329,6 +331,107 @@ def test_creator_outside_the_allowlist_gets_no_buttons_and_cannot_be_moderated(b
                             (unlisted,)).fetchone()[0] == 0  # /pending minted no button for the unlisted creator
         assert conn.execute("SELECT count(*) FROM public.telegram_callback_mapping WHERE streamer_id = %s",
                             (listed,)).fetchone()[0] > 0
+
+
+def command_update(text, n):
+    return {"update_id": 400000000 + n * 1000 + secrets.randbelow(1000), "message": {
+        "message_id": 1, "text": text, "from": {"id": int(TG_MOD)}, "chat": {"id": int(TG_MOD), "type": "private"}}}
+
+
+def test_commands_cover_every_creator_beyond_ten(bots_app):
+    """The old lookup ended in LIMIT 10: a moderator of 11+ creators never saw the rest. Name order is slug order."""
+    for i, slug in enumerate(MANY, 1):
+        sid = creator(slug, moderation_mode="manual")
+        update_streamer(sid, streamer_name=f"P11 Many {i:02d}")
+        add_moderator(sid, telegram=TG_MOD, is_active=i <= 11)
+        make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
+    other = creator("authtest-p11-not-mine", moderation_mode="manual")  # allow-listed, but not this user's
+    update_streamer(other, streamer_name="P11 Many 00 Not Mine")
+    add_moderator(other, telegram=TG_OTHER)
+    make_donation(other, 100, payment="success", moderation="pending", name="Ravi")
+    repo = BotRepository(factory())
+    assert len(run(repo.telegram_assignments(TG_MOD))) == 11
+    assert len(run(repo.telegram_assignments(TG_MOD, active_only=False))) == 12
+    scoped = run(repo.telegram_assignments(TG_MOD, slugs=frozenset({MANY[10]})))
+    assert [r["streamer_slug"] for r in scoped] == [MANY[10]]
+    for n, (text, template) in enumerate((("/pending", "<b>{} - 1 Pending</b>"),
+                                          ("/recent", "No recent donations for {}."), ("/stats", "Stats - {}</b>"),
+                                          ("/settings", "Streamer: <b>{}</b>"), ("/status", "🎮 <b>{}</b>"))):
+        bots_app.platforms.sent.clear()
+        assert tg_post(bots_app, command_update(text, n)).status_code == 200
+        out = "\n".join(str(b.get("text", "")) for _, path, b, _ in bots_app.platforms.sent)
+        shown = {i for i in range(1, 13) if template.format(f"P11 Many {i:02d}") in out}
+        assert shown == (set(range(1, 13)) if text == "/status" else set(range(1, 12))), (text, shown)  # incl. 11th
+        assert "Not Mine" not in out and "more than" not in out, text
+        if text == "/status":
+            assert out.count("❌ Inactive") == 1
+    with db() as conn:  # /pending minted buttons for all 11 active assignments, none for the other user's creator
+        assert conn.execute("SELECT count(DISTINCT m.streamer_id) FROM public.telegram_callback_mapping m JOIN "
+                            "public.streamers s ON s.id = m.streamer_id WHERE s.streamer_slug LIKE "
+                            "'authtest-p11-many-%%'").fetchone()[0] == 11
+        assert conn.execute("SELECT count(*) FROM public.telegram_callback_mapping WHERE streamer_id = %s",
+                            (other,)).fetchone()[0] == 0
+
+
+def audit(did):
+    with db() as conn:
+        return conn.execute("SELECT action_type, action_source, previous_status, new_status FROM "
+                            "public.moderation_actions WHERE donation_id = %s ORDER BY created_at, id", (did,)).fetchall()
+
+
+def state_and_total(did, mod):
+    with db() as conn:
+        return (conn.execute("SELECT moderation_status FROM public.donations WHERE id = %s", (did,)).fetchone()[0],
+                conn.execute("SELECT total_actions FROM public.streamers_moderators WHERE id = %s",
+                             (mod,)).fetchone()[0])
+
+
+REVERSAL = [("reject", "telegram", "pending", "rejected"), ("approve", "telegram", "rejected", "approved"),
+            ("reject", "telegram", "approved", "rejected")]
+
+
+def test_telegram_repeated_decision_after_reversal_is_audited_and_duplicates_are_not(bots_app):
+    sid = creator("authtest-p11-repeat", moderation_mode="manual")
+    mod = add_moderator(sid, telegram=TG_MOD)
+    did = make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
+    reject = callback(bots_app, "telegram", sid, did, "reject", TG_MOD, mod)
+    approve = callback(bots_app, "telegram", sid, did, "approve", TG_MOD, mod)
+    base = 300000000 + secrets.randbelow(10**7) * 10
+    answers = [tg_post(bots_app, press(base + i, TG_MOD, data)).json()["text"]
+               for i, data in enumerate((reject, approve, reject))]  # the same Reject button, pressed again later
+    assert [a.split(" by ")[0] for a in answers] == ["❌ Rejected", "✅ Approved", "❌ Rejected"]
+    assert audit(did) == REVERSAL and state_and_total(did, mod) == ("rejected", 3)
+    # a redelivered update (same update_id) is dropped before anything runs
+    assert tg_post(bots_app, press(base + 2, TG_MOD, reject)).content == b""
+    # a new press of the same action on a donation already in that state changes nothing: no audit row, no counter
+    assert "No change" in tg_post(bots_app, press(base + 3, TG_MOD, reject)).json()["text"]
+    assert audit(did) == REVERSAL and state_and_total(did, mod) == ("rejected", 3)
+    with db() as conn:  # the approval in between queued its audio job (Phase 8), once
+        assert conn.execute("SELECT count(*) FROM public.jobs WHERE dedupe_key = %s AND kind = 'donation_audio'",
+                            (str(did),)).fetchone()[0] == 1
+
+
+def test_discord_repeated_decision_after_reversal_is_audited_and_duplicates_are_not(bots_app):
+    sid = creator("authtest-p11-repeat-dc", moderation_mode="manual", discord_moderation_enabled=True,
+                  discord_moderation_channel_id=DC_CHANNEL)
+    mod = add_moderator(sid, discord=DC_MOD)
+    did = make_donation(sid, 100, payment="success", moderation="pending")
+    reject = callback(bots_app, "discord", sid, did, "reject", DC_CHANNEL, None)
+    approve = callback(bots_app, "discord", sid, did, "approve", DC_CHANNEL, None)
+
+    def click(custom_id, iid):
+        return discord_post(bots_app, {"type": 3, "id": iid, "channel_id": DC_CHANNEL,
+                                       "member": {"user": {"id": DC_MOD}}, "data": {"custom_id": custom_id}}).json()
+    base = 5 * 10**14 + secrets.randbelow(10**13) * 10
+    replies = [click(data, str(base + i)) for i, data in enumerate((reject, approve, reject))]
+    assert [r["type"] for r in replies] == [7, 7, 7]
+    assert audit(did) == [(a, "discord", p, n) for a, _, p, n in REVERSAL]
+    assert state_and_total(did, mod) == ("rejected", 3)
+    duplicate = click(reject, str(base + 2))  # the same interaction delivered again
+    assert duplicate["type"] == 4 and "Already handled" in duplicate["data"]["content"]
+    again = click(reject, str(base + 3))  # a new click of the same action: unchanged, ephemeral
+    assert again["type"] == 4 and "No change" in again["data"]["content"]
+    assert len(audit(did)) == 3 and state_and_total(did, mod) == ("rejected", 3)
 
 
 def test_telegram_viewer_and_disabled(bots_app):
