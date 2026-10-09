@@ -6,7 +6,7 @@ from collections.abc import Iterable, Iterator
 from datetime import datetime
 from decimal import Decimal
 
-from app.dashboard.validation import IST
+from app.core.timezones import IST
 
 COLUMNS = ("created_at", "donor_name", "amount", "currency", "amount_inr")
 CHUNK_ROWS = 500

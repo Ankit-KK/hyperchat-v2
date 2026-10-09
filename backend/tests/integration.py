@@ -118,6 +118,7 @@ def creator_state(streamer_id: str) -> str:
 def cleanup_synthetic_rows() -> None:
     with db() as conn:
         conn.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+        conn.execute("DELETE FROM public.user_signups WHERE email LIKE %s", ("%" + DOMAIN,))
         conn.execute("DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
                      "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s) "
                      "OR supporter_identity_hash LIKE %s", (SLUG_PREFIX + "%", SLUG_PREFIX + "%"))
@@ -129,7 +130,8 @@ def cleanup_synthetic_rows() -> None:
         conn.execute("DELETE FROM public.donations WHERE streamer_id IN "
                      "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (SLUG_PREFIX + "%",))
-        conn.execute("DELETE FROM public.platform_soundboard_slots WHERE audio_key LIKE %s", (SLUG_PREFIX + "%",))
+        conn.execute("DELETE FROM public.platform_soundboard_slots WHERE audio_key LIKE %s OR audio_key LIKE %s",
+                     (SLUG_PREFIX + "%", "hypersounds/" + SLUG_PREFIX + "%"))
         conn.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions
         conn.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.request_nonces WHERE nonce LIKE %s OR nonce LIKE %s",
@@ -137,7 +139,7 @@ def cleanup_synthetic_rows() -> None:
         conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%' "
                      "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%' OR endpoint LIKE 'payment:%' "
                      "OR endpoint LIKE 'transcription:%' OR endpoint LIKE 'realtime:%' OR endpoint LIKE 'obs:%' "
-                     "OR endpoint LIKE 'bot:%'")
+                     "OR endpoint LIKE 'bot:%' OR endpoint LIKE 'signup:%'")
         # Webhook events of synthetic deliveries (their donations are gone already: donation_id SET NULL).
         conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
 

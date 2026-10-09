@@ -44,4 +44,22 @@ The only donor information is the leaderboard's top display name + total (E5) an
 | Showcase metrics | counted `payment_status = 'completed'` (never true → always 0); `streamersLive` = all creators | successful, approved donations in the last 24 h; `streamers_live` = active creators (D7) |
 | Profile images / tagline | static frontend assets + hard-coded tagline per page | `brand_logo_url` / `background_url` from the database; no tagline (D8) |
 | `custom_page_path` | used by hand-written pages | never exposed (D9) |
-| Reviews, signups, Discord link | public table reads / browser inserts / config function | not part of Phase 4 (D10) |
+| Reviews, signups, Discord link | public table reads / browser inserts / config function | not part of Phase 4 (D10); signups added in backend completion G3 (below) |
+
+## Signup interest form (backend completion G3)
+
+`POST /api/v1/public/signups` replaces the legacy signup dialog's direct browser insert into `user_signups`.
+No cookies; the request must come from a trusted frontend `Origin` (403 otherwise, checked before the body),
+and each IP may submit 5 times per hour (`rate_limits`, bucket `signup:create`; 429 after that).
+
+Body (JSON, no other fields): `name` (1–100), `email` (5–255, legacy pattern), `mobile_number` (8–20: digits,
+spaces, `+ - ( )`), optional `youtube_channel` (≤ 500) and `instagram_handle` (≤ 100). Values are trimmed, the
+email is lowercased, control characters are refused, and an empty optional field is stored as NULL. Invalid
+bodies answer 422.
+
+Response: `201 {"status": "received"}` with `Cache-Control: no-store`, **also for an email that already signed
+up** (in any letter case): nothing is stored or overwritten, and the answer does not reveal whether the address
+was known (legacy said "This email is already registered"; decision D14 in
+[`backend-completion-checklist.md`](backend-completion-checklist.md)). A database failure answers
+`503 {"error": "Signups are unavailable right now. Please try again later."}`. No email is sent; the security
+log records rejections and failures by reason and IP, never the submitted values.

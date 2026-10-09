@@ -23,7 +23,12 @@ from app.security.obs_token import (
 )
 from app.security.request_signing import sign_request, verify_hmac_request
 from app.security.shared_secret import ERR_PARTNER_KEY, PartnerKey, verify_partner_api_key, verify_shared_secret
-from app.security.upload_grant import UploadGrantNotConfigured, issue_upload_grant, verify_and_consume_upload_grant
+from app.security.upload_grant import (
+    UploadGrantNotConfigured,
+    consume_upload_grant,
+    issue_upload_grant,
+    verify_upload_grant,
+)
 
 KEY = "TEST-ONLY-hmac-key"
 GRANT_SECRET = "TEST-ONLY-grant-secret"
@@ -89,35 +94,38 @@ async def test_unconfigured_key_and_store_failure_fail_closed():
 
 @pytest.mark.anyio
 async def test_upload_grant_single_use_and_bound_to_creator():
-    grant, expires_at = issue_upload_grant(GRANT_SECRET, "creator-a", now_ms=NOW)
-    assert expires_at.endswith("Z") and grant.startswith("creator-a.")
+    grant, expires_at = issue_upload_grant(GRANT_SECRET, "creator-a", kind="voice", now_ms=NOW)
+    assert expires_at.endswith("Z") and grant.startswith("creator-a.voice.")
     store = InMemoryNonceStore()
-    assert (await verify_and_consume_upload_grant(GRANT_SECRET, store, grant, "creator-b", now_ms=NOW)).error \
-        == "Upload grant does not match this creator"
-    assert (await verify_and_consume_upload_grant(GRANT_SECRET, store, grant, "creator-a", now_ms=NOW)).ok
-    again = await verify_and_consume_upload_grant(GRANT_SECRET, store, grant, "creator-a", now_ms=NOW)
-    assert again.error == "Upload grant already used"
+    assert (await _use(store, grant, "creator-b", NOW)).error == "Upload grant does not match this creator"
+    assert (await _use(store, grant, "creator-a", NOW)).ok
+    assert (await _use(store, grant, "creator-a", NOW)).error == "Upload grant already used"
 
 
 @pytest.mark.anyio
 async def test_upload_grant_expiry_tamper_and_malformed():
-    grant, _ = issue_upload_grant(GRANT_SECRET, "creator-a", now_ms=NOW)
+    grant, _ = issue_upload_grant(GRANT_SECRET, "creator-a", kind="voice", now_ms=NOW)
     store = InMemoryNonceStore()
-    late = await verify_and_consume_upload_grant(GRANT_SECRET, store, grant, "creator-a", now_ms=NOW + 10 * 60 * 1000 + 1)
-    assert late.error == "Upload grant expired"
-    slug, expiry, nonce, sig = grant.split(".")
-    forged = f"{slug}.{int(expiry) + 60_000}.{nonce}.{sig}"
-    assert (await verify_and_consume_upload_grant(GRANT_SECRET, store, forged, "creator-a", now_ms=NOW)).error \
-        == "Invalid upload grant"
-    assert (await verify_and_consume_upload_grant("TEST-ONLY-other", store, grant, "creator-a", now_ms=NOW)).error \
-        == "Invalid upload grant"
-    for bad in ("", None, "a.b.c", f"{slug}.12x.{nonce}.{sig}", f"{slug}.-5.{nonce}.{sig}"):
-        assert not (await verify_and_consume_upload_grant(GRANT_SECRET, store, bad, "creator-a", now_ms=NOW)).ok
+    assert (await _use(store, grant, "creator-a", NOW + 10 * 60 * 1000 + 1)).error == "Upload grant expired"
+    slug, kind, expiry, nonce, sig = grant.split(".")
+    forged = f"{slug}.{kind}.{int(expiry) + 60_000}.{nonce}.{sig}"
+    assert (await _use(store, forged, "creator-a", NOW)).error == "Invalid upload grant"
+    assert (await _use(store, grant, "creator-a", NOW, secret="TEST-ONLY-other")).error == "Invalid upload grant"
+    for bad in ("", None, "a.b.c", f"{slug}.{kind}.12x.{nonce}.{sig}", f"{slug}.{kind}.-5.{nonce}.{sig}",
+                f"{slug}.{expiry}.{nonce}.{sig}"):  # the last one: the legacy untyped shape
+        assert not (await _use(store, bad, "creator-a", NOW)).ok
+    assert (await _use(store, grant, "creator-a", NOW)).ok  # none of the refusals burned the real grant
+
+
+async def _use(store, grant, slug, now_ms, secret=GRANT_SECRET):
+    """Verify, then burn: what the upload API does (app.uploads.service)."""
+    check = verify_upload_grant(secret, grant, slug, kind="voice", now_ms=now_ms)
+    return await consume_upload_grant(store, check) if check.ok else check
 
 
 def test_upload_grant_requires_secret():
     with pytest.raises(UploadGrantNotConfigured):
-        issue_upload_grant(None, "creator-a")
+        issue_upload_grant(None, "creator-a", kind="voice")
 
 
 # ── OBS tokens ──────────────────────────────────────────────────────────────────

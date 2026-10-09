@@ -101,7 +101,10 @@ Phases 0–15 are defined in [`migration-audit.md`](migration-audit.md), section
 Done: 0 (decisions), 1 (platform: clusters, roles, Alembic schema, ETL rehearsal, backups),
 2 (FastAPI-managed authentication), 3 (authorization, admin tooling, database-backed security
 primitives, explicit origins, cleanup, CI), 4 (public read API), 5 (creator dashboard API,
-migration 0009) — all running on the development API. Next, against the development API only: the
-remaining feature APIs (6–12) and the new frontend (13), then integration, security and regression
-testing. Only then: production deployment and data migration (14) and the cutover and Supabase
-decommissioning (15).
+migration 0009), 6 (uploads, hypersounds, soundboard on R2), 7 (payments, 0010), 8 (jobs and worker, 0011),
+9 (realtime, 0012), 10 (OBS audio, 0013), 11 (moderation bots, 0014–0015; bots disabled on DEV) — all running
+on the development API (migration 0015). In progress: closing the gaps of the full backend audit
+([`backend-completion-checklist.md`](backend-completion-checklist.md); groups 1–3 in open PRs, not deployed),
+which covers the parts of phase 12 that need no owner decision. Next: the new frontend (13), then integration,
+security and regression testing. Only then: production deployment and data migration (14) and the cutover
+and Supabase decommissioning (15).

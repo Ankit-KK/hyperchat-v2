@@ -19,6 +19,7 @@ from app.dashboard.service import DashboardService
 from app.db.pool import Database
 from app.public.repository import PublicRepository
 from app.public.service import PublicService
+from app.public.signups import SignupRepository
 from app.audio.repository import AudioRepository
 from app.audio.transcriptions import TranscriptionService
 from app.jobs.queue import JobQueue
@@ -46,6 +47,7 @@ from app.routers import (
     payments,
     public,
     realtime,
+    signups,
     soundboard,
     streamers,
     transcriptions,
@@ -84,6 +86,7 @@ async def lifespan(app: FastAPI):
         app.state.admin = AdminService(AdminRepository(app.state.db.connection))
         conn = app.state.db.connection
         app.state.public = PublicService(PublicRepository(conn))
+        app.state.signups = SignupRepository(conn)
         app.state.dashboard = DashboardService(DashboardRepository(conn))
         app.state.security = SecurityStores(PostgresNonceStore(conn), PostgresObsTokenStore(conn),
                                             PostgresPartnerKeyStore(conn))
@@ -202,6 +205,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(public.streamers_router)
     app.include_router(public.metrics_router)
+    app.include_router(signups.router)
     app.include_router(uploads.router)
     app.include_router(soundboard.hypersounds_router)
     app.include_router(payments.checkout_router)

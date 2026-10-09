@@ -2,12 +2,12 @@
 
 Source of truth for the design: the restored Supabase schema (`hyperchat_restore_test`, PostgreSQL 15,
 dump of 2026-10-04). Every change below was checked against that data (counts only) before it was made.
-Migrations: `database/migrations/versions/0001…0009`; data load: `database/etl/`.
+Migrations: `database/migrations/versions/0001…0015` (the per-revision list is in `database/README.md`); data load: `database/etl/`.
 
 ## Clusters and roles
 | Cluster | Port | Databases | Purpose |
 |---|---|---|---|
-| `17/hyperchat` | 5432 (localhost) | `hyperchat` | Production schema, Alembic head, empty until cutover |
+| `17/hyperchat` | 5432 (localhost) | `hyperchat` | Production schema (revision 0009, not head), empty until cutover |
 | `15/restoretest` | 5433 (localhost) | `hyperchat_restore_test` (read-only source), `hyperchat_dev` | Migration source + rehearsal target |
 
 Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):

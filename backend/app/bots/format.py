@@ -9,13 +9,13 @@ dashboard URL built from HYPERCHAT_FRONTEND_URL.
 
 import html
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from app.core.errors import ApiError
+from app.core.timezones import IST
 from app.payments import rules as payment_rules
 
-IST = timezone(timedelta(hours=5, minutes=30))
 CURRENCY = {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£", "AED": "د.إ", "AUD": "A$"}
 TELEGRAM_EXCERPT, DISCORD_EXCERPT = 200, 1024
 _MD = re.compile(r"([\\*_~`|>#\[\]()<@!:-])")
