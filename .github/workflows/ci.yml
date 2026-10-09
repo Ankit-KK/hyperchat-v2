@@ -39,8 +39,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: DEV + production sites, snippets and catch-all in a throwaway nginx
         # Official nginx image (>= 1.25 for "http2 on;", as on the VPS); nothing is installed on a server.
+        # Official images come through Google's public Docker Hub mirror (no credentials): Docker Hub refuses
+        # unauthenticated pulls from the shared runner IPs (toomanyrequests). A tag the mirror lacks fails the job.
         run: >-
-          docker run --rm -v "$PWD:/repo:ro" -w /repo nginx:1.28
+          docker run --rm -v "$PWD:/repo:ro" -w /repo mirror.gcr.io/library/nginx:1.28
           bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq curl openssl >/dev/null
           && bash tests/e2e/nginx_ratelimit_check.sh"
       - name: Harness leaves the host nginx untouched (Ubuntu 26.04 nginx build, as on the VPS, run as root)
@@ -52,7 +54,7 @@ jobs:
         # control proves this environment catches the old bug (an un-isolated `nginx -t` as root hands
         # /var/lib/nginx/body to nginx's default user).
         run: |
-          docker run --rm -v "$PWD:/repo:ro" -w /repo ubuntu:26.04 bash -euo pipefail -c '
+          docker run --rm -v "$PWD:/repo:ro" -w /repo mirror.gcr.io/library/ubuntu:26.04 bash -euo pipefail -c '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq >/dev/null && apt-get install -y -qq nginx curl openssl >/dev/null
             echo "nginx $(nginx -v 2>&1 | cut -d/ -f2); /var/lib/nginx after install: [$(ls -A /var/lib/nginx | tr "\n" " ")]"
@@ -84,7 +86,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:17
+        image: mirror.gcr.io/library/postgres:17  # Docker Hub's official image via its public mirror (see deploy-config)
         env:
           # Throwaway service container: trust auth, no password exists anywhere.
           POSTGRES_HOST_AUTH_METHOD: trust
