@@ -5,6 +5,7 @@ mod_notified = false rows), and a donation more than 24 h old is never notified 
 run:
   donation missing / already notified                       -> skipped
   bots disabled                                             -> skipped (bots_disabled), mod_notified = true
+  outside production, a creator that is not allow-listed    -> skipped (creator_not_allowlisted), mod_notified = true
   not paid, rejected, older than 24 h                       -> skipped, mod_notified = true
   recipients (Telegram DMs; a Discord channel post or Discord DMs) -> one moderator_notifications row each
     (INSERT .. ON CONFLICT DO NOTHING: a retry never creates or re-sends a delivery that was already sent)
@@ -37,6 +38,11 @@ def allowed(recipients: frozenset[str] | None, target_id: str) -> bool:
     return recipients is None or target_id in recipients
 
 
+def creator_allowed(creators: frozenset[str] | None, slug: str | None) -> bool:
+    """Outside production (creators is a set) the bots act only for allow-listed creator slugs."""
+    return creators is None or (slug or "").strip().lower() in creators
+
+
 def _donation_id(job: Job) -> str:
     did = job.payload.get("donation_id") if isinstance(job.payload, dict) else None
     if not isinstance(did, str) or not _UUID.fullmatch(did) or did != job.dedupe_key:
@@ -49,9 +55,10 @@ class ModeratorNotifyHandler:
     backoff = Backoff(base_seconds=10, cap_seconds=300, jitter=0.2)
 
     def __init__(self, repo: BotRepository, *, telegram: TelegramClient | None, discord: DiscordClient | None,
-                 enabled: bool, recipients: frozenset[str] | None, frontend_url: str, public_base: str | None) -> None:
+                 enabled: bool, recipients: frozenset[str] | None, frontend_url: str, public_base: str | None,
+                 creators: frozenset[str] | None = None) -> None:
         self.repo, self.telegram, self.discord = repo, telegram, discord
-        self.enabled, self.recipients = enabled, recipients
+        self.enabled, self.recipients, self.creators = enabled, recipients, creators
         self.frontend_url, self.public_base = frontend_url, public_base
 
     def _notified(self, did: str) -> Effects:
@@ -82,6 +89,8 @@ class ModeratorNotifyHandler:
             return Done({"outcome": "skipped", "reason": "already_notified"})
         if not self.enabled:
             return Done({"outcome": "skipped", "reason": "bots_disabled"}, self._notified(did))
+        if not creator_allowed(self.creators, d["streamer_slug"]):
+            return Done({"outcome": "skipped", "reason": "creator_not_allowlisted"}, self._notified(did))
         if d["payment_status"] != "success" or d["moderation_status"] not in ("pending", "approved", "auto_approved"):
             return Done({"outcome": "skipped", "reason": "not_eligible"}, self._notified(did))
         if d["too_old"]:

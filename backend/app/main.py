@@ -117,10 +117,12 @@ async def lifespan(app: FastAPI):
                 secret=settings.telegram_webhook_secret.get_secret_value().strip(),
                 client=TelegramClient(settings.telegram_bot_token.get_secret_value().strip()), repo=bot_repo,
                 moderation=moderation_repo, nonces=app.state.security.nonces, limiter=app.state.auth.repo,
-                recipients=settings.bot_recipients, frontend_url=settings.frontend_url, public_base=public_base)
+                recipients=settings.bot_recipients, frontend_url=settings.frontend_url, public_base=public_base,
+                creators=settings.bot_creators)
         if settings.bots_enabled and settings.discord_configured:
             app.state.discord_bot = DiscordBot(public_key=settings.discord_public_key.strip(), repo=bot_repo,
-                                               moderation=moderation_repo, nonces=app.state.security.nonces)
+                                               moderation=moderation_repo, nonces=app.state.security.nonces,
+                                               creators=settings.bot_creators)
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
                                       "google_enabled": settings.google_enabled})
@@ -139,7 +141,8 @@ async def lifespan(app: FastAPI):
     # Booleans and counts only, never tokens, secrets or recipient ids.
     log.info("bots", extra={"bots_enabled": settings.bots_enabled, "telegram_configured": settings.telegram_configured,
                             "discord_configured": settings.discord_configured,
-                            "recipient_allowlist": None if settings.bot_recipients is None else len(settings.bot_recipients)})
+                            "recipient_allowlist": None if settings.bot_recipients is None else len(settings.bot_recipients),
+                            "creator_allowlist": None if settings.bot_creators is None else len(settings.bot_creators)})
     log.info("obs", extra={"audio_queue_window_hours": 24, "vaani_creators": len(settings.vaani_slugs)})
     try:
         yield

@@ -238,9 +238,9 @@ def job():
     return Job(str(uuid.uuid4()), "moderator_notify", DID, {"donation_id": DID}, 1, 5, "w1", False)
 
 
-def handler(repo, *, tg=None, dc=None, enabled=True, recipients=None):
+def handler(repo, *, tg=None, dc=None, enabled=True, recipients=None, creators=None):
     return ModeratorNotifyHandler(repo, telegram=tg, discord=dc, enabled=enabled, recipients=recipients,
-                                  frontend_url=FRONT, public_base=BASE)
+                                  frontend_url=FRONT, public_base=BASE, creators=creators)
 
 
 def sends(results):
@@ -300,6 +300,22 @@ def test_allowlist_outside_production():
     tg2, sent2 = sends([])
     finish(run(handler(repo2, tg=tg2, recipients=frozenset()).run(job())), repo2)
     assert sent2 == []  # an empty allowlist sends nothing at all
+
+
+def test_creator_allowlist_outside_production():
+    repo = FakeRepo(donation(), [moderator()])
+    tg, sent = sends([])
+    result = finish(run(handler(repo, tg=tg, creators=frozenset({"authtest-p11-bots"})).run(job())), repo)
+    assert result["reason"] == "creator_not_allowlisted" and sent == [] and repo.rows == {} and repo.callbacks == []
+    assert repo.notified == [DID]  # finished for good: never re-notified later
+    for creators in (frozenset(), frozenset({"x"})):
+        repo2 = FakeRepo(donation(), [moderator()])
+        tg2, sent2 = sends([])
+        finish(run(handler(repo2, tg=tg2, creators=creators).run(job())), repo2)
+        assert sent2 == []
+    repo3 = FakeRepo(donation(streamer_slug="AuthTest-P11-Bots"), [moderator()])
+    tg3, sent3 = sends([])
+    assert finish(run(handler(repo3, tg=tg3, creators=frozenset({"authtest-p11-bots"})).run(job())), repo3)["sent"] == 1
 
 
 def test_transient_failure_retries_only_the_pending_recipient():
@@ -398,14 +414,14 @@ class BotRepo:
         return "m:" + new_callback_id()
 
 
-def tbot(repo, *, moderation=None, limiter=None, recipients=None, sent=None):
+def tbot(repo, *, moderation=None, limiter=None, recipients=None, sent=None, creators=None):
     def h(request):
         if sent is not None:
             sent.append(json.loads(request.content))
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
     return TelegramBot(secret=SECRET, client=TelegramClient(TOKEN, httpx.MockTransport(h)), repo=repo,
                        moderation=moderation or Moderation(), nonces=Nonces(), limiter=limiter or Limiter(),
-                       recipients=recipients, frontend_url=FRONT, public_base=BASE)
+                       recipients=recipients, frontend_url=FRONT, public_base=BASE, creators=creators)
 
 
 def callback_update(update_id=1, user="111111111", data=None, chat=None):
@@ -452,6 +468,34 @@ def test_telegram_refusals(repo_row, mod, data, user, expected):
     moderation = Moderation()
     _, body = run(tbot(BotRepo(repo_row, mod), moderation=moderation).handle(callback_update(user=user, data=data)))
     assert expected in body["text"] and moderation.calls == []
+
+
+def test_telegram_button_for_a_creator_outside_the_allowlist_never_moderates():
+    moderation = Moderation()
+    bot = tbot(BotRepo(row(), moderator()), moderation=moderation, creators=frozenset({"authtest-p11-bots"}))
+    _, body = run(bot.handle(callback_update()))
+    assert "Invalid or expired" in body["text"] and moderation.calls == []
+    allowed = tbot(BotRepo(row(), moderator(streamer_slug="authtest-p11-bots")), moderation=moderation,
+                   creators=frozenset({"authtest-p11-bots"}))
+    run(allowed.handle(callback_update(update_id=2)))
+    assert len(moderation.calls) == 1
+
+
+@pytest.mark.parametrize("text", ["/pending", "/recent", "/stats", "/status", "/settings"])
+def test_commands_only_cover_allowlisted_creators(text):
+    real, synthetic = moderator(streamer_name="Real Creator"), moderator(
+        streamer_slug="authtest-p11-bots", streamer_name="P11 Bots Test", id=str(uuid.uuid4()))
+    for creators, expect_real, expect_synthetic in ((frozenset({"authtest-p11-bots"}), False, True),
+                                                     (frozenset(), False, False), (None, True, True)):
+        sent, repo = [], BotRepo(assignments=[real, synthetic])
+        run(tbot(repo, sent=sent, creators=creators).handle(command(text)))
+        out = "\n".join(m["text"] for m in sent)
+        assert ("Real Creator" in out) is expect_real and ("P11 Bots Test" in out) is expect_synthetic, (creators, out)
+        if not expect_real:  # no live button for a creator outside the allowlist
+            assert all(kw["streamer_id"] != real["streamer_id"] or kw["moderator_id"] != real["id"]
+                       for kw in repo.callbacks)
+        if creators == frozenset():
+            assert repo.callbacks == [] and all("reply_markup" not in m for m in sent)
 
 
 def test_telegram_not_paid_and_unchanged():
@@ -517,8 +561,9 @@ def test_telegram_logs_nothing_sensitive(caplog):
 
 # ── the Discord interactions endpoint ───────────────────────────────────────
 
-def dbot(repo, public, moderation=None):
-    return DiscordBot(public_key=public, repo=repo, moderation=moderation or Moderation(), nonces=Nonces())
+def dbot(repo, public, moderation=None, creators=None):
+    return DiscordBot(public_key=public, repo=repo, moderation=moderation or Moderation(), nonces=Nonces(),
+                      creators=creators)
 
 
 def interaction(user="222222222222222222", channel="777777777777777777", custom_id=None, iid="1001"):
@@ -575,9 +620,28 @@ def test_discord_refusals_are_ephemeral_and_never_moderate(repo_row, mod, user, 
     assert moderation.calls == []
 
 
+def test_discord_button_for_a_creator_outside_the_allowlist_never_moderates():
+    private, public = keypair()
+    moderation = Moderation()
+    bot = dbot(BotRepo(row(recipient_id="222222222222222222"), moderator()), public, moderation,
+               creators=frozenset({"authtest-p11-bots"}))
+    status, body = call(bot, private, interaction(iid="3003"))
+    assert status == 200 and body["type"] == 4 and body["data"]["flags"] == 64 and moderation.calls == []
+
+
 def test_discord_unchanged_is_reported_honestly():
     private, public = keypair()
     unchanged = Moderation(result=("approved", Step("unchanged", "approved", True), {}))
     bot = dbot(BotRepo(row(recipient_id="777777777777777777", moderator_id=None), moderator()), public, unchanged)
     _, body = call(bot, private, interaction(iid="2002"))
     assert body["type"] == 4 and "No change" in body["data"]["content"]
+
+
+def test_creator_allowlist_setting():
+    from app.core.config import Settings
+    assert Settings(db_enabled=False, _env_file=None).bot_creators == frozenset()  # unset outside production: nobody
+    assert Settings(db_enabled=False, _env_file=None,
+                    bot_creator_allowlist=" AuthTest-P11-Bots ,,x ").bot_creators == {"authtest-p11-bots", "x"}
+    prod = Settings(db_enabled=False, _env_file=None, app_env="production", db_label="PRODUCTION",
+                    bot_creator_allowlist="authtest-p11-bots")
+    assert prod.bot_creators is None and prod.bot_recipients is None  # production: no restriction

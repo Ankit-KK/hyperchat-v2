@@ -52,13 +52,15 @@ def build_handlers(settings: Settings, connection_factory, store) -> dict:
     }
     # Phase 11: moderator notifications. Clients only exist when bots are enabled and the platform is configured
     # (D13); otherwise every job finishes as skipped (bots_disabled) without sending anything.
-    telegram = TelegramClient(settings.telegram_bot_token.get_secret_value().strip())         if settings.bots_enabled and settings.telegram_configured else None
-    discord = DiscordClient(settings.discord_bot_token.get_secret_value().strip())         if settings.bots_enabled and settings.discord_configured else None
+    telegram = (TelegramClient(settings.telegram_bot_token.get_secret_value().strip())
+                if settings.bots_enabled and settings.telegram_configured else None)
+    discord = (DiscordClient(settings.discord_bot_token.get_secret_value().strip())
+               if settings.bots_enabled and settings.discord_configured else None)
     handlers["moderator_notify"] = ModeratorNotifyHandler(
         BotRepository(connection_factory), telegram=telegram, discord=discord,
         enabled=settings.bots_enabled and (telegram is not None or discord is not None),
         recipients=settings.bot_recipients, frontend_url=settings.frontend_url,
-        public_base=settings.r2_public_base if store is not None else None)
+        public_base=settings.r2_public_base if store is not None else None, creators=settings.bot_creators)
     if store is not None:  # donation audio needs R2 (generated audio and the silence object)
         handlers["donation_audio"] = DonationAudioHandler(
             repo, store, speech=speech, sound_effects=elevenlabs, music=elevenlabs, moderation_key=moderation_key,

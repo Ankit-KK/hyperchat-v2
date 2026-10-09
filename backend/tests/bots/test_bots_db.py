@@ -227,6 +227,8 @@ def keypair():
 
 
 PRIVATE, PUBLIC = keypair()
+# Outside production the bots only act for these creators (HYPERCHAT_BOT_CREATOR_ALLOWLIST).
+ALLOWED_CREATORS = ("authtest-p11-tg", "authtest-p11-view", "authtest-p11-dc", "authtest-p11-log")
 
 
 @pytest.fixture
@@ -234,7 +236,8 @@ def bots_app(env, monkeypatch):
     for key, value in {"HYPERCHAT_BOTS_ENABLED": "true", "HYPERCHAT_TELEGRAM_BOT_TOKEN": TOKEN,
                        "HYPERCHAT_TELEGRAM_WEBHOOK_SECRET": SECRET, "HYPERCHAT_DISCORD_BOT_TOKEN": DTOKEN,
                        "HYPERCHAT_DISCORD_PUBLIC_KEY": PUBLIC,
-                       "HYPERCHAT_BOT_RECIPIENT_ALLOWLIST": f"{TG_MOD},{TG_OTHER}"}.items():
+                       "HYPERCHAT_BOT_RECIPIENT_ALLOWLIST": f"{TG_MOD},{TG_OTHER}",
+                       "HYPERCHAT_BOT_CREATOR_ALLOWLIST": ",".join(ALLOWED_CREATORS)}.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
     from app.main import create_app
@@ -296,6 +299,36 @@ def test_telegram_webhook_end_to_end(bots_app):
             "donation-updated"
     edits = [b for _, path, b, _ in bots_app.platforms.sent if path.endswith("/editMessageText")]
     assert len(edits) == 1 and "Approved by Mod One" in edits[0]["text"]
+
+
+def test_creator_outside_the_allowlist_gets_no_buttons_and_cannot_be_moderated(bots_app):
+    listed = creator("authtest-p11-tg", moderation_mode="manual")
+    unlisted = creator("authtest-p11-unlisted", moderation_mode="manual")
+    update_streamer(unlisted, streamer_name="Unlisted Creator")
+    add_moderator(listed, telegram=TG_MOD)
+    unlisted_mod = add_moderator(unlisted, telegram=TG_MOD)
+    make_donation(listed, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
+    did = make_donation(unlisted, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
+    # a button minted for the unlisted creator (e.g. before the allowlist existed) can no longer moderate
+    r = tg_post(bots_app, press(700000000 + secrets.randbelow(10**8), TG_MOD,
+                                callback(bots_app, "telegram", unlisted, did, "approve", TG_MOD, unlisted_mod)))
+    assert "Invalid or expired" in r.json()["text"]
+    with db() as conn:
+        assert conn.execute("SELECT moderation_status FROM public.donations WHERE id = %s", (did,)).fetchone()[0] == "pending"
+        assert conn.execute("SELECT count(*) FROM public.moderation_actions WHERE donation_id = %s",
+                            (did,)).fetchone()[0] == 0
+        conn.execute("DELETE FROM public.telegram_callback_mapping WHERE streamer_id = %s", (unlisted,))
+    for n, text in enumerate(("/pending", "/recent", "/stats", "/status", "/settings")):
+        bots_app.platforms.sent.clear()
+        tg_post(bots_app, {"update_id": 500000000 + n * 1000 + secrets.randbelow(1000), "message": {
+            "message_id": 1, "text": text, "from": {"id": int(TG_MOD)}, "chat": {"id": int(TG_MOD), "type": "private"}}})
+        out = "\n".join(str(b.get("text", "")) for _, path, b, _ in bots_app.platforms.sent)
+        assert "Unlisted Creator" not in out and bots_app.platforms.sent, text
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.telegram_callback_mapping WHERE streamer_id = %s",
+                            (unlisted,)).fetchone()[0] == 0  # /pending minted no button for the unlisted creator
+        assert conn.execute("SELECT count(*) FROM public.telegram_callback_mapping WHERE streamer_id = %s",
+                            (listed,)).fetchone()[0] > 0
 
 
 def test_telegram_viewer_and_disabled(bots_app):

@@ -180,6 +180,9 @@ class Settings(BaseSettings):
     discord_public_key: str | None = None  # the application's Ed25519 public key (hex)
     discord_application_id: str | None = None
     bot_recipient_allowlist: str = ""
+    # Outside production the bots also act ONLY for these creator slugs (notifications, commands, button presses):
+    # an allow-listed tester is often a moderator of real DEV creators too, and /pending would hand them live buttons.
+    bot_creator_allowlist: str = ""
 
     @property
     def bot_recipients(self) -> frozenset[str] | None:
@@ -187,6 +190,13 @@ class Settings(BaseSettings):
         if self.app_env == "production":
             return None
         return frozenset(i.strip() for i in self.bot_recipient_allowlist.split(",") if i.strip())
+
+    @property
+    def bot_creators(self) -> frozenset[str] | None:
+        """None = no restriction (production only); otherwise the allow-listed creator slugs (possibly empty)."""
+        if self.app_env == "production":
+            return None
+        return frozenset(s.strip().lower() for s in self.bot_creator_allowlist.split(",") if s.strip())
 
     @property
     def telegram_configured(self) -> bool:
