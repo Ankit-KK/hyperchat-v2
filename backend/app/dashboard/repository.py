@@ -249,10 +249,13 @@ class DashboardRepository:
 
     async def _record_action(self, cur, streamer_id: str, donation_id: str, action: str, previous: str, new: str,
                              actor_user_id: str | None, actor_label: str, notes: str | None) -> None:
+        # created_at = clock_timestamp(), not the column default now() (the transaction START, taken before this
+        # transaction waited for the donation's row lock): the audit rows of one donation sort in the order the
+        # actions were applied, also when they raced.
         await cur.execute("""
             INSERT INTO public.moderation_actions (streamer_id, moderator_id, moderator_telegram_id, moderator_name,
-                donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
-            VALUES (%s, NULL, NULL, %s, %s, %s, 'dashboard', %s, %s, %s, %s)
+                donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id, created_at)
+            VALUES (%s, NULL, NULL, %s, %s, %s, 'dashboard', %s, %s, %s, %s, clock_timestamp())
         """, (streamer_id, actor_label, donation_id, action, previous, new, notes, actor_user_id))
 
     @staticmethod
@@ -261,11 +264,11 @@ class DashboardRepository:
         # One audit row per APPLIED action, so a decision repeated after a reversal (reject, approve, reject) is
         # recorded every time (migration 0015 dropped the unique index that silently swallowed it). Duplicates never
         # get here: a redelivered webhook is dropped by its update / interaction id nonce, and the same action on a
-        # donation already in that state is "unchanged" (no audit row, no counter).
+        # donation already in that state is "unchanged" (no audit row, no counter). created_at: see _record_action.
         await cur.execute("""
             INSERT INTO public.moderation_actions (streamer_id, moderator_id, moderator_telegram_id, moderator_name,
-                donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL)
+                donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, clock_timestamp())
         """, (streamer_id, bot.moderator_id, bot.platform_user_id, actor_label, donation_id, action, bot.platform,
               previous, new))
         await cur.execute("UPDATE public.streamers_moderators SET last_action_at = now(), "

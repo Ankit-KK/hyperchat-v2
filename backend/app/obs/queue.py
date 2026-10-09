@@ -107,8 +107,8 @@ class AudioQueue:
                               "WHERE id = %s", (donation_id,))
             await cur.execute("""
                 INSERT INTO public.moderation_actions (streamer_id, moderator_id, moderator_telegram_id, moderator_name,
-                    donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id)
-                VALUES (%s, NULL, NULL, %s, %s, 'replay', 'dashboard', %s, %s, NULL, %s)
+                    donation_id, action_type, action_source, previous_status, new_status, notes, actor_user_id, created_at)
+                VALUES (%s, NULL, NULL, %s, %s, 'replay', 'dashboard', %s, %s, NULL, %s, clock_timestamp())
             """, (streamer_id, actor_label, donation_id, d["moderation_status"], d["moderation_status"],
                   actor_user_id))
             await outbox.emit(cur, streamer_id, "donation-updated", subject_id=donation_id,

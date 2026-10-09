@@ -10,8 +10,10 @@
     discord, moderator stats, realtime events, audio job), deduplication, cross-moderator refusal, and logs
 """
 
+import asyncio
 import json
 import logging
+import random
 import secrets
 import time
 
@@ -25,10 +27,13 @@ from fastapi.testclient import TestClient
 from app.bots.clients import DiscordClient, TelegramClient
 from app.bots.notify import ModeratorNotifyHandler
 from app.bots.repository import BotRepository
+from app.bots.telegram import TelegramBot
 from app.core.config import get_settings
+from app.dashboard.repository import BotActor, DashboardRepository
 from app.jobs.queue import JobQueue
 from app.jobs.runner import Worker
 from app.payments.repository import PaymentRepository
+from app.security.pg_stores import PostgresNonceStore
 from tests.integration import CaptureSender, FakeGoogle, LogCapture, db, make_donation, make_streamer, requires_db, \
     update_streamer
 from tests.jobs.test_jobs_db import factory, run
@@ -500,3 +505,91 @@ def test_nothing_sensitive_in_logs(bots_app):
     for value in (TOKEN, SECRET, DTOKEN, MESSAGE, "Secret Donor Name", TG_MOD, "callback_query", data):
         assert value not in text
     assert "telegram callback" in text and "bot_webhook_rejected" in text
+
+
+# ── concurrency (real connections, one per call) ────────────────────────────
+
+CONCURRENCY = 8  # transactions at once (within the test role's connection limit)
+
+
+async def _gathered(calls):
+    gate = asyncio.Semaphore(CONCURRENCY)
+
+    async def one(call):
+        async with gate:
+            return await call()
+    return await asyncio.gather(*[one(c) for c in calls])
+
+
+def _bot_moderate(sid, did, mod, action):
+    repo = DashboardRepository(factory())
+    return lambda: repo.moderate(sid, did, action, actor_user_id=None, actor_label="Mod One", notes=None,
+                                 bot=BotActor("telegram", mod, TG_MOD))
+
+
+def _chain(did):
+    with db() as conn:  # the audit history in the order it is read back: by time, then id
+        return conn.execute("SELECT action_type, previous_status, new_status FROM public.moderation_actions "
+                            "WHERE donation_id = %s ORDER BY created_at, id", (did,)).fetchall()
+
+
+def test_concurrent_identical_presses_apply_and_audit_once(clean):
+    sid = creator("authtest-p11-conc-same", moderation_mode="manual")
+    mod = add_moderator(sid, telegram=TG_MOD)
+    did = make_donation(sid, 100, payment="success", moderation="pending", name="Ravi")
+    outcomes = run(_gathered([_bot_moderate(sid, did, mod, "reject")] * 12))
+    assert [o[1].result for o in outcomes].count("applied") == 1
+    assert _chain(did) == [("reject", "pending", "rejected")] and state_and_total(did, mod) == ("rejected", 1)
+
+
+def test_concurrent_reversals_keep_an_ordered_complete_audit_history(clean):
+    """Racing approve / reject presses: every applied step has exactly one audit row, the counter matches, and the
+    history read back by time is an unbroken chain ending in the donation's final state (the rows are stamped when
+    the action is applied under the row lock, not when its transaction started)."""
+    sid = creator("authtest-p11-conc-flip", moderation_mode="manual")
+    mod = add_moderator(sid, telegram=TG_MOD)
+    did = make_donation(sid, 100, payment="success", moderation="pending", name="Ravi")
+    rng = random.Random(11)
+    actions = [rng.choice(("approve", "reject")) for _ in range(40)]
+    outcomes = run(_gathered([_bot_moderate(sid, did, mod, a) for a in actions]))
+    applied = [o for o in outcomes if o[1].result == "applied"]
+    chain = _chain(did)
+    status, total = state_and_total(did, mod)
+    assert len(applied) >= 2 and len(chain) == len(applied) == total
+    assert chain[0][1] == "pending" and chain[-1][2] == status
+    assert all(new == nxt_prev for (_, _, new), (_, nxt_prev, _) in zip(chain, chain[1:]))
+    with db() as conn:  # the donor total ends consistent with the final state (credited once, or not at all)
+        count = conn.execute("SELECT coalesce(sum(donation_count), 0) FROM public.streamer_donator_totals "
+                             "WHERE streamer_id = %s", (sid,)).fetchone()[0]
+    assert count == (1 if status == "approved" else 0)
+
+
+class _Allow:
+    async def hit_rate_limit(self, *args):
+        return True
+
+
+def test_one_telegram_update_delivered_concurrently_moderates_once(clean):
+    """Telegram may deliver one update again while the first delivery is still running: the update_id nonce lets
+    exactly one through (real PostgresNonceStore, real moderation core, one connection per call)."""
+    sid = creator("authtest-p11-conc-update", moderation_mode="manual")
+    mod = add_moderator(sid, telegram=TG_MOD)
+    did = make_donation(sid, 100, payment="success", moderation="pending", name="Ravi")
+    f = factory()
+    data = run(BotRepository(f).create_callback("telegram", donation_id=did, streamer_id=sid, action="reject",
+                                                recipient_id=TG_MOD, moderator_id=mod))
+    client = TelegramClient(TOKEN, httpx.MockTransport(lambda r: httpx.Response(200, json={"ok": True, "result": {}})))
+    bot = TelegramBot(secret=SECRET, client=client, repo=BotRepository(f), moderation=DashboardRepository(f),
+                      nonces=PostgresNonceStore(f), limiter=_Allow(), recipients=None, frontend_url="https://x.test",
+                      public_base=None)
+    update_id = 200000000 + secrets.randbelow(10**8)
+    body = json.dumps(press(update_id, TG_MOD, data)).encode()
+    try:
+        results = run(_gathered([lambda: bot.handle(body)] * 8))
+        answered = [r for r in results if r[1] is not None]
+        assert len(answered) == 1 and "Rejected" in answered[0][1]["text"]
+        assert all(r == (200, None) for r in results if r[1] is None)  # the other deliveries: dropped duplicates
+        assert _chain(did) == [("reject", "pending", "rejected")] and state_and_total(did, mod) == ("rejected", 1)
+    finally:
+        with db() as conn:
+            conn.execute("DELETE FROM public.request_nonces WHERE nonce = %s", (f"tg:{update_id}",))
