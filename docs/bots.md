@@ -25,10 +25,10 @@ button "m:<16 chars>" ─ stored row (action, donation, creator, recipient) ─ 
 | D7 | 429 (`retry_after`), 5xx and network errors are retried; only the deliveries that failed are re-sent. 400/401/403/404 fail that one recipient. When attempts run out, leftover deliveries are marked `failed` and the donation counts as notified, so there's no endless loop. |
 | D8 | Legacy layout. Donor text is HTML-escaped (Telegram) and markdown-escaped (Discord). Discord `allowed_mentions` is limited to the moderators the bot pings. |
 | D9 | Approve, reject, hide and ban, checked at click time. Roles: owner = all, viewer = none, otherwise the `can_*` flags. The reply reports the real result. No bot replay (legacy never offered one). |
-| D10 | `/start`, `/pending`, `/recent`, `/stats`, `/status` and `/settings` cover **every** creator the user moderates. **`/stats` shows the pending count and the user's own action count, never revenue.** |
+| D10 | `/start`, `/pending`, `/recent`, `/stats`, `/status` and `/settings` cover **every** creator the user moderates (outside production: only allow-listed creators, see D13). **`/stats` shows the pending count and the user's own action count, never revenue.** |
 | D11 | `moderation_actions` records `telegram` and `discord` (CHECK widened), plus the moderator row and platform user ID. The moderator's `last_action_at` / `total_actions` are updated in the same transaction. |
 | D12 | Discord invite endpoint: deferred (the current frontend doesn't need it). |
-| D13 | **Bots off by default.** Outside production, **only allow-listed recipient IDs** (`HYPERCHAT_BOT_RECIPIENT_ALLOWLIST`) receive anything; an empty list means nobody. DEV uses separate test bots. |
+| D13 | **Bots off by default.** Outside production, **only allow-listed recipient IDs** (`HYPERCHAT_BOT_RECIPIENT_ALLOWLIST`) receive anything; an empty list means nobody. **The bots also act only for allow-listed creators** (`HYPERCHAT_BOT_CREATOR_ALLOWLIST`, slugs; empty = none): notifications, every command and every button press. A tester is often a moderator of real DEV creators too, and without this `/pending` would hand them live buttons for those creators. DEV uses separate test bots. |
 | D14 | The legacy `@hyperChat_modbot` webhook and the legacy Discord application are never changed. Re-pointing them is cutover work. |
 | D15 | Migration `0014`: `jobs.kind` gains `moderator_notify`; `moderation_actions.action_source` gains `discord`; new `moderator_notifications` table; the callback tables get text short IDs, `recipient_id` and `moderator_id`. Cleanup rules: callback rows 7 days after expiry, notifications after 30 days. |
 
@@ -40,6 +40,7 @@ button "m:<16 chars>" ─ stored row (action, donation, creator, recipient) ─ 
 |---|---|
 | donation missing or already notified | `skipped` |
 | bots disabled | `skipped (bots_disabled)`, `mod_notified = true` |
+| outside production, creator not allow-listed | `skipped (creator_not_allowlisted)`, `mod_notified = true` |
 | not paid, not pending/approved, or older than 24 h | `skipped`, `mod_notified = true` |
 | no recipients | `skipped (no_recipients)`, `mod_notified = true` |
 
@@ -76,6 +77,7 @@ HYPERCHAT_DISCORD_BOT_TOKEN=                  # DEV: a separate test application
 HYPERCHAT_DISCORD_PUBLIC_KEY=                 # the application's Ed25519 public key (hex)
 HYPERCHAT_DISCORD_APPLICATION_ID=
 HYPERCHAT_BOT_RECIPIENT_ALLOWLIST=            # outside production: the only ids that may receive messages
+HYPERCHAT_BOT_CREATOR_ALLOWLIST=              # outside production: the only creator slugs the bots act for
 ```
 
 Registering the webhooks (root, on the server, only after you have chosen to enable them):

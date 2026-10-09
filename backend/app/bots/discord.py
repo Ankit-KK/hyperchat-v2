@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.bots import format as fmt
 from app.bots.clients import parse_json, verify_discord
+from app.bots.notify import creator_allowed
 from app.bots.permissions import BOT_ACTIONS, can
 from app.bots.repository import BotRepository
 from app.dashboard.moderation import NotPaid
@@ -36,8 +37,9 @@ def ephemeral(text: str) -> dict:
 
 class DiscordBot:
     def __init__(self, *, public_key: str, repo: BotRepository, moderation: DashboardRepository,
-                 nonces: NonceStore) -> None:
+                 nonces: NonceStore, creators: frozenset[str] | None = None) -> None:
         self.public_key, self.repo, self.moderation, self.nonces = public_key, repo, moderation, nonces
+        self.creators = creators  # outside production: only allow-listed creator slugs are moderated
 
     async def handle(self, body: bytes, signature: str | None, timestamp: str | None,
                      now: float | None = None) -> tuple[int, dict | None]:
@@ -84,6 +86,8 @@ class DiscordBot:
         moderator = await self.repo.moderator_for("discord", row["streamer_id"], user_id)
         if moderator is None:
             return "not_moderator", ephemeral("❌ You are not a registered moderator for this streamer.")
+        if not creator_allowed(self.creators, moderator["streamer_slug"]):
+            return "creator_not_allowlisted", ephemeral("❌ This action has expired or is invalid.")
         if not moderator["discord_enabled"]:
             return "discord_disabled", ephemeral("❌ Discord moderation is disabled.")
         action = row["action_type"]
