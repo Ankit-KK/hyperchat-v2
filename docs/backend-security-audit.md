@@ -16,7 +16,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 |---|---|---|
 | **P0**: exploitable now, stop everything | **0** | – |
 | **P1**: fix before production traffic | **1** | F1 (fixed in the repository, `cc961df`; not deployed) |
-| **P2**: fix before launch | **3** | F2, F3 (fixed and verified in the repository, #25; policy approved 2026-10-11; not deployed), F4 |
+| **P2**: fix before launch | **3** | F2 (fixed in the repository, branch `security-f2-login-throttling`; not merged / deployed), F3 (fixed and verified in the repository, #25; policy approved 2026-10-11; not deployed), F4 |
 | **P3**: hardening | **3** | F5, F6 (fixed in the repository, not merged / deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; fixed in the repository, not merged); all other Bandit results are false positives or informational |
@@ -80,6 +80,49 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Remediation (needs a decision):** lock per (account, IP) instead of per account, or replace the hard lock with
   growing delays; keep the per-IP limit. Add a test for the abuse case.
 
+- **Root cause found during the fix:** the per-account counter (`users.failed_login_attempts`) was reset only by a successful sign-in or a password change, never when the lock expired. Once at 5, **each further failure re-locked the account**, so one wrong guess per 15 minutes kept a creator locked out indefinitely, needing only their email. A locked account also answered 429 while an unknown email answered 401, which revealed that the account exists.
+- **Status: fixed in the repository (branch `security-f2-login-throttling`; not merged, not deployed).** Policy approved by the owner on 2026-10-11: layered throttling instead of an account-wide lockout.
+  - **Limits** (`app/auth/service.py`, `LOGIN_LIMITS`), all in the existing `rate_limits` table:
+
+    | Bucket | Key | Limit | Reset |
+    |---|---|---|---|
+    | IP, short | `ip:<client>` | 20 attempts / 15 min | window (unchanged existing limit) |
+    | IP, long | `ip:<client>` | 100 attempts / 24 h | window (new) |
+    | Account at IP, short | `acct:<sha256(lower(email))>:ip:<client>` | 5 attempts / 15 min | window, or a successful sign-in |
+    | Account at IP, long | the same key | 15 attempts / 24 h | window, or a successful sign-in |
+
+    - **Rationale for the values:**
+      - creators sign in rarely (sessions last 30 days);
+      - 5 tries per 15 minutes covers typos;
+      - the 24 h buckets make sustained guessing progressively slower: after 15 failures at one IP an account is throttled there for the rest of the day;
+      - the IP buckets keep shared NATs usable (20 per 15 min, as before).
+  - **How it counts:** every attempt is counted **before** the password is checked, through the atomic upsert `hit_rate_limit` (`INSERT … ON CONFLICT DO UPDATE … RETURNING`). Concurrent requests can't race past a limit, and a throttled request reveals nothing about the password.
+  - **No account-wide lockout any more:** the lock path, `AuthRepository.record_failed_login` and the `login_lockout_*` settings are removed. The `users.failed_login_attempts` / `locked_until` columns stay in the schema (no migration) and in the `User` model, but **no longer enforce an account-wide login lockout**: sign-in never increments the counter or sets `locked_until`, and never refuses an attempt because of them. They are still selected with every user row (`AuthRepository`, `_USER_COLS`) and still reset to `0` / `NULL` by a successful sign-in (`record_successful_login`), `set_password` (password reset and change), invite acceptance and `bootstrap-admin`. The admin user list still reports `locked` from `locked_until`; since nothing sets it any more, that is only true for a value written before this change, until it expires. Failures at one IP only throttle that account **at that IP**; every window expires on its own and nothing can renew it beyond its window.
+  - **One generic answer:** every failed sign-in (unknown account, wrong password, inactive account, any limit) returns **401** with `GENERIC_LOGIN_ERROR` ("Invalid email or password, or too many attempts. Please try again later."). Throttled requests still run one dummy Argon2 verification, so each failure does the same hashing work.
+  - **Account identifier:** the email is trimmed and lowercased, then hashed. The raw email is never stored as a rate-limit key.
+  - **Client address:** `client_ip(request)` is the address Uvicorn derives through the trusted proxy chain (see F5). A missing address counts under one shared `ip:None` key, so it can't bypass the limit.
+  - **Storage:** `rate_limits` rows are deleted by the existing daily cleanup once their window started more than a day ago, which matches the longest window. A successful sign-in deletes that account-at-IP's rows.
+  - **Logging:** `login_rejected` (reason, user id if known, client IP), `login_rate_limited` (the limit hit, client IP) and `login_succeeded`. No password, email or token is logged.
+  - **Unchanged:** successful sign-in, session creation, cookies, CSRF, Google sign-in, password reset and change (F3).
+  - **Tests** (`backend/tests/auth/test_login_throttling.py`, 12 PostgreSQL tests): requests go through Uvicorn's real `ProxyHeadersMiddleware` with the test client as the local Nginx, so each request's address comes from `X-Forwarded-For` exactly as Nginx appends it. They cover:
+    - the documented limits;
+    - 20 failures from one IP throttle it across accounts while another IP is unaffected;
+    - 5 failures for one account at one IP throttle only there, the owner at another IP always gets in while the attacker keeps going window after window, and nothing is stored on the account;
+    - the email is normalized (5 spellings share one budget);
+    - spoofed `X-Forwarded-For` values (incl. `127.0.0.1`) don't bypass the IP limit, and the forged addresses never become keys;
+    - an untrusted peer can't choose its address;
+    - unknown, wrong-password, inactive and throttled failures look identical (status, body, one password verification each, no cookie);
+    - sign-in works again after the short window, and the 24 h limit holds until its own window ends;
+    - a successful sign-in clears that account-at-IP budget;
+    - 12 concurrent wrong guesses reach the password check exactly 5 times, with all 12 counted;
+    - expired rows are removed by the daily cleanup;
+    - logs contain no password, email or CSRF token.
+  - **Regression proof:** against the previous `service.py`/`repository.py`/`config.py`, **10 of the 12** new tests fail. These include the account-lockout, generic-response, normalization, IP-limit, spoofing, concurrency and logging tests. The two that pass on both check the limit values and the success reset, which are non-regression checks.
+  - **Remaining limitations:**
+    - **A distributed attacker** with many IPs can guess against one account at up to 5 attempts per 15 min (15 per day) per IP. This is the accepted trade-off for not locking accounts. Argon2id and the password policy are the remaining defence; a CAPTCHA or second factor would be a later decision.
+    - **Shared IPs:** users behind one IP share the IP buckets.
+    - **Not done:** the old `failed_login_attempts` / `locked_until` columns remain in the schema and the `User` model (still selected and reset, no longer enforced); dropping them would need a migration and changes to those queries.
+
 ### F3 (P2): the current-password check on password change is not rate limited
 - **Evidence:** `AuthService.change_password` verifies `current_password` with no attempt limit.
 - **Impact:** someone holding a stolen session can guess the current password without limit, then change it (other
@@ -92,7 +135,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **The limit:** `AuthService.change_password` allows **5 current-password verifications per user per hour** (`PASSWORD_CHANGE_LIMIT`, existing `rate_limits` table, bucket `auth:password-change`, key `user:<id>`).
   - **What counts:** every verification counts before the password is checked, so once the limit is reached even the right password gets 429 (no oracle). A rejected weak new password is refused before verification and is not counted.
   - **Logging:** security events `password_change_rejected` and `password_change_rate_limited`, without the password.
-  - **Not touched:** login, the account lockout (F2) and sessions.
+  - **Not touched:** login and sessions (sign-in throttling is F2).
   - **Residual bound:** at most 120 guesses per day from one stolen session, about 3,600 over the 30-day session lifetime.
   - **Session revocation at the limit:** considered and **not** adopted. The approved policy keeps the session active.
   - **Tests:** 5 PostgreSQL tests in `tests/auth/test_auth_flow.py`:
@@ -289,7 +332,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
    Original plan: production log format without query strings + CI assertion. Small, configuration only; deploying it
    to production needs approval.
 2. **F3** (P2): limit current-password checks: **fixed and verified in the repository** (#25; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
-3. **F2** (P2): owner decision on the lockout model, then code and tests.
+3. **F2** (P2): **fixed in the repository** (layered IP and account-at-IP throttling, policy approved 2026-10-11; not merged, not deployed).
 4. **F6, F5** (P3): production guard for invite links; trim the public health response: **fixed in the repository** (branch `security-f5-f6-health-invite-guard`; not merged, not deployed).
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: fixed in the repository** (`\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.

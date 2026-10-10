@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import bcrypt
 
 from app.auth.google import GoogleIdentity
+from app.auth.service import GENERIC_LOGIN_ERROR
 from app.auth.tokens import sha256_hex
 from tests.integration import DOMAIN, FRONT, ORIGIN, PASSWORD, requires_db
 from tests.integration import csrf_headers as _csrf
@@ -47,7 +48,7 @@ def test_wrong_password_and_unknown_email_get_the_same_generic_error(app):
     a = _login(app, "generic" + DOMAIN, "wrong-password")
     b = _login(app, "nobody" + DOMAIN, "wrong-password")
     assert a.status_code == b.status_code == 401
-    assert a.json() == b.json() == {"error": "Invalid email or password"}
+    assert a.json() == b.json() == {"error": GENERIC_LOGIN_ERROR}
     assert "set-cookie" not in a.headers
 
 
@@ -57,19 +58,7 @@ def test_login_requires_allowed_origin(app):
     assert _login(app, "origin" + DOMAIN, headers={"origin": "https://evil.invalid"}).status_code == 403
 
 
-def test_lockout_after_five_failures_even_with_the_right_password(app):
-    _user("lock" + DOMAIN)
-    for _ in range(5):
-        assert _login(app, "lock" + DOMAIN, "wrong-password").status_code == 401
-    r = _login(app, "lock" + DOMAIN)
-    assert r.status_code == 429 and r.json() == {"error": "Too many attempts. Please try again later."}
-    with _db() as conn:
-        conn.execute("UPDATE public.users SET locked_until = now() - interval '1 second' WHERE email = %s",
-                     ("lock" + DOMAIN,))
-    assert _login(app, "lock" + DOMAIN).status_code == 200
-    with _db() as conn:
-        assert conn.execute("SELECT failed_login_attempts, locked_until FROM public.users WHERE email = %s",
-                            ("lock" + DOMAIN,)).fetchone() == (0, None)
+# Sign-in throttling (security audit F2, replaces the account-wide lockout): tests/auth/test_login_throttling.py
 
 
 def test_legacy_bcrypt_hash_logs_in_and_is_upgraded_to_argon2id(app):

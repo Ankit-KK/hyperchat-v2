@@ -3,7 +3,6 @@
 import ipaddress
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from app.auth.email import DisabledSender, EmailSender, ResendSender, render
 from app.auth.google import GoogleAuthError, GoogleOAuth
@@ -13,8 +12,21 @@ from app.auth.tokens import csrf_token_for, new_hex_token, new_token, sha256_hex
 from app.core.config import Settings
 from app.security.audit import security_event
 
-GENERIC_LOGIN_ERROR = "Invalid email or password"
+# Security audit F2: every failed sign-in, including a throttled one, gets this one answer (status 401), so a response
+# never tells whether the account exists, the password was right, or a limit was hit.
+GENERIC_LOGIN_ERROR = "Invalid email or password, or too many attempts. Please try again later."
 TOO_MANY = "Too many attempts. Please try again later."
+# Security audit F2: layered sign-in throttling (no account-wide lockout). (key, bucket, attempts, window seconds).
+# Every attempt is counted BEFORE the password check (atomic upsert in rate_limits), so concurrent requests cannot
+# exceed a limit and a throttled request reveals nothing about the password. "account_ip" = the normalized email at
+# one client IP: a failure from one IP never throttles the same account from another IP. The account/IP buckets
+# are cleared by a successful sign-in; all windows expire on their own (rows are deleted by the daily cleanup).
+LOGIN_LIMITS = (
+    ("ip", "auth:login", 20, 15 * 60),
+    ("ip", "auth:login-day", 100, 24 * 3600),
+    ("account_ip", "auth:login-account", 5, 15 * 60),
+    ("account_ip", "auth:login-account-day", 15, 24 * 3600),
+)
 PASSWORD_CHANGE_LIMIT = (5, 3600)  # current-password verifications per user per hour (security audit F3)
 
 
@@ -100,24 +112,21 @@ class AuthService:
     # ── login ──────────────────────────────────────────────────────────────
     async def login(self, email: str, password: str, ip: str | None, user_agent: str | None
                     ) -> tuple[User, IssuedSession]:
-        if not await self.repo.hit_rate_limit(f"ip:{ip}", "auth:login", 20, 15 * 60):
-            security_event("login_rate_limited", reason="ip_limit", client_ip=ip)
-            raise AuthError(429, TOO_MANY, "ip_rate_limited")
         email = (email or "").strip()
+        keys = {"ip": f"ip:{ip}", "account_ip": f"acct:{sha256_hex(email.lower())}:ip:{ip}"}
+        exceeded = [bucket for kind, bucket, limit, window in LOGIN_LIMITS  # all counted, none skipped
+                    if not await self.repo.hit_rate_limit(keys[kind], bucket, limit, window)]
+        if exceeded:
+            verify_password(password or "", None)  # the same work as a real attempt
+            security_event("login_rate_limited", reason=exceeded[0], client_ip=ip)
+            raise AuthError(401, GENERIC_LOGIN_ERROR, "rate_limited")
         user = await self.repo.user_by_email(email) if email else None
-        now = datetime.now(UTC)
-        if user and user.locked_until and user.locked_until > now:
-            verify_password(password or "", None)  # same work as a real attempt
-            security_event("login_rejected", reason="locked", user_id=user.id, client_ip=ip)
-            raise AuthError(429, TOO_MANY, "locked")
         ok = verify_password(password or "", user.password_hash if user else None)
         if not user or not user.is_active or not ok:
-            if user and user.is_active and user.password_hash:
-                await self.repo.record_failed_login(user.id, self.settings.login_lockout_threshold,
-                                                    self.settings.login_lockout_minutes)
             security_event("login_rejected", reason="bad_credentials" if user else "unknown_account",
                            user_id=user.id if user else None, client_ip=ip)
             raise AuthError(401, GENERIC_LOGIN_ERROR, "bad_credentials")
+        await self.repo.clear_rate_limits(keys["account_ip"], [b for k, b, _, _ in LOGIN_LIMITS if k == "account_ip"])
         new_hash = hash_password(password) if needs_rehash(user.password_hash) else None
         await self.repo.record_successful_login(user.id, new_hash)
         issued = await self.issue_session(user, ip, user_agent)

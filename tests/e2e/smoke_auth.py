@@ -25,6 +25,7 @@ import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.auth.passwords import hash_password  # noqa: E402
+from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
@@ -65,7 +66,7 @@ try:
         a = c.post("/api/v1/auth/login", json={"email": EMAIL, "password": "wrong-" + PASSWORD}, headers=ORIGIN)
         b = c.post("/api/v1/auth/login", json={"email": "nobody@authtest.invalid", "password": "x"}, headers=ORIGIN)
         check("wrong password / unknown email -> identical generic 401",
-              a.status_code == b.status_code == 401 and a.json() == b.json() == {"error": "Invalid email or password"})
+              a.status_code == b.status_code == 401 and a.json() == b.json() == {"error": GENERIC})
 
         r = c.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD},
                    headers={**ORIGIN, "x-forwarded-for": "203.0.113.9"})
