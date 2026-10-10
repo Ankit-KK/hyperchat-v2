@@ -1,5 +1,6 @@
 """Authentication use-cases. Routers stay thin; every rule lives here."""
 
+import asyncio
 import ipaddress
 import uuid
 from dataclasses import dataclass
@@ -41,6 +42,16 @@ class IssuedSession:
     token: str
     csrf_token: str
     session: Session
+
+
+async def _verify(password: str, stored_hash: str | None) -> bool:
+    """Argon2 / bcrypt (~50 ms) in the default thread pool (bounded), so the event loop keeps serving other requests
+    while a password is checked (security audit F9)."""
+    return await asyncio.to_thread(verify_password, password, stored_hash)
+
+
+async def _hash(password: str) -> str:
+    return await asyncio.to_thread(hash_password, password)
 
 
 def _valid_ip(ip: str | None) -> str | None:
@@ -114,20 +125,28 @@ class AuthService:
                     ) -> tuple[User, IssuedSession]:
         email = (email or "").strip()
         keys = {"ip": f"ip:{ip}", "account_ip": f"acct:{sha256_hex(email.lower())}:ip:{ip}"}
-        exceeded = [bucket for kind, bucket, limit, window in LOGIN_LIMITS  # all counted, none skipped
-                    if not await self.repo.hit_rate_limit(keys[kind], bucket, limit, window)]
-        if exceeded:
-            verify_password(password or "", None)  # the same work as a real attempt
+
+        async def over(kind: str) -> list[str]:  # every bucket of this kind is counted, none skipped
+            return [bucket for k, bucket, limit, window in LOGIN_LIMITS if k == kind
+                    and not await self.repo.hit_rate_limit(keys[kind], bucket, limit, window)]
+        if exceeded := await over("ip"):
+            # Security audit F9: no password hashing once the IP is over its limit, so one client cannot make the
+            # server hash without bound. Same answer as every failure; only the latency differs, and that tells
+            # nothing about the account (the IP buckets are the same whatever account is tried). Accepted 2026-10-11.
+            security_event("login_rate_limited", reason=exceeded[0], client_ip=ip)
+            raise AuthError(401, GENERIC_LOGIN_ERROR, "rate_limited")
+        if exceeded := await over("account_ip"):
+            await _verify(password or "", None)  # account-specific throttling must cost what a real attempt costs
             security_event("login_rate_limited", reason=exceeded[0], client_ip=ip)
             raise AuthError(401, GENERIC_LOGIN_ERROR, "rate_limited")
         user = await self.repo.user_by_email(email) if email else None
-        ok = verify_password(password or "", user.password_hash if user else None)
+        ok = await _verify(password or "", user.password_hash if user else None)
         if not user or not user.is_active or not ok:
             security_event("login_rejected", reason="bad_credentials" if user else "unknown_account",
                            user_id=user.id if user else None, client_ip=ip)
             raise AuthError(401, GENERIC_LOGIN_ERROR, "bad_credentials")
         await self.repo.clear_rate_limits(keys["account_ip"], [b for k, b, _, _ in LOGIN_LIMITS if k == "account_ip"])
-        new_hash = hash_password(password) if needs_rehash(user.password_hash) else None
+        new_hash = await _hash(password) if needs_rehash(user.password_hash) else None
         await self.repo.record_successful_login(user.id, new_hash)
         issued = await self.issue_session(user, ip, user_agent)
         security_event("login_succeeded", level=20, reason="password", user_id=user.id, client_ip=ip)
@@ -164,7 +183,7 @@ class AuthService:
         user_id = await self.repo.consume_reset_token(sha256_hex(token or ""))
         if not user_id:
             raise AuthError(400, "Invalid or expired reset link. Please request a new one.", "bad_reset_token")
-        await self.repo.set_password(user_id, hash_password(new_password))
+        await self.repo.set_password(user_id, await _hash(new_password))
         revoked = await self.repo.revoke_all_sessions(user_id)
         security_event("password_reset_completed", level=20, user_id=user_id, client_ip=ip,
                        reason=f"sessions_revoked:{revoked}")
@@ -177,10 +196,10 @@ class AuthService:
         if not await self.repo.hit_rate_limit(f"user:{user.id}", "auth:password-change", *PASSWORD_CHANGE_LIMIT):
             security_event("password_change_rate_limited", reason="user_limit", user_id=user.id, client_ip=ip)
             raise AuthError(429, TOO_MANY, "password_change_rate_limited")
-        if not verify_password(current or "", user.password_hash):
+        if not await _verify(current or "", user.password_hash):
             security_event("password_change_rejected", reason="bad_current_password", user_id=user.id, client_ip=ip)
             raise AuthError(400, "Current password is incorrect", "bad_current_password")
-        await self.repo.set_password(user.id, hash_password(new_password))
+        await self.repo.set_password(user.id, await _hash(new_password))
         await self.repo.revoke_all_sessions(user.id, except_session_id=session.id)
 
     def _check_new_password(self, password: str) -> None:
@@ -213,7 +232,7 @@ class AuthService:
                             user_agent: str | None) -> tuple[User, IssuedSession]:
         self._check_new_password(password)
         try:
-            user = await self.repo.accept_invite(sha256_hex(token or ""), hash_password(password), username)
+            user = await self.repo.accept_invite(sha256_hex(token or ""), await _hash(password), username)
         except InviteConflict:
             raise AuthError(409, "This account already exists. Please sign in.", "account_exists") from None
         if user is None:

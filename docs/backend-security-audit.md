@@ -17,6 +17,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P0**: exploitable now, stop everything | **0** | – |
 | **P1**: fix before production traffic | **1** | F1 (fixed in the repository, `cc961df`; not deployed) |
 | **P2**: fix before launch | **3** | F2 (fixed in the repository, branch `security-f2-login-throttling`; not merged / deployed), F3 (fixed and verified in the repository, #25; policy approved 2026-10-11; not deployed), F4 |
+| **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; fixed in the repository, branch `security-f9-login-hash-dos`; not merged / deployed) |
 | **P3**: hardening | **3** | F5, F6 (fixed in the repository, not merged / deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; fixed in the repository, not merged); all other Bandit results are false positives or informational |
@@ -215,6 +216,36 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Impact:** none today; unused code tends to be forgotten when the rules around it change.
 - **Remediation:** delete after D4 / SEC-L2 are decided.
 
+### F9 (P1): sign-in could be used to overload the API from one IP (introduced by F2, fixed before deployment)
+- **Evidence:**
+  - The F2 change (#29) made every throttled sign-in run a dummy Argon2 verification, to keep timing equal.
+  - One Argon2 verification costs about **50 ms** (measured: 50.7 ms dummy, 52.7 ms real).
+  - It ran synchronously on the event loop, freezing the worker for that time.
+  - Nginx does not rate-limit `/api/v1/auth/`.
+  - So a client over its IP limit could still make the server hash on every request, without bound. About 40 requests per second from one IP would keep both API workers busy and stall every endpoint.
+  - Before F2, an IP over its limit was refused before any hashing.
+- **Impact:** availability of the whole API, unauthenticated, from a single IP. No data exposure.
+- **Exploitability:** trivial once #29 is deployed. **Not exposed:** DEV and production still run older releases.
+- **Status: fixed in the repository (branch `security-f9-login-hash-dos`; not merged, not deployed).** Owner-approved 2026-10-11.
+  - **No hashing over the IP limit:** `AuthService.login` checks both IP buckets first. Once either is over its limit, it returns the generic 401 **without any password hashing**, and without touching the account buckets.
+    - Within the IP limits, account-at-IP throttling still runs one dummy verification, so account-specific state can't be told apart by timing.
+    - Total hashing per IP is therefore capped by the IP limits (20 per 15 min, 100 per 24 h).
+    - Every attempt is still counted atomically against the IP before any check, so no request can pass the IP limit or reach verification after it.
+  - **Hashing off the event loop:** every Argon2 / bcrypt call in the auth service (sign-in, rehash, password reset and change, invite acceptance) runs via `asyncio.to_thread`. That's the mechanism the project already uses for blocking work; the default thread pool is bounded at `min(32, CPUs + 4)` threads. A slow hash no longer freezes the worker's other requests. Successful sign-in behaviour is unchanged.
+- **Accepted timing side channel** (owner decision, 2026-10-11):
+  - **What it reveals:** an IP-throttled attempt gets the identical status and body but answers faster, because no hash runs. That shows only that **the IP's shared bucket is exhausted**.
+  - **What it doesn't reveal:** account existence, password correctness, or account-specific throttling. The IP buckets don't depend on the account tried, and account-specific throttling still costs one verification.
+- **Tests** (`backend/tests/auth/test_login_throttling.py`, 4 more PostgreSQL tests):
+  - **IP limit, no hashing:** 50 attempts from one IP get 50 identical generic answers and exactly **20** password verifications. IP-throttled attempts create no account-bucket rows, and all 50 are counted against the IP.
+  - **Account throttle still hashes:** within the IP limits, account-throttled attempts still do exactly one dummy verification each.
+  - **Concurrency:** 30 concurrent attempts from one IP, through the app's own connection pool, reach exactly **20** verifications, with all 30 counted.
+  - **Event loop stays free:** while a sign-in's verification takes 0.6 s, a ticker on the same event loop never stalls for more than 0.3 s, and the sign-in still succeeds.
+- **Regression proof:** against the pre-F9 code, the unbounded-hashing, concurrency and event-loop tests **fail**. The account-throttled test passes on both, as intended: it checks behaviour F9 must keep.
+- **Remaining limitations:**
+  - **Distributed hashing load:** many IPs can still each cause up to 20 verifications per 15 minutes.
+  - **Pool queue:** the thread pool bounds concurrent hashing, but its queue is not bounded. Under a large distributed flood, requests wait rather than fail. The pool is the default one, **shared** with the existing R2 and MP3/voice work, so heavy sign-in load can delay uploads (bounded per IP by the limits above).
+  - **Not done:** an Nginx `limit_req` on `/api/v1/auth/` would cut this off before the API. It's a separate deployment-configuration change, not part of this fix.
+
 ## Verified controls
 
 | Area | Control | Evidence |
@@ -333,6 +364,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
    to production needs approval.
 2. **F3** (P2): limit current-password checks: **fixed and verified in the repository** (#25; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): **fixed in the repository** (layered IP and account-at-IP throttling, policy approved 2026-10-11; not merged, not deployed).
+3a. **F9** (P1): **fixed in the repository** (no hashing over the IP limit; hashing off the event loop); must ship together with or before F2.
 4. **F6, F5** (P3): production guard for invite links; trim the public health response: **fixed in the repository** (branch `security-f5-f6-health-invite-guard`; not merged, not deployed).
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: fixed in the repository** (`\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.
