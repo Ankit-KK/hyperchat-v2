@@ -1,0 +1,768 @@
+Run started:2026-10-10 15:36:41.181794+00:00
+
+Test results:
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:91:36
+90	                cols = ", ".join(row)
+91	                await cur.execute(f"INSERT INTO public.streamers ({cols}) VALUES "
+92	                                  f"({', '.join(f'%({c})s' for c in row)}) RETURNING {_CREATOR_COLS}", row)
+93	                return await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:113:36
+112	            if current["user_id"] is not None:
+113	                await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
+114	                return "claimed", await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:118:32
+117	                return "bad_user", None
+118	            await cur.execute(f"UPDATE public.streamers SET user_id = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
+119	                              (user_id, streamer_id))
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:137:32
+136	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+137	            await cur.execute(f"SELECT count(*) AS n FROM public.users WHERE {cond}", params)
+138	            total = (await cur.fetchone())["n"]
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:139:32
+138	            total = (await cur.fetchone())["n"]
+139	            await cur.execute(f"SELECT {_ADMIN_USER_COLS} FROM public.users WHERE {cond} "
+140	                              "ORDER BY email LIMIT %s OFFSET %s", [*params, limit, offset])
+141	            return await cur.fetchall(), total
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:145:32
+144	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+145	            await cur.execute(f"SELECT {_ADMIN_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
+146	            return await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:175:36
+174	            try:
+175	                await cur.execute(f"UPDATE public.users SET {sets} WHERE id = %(id)s",
+176	                                  {**{k: changes[k] for k in changed}, "id": user_id})
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:194:28
+193	    async def _fetch_user(cur, user_id: str) -> dict:
+194	        await cur.execute(f"SELECT {_ADMIN_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
+195	        return await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:202:32
+201	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+202	            await cur.execute(f"SELECT {_INVITE_COLS} FROM public.user_invites WHERE {cond} "
+203	                              "ORDER BY created_at DESC LIMIT %s", (limit,))
+204	            return await cur.fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\admin\repository.py:213:32
+212	                return "ok"
+213	            await cur.execute(f"SELECT {_INVITE_COLS} FROM public.user_invites WHERE id = %s", (invite_id,))
+214	            row = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B311:blacklist] Standard pseudo-random generators are not suitable for security/cryptographic purposes.
+   Severity: Low   Confidence: High
+   CWE: CWE-330 (https://cwe.mitre.org/data/definitions/330.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random
+   Location: backend/app\audio\handlers.py:122:26
+121	        self.providers_enabled = providers_enabled
+122	        self.rng = rng or random.Random()
+123	
+
+--------------------------------------------------
+>> Issue: [B613:trojansource] A Python source file contains bidirectional control characters ('\u202a').
+   Severity: High   Confidence: Medium
+   CWE: CWE-838 (https://cwe.mitre.org/data/definitions/838.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b613_trojansource.html
+   Location: backend/app\audio\moderation.py:29:40
+28	# ── normalization (legacy engine/normalize.ts) ──────────────────────────────
+29	_INVISIBLE = re.compile("[­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮"
+30	                        "⁠-⁯ㅤ︀-️﻿ﾠ\U000E0000-\U000E007F]")
+
+--------------------------------------------------
+>> Issue: [B613:trojansource] A Python source file contains bidirectional control characters ('\u202a').
+   Severity: High   Confidence: Medium
+   CWE: CWE-838 (https://cwe.mitre.org/data/definitions/838.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b613_trojansource.html
+   Location: backend/app\audio\text.py:32:40
+31	
+32	_ZERO_WIDTH_AND_BIDI = re.compile("[​-‏‪-‮⁦-⁩﻿]")
+33	_CONTROL = re.compile("[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]")
+
+--------------------------------------------------
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: 'https://oauth2.googleapis.com/token'
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html
+   Location: backend/app\auth\google.py:17:12
+16	AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+17	TOKEN_URL = "https://oauth2.googleapis.com/token"
+18	JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\auth\repository.py:50:32
+49	    async def user_by_email(self, email: str) -> User | None:
+50	        row = await self._one(f"SELECT {_USER_COLS} FROM public.users WHERE email = %s", (email,))
+51	        return User(**row) if row else None
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\auth\repository.py:54:32
+53	    async def user_by_id(self, user_id: str) -> User | None:
+54	        row = await self._one(f"SELECT {_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
+55	        return User(**row) if row else None
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\auth\repository.py:155:34
+154	                return None
+155	            await cur.execute(f"""
+156	                INSERT INTO public.users (email, password_hash, username, role, streamer_id, email_verified_at,
+157	                                          password_changed_at)
+158	                VALUES (%(email)s, %(hash)s, %(username)s, %(role)s, %(streamer_id)s, now(), now())
+159	                ON CONFLICT (email) DO UPDATE SET
+160	                    password_hash = EXCLUDED.password_hash,
+161	                    username = COALESCE(public.users.username, EXCLUDED.username),
+162	                    streamer_id = COALESCE(EXCLUDED.streamer_id, public.users.streamer_id),
+163	                    role = CASE WHEN public.users.role = 'admin' THEN 'admin' ELSE EXCLUDED.role END,
+164	                    email_verified_at = COALESCE(public.users.email_verified_at, now()),
+165	                    password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL
+166	                WHERE public.users.password_hash IS NULL
+167	                RETURNING {_USER_COLS}
+168	            """, {"email": invite["email"], "hash": password_hash, "username": username, "role": invite["role"],
+169	                  "streamer_id": invite["streamer_id"]})
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\auth\repository.py:179:34
+178	    async def user_by_identity(self, provider: str, subject: str) -> User | None:
+179	        row = await self._one(f"""
+180	            SELECT {', '.join('u.' + c.strip() for c in _USER_COLS.split(','))}
+181	            FROM public.user_identities i JOIN public.users u ON u.id = i.user_id
+182	            WHERE i.provider = %s AND i.provider_subject = %s
+183	        """, (provider, subject))
+184	        return User(**row) if row else None
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\authz\repository.py:20:32
+19	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+20	            await cur.execute(f"SELECT {_COLS} FROM public.streamers WHERE {where}", (param,))
+21	            row = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\authz\repository.py:27:34
+26	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+27	            await cur.execute(f"""
+28	                SELECT {_COLS} FROM public.streamers
+29	                WHERE user_id = %s OR (id = %s AND user_id IS NOT NULL)
+30	                ORDER BY streamer_name, streamer_slug
+31	            """, (user_id, linked_streamer_id))
+32	            return [StreamerRef(**row) for row in await cur.fetchall()]
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\bots\repository.py:58:35
+57	    async def notify_context(self, donation_id: str) -> dict | None:
+58	        return await self._one(f"""
+59	            SELECT d.id::text AS id, d.streamer_id::text AS streamer_id, d.donor_name, d.amount,
+60	                   d.currency::text AS currency, d.message, d.message_visible, d.payment_status, d.moderation_status,
+61	                   d.voice_message_url, d.media_url, d.media_type, d.created_at, d.mod_notified,
+62	                   d.created_at < now() - make_interval(hours => %s) AS too_old, {_STREAMER_COLS}
+63	            FROM public.donations d JOIN public.streamers s ON s.id = d.streamer_id WHERE d.id = %s
+64	        """, (NOTIFY_WINDOW_HOURS, donation_id))
+65	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\bots\repository.py:67:33
+66	    async def moderators(self, streamer_id: str) -> list[dict]:
+67	        return await self._all(f"SELECT {_MOD_COLS} FROM public.streamers_moderators m "
+68	                               "WHERE m.streamer_id = %s AND m.is_active = true ORDER BY m.created_at, m.id",
+69	                               (streamer_id,))
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\bots\repository.py:111:34
+110	        async with self._conn() as conn, conn.cursor() as cur:
+111	            await cur.execute(f"""
+112	                INSERT INTO public.{CALLBACK_TABLE[platform]} (short_id, donation_id, streamer_id, action_type,
+113	                    recipient_id, moderator_id, expires_at)
+114	                VALUES (%s, %s, %s, %s, %s, %s, now() + interval '24 hours')
+115	            """, (short_id, donation_id, streamer_id, action, recipient_id, moderator_id))
+116	        return f"m:{short_id}"
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\bots\repository.py:119:35
+118	    async def callback(self, platform: str, short_id: str) -> dict | None:
+119	        return await self._one(f"""
+120	            SELECT short_id, donation_id::text AS donation_id, streamer_id::text AS streamer_id, action_type,
+121	                   recipient_id, moderator_id::text AS moderator_id, expires_at <= now() AS expired
+122	            FROM public.{CALLBACK_TABLE[platform]} WHERE short_id = %s
+123	        """, (short_id,))
+124	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\bots\repository.py:128:35
+127	        column = "telegram_user_id" if platform == "telegram" else "discord_user_id"
+128	        return await self._one(f"""
+129	            SELECT {_MOD_COLS}, {_STREAMER_COLS} FROM public.streamers_moderators m
+130	            JOIN public.streamers s ON s.id = m.streamer_id
+131	            WHERE m.streamer_id = %s AND m.{column} = %s AND m.is_active = true
+132	            ORDER BY m.created_at LIMIT 1
+133	        """, (streamer_id, platform_user_id))
+134	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\bots\repository.py:142:35
+141	        scope = "AND lower(s.streamer_slug) = ANY(%(slugs)s)" if slugs is not None else ""
+142	        return await self._all(f"""
+143	            SELECT {_MOD_COLS}, {_STREAMER_COLS} FROM public.streamers_moderators m
+144	            JOIN public.streamers s ON s.id = m.streamer_id
+145	            WHERE m.telegram_user_id = %(uid)s {active} {scope}
+146	            ORDER BY s.streamer_name, m.created_at LIMIT %(limit)s
+147	        """, {"uid": telegram_user_id, "slugs": sorted(slugs or ()), "limit": MAX_ASSIGNMENTS + 1})
+148	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\bots\repository.py:151:35
+150	    async def pending_donations(self, streamer_id: str, limit: int = 5) -> list[dict]:
+151	        return await self._all(f"""
+152	            SELECT d.id::text AS id, d.streamer_id::text AS streamer_id, d.donor_name, d.amount,
+153	                   d.currency::text AS currency, d.message, d.message_visible, d.moderation_status, d.voice_message_url,
+154	                   d.media_url, d.media_type, d.created_at, {_STREAMER_COLS}
+155	            FROM public.donations d JOIN public.streamers s ON s.id = d.streamer_id
+156	            WHERE d.streamer_id = %s AND d.payment_status = 'success' AND d.moderation_status = 'pending'
+157	            ORDER BY d.created_at, d.id LIMIT %s
+158	        """, (streamer_id, limit))
+159	
+
+--------------------------------------------------
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: 'This account already has a password. Sign in with it, or have an admin change its role.'
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html
+   Location: backend/app\cli.py:48:4
+47	    "admin_exists": "An active admin who can sign in already exists. Use the admin API instead.",
+48	    "account_has_password": "This account already has a password. Sign in with it, or have an admin change its role.",
+49	}
+50	
+51	
+52	def connection_factory(settings: Settings):
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:56:31
+55	    d.media_type, d.moderation_status, d.created_at"""
+56	_QUEUE_COLS = _DONATION_COLS + """, d.approved_at, d.approved_by_label,
+57	    EXISTS (SELECT 1 FROM public.banned_donors b WHERE b.streamer_id = d.streamer_id AND b.is_active = true
+58	            AND b.donor_name_lower = lower(d.donor_name)) AS is_donor_banned"""
+59	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:111:33
+110	    async def settings(self, streamer_id: str) -> dict | None:
+111	        return await self._one(f"SELECT {_SETTINGS_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
+112	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:123:32
+122	        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+123	            await cur.execute(f"SELECT {differs} FROM public.streamers WHERE id = %(id)s FOR UPDATE", params)
+124	            diff = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:130:36
+129	                sets = ", ".join(f"{c} = %({c})s::{SETTINGS_SQL_TYPES[c]}" for c in changed)
+130	                await cur.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", params)
+131	                await outbox.emit_settings_changed(cur, streamer_id, changed)  # Phase 9: live overlay settings
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:132:32
+131	                await outbox.emit_settings_changed(cur, streamer_id, changed)  # Phase 9: live overlay settings
+132	            await cur.execute(f"SELECT {_SETTINGS_COLS} FROM public.streamers WHERE id = %(id)s", params)
+133	            return await cur.fetchone(), changed
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:149:33
+148	        columns = _QUEUE_COLS if queue else _DONATION_COLS
+149	        return await self._all(f"SELECT {columns} FROM public.donations d WHERE {' AND '.join(where)} "
+150	                               "ORDER BY d.created_at DESC, d.id DESC LIMIT %(limit)s", params)
+151	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:226:32
+225	                                                  step.new_status, bot, actor_label)
+226	            await cur.execute(f"SELECT {_QUEUE_COLS} FROM public.donations d WHERE d.id = %s", (donation_id,))
+227	            return current["moderation_status"], step, await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:244:28
+243	                     "approved_by_moderator_id = NULL"]
+244	        await cur.execute(f"UPDATE public.donations SET {', '.join(sets)} WHERE id = %(id)s AND streamer_id = %(sid)s",
+245	                          {"status": step.new_status, "visible": step.message_visible, "label": actor_label,
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:259:33
+258	        """The creator's active bans, newest first (at most `limit`), and how many there are in total."""
+259	        rows = await self._all(f"SELECT {_BAN_COLS} FROM public.banned_donors WHERE streamer_id = %s "
+260	                               "AND is_active = true ORDER BY created_at DESC, id DESC LIMIT %s", (streamer_id, limit))
+261	        total = await self._one("SELECT count(*) AS n FROM public.banned_donors WHERE streamer_id = %s "
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:285:32
+284	            # Every write to this donor's bans holds the lock above, so this read is current.
+285	            await cur.execute(f"SELECT {_BAN_COLS} FROM public.banned_donors WHERE id = %s", (ban_id,))
+286	            row = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:295:32
+294	            deactivated = cur.rowcount
+295	            await cur.execute(f"SELECT {_BAN_COLS} FROM public.banned_donors WHERE id = %s", (ban_id,))
+296	            return deactivated, await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:329:33
+328	        """Active and removed moderators, newest first (legacy order)."""
+329	        return await self._all(f"SELECT {_MODERATOR_COLS} FROM public.streamers_moderators WHERE streamer_id = %s "
+330	                               "ORDER BY created_at DESC, id DESC", (streamer_id,))
+331	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:355:28
+354	                                discord_user_id: str | None) -> dict:
+355	        await cur.execute(f"INSERT INTO public.streamers_moderators (streamer_id, mod_name, telegram_user_id, "
+356	                          f"discord_user_id) VALUES (%s, %s, %s, %s) RETURNING {_MODERATOR_COLS}",
+357	                          (streamer_id, mod_name, telegram_user_id, discord_user_id))
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:367:32
+366	        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+367	            await cur.execute(f"SELECT {_MODERATOR_COLS} FROM public.streamers_moderators WHERE id = %s "
+368	                              "AND streamer_id = %s FOR UPDATE", (moderator_id, streamer_id))
+369	            row = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:378:32
+377	            sets = ", ".join(f"{c} = %({c})s" + ("::public.moderator_role" if c == "role" else "") for c in changed)
+378	            await cur.execute(f"UPDATE public.streamers_moderators SET {sets} "
+379	                              f"WHERE id = %(id)s AND streamer_id = %(sid)s RETURNING {_MODERATOR_COLS}",
+380	                              {**{c: changes[c] for c in changed}, "id": moderator_id, "sid": streamer_id})
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:387:32
+386	        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+387	            await cur.execute(f"UPDATE public.streamers_moderators SET is_active = false WHERE id = %s "
+388	                              f"AND streamer_id = %s AND is_active = true RETURNING {_MODERATOR_COLS}",
+389	                              (moderator_id, streamer_id))
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\dashboard\repository.py:393:32
+392	                return "removed", row
+393	            await cur.execute(f"SELECT {_MODERATOR_COLS} FROM public.streamers_moderators "
+394	                              "WHERE id = %s AND streamer_id = %s", (moderator_id, streamer_id))
+395	            row = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: backend/app\jobs\queue.py:101:8
+100	        written) when this worker lost the lease."""
+101	        assert status in ("succeeded", "failed")
+102	        try:
+
+--------------------------------------------------
+>> Issue: [B311:blacklist] Standard pseudo-random generators are not suitable for security/cryptographic purposes.
+   Severity: Low   Confidence: High
+   CWE: CWE-330 (https://cwe.mitre.org/data/definitions/330.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random
+   Location: backend/app\jobs\runner.py:53:26
+52	        self.ident = ident or worker_id()
+53	        self.rng = rng or random.Random()
+54	        self.processed = 0
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\maintenance.py:46:36
+45	            if dry_run:
+46	                await cur.execute(f"SELECT count(*) FROM {table} WHERE {condition}")
+47	                counts[name] = (await cur.fetchone())[0]
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\maintenance.py:49:36
+48	            else:
+49	                await cur.execute(f"DELETE FROM {table} WHERE {condition}")
+50	                counts[name] = cur.rowcount
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\obs\queue.py:61:38
+60	            for _ in range(MAX_SKIPS + 1):
+61	                await cur.execute(f"""
+62	                    UPDATE public.donations d SET audio_played_at = now()
+63	                    WHERE d.id = (
+64	                        SELECT q.id FROM public.donations q
+65	                        WHERE q.streamer_id = %(sid)s AND q.audio_played_at IS NULL AND q.payment_status = 'success'
+66	                          AND q.moderation_status IN ('approved', 'auto_approved')
+67	                          AND q.audio_scheduled_at <= now()
+68	                          AND q.audio_scheduled_at >= now() - make_interval(hours => %(window)s)
+69	                          AND (q.hypersound_url IS NOT NULL OR q.voice_message_url IS NOT NULL
+70	                               OR q.tts_audio_url IS NOT NULL)
+71	                        ORDER BY q.audio_scheduled_at, q.id
+72	                        LIMIT 1
+73	                        FOR UPDATE SKIP LOCKED)
+74	                    RETURNING {_DONATION}
+75	                """, {"sid": streamer_id, "window": QUEUE_WINDOW_HOURS})
+76	                row = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\obs\queue.py:98:32
+97	        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+98	            await cur.execute(f"SELECT {_DONATION} FROM public.donations d WHERE d.id = %s AND d.streamer_id = %s "
+99	                              "FOR UPDATE", (donation_id, streamer_id))
+100	            d = await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\obs\tokens.py:59:32
+58	            rotated = cur.rowcount
+59	            await cur.execute(f"INSERT INTO public.obs_tokens (streamer_id, token_hash, is_active) VALUES (%s, %s, true) "
+60	                              f"RETURNING {_COLS}", (streamer_id, sha256_hex(token)))
+61	            return token, await cur.fetchone(), rotated
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\obs\tokens.py:65:32
+64	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+65	            await cur.execute(f"SELECT {_COLS} FROM public.obs_tokens WHERE streamer_id = %s "
+66	                              "ORDER BY created_at DESC, id DESC LIMIT %s", (streamer_id, LIST_LIMIT))
+67	            return await cur.fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\obs\tokens.py:71:34
+70	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+71	            await cur.execute(f"""
+72	                UPDATE public.obs_tokens SET is_active = false,
+73	                    revoked_at = CASE WHEN revoked_at IS NOT NULL AND revoked_at <= now() THEN revoked_at ELSE now() END
+74	                WHERE id = %s AND streamer_id = %s RETURNING {_COLS}
+75	            """, (token_id, streamer_id))
+76	            return await cur.fetchone()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\payments\repository.py:107:33
+106	    async def by_order_id(self, order_id: str) -> dict | None:
+107	        return await self._one(f"SELECT {_DONATION} FROM public.donations d "
+108	                               "JOIN public.streamers s ON s.id = d.streamer_id WHERE d.order_id = %s", (order_id,))
+109	
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\payments\repository.py:111:34
+110	    async def by_provider_order(self, razorpay_order_id: str) -> dict | None:
+111	        row = await self._one(f"""
+112	            SELECT {_DONATION} FROM public.order_lookup o JOIN public.donations d ON d.id = o.donation_id
+113	            JOIN public.streamers s ON s.id = d.streamer_id WHERE o.razorpay_order_id = %s
+114	        """, (razorpay_order_id,))
+115	        if row is not None:
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\payments\repository.py:118:32
+117	        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+118	            await cur.execute(f"SELECT {_DONATION} FROM public.donations d JOIN public.streamers s "
+119	                              "ON s.id = d.streamer_id WHERE d.provider_order_id = %s LIMIT 2", (razorpay_order_id,))
+120	            rows = await cur.fetchall()
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Low
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\public\repository.py:38:33
+37	        """Only `active` creators are public (D3). The id stays server-side, never in a response."""
+38	        rows = await self._all(f"SELECT {_PUBLIC_STREAMER_COLS} FROM public.streamers "
+39	                               "WHERE streamer_slug = %s AND status = 'active'", (slug,))
+40	        return rows[0] if rows else None
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: backend/app\realtime\outbox.py:178:8
+177	    async def finish(self, event: Event, status: str, reason: str | None = None) -> bool:
+178	        assert status in ("published", "failed", "skipped")
+179	        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+
+--------------------------------------------------
+>> Issue: [B311:blacklist] Standard pseudo-random generators are not suitable for security/cryptographic purposes.
+   Severity: Low   Confidence: High
+   CWE: CWE-330 (https://cwe.mitre.org/data/definitions/330.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random
+   Location: backend/app\realtime\publisher.py:61:26
+60	        self.ident = ident or worker_id()
+61	        self.rng = rng or random.Random()
+62	        self.counts = {"published": 0, "failed": 0, "skipped": 0, "retried": 0, "expired": 0}
+
+--------------------------------------------------
+>> Issue: [B324:hashlib] Use of weak MD5 hash for security. Consider usedforsecurity=False
+   Severity: High   Confidence: High
+   CWE: CWE-327 (https://cwe.mitre.org/data/definitions/327.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b324_hashlib.html
+   Location: backend/app\realtime\pusher.py:78:26
+77	    params = {"auth_key": app.key, "auth_timestamp": str(timestamp), "auth_version": "1.0",
+78	              "body_md5": hashlib.md5(body).hexdigest()}  # noqa: S324 - required by the Pusher protocol
+79	    query = "&".join(f"{k}={params[k]}" for k in sorted(params))
+
+--------------------------------------------------
+>> Issue: [B311:blacklist] Standard pseudo-random generators are not suitable for security/cryptographic purposes.
+   Severity: Low   Confidence: High
+   CWE: CWE-330 (https://cwe.mitre.org/data/definitions/330.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random
+   Location: backend/app\security\nonce_store.py:52:7
+51	    """Best-effort cleanup on ~1% of calls; failures are ignored."""
+52	    if random.random() < probability:
+53	        try:
+
+--------------------------------------------------
+>> Issue: [B110:try_except_pass] Try, Except, Pass detected.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html
+   Location: backend/app\security\nonce_store.py:55:8
+54	            await store.purge_expired()
+55	        except Exception:  # noqa: BLE001
+56	            pass
+
+--------------------------------------------------
+>> Issue: [B608:hardcoded_sql_expressions] Possible SQL injection vector through string-based query construction.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-89 (https://cwe.mitre.org/data/definitions/89.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html
+   Location: backend/app\soundboard\repository.py:154:48
+153	                        for slot_id, order in reorder:
+154	                            await cur.execute(f"UPDATE public.streamer_soundboard_slots SET order_index = {step} "
+155	                                              "WHERE streamer_slug = %s AND id = %s", (order, slug, slot_id))
+156	                for slot_id, order in unhide:
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: backend/app\storage\memory.py:130:8
+129	        """Test helper: platform library objects (hypersounds/, hypersound-thumbs/) as an operator uploads them."""
+130	        assert key.startswith(LISTABLE_PREFIXES)
+131	        self.objects[key] = StoredObject(data, content_type, "", {})
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 11050
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 10
+		Medium: 52
+		High: 3
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 17
+		Medium: 39
+		High: 9
+Files skipped (0):
