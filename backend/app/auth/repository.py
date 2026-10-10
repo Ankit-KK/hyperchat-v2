@@ -54,15 +54,6 @@ class AuthRepository:
         row = await self._one(f"SELECT {_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
         return User(**row) if row else None
 
-    async def record_failed_login(self, user_id: str, threshold: int, lock_minutes: int) -> None:
-        await self._exec("""
-            UPDATE public.users SET
-              failed_login_attempts = failed_login_attempts + 1,
-              locked_until = CASE WHEN failed_login_attempts + 1 >= %s
-                                  THEN now() + make_interval(mins => %s) ELSE locked_until END
-            WHERE id = %s
-        """, (threshold, lock_minutes, user_id))
-
     async def record_successful_login(self, user_id: str, new_hash: str | None) -> None:
         await self._exec("""
             UPDATE public.users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now(),
@@ -204,6 +195,9 @@ class AuthRepository:
             RETURNING request_count
         """, (key, bucket, window_seconds, window_seconds))
         return row["request_count"] <= limit
+
+    async def clear_rate_limits(self, key: str, buckets: list[str]) -> None:
+        await self._exec("DELETE FROM public.rate_limits WHERE ip_address = %s AND endpoint = ANY(%s)", (key, buckets))
 
 
 class InviteConflict(Exception):

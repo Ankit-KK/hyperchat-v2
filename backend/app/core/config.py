@@ -88,8 +88,6 @@ class Settings(BaseSettings):
     session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     session_idle_days: int = 7
     session_absolute_days: int = 30
-    login_lockout_threshold: int = 5
-    login_lockout_minutes: int = 15
     password_min_length: int = 8  # new passwords only; existing ones (min 6 before) still log in
     password_max_length: int = 128
     reset_token_ttl_minutes: int = 60
