@@ -16,7 +16,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 |---|---|---|
 | **P0**: exploitable now, stop everything | **0** | – |
 | **P1**: fix before production traffic | **1** | F1 (fixed in the repository, `cc961df`; not deployed) |
-| **P2**: fix before launch | **3** | F2, F3 (implemented, limit pending approval), F4 |
+| **P2**: fix before launch | **3** | F2, F3 (implemented, policy approved 2026-10-11; in #25), F4 |
 | **P3**: hardening | **3** | F5, F6, F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; fixed in the repository, not merged); all other Bandit results are false positives or informational |
@@ -88,13 +88,13 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Remediation:** per-user limit on failed current-password checks (e.g. 5 per hour), counted with the login
   lockout, and a security event.
 
-- **Status: implemented, pending owner approval of the limit (not merged, not deployed).**
+- **Status: implemented; policy approved by the owner on 2026-10-11 (5 current-password verifications per user per hour; the session stays active at the limit; 429 until the window resets; a weak new password does not count). In #25; not deployed.**
   - **The limit:** `AuthService.change_password` allows **5 current-password verifications per user per hour** (`PASSWORD_CHANGE_LIMIT`, existing `rate_limits` table, bucket `auth:password-change`, key `user:<id>`).
   - **What counts:** every verification counts before the password is checked, so once the limit is reached even the right password gets 429 (no oracle). A rejected weak new password is refused before verification and is not counted.
   - **Logging:** security events `password_change_rejected` and `password_change_rate_limited`, without the password.
   - **Not touched:** login, the account lockout (F2) and sessions.
   - **Residual bound:** at most 120 guesses per day from one stolen session, about 3,600 over the 30-day session lifetime.
-  - **Option for the owner:** revoke the session that hit the limit. This is a policy decision, not implemented.
+  - **Session revocation at the limit:** considered and **not** adopted. The approved policy keeps the session active.
   - **Tests:** 3 PostgreSQL tests in `tests/auth/test_auth_flow.py`:
     - 5 failures, then 429 even for the right password; the password is unchanged; events are logged and no password appears in the logs;
     - legitimate typos within the limit succeed, and the window resets;
@@ -246,7 +246,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 
    Original plan: production log format without query strings + CI assertion. Small, configuration only; deploying it
    to production needs approval.
-2. **F3** (P2): limit current-password checks: **implemented** (5 per user per hour), pending approval of the limit.
+2. **F3** (P2): limit current-password checks: **implemented**, policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): owner decision on the lockout model, then code and tests.
 4. **F6, F5** (P3): production guard for invite links; trim the public health response.
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: fixed in the repository** (`\u` escapes, behaviour pinned over all code points, repository-wide CI check).
