@@ -69,7 +69,9 @@ api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUC
    `moderator_notifications` table and two columns on each callback table; the previous release ignores them.
    Bots stay off until `HYPERCHAT_BOTS_ENABLED=true` with dedicated test bots, see `docs/bots.md`.
    `0015` drops one UNIQUE index on `moderation_actions` (no row changes); the previous release works without it,
-   and its downgrade deliberately does not rebuild it.)
+   and its downgrade deliberately does not rebuild it.
+   `0016` adds three nullable columns to `banned_donors` (no table rewrite; its foreign key briefly locks `users`
+   against writes, bounded by `lock_timeout`); the previous release ignores them.)
 6. Nginx (required from Phase 4 on: the public read API's per-IP rate limit; repeat whenever
    `deploy/nginx/` changed). As root, with the files of the same `<commit>`:
    - back up what is installed: `/etc/nginx/sites-available/api.quicktestspace.site` and any existing

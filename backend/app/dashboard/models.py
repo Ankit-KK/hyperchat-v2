@@ -164,6 +164,29 @@ class ModerationRequest(_Model):  # D-M2 body
     reason: Annotated[StrictStr, Field(max_length=500)] | None = None  # ban_donor only (stored as the ban reason)
 
 
+class BannedDonor(_Model):  # D-R8 row and the D-M6 result (the donor name is what the creator already sees)
+    ban_id: str
+    donor_name: str
+    banned_by_name: str | None
+    reason: str | None
+    is_active: bool
+    created_at: datetime
+    unbanned_at: datetime | None
+    unbanned_by_label: str | None
+
+
+class BannedDonorList(_Model):  # D-R8
+    banned_donors: list[BannedDonor]
+    total: int
+    truncated: bool  # more active bans exist than were returned
+
+
+class UnbanResult(_Model):  # D-M6
+    result: Literal["applied", "unchanged"]  # unchanged: the ban was already lifted
+    bans_lifted: int  # active bans of this donor name now inactive (legacy data may hold duplicates)
+    ban: BannedDonor
+
+
 class ModerationResult(_Model):  # D-M2
     result: Literal["applied", "unchanged"]
     action: str
@@ -204,6 +227,29 @@ class ModeratorCreate(_Model):  # D-M3 body (permissions keep their column defau
         if self.telegram_user_id is None and self.discord_user_id is None:
             raise ValueError("telegram_user_id or discord_user_id is required")
         return self
+
+
+class ModeratorPermissionsPatch(_Model):  # D-M7 body: only the fields to change; none may be null
+    role: Literal["owner", "moderator", "viewer"] | None = None
+    can_approve: StrictBool | None = None
+    can_reject: StrictBool | None = None
+    can_hide_message: StrictBool | None = None
+    can_ban: StrictBool | None = None
+    can_replay: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def _not_empty_no_nulls(self):
+        if not self.model_fields_set:
+            raise ValueError("at least one of role, can_approve, can_reject, can_hide_message, can_ban, can_replay")
+        if any(getattr(self, f) is None for f in self.model_fields_set):
+            raise ValueError("fields cannot be null")
+        return self
+
+
+class ModeratorPermissionsResult(_Model):  # D-M7
+    result: Literal["applied", "unchanged"]
+    changed: list[str]
+    moderator: Moderator
 
 
 class ModeratorRemoval(_Model):  # D-M4

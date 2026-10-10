@@ -34,9 +34,12 @@ Creator paths are `/api/v1/dashboard/streamers/{streamer}/…`.
 | D-R4 | `GET …/donations/export.csv?from=&to=` | 200 `text/csv` (attachment, streamed) | 400 range / too many rows |
 | D-R5 | `GET …/moderation/queue?status=&limit=&cursor=` | 200 `{donations, pending_count, next_cursor, has_more}` | 400 cursor, 422 status/limit |
 | D-M2 | `POST …/donations/{donation_id}/moderation` | 200 `{result, action, previous_status, new_status, donation}` | 404, 409 unpaid, 422 |
+| D-R8 | `GET …/moderation/banned-donors` | 200 `{banned_donors, total, truncated}` | – |
+| D-M6 | `POST …/moderation/banned-donors/{ban_id}/unban` | 200 `{result, bans_lifted, ban}` | 403 CSRF, 404 |
 | D-R6 | `GET …/moderators` | 200 `{moderators}` | 401, 403, 404 |
 | D-M3 | `POST …/moderators` | 201 `Moderator` | 409 duplicate, 422 |
 | D-M4 | `DELETE …/moderators/{moderator_id}` | 200 `{result, moderator}` | 404 |
+| D-M7 | `PATCH …/moderators/{moderator_id}` | 200 `{result, changed, moderator}` | 403 CSRF, 404, 409 removed, 422 |
 | D-R7 | `GET /api/v1/me/terms` | 200 `{current_version, accepted, is_admin}` | 401 |
 | D-M5 | `POST /api/v1/me/terms/accept` | 200 `{accepted, current_version}` | 403 CSRF, 409 version, 422 |
 
@@ -145,6 +148,20 @@ An action already in effect returns `"result": "unchanged"` and writes nothing �
 totals change. Concurrent actions on one donation serialise on the row lock (two simultaneous
 approvals credit once); any error rolls everything back.
 
+**D-R8 ban list:** the creator's **active** bans, newest first, at most 500 (`truncated` says more exist; `total`
+counts them all). Each ban: `ban_id`, `donor_name`, `banned_by_name`, `reason`, `is_active`, `created_at`,
+`unbanned_at`, `unbanned_by_label`.
+
+**D-M6 unban by id** (replaces legacy's per-donation `unban_donor`, which A3 keeps out of D-M2): in one
+transaction, every **active** ban of that donor name (exact `lower()`, never `ILIKE`) for this creator becomes
+inactive and records `unbanned_at`, `unbanned_by_label` (the actor label) and `unbanned_by_user_id` (migration
+0016); the rows are kept as history. Legacy data can hold several active bans of one name, and leaving one active
+would keep the donor banned, so all are lifted: `bans_lifted` says how many. Already lifted → `"result":
+"unchanged"`, `bans_lifted: 0`. A ban of another creator (or a malformed id) is 404. It takes the same
+per-creator, per-donor lock as `ban_donor`, so a ban racing an unban of one donor serialises. A security event
+`donor_unbanned` records the user and creator (no donor name). The donation's moderation status is not changed
+(legacy behaviour).
+
 ## G4 moderators
 Moderators are Telegram/Discord identities used by the bots (Phase 11, [`bots.md`](bots.md)); they have no web access.
 - **D-R6:** all moderators of the creator, active and removed, newest first: `moderator_id,
@@ -156,14 +173,23 @@ Moderators are Telegram/Discord identities used by the bots (Phase 11, [`bots.md
   ids). `mod_name` is trimmed, 1–100 characters; each id is an optional string, trimmed, at most 64
   characters, `""` meaning none; at least one id is required. The caps only bound input (the longest
   stored values are a 24-character name and 10/19-character ids). Existing rows are never
-  re-validated or rewritten. Permissions keep their column defaults (editing them is D-M7, deferred).
+  re-validated or rewritten. New moderators get the column defaults; D-M7 edits them.
 - **Duplicates (409):** an active moderator of the same creator with the same Telegram id
   (`An active moderator with this Telegram ID already exists`, enforced by the existing
   `streamers_moderators_unique_active` index) or Discord id (`… Discord ID …`, checked under a
   per-creator advisory lock; there is no Discord index because existing data already holds a
   duplicate, which stays untouched). Removed moderators do not count.
 - **D-M4:** soft removal (`is_active = false`): `"removed"`, then `"unchanged"` on repeat.
-- Additions and removals are logged (`moderator_added`, `moderator_removed`).
+- **D-M7 permission editing** (new in v2: legacy only ever had the column defaults): body with any of `role`
+  (`owner` / `moderator` / `viewer`), `can_approve`, `can_reject`, `can_hide_message`, `can_ban`, `can_replay`
+  (strict booleans; at least one field, no nulls, nothing else — not `can_manage_mods`, which nothing reads, nor
+  names or ids). Exactly what the bots check at click time (`app.bots.permissions`: owner = all, viewer = none,
+  otherwise the flags), so it takes effect on the moderator's next Telegram / Discord action. Under the row lock
+  the request is compared with the **effective** values (NULL = the column default, as every read does) and only
+  differing columns are written: `"applied"` with `changed`, or `"unchanged"`. A removed moderator is 409; another
+  creator's moderator, an unknown or malformed id is 404. Concurrent edits serialise (no lost update).
+- Additions, removals and permission changes are logged (`moderator_added`, `moderator_removed`,
+  `moderator_permissions_changed` with the changed field names).
 
 ## G5 terms
 The current version is a server constant, `2026-07-03` (legacy `src/config/terms.ts`).
@@ -192,7 +218,7 @@ OBS tokens, order ids (`order_id`, `provider_order_id`), `status_token_hash`, `u
 | Approve on `auto_approved` | set `approved`, re-alerted | unchanged (A5) |
 | Writes | several statements, errors ignored (S8) | one transaction |
 | Audit identity | client-supplied moderator fields (S7) | session user (`actor_user_id`), label = username or "Dashboard" |
-| Unban | `ILIKE` on the donor-chosen name (S6) | not in Phase 5 (A3); ban checks use exact `lower()` |
+| Unban | per-donation action, `ILIKE` on the donor-chosen name (S6) | by ban id (D-M6), exact `lower()`; recorded on the ban row (0016) |
 | Side effects | Pusher, TTS/music/SFX, Telegram notifications in the request | none (Phases 8, 9, 11) |
 | Settings validation | some fields unchecked (S11); leaderboard overlay 0–16 | strict types for all 21 fields; leaderboard 0–15 (A8); minimum amounts read-only (A1) |
 | Stats | all paid rows loaded and re-converted with fixed rates (S12) | one SQL aggregate over `amount_inr`; no average/top-donation fields |
@@ -204,10 +230,10 @@ OBS tokens, order ids (`order_id`, `provider_order_id`), `status_token_hash`, `u
 | Request format | POST with `streamerId`/`action` in the body | REST paths with the creator in the URL |
 
 ## Deferred (not in Phase 5)
-Ban list and unban by id (D-R8/D-M6), moderator permission editing (D-M7), OBS tokens and replay
-(Phase 10), soundboard (Phase 6), Pusher broadcasts and the live feed (Phase 9), TTS/music/SFX on
-approval (Phase 8), Telegram/Discord moderation and notifications (Phase 11), payouts (Phase 12),
-Sarvam transcription (D14).
+OBS tokens and replay (Phase 10), soundboard (Phase 6), Pusher broadcasts and the live feed (Phase 9),
+TTS/music/SFX on approval (Phase 8), Telegram/Discord moderation and notifications (Phase 11), payouts
+(Phase 12), Sarvam transcription (D14). The ban list, unban by id (D-R8/D-M6) and moderator permission
+editing (D-M7) were deferred too and have since been added in the backend completion phase (above).
 
 ## Schema
 Migration `0009_moderation_actor` adds `moderation_actions.actor_user_id uuid NULL REFERENCES

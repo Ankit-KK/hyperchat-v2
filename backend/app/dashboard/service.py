@@ -16,6 +16,8 @@ from app.dashboard.models import (
     Moderator,
     ModeratorCreate,
     ModeratorList,
+    ModeratorPermissionsPatch,
+    ModeratorPermissionsResult,
     ModeratorRemoval,
     SettingsUpdate,
     TermsAccepted,
@@ -104,6 +106,23 @@ class DashboardService:
         security_event("moderator_added", level=logging.INFO, user_id=access.current.user.id,
                        streamer_id=access.streamer.id)
         return Moderator(**row)
+
+    async def update_moderator(self, access: StreamerAccess, moderator_id: str,
+                               body: ModeratorPermissionsPatch) -> ModeratorPermissionsResult:
+        """D-M7: a creator edits an active moderator's role and permissions (new in v2; legacy only had the column
+        defaults). Takes effect on the moderator's next Telegram / Discord action (checked at click time)."""
+        moderator_id = v.parse_uuid(moderator_id)
+        changes = {f: getattr(body, f) for f in body.model_fields_set}
+        outcome = await self.repo.update_moderator(access.streamer.id, moderator_id, changes) if moderator_id else None
+        if outcome is None:
+            raise ApiError(404, "Moderator not found", "moderator_not_found")
+        result, changed, row = outcome
+        if result == "removed":
+            raise ApiError(409, "This moderator has been removed", "moderator_removed")
+        if changed:
+            security_event("moderator_permissions_changed", level=logging.INFO, user_id=access.current.user.id,
+                           streamer_id=access.streamer.id, reason=",".join(changed))
+        return ModeratorPermissionsResult(result=result, changed=changed, moderator=Moderator(**row))
 
     async def remove_moderator(self, access: StreamerAccess, moderator_id: str) -> ModeratorRemoval:
         moderator_id = v.parse_uuid(moderator_id)

@@ -6,13 +6,15 @@ e.g. audio_scheduled_at). Every action runs in one transaction in DashboardRepos
 writes the donation_audio job (Phase 8) and the realtime outbox events (Phase 9) with it.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
 from app.authz.dependencies import StreamerAccess
 from app.core.errors import ApiError
 from app.dashboard import validation as v
-from app.dashboard.models import ModerationResult, QueueItem, QueuePage
+from app.dashboard.models import BannedDonor, BannedDonorList, ModerationResult, QueueItem, QueuePage, UnbanResult
+from app.security.audit import security_event
 
 ACTIONS = ("approve", "reject", "hide_message", "unhide_message", "ban_donor")
 STATUSES = ("pending", "approved", "auto_approved", "rejected")
@@ -20,6 +22,7 @@ APPROVED_STATUSES = ("approved", "auto_approved")
 CREDITED = frozenset(APPROVED_STATUSES)  # included in streamer_donator_totals
 QUEUE_FILTERS = {"pending": ("pending",), "approved": APPROVED_STATUSES, "rejected": ("rejected",), "all": None}
 DASHBOARD_LABEL = "Dashboard"
+BANNED_LIST_LIMIT = 500  # active bans returned at once (a creator with more sees `truncated`)
 
 
 class NotPaid(Exception):
@@ -93,6 +96,27 @@ class ModerationService:
         pending = await self.repo.pending_count(access.streamer.id)
         return QueuePage(donations=[QueueItem(**r) for r in items], pending_count=pending,
                          next_cursor=next_cursor, has_more=has_more)
+
+    async def banned_donors(self, access: StreamerAccess) -> BannedDonorList:
+        """D-R8: the creator's active donor bans, newest first."""
+        rows, total = await self.repo.banned_donors(access.streamer.id, BANNED_LIST_LIMIT)
+        return BannedDonorList(banned_donors=[BannedDonor(**r) for r in rows], total=total,
+                               truncated=total > len(rows))
+
+    async def unban(self, access: StreamerAccess, ban_id: str) -> UnbanResult:
+        """D-M6: lift a ban by id (replaces legacy's per-donation unban_donor, A3). Every active ban of that donor
+        name for this creator is lifted; a ban of another creator is 404."""
+        ban_id = v.parse_uuid(ban_id)
+        if ban_id is None:
+            raise ApiError(404, "Ban not found", "ban_not_found")
+        outcome = await self.repo.unban(access.streamer.id, ban_id, actor_user_id=access.current.user.id,
+                                        actor_label=actor_label(access.current.user))
+        if outcome is None:
+            raise ApiError(404, "Ban not found", "ban_not_found")
+        lifted, row = outcome
+        security_event("donor_unbanned" if lifted else "donor_unban_unchanged", level=logging.INFO,
+                       user_id=access.current.user.id, streamer_id=access.streamer.id, count=lifted)
+        return UnbanResult(result="applied" if lifted else "unchanged", bans_lifted=lifted, ban=BannedDonor(**row))
 
     async def moderate(self, access: StreamerAccess, donation_id: str, action: str,
                        reason: str | None) -> ModerationResult:

@@ -12,7 +12,7 @@ app/core/logging.py    JSON-lines logging (no query strings, headers or bodies)
 app/db/pool.py         psycopg 3 async pool + ping
 app/auth/              FastAPI-managed authentication (sessions, CSRF, passwords, invites, Google)
 app/authz/             authorization: creator (streamer) ownership, require_streamer_access
-app/admin/             user / invite administration, admin bootstrap
+app/admin/             user / invite / creator administration (onboarding, owner assignment), admin bootstrap
 app/public/            public read API (Phase 4): creator profile, pricing, overlay config, soundboard,
                        leaderboard, goal, platform/showcase metrics, signup interest form
                        (see ../docs/public-api.md)
@@ -27,7 +27,8 @@ app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit w
 app/cli.py             operator commands: bootstrap-admin, cleanup, enqueue-donation-audio, bot webhook
                        setup, seed-platform-soundboard
 app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*,
-                       /api/v1/public/streamers/*, /api/v1/metrics/*, /api/v1/dashboard/streamers/*,
+                       /api/v1/public/streamers/*, /api/v1/public/signups, /api/v1/metrics/*,
+                       /api/v1/dashboard/streamers/*,
                        /api/v1/me/terms
 tests/                 unit tests + end-to-end tests against a scratch database
 ```
@@ -78,6 +79,8 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 | `PATCH /api/v1/admin/users/{id}` | change `role`, `is_active`, `streamer_id`; revokes that user's sessions |
 | `POST /api/v1/admin/users/{id}/sessions/revoke` | sign a user out everywhere |
 | `GET /api/v1/admin/invites`, `POST /api/v1/admin/invites/{id}/revoke` | list / revoke invites |
+| `POST /api/v1/admin/creators` | onboard a creator: validated unique slug (reserved site paths refused), name, an explicit **configured** Razorpay account (no default, D12), optional `brand_color` / `order_prefix`; legacy launch defaults; least-loaded configured Pusher group; unclaimed |
+| `POST /api/v1/admin/creators/{id}/owner` | make an active user the owner of an **unclaimed** creator (an unclaimed creator is admin-only); a claimed creator is 409 (no transfers) |
 
 An admin cannot change their own role or status, and at least one active admin who can sign in
 (password or Google identity) always remains.
@@ -91,7 +94,7 @@ Owner, linked account or admin (`require_streamer_access`); CSRF + Origin on eve
 | `GET`, `PATCH .../settings` | creator settings (21 writable fields, strict validation, only changed values written) |
 | `GET .../donations`, `.../donations/stats`, `.../donations/export.csv` | approved donations (keyset pages), IST revenue stats, CSV export (≤ 366 days, ≤ 10,000 rows) |
 | `GET .../moderation/queue`, `POST .../donations/{id}/moderation` | queue + approve / reject / hide / unhide / ban in one transaction (database state only) |
-| `GET`, `POST .../moderators`, `DELETE .../moderators/{id}` | Telegram/Discord moderators |
+| `GET`, `POST .../moderators`, `PATCH`, `DELETE .../moderators/{id}` | Telegram/Discord moderators; PATCH edits role / `can_*` (D-M7) |
 | `GET /api/v1/me/terms`, `POST /api/v1/me/terms/accept` | terms-of-service status and acceptance (server-owned version) |
 
 ## Trusted browser origins

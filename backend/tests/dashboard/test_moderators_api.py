@@ -174,3 +174,91 @@ def test_concurrent_adds_of_one_discord_id_insert_once(env):
     results = asyncio.run(race())
     assert sum(isinstance(r, dict) for r in results) == 1 and "discord" in results
     assert len(_rows(sid)) == 1
+
+
+# ── D-M7 moderator permission editing ───────────────────────────────────────────
+
+PERMS = ("role", "can_approve", "can_reject", "can_hide_message", "can_ban", "can_replay")
+
+
+def _perms(mod_id: str) -> tuple:
+    with db() as conn:
+        return conn.execute("SELECT role::text, can_approve, can_reject, can_hide_message, can_ban, can_replay "
+                            "FROM public.streamers_moderators WHERE id = %s", (mod_id,)).fetchone()
+
+
+def test_edit_permissions_changes_only_what_differs_and_reaches_the_bots(app):
+    from app.bots.permissions import can
+    from app.bots.repository import BotRepository
+    sid, headers = owned_creator(app, "authtest-modperm")
+    mod = _insert(sid, "Mod", telegram="555")
+    with db() as conn:  # legacy rows can hold NULL permissions: every read treats NULL as the column default
+        conn.execute("UPDATE public.streamers_moderators SET role = NULL, can_approve = NULL, can_reject = NULL, "
+                     "can_hide_message = NULL, can_ban = NULL, can_replay = NULL WHERE id = %s", (mod,))
+    url = f"{S}/authtest-modperm/moderators/{mod}"
+    bot = BotRepository(connection_factory(Settings()))
+
+    def bot_may(action):
+        return can(asyncio.run(bot.moderator_for("telegram", sid, "555")), action)
+
+    assert not bot_may("ban_donor") and bot_may("approve")  # defaults: no ban, approve yes
+    r = app.patch(url, json={"can_ban": True, "can_approve": False}, headers=headers)
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store", r.text
+    body = r.json()
+    assert (body["result"], sorted(body["changed"])) == ("applied", ["can_approve", "can_ban"])
+    assert set(body["moderator"]) == FIELDS and body["moderator"]["can_ban"] is True
+    assert _perms(mod) == (None, False, None, None, True, None)  # only the changed columns were written
+    assert bot_may("ban_donor") and not bot_may("approve")      # effective on the next bot action
+    # effective values count: NULL can_reject is true by default, so setting true changes nothing
+    again = app.patch(url, json={"can_ban": True, "can_reject": True}, headers=headers).json()
+    assert (again["result"], again["changed"]) == ("unchanged", [])
+    viewer = app.patch(url, json={"role": "viewer"}, headers=headers).json()
+    assert viewer["changed"] == ["role"] and viewer["moderator"]["role"] == "viewer" and not bot_may("ban_donor")
+    assert app.get(f"{S}/authtest-modperm/moderators").json()["moderators"][0]["role"] == "viewer"
+    assert any("moderator_permissions_changed" in rec and sid in rec for rec in app.app_state.log_capture.records)
+
+
+@pytest.mark.parametrize("body", [{}, {"can_ban": None}, {"role": None}, {"role": "admin"}, {"can_ban": "true"},
+                                  {"can_ban": 1}, {"can_manage_mods": True}, {"mod_name": "x"}, {"is_active": True}])
+def test_edit_permissions_rejects_invalid_bodies(app, body):
+    sid, headers = owned_creator(app, "authtest-modperm-bad")
+    mod = _insert(sid, "Mod", telegram="556")
+    before = _perms(mod)
+    r = app.patch(f"{S}/authtest-modperm-bad/moderators/{mod}", json=body, headers=headers)
+    assert r.status_code == 422, (body, r.text)
+    assert _perms(mod) == before
+
+
+def test_edit_permissions_is_scoped_and_needs_a_session_and_csrf(app):
+    sid, headers = owned_creator(app, "authtest-modperm-mine")
+    other = make_streamer("authtest-modperm-theirs", user_id=make_user("other" + DOMAIN))
+    removed = _insert(sid, "Gone", telegram="557", active=False)
+    theirs = _insert(other, "Theirs", telegram="558")
+    mine = _insert(sid, "Mine", telegram="559")
+    before = [_perms(m) for m in (removed, theirs, mine)]
+    url = f"{S}/authtest-modperm-mine/moderators"
+    r = app.patch(f"{url}/{removed}", json={"can_ban": True}, headers=headers)
+    assert (r.status_code, r.json()) == (409, {"error": "This moderator has been removed"})
+    for bad in (theirs, "00000000-0000-4000-8000-000000000000", "not-a-uuid"):
+        resp = app.patch(f"{url}/{bad}", json={"can_ban": True}, headers=headers)
+        assert (resp.status_code, resp.json()) == (404, {"error": "Moderator not found"}), bad
+    assert app.patch(f"{S}/authtest-modperm-theirs/moderators/{theirs}", json={"can_ban": True},
+                     headers=headers).status_code == 403  # not my creator
+    assert app.patch(f"{url}/{mine}", json={"can_ban": True}, headers={"origin": headers["origin"]}).status_code == 403
+    app.cookies.clear()
+    assert app.patch(f"{url}/{mine}", json={"can_ban": True}, headers=headers).status_code == 401
+    assert [_perms(m) for m in (removed, theirs, mine)] == before  # can_ban stays false everywhere
+
+
+def test_concurrent_permission_edits_both_apply(env):
+    sid = make_streamer("authtest-modperm-race")
+    mod = _insert(sid, "Mod", telegram="560")
+    repo = DashboardRepository(connection_factory(Settings()))
+
+    async def race():
+        return await asyncio.gather(repo.update_moderator(sid, mod, {"can_ban": True}),
+                                    repo.update_moderator(sid, mod, {"can_replay": False}),
+                                    repo.update_moderator(sid, mod, {"role": "owner"}))
+    results = asyncio.run(race())
+    assert [r[0] for r in results] == ["applied"] * 3  # serialised on the row lock: no lost update
+    assert _perms(mod) == ("owner", True, True, True, True, False)  # defaults kept, all three edits applied

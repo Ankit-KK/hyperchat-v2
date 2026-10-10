@@ -43,12 +43,12 @@ docs/       architecture, target schema, migration audit, history
 | 9 Realtime outbox, Pusher publishing, channel authorization (0012) | done; running on the v2 development API |
 | 10 OBS audio queue and player, OBS tokens, replay (0013) | done; running on the v2 development API |
 | 11 Telegram / Discord moderation bots (0014, 0015) | done; deployed on the v2 development API with the bots **disabled** |
-| Backend completion (gaps from the full backend audit) | in review: group 1 (ban list + unban, migration 0016) and group 2 (creator onboarding, moderator permissions) in open PRs; group 3 (signup form, platform soundboard seeding, cleanup) in its PR; nothing of it deployed — see [`docs/backend-completion-checklist.md`](docs/backend-completion-checklist.md) |
+| Backend completion (gaps from the full backend audit) | groups 1–3 in `main`: group 1 (ban list + unban, migration 0016, #18), group 2 (creator onboarding, moderator permissions, #19), group 3 (signup form, platform soundboard seeding, cleanup, #20); none of it deployed yet; group 4 and the items waiting on owner decisions remain — see [`docs/backend-completion-checklist.md`](docs/backend-completion-checklist.md) |
 | 12 Admin, payouts, partners | partly in the backend-completion groups; payouts and partners wait on owner decisions (checklist D2, D4) |
 | 13 New frontend | not started |
 | 14–15 Production deployment, data migration, cutover | final phase — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
 
-**Development environment:** `main` up to Phase 11 (release `9042fb7fff40`, migration `0015`), bots disabled,
+**Development environment:** Phase 11 (release `9042fb7fff40`, migration `0015`; `main` is ahead, at `0016`), bots disabled,
 no bot webhooks registered. **Production:** release `940137070657` at migration `0009`, no traffic, unchanged
 since Phase 5. Which features were exercised against the real external services (Razorpay test mode, Pusher,
 R2, the DEV bots) and which are only covered by automated tests (email, Google sign-in, TTS and transcription

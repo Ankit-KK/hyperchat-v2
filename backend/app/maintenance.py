@@ -23,6 +23,9 @@ RULES: dict[str, tuple[str, str]] = {
     # (legacy kept 90 days).
     "jobs": ("public.jobs", "status IN ('succeeded', 'failed') AND completed_at < now() - interval '30 days'"),
     "tts_moderation_audit": ("public.tts_moderation_audit", "created_at < now() - interval '90 days'"),
+    # Phase 7: the Razorpay order -> donation index (legacy cron cleanup-order-lookup: daily, 30 days). A webhook
+    # for an older order still resolves through donations.provider_order_id (PaymentRepository.by_provider_order).
+    "order_lookup": ("public.order_lookup", "created_at < now() - interval '30 days'"),
     # Phase 11: bot button rows a week after they expired; delivery records after 30 days.
     "telegram_callback_mapping": ("public.telegram_callback_mapping", "expires_at < now() - interval '7 days'"),
     "discord_callback_mapping": ("public.discord_callback_mapping", "expires_at < now() - interval '7 days'"),

@@ -146,7 +146,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | SEC-L1 | Unused HMAC / partner-key / cron-secret layer | BLOCKED | Remove after tracing; the partner verifier depends on D4 | D4 |
 | SEC-L2 | Dead upload-grant helpers (legacy 4-part grant, `verify_and_consume_upload_grant`, `fetch_order`) | PARTIAL | **Done (G3):** the legacy untyped 4-part grant is no longer issued or accepted (`kind` is required for issue and verify; a correctly signed 4-part token is refused as malformed) and `verify_and_consume_upload_grant` is removed; the upload API already used only typed grants + `consume_upload_grant`, so no client changes. Tests now cover the refusal of the legacy form, missing / unknown kinds, and that a refused grant is never burned. **Left in place:** `RazorpayClient.fetch_order` (unused by app code, but part of the payments client, outside G3's upload-grant scope; remove or use with the PAY-7 poll work) | – |
 | SEC-L3 | Duplicated IST constant | TESTED | `app.core.timezones.IST` is the one definition (dashboard validation / CSV export and bot message formatting import it; the bots' copy had no name, so `tzname` is now "IST" there too, which no output uses) → 4 tests: offset, no DST, identity, the 18:30 UTC day boundary, month / year-end bounds, unchanged bot and CSV text | – |
-| DOC-1 | Stale README status table | TESTED | README status table, `docs/architecture.md` delivery plan, `database/README.md` (revisions 0001–0015, order) and `docs/target-schema.md` now match `main`: phases 1–11 merged, backend completion G1/G2/G3 in open PRs, DEV and production state, external verification status pointing at this checklist | – |
+| DOC-1 | Stale README status table | TESTED | README status table, `docs/architecture.md` delivery plan, `database/README.md` (revisions 0001–0016, order) and `docs/target-schema.md` now match `main`: phases 1–11 merged, backend completion G1/G2/G3 in open PRs, DEV and production state, external verification status pointing at this checklist | – |
 
 ## Out of scope for this phase (tracked elsewhere)
 - Frontend (plan phase 13): every page type; nothing built.
@@ -156,9 +156,9 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 ## Work groups
 | Group | Scope | Status |
 |---|---|---|
-| G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | done (TESTED; DEV deploy needs approval) |
-| G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | done (TESTED; DEV deploy needs approval) |
-| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2 (upload grants; `fetch_order` left), SEC-L3, DOC-1 | done (TESTED; no migration; DEV deploy needs approval) |
+| G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | merged into `main` (#18, `7b21cad`); TESTED; not deployed (DEV deploy needs approval) |
+| G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | merged into `main` (#19, `c526d2e`); TESTED; not deployed (DEV deploy needs approval) |
+| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2 (upload grants; `fetch_order` left), SEC-L3, DOC-1 | done in #20 (TESTED; no migration; not deployed, DEV deploy needs approval) |
 | G4 | OBS-4 URL mapping + cutover compatibility checklist; PAY-11 | next |
 | G5+ | Items unblocked by decisions D1–D11 | waiting |
 | SEC | Full backend security audit (`docs/backend-security-audit.md`) after G1–G4 | planned |

@@ -15,6 +15,7 @@ from app.authz.dependencies import StreamerAccess, require_streamer_access
 from app.core.errors import ApiError
 from app.dashboard import csv_export
 from app.dashboard.models import (
+    BannedDonorList,
     DashboardSettings,
     DonationPage,
     DonationStats,
@@ -23,6 +24,8 @@ from app.dashboard.models import (
     Moderator,
     ModeratorCreate,
     ModeratorList,
+    ModeratorPermissionsPatch,
+    ModeratorPermissionsResult,
     ModeratorRemoval,
     QueuePage,
     SettingsPatch,
@@ -30,6 +33,7 @@ from app.dashboard.models import (
     TermsAccept,
     TermsAccepted,
     TermsStatus,
+    UnbanResult,
 )
 from app.dashboard.service import DashboardService
 
@@ -110,6 +114,18 @@ async def moderation_queue(request: Request, status: Literal["pending", "approve
     return await _service(request).moderation.queue(access, status=status, limit=limit, cursor=cursor)
 
 
+@dashboard_router.get("/moderation/banned-donors", response_model=BannedDonorList)
+async def banned_donors(request: Request,
+                        access: StreamerAccess = Depends(require_streamer_access)) -> BannedDonorList:
+    return await _service(request).moderation.banned_donors(access)
+
+
+@dashboard_router.post("/moderation/banned-donors/{ban_id}/unban", response_model=UnbanResult)
+async def unban_donor(ban_id: str, request: Request,
+                      access: StreamerAccess = Depends(require_streamer_access)) -> UnbanResult:
+    return await _service(request).moderation.unban(access, ban_id)
+
+
 @dashboard_router.post("/donations/{donation_id}/moderation", response_model=ModerationResult)
 async def moderate_donation(donation_id: str, body: ModerationRequest, request: Request,
                             access: StreamerAccess = Depends(require_streamer_access)) -> ModerationResult:
@@ -128,6 +144,12 @@ async def list_moderators(request: Request,
 async def add_moderator(body: ModeratorCreate, request: Request,
                         access: StreamerAccess = Depends(require_streamer_access)) -> Moderator:
     return await _service(request).add_moderator(access, body)
+
+
+@dashboard_router.patch("/moderators/{moderator_id}", response_model=ModeratorPermissionsResult)
+async def update_moderator(moderator_id: str, body: ModeratorPermissionsPatch, request: Request,
+                           access: StreamerAccess = Depends(require_streamer_access)) -> ModeratorPermissionsResult:
+    return await _service(request).update_moderator(access, moderator_id, body)
 
 
 @dashboard_router.delete("/moderators/{moderator_id}", response_model=ModeratorRemoval)

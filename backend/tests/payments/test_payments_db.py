@@ -12,6 +12,9 @@ import hashlib
 import httpx
 import pytest
 
+from app.cli import connection_factory
+from app.core.config import Settings
+from app.maintenance import cleanup
 from app.payments.accounts import AccountHealth
 from app.soundboard.library import HypersoundLibrary
 from app.storage.memory import InMemoryObjectStore, StoredObject
@@ -180,6 +183,22 @@ def test_captured_webhook_completes_once_and_is_idempotent(client):
     assert events("authtest-wh-") == [
         ("authtest-wh-1", "payment.captured", "primary", "completed", out["razorpay_order_id"], payment.id, True),
         ("authtest-wh-2", "payment.captured", "primary", "already_paid", out["razorpay_order_id"], payment.id, True)]
+
+
+def test_webhook_still_completes_after_the_order_lookup_row_was_cleaned_up(client):
+    """maintenance deletes order_lookup rows after 30 days (legacy cleanup-order-lookup); a late webhook for such an
+    order still finds its donation through donations.provider_order_id."""
+    make_streamer("authtest-pay-oldlookup")
+    out = checkout(client, "authtest-pay-oldlookup")
+    with db() as conn:
+        conn.execute("UPDATE public.order_lookup SET created_at = now() - interval '31 days' "
+                     "WHERE razorpay_order_id = %s", (out["razorpay_order_id"],))
+    assert asyncio.run(cleanup(connection_factory(Settings()), dry_run=False))["order_lookup"] >= 1
+    assert donation(out["order_id"])["lookups"] == 0
+    payment = client.fake.captured(out["razorpay_order_id"], 10000)
+    r = webhook(client, "payment.captured", out, payment.id, event_id="authtest-wh-oldlookup")
+    assert (r.status_code, r.json()) == (200, {"status": "completed"})
+    assert donation(out["order_id"])["payment_status"] == "success"
 
 
 def test_failed_then_captured_becomes_paid(client):
