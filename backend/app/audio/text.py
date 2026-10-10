@@ -29,7 +29,7 @@ CURRENCY_SPOKEN_NAMES = {
 MESSAGE_MAX = 500
 NAME_MAX = 80
 
-_ZERO_WIDTH_AND_BIDI = re.compile("[​-‏‪-‮⁦-⁩﻿]")
+_ZERO_WIDTH_AND_BIDI = re.compile("[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]")
 _CONTROL = re.compile("[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]")
 _TAGS = re.compile(r"<[^>]*>")
 _SPACES = re.compile(r"\s+")

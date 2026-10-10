@@ -26,8 +26,8 @@ RANK = {"SAFE": 0, "LOW_RISK": 1, "MEDIUM_RISK": 2, "HIGH_RISK": 3, "CRITICAL": 
 BLOCK_AT = RANK["MEDIUM_RISK"]
 
 # ── normalization (legacy engine/normalize.ts) ──────────────────────────────
-_INVISIBLE = re.compile("[­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮"
-                        "⁠-⁯ㅤ︀-️﻿ﾠ\U000E0000-\U000E007F]")
+_INVISIBLE = re.compile("[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E"
+                        "\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\U000E0000-\U000E007F]")
 _HOMOGLYPHS = {
     "а": "a", "в": "b", "с": "c", "е": "e", "ё": "e", "һ": "h", "н": "h", "і": "i", "ї": "i",
     "ј": "j", "к": "k", "м": "m", "о": "o", "р": "p", "г": "r", "ѕ": "s", "т": "t", "у": "y",
