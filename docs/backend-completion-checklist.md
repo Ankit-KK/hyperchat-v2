@@ -40,6 +40,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | **D12** | **Razorpay account for new creators.** Onboarding currently requires the admin to name a *configured* account per creator (no default). Keep that, or default to one account? | CRE-2 | Keep it explicit until D6 settles the second account. |
 | **D13** | **Creator ownership transfer.** Owner assignment only claims an *unclaimed* creator; a claimed creator answers 409. Allow admin transfers (and what happens to the old owner's sessions)? | CRE-2 | Not for launch; transfers stay a manual, reviewed operation. |
 | **D14** | **Duplicate signup answer.** Legacy told the visitor "This email is already registered", which lets anyone test whether an address signed up. V2 answers a repeated email exactly like a new one (201, nothing stored or overwritten). Keep, or restore the legacy message? | PLAT-5 | Keep the identical answer (privacy); the frontend can say "Thanks, we'll be in touch" in both cases. |
+| **D15** | **Legacy OBS Media Source URLs on `*.supabase.co`.** V2 cannot answer on that host, so they stop working at Supabase shutdown. (1) Creators update the URL before shutdown; (2) bridge: during cutover, replace the legacy `get-current-audio` Edge Function with a 302 to `https://api.hyperchat.space/api/v1/obs/audio/next?token=<same token>` (OBS must follow two redirects; needs a live OBS test). | OBS-4, cutover | (2) for the switch, (1) communicated well before Supabase shutdown. See `docs/obs-cutover.md`. |
 
 ## Capabilities
 
@@ -79,7 +80,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | PAY-8 | Second Razorpay account | BLOCKED | Per D6 | existing | – | D6 | A; not configured on DEV |
 | PAY-9 | Scheduled payment-health check | BLOCKED | Per D7 | – | – | D7 | checkout-time check only |
 | PAY-10 | Auto-approve, donor totals, `!vaani` | VERIFIED | – | payments tests | DEV smoke | – | A+D |
-| PAY-11 | Stale Phase 6 / Phase 7 smoke assertions | PARTIAL | Correct the two known stale assertions (they were never in the repo; the scripts live in the operator scratchpad) → re-run green | – | DEV | – | 28/29, 29/30 |
+| PAY-11 | Stale Phase 6 / Phase 7 smoke assertions | BLOCKED | Correct the two known stale assertions (they were never in the repo; the scripts live in the operator scratchpad) → re-run green. G4 review: which checks are stale can only be confirmed by re-running the scripts against live DEV, and they write synthetic rows and R2 objects and create Razorpay **test-mode** orders | – | DEV | **owner approval** for a live DEV smoke run (R2 writes, Razorpay test mode) | 28/29, 29/30 (last runs, 2026-10-07) |
 
 ### Creator dashboard
 
@@ -109,7 +110,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | OBS-1 | OBS audio queue (302), player | VERIFIED | – | obs tests | Phase 10 live smoke 40/40 | – | A+X |
 | OBS-2 | Realtime events + Pusher auth | VERIFIED | – | realtime tests | DEV Pusher | – | A+X |
 | OBS-3 | Goal, overlay config | VERIFIED | – | public tests | DEV | – | A+D |
-| OBS-4 | **Existing OBS media-source URLs** | PARTIAL | Document legacy → V2 URL mapping and a cutover compatibility checklist (no creator contact) | – | – | – | – |
+| OBS-4 | **Existing OBS media-source URLs** | PARTIAL | **Documented (G4): `docs/obs-cutover.md`.** The 5 legacy URL shapes (alerts, Media Source, goal, helper page, older player) and their V2 equivalents; route slugs vs creator slugs (`chiaa` → `chiaa_gaming`; `altrui`, `gigi_is_live` not in the DEV dump); cutover checklist. Backend side already covered: legacy-format tokens (`obs_` + 64 hex, ETL SHA-256) work on the Media Source endpoint and Pusher auth, header and `?token=`. **Remaining:** frontend routes (phase 13) and D15 for the `*.supabase.co` Media Source URLs | existing `tests/obs/test_obs_db.py`, `tests/realtime/test_realtime_db.py` (legacy-format tokens, `?token=`) | read-only DEV counts: 218 tokens, 143 active, 126 creators | D15, frontend | A (backend); mapping from the legacy source |
 | OBS-6 | Leaderboard latest-donations feed | DEFERRED_BY_APPROVAL | Phase 4 D2 approved "top donor only" | – | – | D10 (revisit?) | PR #3 |
 
 ### Moderation bots
@@ -159,6 +160,6 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | merged into `main` (#18, `7b21cad`); TESTED; not deployed (DEV deploy needs approval) |
 | G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | merged into `main` (#19, `c526d2e`); TESTED; not deployed (DEV deploy needs approval) |
 | G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2 (upload grants; `fetch_order` left), SEC-L3, DOC-1 | done in #20 (TESTED; no migration; not deployed, DEV deploy needs approval) |
-| G4 | OBS-4 URL mapping + cutover compatibility checklist; PAY-11 | next |
-| G5+ | Items unblocked by decisions D1–D11 | waiting |
+| G4 | OBS-4 URL mapping + cutover compatibility checklist; PAY-11 | OBS-4 documented (`docs/obs-cutover.md`; remaining: D15, frontend); PAY-11 blocked on approval for a live DEV smoke run |
+| G5+ | Items unblocked by decisions D1–D15 | waiting |
 | SEC | Full backend security audit (`docs/backend-security-audit.md`) after G1–G4 | planned |
