@@ -18,7 +18,8 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P1**: fix before production traffic | **1** | F1 |
 | **P2**: fix before launch | **3** | F2, F3, F4 |
 | **P3**: hardening | **3** | F5, F6, F7 |
-| Tracked owner decisions / approvals | 7 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11, tool approval |
+| Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
+| Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters); all other Bandit results are false positives or informational |
 
 No route lacks authentication where it needs it, no cross-creator access path was found, and payment completion
 cannot be forged without a provider secret. The open items are logging hygiene, abuse resistance and hardening.
@@ -116,12 +117,56 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 
 | Area | Why | Needed |
 |---|---|---|
-| Known vulnerabilities in dependencies | `pip-audit` is not installed; installing it downloads packages | **Approval** to install `pip-audit` (and optionally `bandit`) in the scratch environment and run them |
 | Email delivery, Google sign-in, TTS / transcription providers | No DEV credentials (D8) | D8 |
 | Live payment status poll / confirm | Needs a Razorpay test-mode run (PAY-7) | Owner-run test-mode checkout |
 | Production as deployed | Production runs release `940137070657` (Phase 5) at migration `0009`; this audit covers `main` | Redeploy from `main` before cutover, then re-check F1 |
 | Frontend | Not built | Frontend phase; F4 is its first requirement |
 | Media URLs | Public to anyone holding the URL (unguessable key), as legacy | Owner decision D9 |
+
+## Dependency scan and static analysis (2026-10-10)
+
+**Environment:**
+- **Where:** a separate virtual environment in the operator's scratch directory, outside the repository, the project test environment, the VPS, DEV and production.
+- **Tools installed:** `pip-audit` 2.10.1 and `bandit` 1.9.4 (and their dependencies), from PyPI.
+- **Untouched:** no dependency pin was changed and nothing was upgraded.
+- **Full outputs:** `docs/security-evidence/2026-10-10-*` (pip-audit JSON per source, Bandit JSON and text).
+
+**TLS note:** the first scan attempt failed for both sources with `requests.exceptions.SSLError … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate` (hosts `pypi.org`, `api.osv.dev`).
+- **Cause:** Norton Antivirus intercepts TLS on the operator's machine (certificate issuer "Norton Web/Mail Shield Root"). That root is in the Windows certificate store but not in `certifi`.
+- **How the scan was run:** with certificate verification **on**, against the Windows store, via pip's vendored `truststore` (the same trust `pip install` used).
+- **Caveat:** the vulnerability data reached the scanner through Norton's TLS inspection, so its integrity also depends on that proxy. A re-run from CI or another machine would remove the caveat.
+
+### Dependencies: no known vulnerabilities
+| | Source `pypi` (PyPI JSON API, `pypi.org`) | Source `osv` (`api.osv.dev`) |
+|---|---|---|
+| Command | `pip-audit --disable-pip --no-deps -s pypi -r backend/requirements.txt -r backend/requirements-dev.txt --desc on -f json` | the same with `-s osv` |
+| Packages checked | 50 of 50 pinned (`==`) packages, none skipped | 50 of 50, none skipped |
+| Vulnerabilities | **0** | **0** |
+
+- **What was sent:** package names and versions only. Because of `--disable-pip --no-deps`, no project package was downloaded or installed. pip-audit recommends hashed pins; the requirement files have none.
+- **Coverage:** `backend/requirements.txt` pins the full environment (45 packages); `requirements-dev.txt` adds 5 test packages.
+- **Not covered:** the Python interpreter (3.14.4), operating-system packages, Nginx, PostgreSQL, and the frontend.
+- **A clean result is not a guarantee:** it means no *published* advisory matched these exact versions on 2026-10-10.
+
+### Bandit (`bandit -r backend/app`): 65 results, 1 real (P3)
+Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each result was checked against the code.
+
+| Result | Count | Classification | Reason |
+|---|---|---|---|
+| **B613** trojansource (High / Medium) | 2 (`audio/moderation.py:29`, `audio/text.py:32`) | **F8, P3, verified** | See F8 below. |
+| B608 hardcoded SQL expressions (Medium) | 52 | **False positive** | Every interpolated piece is one of: a module constant (column lists, the `CALLBACK_TABLE` map, `maintenance.RULES`), a fixed fragment chosen in code (`AND m.is_active = true`, `id = %s`), or a column name from an allowlist (`WRITABLE_SETTINGS`, `MODERATOR_PERMISSIONS`, Pydantic models with `extra="forbid"`). All values are bound parameters. No request data becomes SQL text. |
+| B324 `hashlib.md5` (High) | 1 (`realtime/pusher.py:78`) | False positive | `body_md5` is required by the Pusher REST protocol. The request is authenticated with HMAC-SHA256. |
+| B311 `random` (Low) | 4 | False positive | Retry jitter and backoff (`audio/handlers.py`, `jobs/runner.py`, `realtime/publisher.py`) and the probabilistic purge trigger (`security/nonce_store.py`). No secret is drawn from `random`; tokens use `secrets`. |
+| B105 hard-coded password (Low) | 2 | False positive | Google's token endpoint URL (`auth/google.py:17`) and an error message text (`cli.py:48`). |
+| B101 `assert` (Low) | 3 | Informational | Internal invariants (`jobs/queue.py:101`, `realtime/outbox.py:178`) and a test helper (`storage/memory.py:130`). Python `-O` would remove them; the service runs without `-O` (`deploy/systemd`). Could become explicit checks; no security impact found. |
+| B110 `try/except/pass` (Low) | 1 (`security/nonce_store.py:55`) | Informational | Best-effort purge of expired nonces; a failure only delays cleanup. Nonce checks themselves are not affected. |
+
+### F8 (P3): literal bidirectional control characters in source
+- **Evidence:** `backend/app/audio/moderation.py:29` (4 characters) and `backend/app/audio/text.py:32` (5 characters) contain *literal* Unicode bidi controls, among them U+202E RIGHT-TO-LEFT OVERRIDE, inside regex character classes. The same appears in two tests (`tests/audio/test_moderation.py:51`, `tests/audio/test_text.py:14`).
+- **Runtime:** intended. These are the characters the code strips from donor text.
+- **Impact:** "Trojan Source" class (CVE-2021-42574). Editors and GitHub may display those lines differently from what Python executes, so a reviewer could be misled by a future change on those lines.
+- **Exploitability:** not exploitable at runtime; it's a code-review risk.
+- **Remediation (not applied; findings first):** write the characters as `\u` escapes, which compile to the same regex. Add a CI check (Bandit B613 or a grep) that rejects literal bidi characters in `backend/`.
 
 ## Tracked decisions and approvals (unchanged by this audit)
 
@@ -133,7 +178,6 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 | PAY-11 | Stale smoke assertions | needs approval for a live DEV smoke run |
 | D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | awaiting owner |
 | D9 | Media access model | awaiting owner |
-| Tools | `pip-audit` / `bandit` | awaiting approval |
 
 ## Remediation plan
 
@@ -142,7 +186,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 2. **F3** (P2): limit current-password checks. Small code change with tests.
 3. **F2** (P2): owner decision on the lockout model, then code and tests.
 4. **F6, F5** (P3): production guard for invite links; trim the public health response.
-5. **Dependency scan** once approved; any finding is triaged here.
+5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover.
 6. **F4**: carried into the frontend phase as a requirement.
 7. **F7**: after D4 and SEC-L2.
 
