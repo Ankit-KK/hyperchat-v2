@@ -124,11 +124,31 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
     - uvicorn listens on 127.0.0.1 only (`deploy/systemd`).
     - It trusts `X-Forwarded-For` only from Nginx, and it takes the client address Nginx appended (verified earlier in this audit). So every proxied request carries the real, non-loopback client address.
     - The app itself never reads the header.
-  - **Tests** (`backend/tests/test_health.py`):
-    - the public response is exactly status + database status, with no release, environment, label or service name, also when a forged `X-Forwarded-For: 127.0.0.1` header is sent;
-    - IPv4 and IPv6 loopback callers still get the details.
-  - **Regression proof:** the public-response test **fails** against the previous implementation.
-  - **Deploy docs:** `deploy/README.md` (public health step) and `deploy/api.env.example` (label comment) are updated. The operator's own deploy scripts outside the repository that read `"release"` from the **public** URL must switch to the loopback check.
+  - **Evidence, automated (CI):**
+    - **The route** (`tests/test_health.py`):
+      - the public response is exactly status + database status;
+      - loopback callers (IPv4, IPv6) get the details;
+      - the route never reads `X-Forwarded-For` itself. This runs through Starlette's `TestClient`, so it says nothing about Uvicorn or Nginx.
+      - **Regression proof:** fails against the previous implementation.
+    - **Uvicorn's real proxy middleware** (`tests/test_health_proxy_chain.py`): the real app wrapped in `uvicorn.middleware.proxy_headers.ProxyHeadersMiddleware`, the class `--proxy-headers` installs, with `trusted_hosts="127.0.0.1"` as in the units.
+      - Through the trusted proxy, `X-Forwarded-For` values `203.0.113.9`, `127.0.0.1, 203.0.113.9`, `::1, 127.0.0.1, 203.0.113.9` and `127.0.0.1,203.0.113.9` all get the public response.
+      - From an untrusted peer, `X-Forwarded-For: 127.0.0.1` is ignored.
+      - A genuine local request without the header keeps the details.
+      - **Sensitivity proof:** these tests fail against the previous route, and also fail when the middleware is configured to trust every proxy (`*`). So they test the real boundary, not just the route.
+    - **Real end to end** (`tests/test_health_proxy_chain.py::test_real_nginx_and_uvicorn_never_treat_a_forged_header_as_local`):
+      - **Setup:** a real Nginx, using the production site's own `location /` forwarding directives (read from `api.hyperchat.space.conf`), in front of a real Uvicorn process started with the production unit's flags (read from `hyperchat-prod-api.service`: `--host 127.0.0.1 --proxy-headers --forwarded-allow-ips 127.0.0.1`, …).
+      - **Requests:** from a non-loopback address of the CI machine, without and with forged `X-Forwarded-For: 127.0.0.1`, `::1, 127.0.0.1` and `X-Real-IP: 127.0.0.1`. All get the public response. A direct local request to Uvicorn keeps the details.
+      - **When it runs:** only where an `nginx` binary exists; it skips otherwise (e.g. on Windows).
+    - **Configuration consistency** (`tests/test_health_proxy_chain.py`):
+      - both systemd units listen on 127.0.0.1 and trust forwarded headers only from 127.0.0.1 (no wildcard);
+      - both Nginx sites set `X-Forwarded-For $proxy_add_x_forwarded_for` in every proxied location and never rewrite the client address (`real_ip`).
+
+      If either changes, CI fails.
+  - **Evidence, configuration audit only (not exercised by a test):**
+    - the TLS front of the real site (the end-to-end test uses plain HTTP and only the `location /` directives);
+    - the installed files on the server matching the repository (they're deployed from it);
+    - a request from the server itself through Nginx counts as local, by design: its client address is loopback.
+  - **Deploy docs:** `deploy/README.md` (public health step) and `deploy/api.env.example` (label comment) are updated. **Deployment prerequisite:** the operator's deploy scripts outside the repository (`p8d_deploy.sh`, `p9d_deploy.sh`, `p10d_deploy.sh`, `p11d_deploy.sh`, `p11e_deploy.sh`, `p17_verify.sh`, `p17_build.sh` in the operator scratch directory) read `"release"` from the **public** URL `https://api.quicktestspace.site/health`. Before the next deploy they must read it on the server instead: `curl -fsS http://127.0.0.1:8000/health` (DEV) or `curl -fsS http://127.0.0.1:8001/health` (production). The public URL keeps answering `status`.
 
 ### F6 (P3): the invite-link convenience setting is not refused in production
 - **Evidence:** `HYPERCHAT_AUTH_RETURN_INVITE_LINKS=true` returns the accept URL to the inviting admin. Accepting an
