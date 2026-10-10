@@ -248,6 +248,55 @@ def test_the_limit_is_per_user(app):
     assert _change(other, r2, PASSWORD).status_code == 200
 
 
+def test_switching_sessions_does_not_reset_the_limit(app):
+    """The counter belongs to the user, not to the session: guesses spread over several sessions (and a fresh
+    sign-in after signing out) share one budget."""
+    _user("hopper" + DOMAIN)
+    first, second = app, _new_client(app)
+    r1, r2 = _login(first, "hopper" + DOMAIN), _login(second, "hopper" + DOMAIN)
+    assert [_change(first, r1, "wrong").status_code for _ in range(3)] == [400] * 3
+    assert [_change(second, r2, "wrong").status_code for _ in range(2)] == [400] * 2
+    assert first.post("/api/v1/auth/logout", headers=_csrf(r1)).status_code == 200
+    r3 = _login(first, "hopper" + DOMAIN)  # a brand-new session
+    assert _change(first, r3, PASSWORD).status_code == 429
+    assert _change(second, r2, PASSWORD).status_code == 429
+    assert second.get("/api/v1/auth/session").status_code == 200  # the session stays active at the limit
+
+
+def test_concurrent_guesses_cannot_exceed_the_limit(env):
+    """12 wrong guesses at once, each on its own database connection, through the real service: the atomic
+    counter lets exactly 5 reach the password check; the rest get 429."""
+    import asyncio
+
+    from app.auth.repository import AuthRepository
+    from app.auth.service import AuthError, AuthService
+    from app.cli import connection_factory
+    from app.core.config import Settings
+
+    _user("racer" + DOMAIN)
+    settings = Settings()
+    service = AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+
+    async def race():
+        user = await service.repo.user_by_email("racer" + DOMAIN)
+        session = (await service.issue_session(user, "203.0.113.7", None)).session
+
+        async def guess(i):
+            try:
+                await service.change_password(user, session, f"wrong-{i}", "Changed-Pass-42", "203.0.113.7")
+            except AuthError as exc:
+                return exc.status
+            return 200
+        return await asyncio.gather(*(guess(i) for i in range(12)))
+    results = asyncio.run(race())
+    assert sorted(results) == [400] * 5 + [429] * 7
+    with _db() as conn:
+        count = conn.execute("SELECT request_count FROM public.rate_limits WHERE ip_address = "
+                             "(SELECT 'user:' || id::text FROM public.users WHERE email = %s) "
+                             "AND endpoint = 'auth:password-change'", ("racer" + DOMAIN,)).fetchone()[0]
+    assert count == 12  # every attempt was counted, none lost to the race
+
+
 # ── invites ─────────────────────────────────────────────────────────────────────
 
 

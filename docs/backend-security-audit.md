@@ -16,7 +16,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 |---|---|---|
 | **P0**: exploitable now, stop everything | **0** | – |
 | **P1**: fix before production traffic | **1** | F1 (fixed in the repository, `cc961df`; not deployed) |
-| **P2**: fix before launch | **3** | F2, F3 (implemented, policy approved 2026-10-11; in #25), F4 |
+| **P2**: fix before launch | **3** | F2, F3 (fixed and verified in the repository, #25; policy approved 2026-10-11; not deployed), F4 |
 | **P3**: hardening | **3** | F5, F6, F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; fixed in the repository, not merged); all other Bandit results are false positives or informational |
@@ -95,11 +95,14 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Not touched:** login, the account lockout (F2) and sessions.
   - **Residual bound:** at most 120 guesses per day from one stolen session, about 3,600 over the 30-day session lifetime.
   - **Session revocation at the limit:** considered and **not** adopted. The approved policy keeps the session active.
-  - **Tests:** 3 PostgreSQL tests in `tests/auth/test_auth_flow.py`:
+  - **Tests:** 5 PostgreSQL tests in `tests/auth/test_auth_flow.py`:
     - 5 failures, then 429 even for the right password; the password is unchanged; events are logged and no password appears in the logs;
-    - legitimate typos within the limit succeed, and the window resets;
-    - the limit is per user.
-  - **Regression proof:** the two limit tests fail against the unfixed service.
+    - legitimate typos within the limit succeed, a weak new password does not count, and the window resets;
+    - the limit is per user;
+    - **switching sessions does not reset it:** guesses spread over two sessions of one user, plus a fresh sign-in after signing out, share one budget, and the session stays active at the limit;
+    - **concurrent guesses cannot exceed it:** 12 simultaneous wrong guesses through the real service, each on its own database connection, give exactly 5 password checks and 7 × 429, with all 12 attempts counted. The counter is a single atomic PostgreSQL upsert keyed `user:<id>`.
+  - **Regression proof:** against the unprotected `change_password`, the limit, per-user, session-switching and concurrency tests all **fail**.
+  - **Verified** on PostgreSQL 17 and in CI (see #25); not deployed.
 
 ### F4 (P2): reset and invite tokens travel in frontend URLs
 - **Evidence:** reset and invite emails link to `{frontend}/reset-password?token=…` and `{frontend}/invite?token=…`
@@ -246,7 +249,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 
    Original plan: production log format without query strings + CI assertion. Small, configuration only; deploying it
    to production needs approval.
-2. **F3** (P2): limit current-password checks: **implemented**, policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
+2. **F3** (P2): limit current-password checks: **fixed and verified in the repository** (#25; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): owner decision on the lockout model, then code and tests.
 4. **F6, F5** (P3): production guard for invite links; trim the public health response.
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: fixed in the repository** (`\u` escapes, behaviour pinned over all code points, repository-wide CI check).
