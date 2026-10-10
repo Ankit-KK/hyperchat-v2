@@ -7,7 +7,7 @@ The full table-by-table design, including how every legacy column was mapped, is
 
 ## Layout
 ```
-alembic.ini, migrations/   Alembic environment and revisions 0001-0009 (SQL-first, op.execute)
+alembic.ini, migrations/   Alembic environment and revisions 0001-0016 (SQL-first, op.execute)
 etl/rehearsal.py           load the legacy data (restored dump) into the new schema
 etl/mapping.py             value mapping rules (currencies, roles, slugs, OBS token hashing, ...)
 etl/reconcile.py           post-load reconciliation (counts, per-creator sums, invariants)
@@ -28,15 +28,15 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0010 | payments: `streamers.razorpay_account`, `donations.payment_account` / `provider_payment_id`, `payment_webhook_events` |
 | 0011 | background jobs: `jobs` (durable queue), `donation_transcripts` |
 | 0012 | realtime: `realtime_outbox` (transactional outbox published to Pusher by the worker) |
-| 0014 | moderation bots: `jobs.kind` + `moderator_notify`, `moderation_actions` source `discord`, `moderator_notifications`, callback-table columns |
 | 0013 | OBS audio: `realtime_outbox` CHECKs allow the `alerts` channel, `audio-now-playing` and `vaani-celebration` |
+| 0014 | moderation bots: `jobs.kind` + `moderator_notify`, `moderation_actions` source `discord`, `moderator_notifications`, callback-table columns |
 | 0015 | bot audit: drops the UNIQUE `moderation_actions_unique_bot` index so a decision repeated after a reversal is recorded (no data change; downgrade does not rebuild it) |
 | 0016 | donor unban audit: nullable `banned_donors.unbanned_at`, `unbanned_by_label`, `unbanned_by_user_id` (FK `users`, ON DELETE SET NULL) |
 
 ## Databases
 | Database | Cluster | Purpose |
 |---|---|---|
-| `hyperchat` | `17/hyperchat` :5432 | production (schema only until cutover) |
+| `hyperchat` | `17/hyperchat` :5432 | production (schema at revision 0009, no traffic until cutover) |
 | `hyperchat_dev` | `15/restoretest` :5433 | v2 development, loaded by `etl/rehearsal.py` |
 | `hyperchat_restore_test` | `15/restoretest` :5433 | read-only restore of the legacy dump (ETL source only) |
 

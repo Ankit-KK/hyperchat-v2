@@ -1,9 +1,9 @@
 """Single-use donor upload grants (donor media uploads to Cloudflare R2).
 
-Grant (v2 API, bound to one upload type):
+Grant (always bound to one upload type):
     "<slug>.<kind>.<expiryMs>.<nonce32hex>.<hmac>", kind = "voice" | "media"
-Legacy form (kept for compatibility, no type binding):
-    "<slug>.<expiryMs>.<nonce32hex>.<hmac>"
+The legacy untyped 4-part form ("<slug>.<expiryMs>.<nonce>.<hmac>") is no longer issued or accepted (the v2
+upload API only ever issued typed grants).
 hmac = HMAC_SHA256_hex(upload_grant_secret, everything before the last dot). Valid 10 minutes; burned
 by inserting "upload:<nonce>" into the nonce store, so a grant can be used exactly once.
 
@@ -49,34 +49,34 @@ def _iso_ms(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms % 1000:03d}Z"
 
 
-def issue_upload_grant(secret: str | None, streamer_slug: str, *, kind: str | None = None,
+def _check_kind(kind: str) -> None:
+    if kind not in GRANT_KINDS:
+        raise ValueError("unknown upload kind")  # a programming error: callers always pass "voice" or "media"
+
+
+def issue_upload_grant(secret: str | None, streamer_slug: str, *, kind: str,
                        now_ms: int | None = None, nonce: str | None = None) -> tuple[str, str]:
-    """Returns (grant, expiresAt ISO string). With `kind` the grant only works for that upload type."""
-    if kind is not None and kind not in GRANT_KINDS:
-        raise ValueError("unknown upload kind")
+    """Returns (grant, expiresAt ISO string). The grant only works for that creator and upload type."""
+    _check_kind(kind)
     now = int(time.time() * 1000) if now_ms is None else now_ms
     expiry = now + GRANT_TTL_MS
     nonce = nonce or random_hex(16)
-    payload = ".".join([streamer_slug, *([kind] if kind else []), str(expiry), nonce])
+    payload = ".".join([streamer_slug, kind, str(expiry), nonce])
     return f"{payload}.{_sign(secret, payload)}", _iso_ms(expiry)
 
 
-def verify_upload_grant(secret: str | None, grant: object, streamer_slug: str, *, kind: str | None = None,
+def verify_upload_grant(secret: str | None, grant: object, streamer_slug: str, *, kind: str,
                         now_ms: int | None = None) -> GrantCheck:
-    """Signature, expiry, creator and (with `kind`) upload type. Does not burn the grant."""
+    """Signature, expiry, creator and upload type. Does not burn the grant."""
+    _check_kind(kind)
     if not isinstance(grant, str) or not grant:
         return GrantCheck(False, "Upload grant required")
     parts = grant.split(".")
-    if len(grant) > MAX_GRANT_LENGTH or len(parts) != (5 if kind else 4):
+    if len(grant) > MAX_GRANT_LENGTH or len(parts) != 5:  # also refuses the legacy untyped 4-part form
         return GrantCheck(False, "Malformed upload grant")
-
-    if kind:
-        slug, grant_kind, expiry_raw, nonce, signature = parts
-        if not _NONCE.match(nonce):
-            return GrantCheck(False, "Malformed upload grant")
-    else:
-        slug, expiry_raw, nonce, signature = parts
-        grant_kind = None
+    slug, grant_kind, expiry_raw, nonce, signature = parts
+    if not _NONCE.match(nonce):
+        return GrantCheck(False, "Malformed upload grant")
     if slug != streamer_slug:
         return GrantCheck(False, "Upload grant does not match this creator")
     if grant_kind != kind:
@@ -106,15 +106,3 @@ async def consume_upload_grant(nonce_store: NonceStore, check: GrantCheck) -> Gr
     except Exception:  # noqa: BLE001 - storage failure: never accept the grant (fail closed)
         return GrantCheck(False, "Upload grant could not be verified", unavailable=True)
     return check
-
-
-async def verify_and_consume_upload_grant(secret: str | None, nonce_store: NonceStore, grant: object,
-                                          streamer_slug: str, *, kind: str | None = None,
-                                          now_ms: int | None = None) -> GrantCheck:
-    check = verify_upload_grant(secret, grant, streamer_slug, kind=kind, now_ms=now_ms)
-    if not check.ok:
-        return check
-    used = await consume_upload_grant(nonce_store, check)
-    if not used.ok:  # replay or storage failure: never accept the grant twice
-        return GrantCheck(False, "Upload grant already used")
-    return used

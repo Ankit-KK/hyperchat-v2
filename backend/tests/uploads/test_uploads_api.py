@@ -13,6 +13,7 @@ from pydantic import SecretStr
 
 from app.public.service import PublicService
 from app.security.nonce_store import InMemoryNonceStore
+from app.security.crypto import hmac_sha256_hex
 from app.security.upload_grant import GRANT_TTL_MS, issue_upload_grant
 from app.storage.memory import InMemoryObjectStore
 from app.storage.r2 import IMMUTABLE
@@ -269,7 +270,8 @@ def test_missing_or_malformed_grant(client, grant, error):
 
 
 def test_legacy_untyped_grant_rejected(client):
-    legacy, _ = issue_upload_grant(GRANT_SECRET, "creator-a", now_ms=NOW)
+    payload = f"creator-a.{NOW + GRANT_TTL_MS}.{'a' * 32}"  # the legacy 4-part form, correctly signed
+    legacy = f"{payload}.{hmac_sha256_hex(GRANT_SECRET, payload)}"
     r = upload(client, "voice", REAL_VOICE, "audio/webm", legacy)
     assert (r.status_code, r.json()) == (403, {"error": "Malformed upload grant"})
 

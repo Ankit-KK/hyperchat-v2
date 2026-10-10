@@ -37,8 +37,22 @@ docs/       architecture, target schema, migration audit, history
 | 3 Authorization (creator ownership), admin bootstrap + user management, database-backed security primitives, explicit origins, cleanup, CI | done; running on the v2 development API |
 | 4 Public read API (donation pages, overlays, landing page) | done; running on the v2 development API |
 | 5 Creator dashboard API (settings, donations, moderation, moderators, terms; migration 0009) | done; running on the v2 development API |
-| 6–13 Remaining feature APIs, new frontend | next — built and tested against the development API |
+| 6 Donor uploads, hypersound library, creator soundboard on R2 | done; running on the v2 development API |
+| 7 Razorpay checkout, payment status, webhooks (migration 0010) | done; running on the v2 development API |
+| 8 Background jobs, worker, donation audio / TTS, transcription (0011) | done; running on the v2 development API (TTS / transcription providers disabled there) |
+| 9 Realtime outbox, Pusher publishing, channel authorization (0012) | done; running on the v2 development API |
+| 10 OBS audio queue and player, OBS tokens, replay (0013) | done; running on the v2 development API |
+| 11 Telegram / Discord moderation bots (0014, 0015) | done; deployed on the v2 development API with the bots **disabled** |
+| Backend completion (gaps from the full backend audit) | groups 1–3 in `main`: group 1 (ban list + unban, migration 0016, #18), group 2 (creator onboarding, moderator permissions, #19), group 3 (signup form, platform soundboard seeding, cleanup, #20); none of it deployed yet; group 4 and the items waiting on owner decisions remain — see [`docs/backend-completion-checklist.md`](docs/backend-completion-checklist.md) |
+| 12 Admin, payouts, partners | partly in the backend-completion groups; payouts and partners wait on owner decisions (checklist D2, D4) |
+| 13 New frontend | not started |
 | 14–15 Production deployment, data migration, cutover | final phase — see [`docs/migration-audit.md`](docs/migration-audit.md) §M |
+
+**Development environment:** Phase 11 (release `9042fb7fff40`, migration `0015`; `main` is ahead, at `0016`), bots disabled,
+no bot webhooks registered. **Production:** release `940137070657` at migration `0009`, no traffic, unchanged
+since Phase 5. Which features were exercised against the real external services (Razorpay test mode, Pusher,
+R2, the DEV bots) and which are only covered by automated tests (email, Google sign-in, TTS and transcription
+providers, among others) is tracked per capability in the checklist.
 
 **V2 is not production-ready.** All development, frontend integration, previews and testing target
 the development environment only:
@@ -67,8 +81,8 @@ the unit tests and the full database + integration suites against PostgreSQL 17 
 - [`docs/architecture.md`](docs/architecture.md) — components, trust boundaries, environments
 - [`docs/public-api.md`](docs/public-api.md) — public read API (Phase 4)
 - [`docs/dashboard-api.md`](docs/dashboard-api.md) — creator dashboard API (Phase 5)
-- [`docs/uploads-api.md`](docs/uploads-api.md) — donor upload grants and voice/media uploads to R2 (Phase 6, in progress)
-- [`docs/soundboard-api.md`](docs/soundboard-api.md) — creator soundboard and hypersound library (Phase 6, in progress)
+- [`docs/uploads-api.md`](docs/uploads-api.md) — donor upload grants and voice/media uploads to R2 (Phase 6)
+- [`docs/soundboard-api.md`](docs/soundboard-api.md) — creator soundboard and hypersound library (Phase 6)
 - [`docs/payments-api.md`](docs/payments-api.md) — Razorpay checkout, payment status, confirmation and webhooks (Phase 7)
 - [`docs/audio-jobs.md`](docs/audio-jobs.md) — background jobs, worker, donation audio/TTS, moderation, voice transcription (Phase 8)
 - [`docs/realtime.md`](docs/realtime.md) — realtime outbox, Pusher publishing, channel authorization, the Phase 10 OBS contract (Phase 9)
@@ -76,6 +90,7 @@ the unit tests and the full database + integration suites against PostgreSQL 17 
 - [`docs/bots.md`](docs/bots.md) — Telegram / Discord moderation bots and moderator notifications (Phase 11)
 - [`docs/target-schema.md`](docs/target-schema.md) — PostgreSQL schema and legacy → v2 data mapping
 - [`docs/migration-audit.md`](docs/migration-audit.md) — Supabase-exit audit and phase plan
+- [`docs/backend-completion-checklist.md`](docs/backend-completion-checklist.md) — remaining backend gaps, owner decisions, verification status
 - [`docs/history.md`](docs/history.md) — relationship to the legacy repository
 - [`deploy/README.md`](deploy/README.md) — VPS layout, deployment and rollback
 

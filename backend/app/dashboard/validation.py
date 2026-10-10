@@ -4,9 +4,10 @@ import base64
 import binascii
 import re
 import uuid
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 
 from app.core.errors import ApiError
+from app.core.timezones import IST
 
 
 def parse_uuid(value: str | None) -> str | None:
@@ -172,7 +173,6 @@ def keyset_page(rows: list[dict], limit: int) -> tuple[list[dict], str | None, b
 # ── India Standard Time: fixed +05:30 (Asia/Kolkata has had no DST since 1945), as the legacy
 #    dashboard computed it. Boundaries are computed here and passed to SQL as timestamps. ─────────
 
-IST = timezone(timedelta(hours=5, minutes=30), "IST")
 TIMEZONE_NAME = "Asia/Kolkata"
 EXPORT_MAX_DAYS = 366
 EXPORT_MAX_ROWS = 10_000

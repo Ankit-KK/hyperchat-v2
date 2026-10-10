@@ -14,17 +14,21 @@ app/auth/              FastAPI-managed authentication (sessions, CSRF, passwords
 app/authz/             authorization: creator (streamer) ownership, require_streamer_access
 app/admin/             user / invite / creator administration (onboarding, owner assignment), admin bootstrap
 app/public/            public read API (Phase 4): creator profile, pricing, overlay config, soundboard,
-                       leaderboard, goal, platform/showcase metrics (see ../docs/public-api.md)
+                       leaderboard, goal, platform/showcase metrics, signup interest form
+                       (see ../docs/public-api.md)
 app/dashboard/         creator dashboard API (Phase 5): settings, donations + stats + CSV export,
                        moderation state machine, moderators, terms (see ../docs/dashboard-api.md)
 app/core/errors.py     ApiError -> {"error": ...} for non-auth errors
+app/core/timezones.py  IST (+05:30), the one definition for day boundaries and human-readable times
 app/security/          non-browser callers: HMAC-signed requests, nonces, upload grants, OBS tokens,
                        shared secrets, partner keys (+ PostgreSQL stores and FastAPI dependencies),
                        CORS, security logging
 app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit windows, invites
-app/cli.py             operator commands: bootstrap-admin, cleanup
+app/cli.py             operator commands: bootstrap-admin, cleanup, enqueue-donation-audio, bot webhook
+                       setup, seed-platform-soundboard
 app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*,
-                       /api/v1/public/streamers/*, /api/v1/metrics/*, /api/v1/dashboard/streamers/*,
+                       /api/v1/public/streamers/*, /api/v1/public/signups, /api/v1/metrics/*,
+                       /api/v1/dashboard/streamers/*,
                        /api/v1/me/terms
 tests/                 unit tests + end-to-end tests against a scratch database
 ```
@@ -106,6 +110,8 @@ cd /opt/hyperchat/current/backend
 ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env bootstrap-admin --email you@example.com
 # Housekeeping (also runs daily from hyperchat-cleanup.timer):
 ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env cleanup --dry-run
+# Fill an EMPTY platform soundboard from the R2 hypersound library (no-op once any slot exists):
+../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env seed-platform-soundboard --dry-run
 ```
 
 ## Tests

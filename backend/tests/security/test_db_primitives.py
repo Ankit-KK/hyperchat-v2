@@ -26,7 +26,7 @@ from app.security.nonce_store import NonceReplayError
 from app.security.obs_token import obs_channel_allowed
 from app.security.pg_stores import PostgresNonceStore
 from app.security.request_signing import sign_request
-from app.security.upload_grant import issue_upload_grant, verify_and_consume_upload_grant
+from app.security.upload_grant import consume_upload_grant, issue_upload_grant, verify_upload_grant
 from tests.integration import FRONT, LogCapture, db, make_streamer, requires_db
 
 pytestmark = requires_db
@@ -213,9 +213,10 @@ def test_nonce_store_and_upload_grant_on_postgres(env):
     with pytest.raises(NonceReplayError):
         asyncio.run(store.insert(nonce, None, datetime.now(UTC) + timedelta(minutes=5)))
 
-    grant, _ = issue_upload_grant("TEST-ONLY-grant", "authtest-up", nonce="authtest-" + secrets.token_hex(8))
-    first = asyncio.run(verify_and_consume_upload_grant("TEST-ONLY-grant", store, grant, "authtest-up"))
-    second = asyncio.run(verify_and_consume_upload_grant("TEST-ONLY-grant", store, grant, "authtest-up"))
+    grant, _ = issue_upload_grant("TEST-ONLY-grant", "authtest-up", kind="voice", nonce=secrets.token_hex(16))
+    check = verify_upload_grant("TEST-ONLY-grant", grant, "authtest-up", kind="voice")
+    first = asyncio.run(consume_upload_grant(store, check))
+    second = asyncio.run(consume_upload_grant(store, check))
     assert first.ok and second.error == "Upload grant already used"
 
 

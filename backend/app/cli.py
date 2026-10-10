@@ -17,6 +17,10 @@ bots-set-telegram-webhook --url URL --expect-bot USERNAME and bots-set-discord-e
 --expect-application-id ID register this environment's bot webhooks (Phase 11). Both refuse unless the bot behind
 the configured token is exactly the one named (so the legacy production bot / application can never be re-pointed
 by mistake, D14) and the URL is this API's https webhook path. Tokens and secrets are never printed.
+
+seed-platform-soundboard [--dry-run] fills the empty platform soundboard from this environment's R2 library
+(hypersounds/ + hypersound-thumbs/, see app.soundboard.seed); it does nothing once any platform slot exists.
+--dry-run lists what would be inserted and writes nothing.
 """
 
 import argparse
@@ -36,6 +40,8 @@ from app.core.logging import configure_logging
 from app.jobs.queue import enqueue
 from app.maintenance import run_cleanup
 from app.security.audit import security_event
+from app.soundboard import seed
+from app.storage.r2 import StorageError, build_object_store
 
 REFUSALS = {
     "admin_exists": "An active admin who can sign in already exists. Use the admin API instead.",
@@ -144,6 +150,46 @@ async def set_discord_endpoint(settings: Settings, url: str, expect_application_
     return 0
 
 
+async def seed_platform_soundboard(settings: Settings, dry_run: bool, store=None) -> int:
+    store = store or build_object_store(settings)
+    if store is None:
+        print("R2 storage is not configured (HYPERCHAT_R2_* variables).", file=sys.stderr)
+        return 2
+    connect = connection_factory(settings)
+    existing = await seed.existing_slots(connect)
+    if existing:
+        print(f"Nothing to do: {existing} platform soundboard slots already exist "
+              f"(database label: {settings.db_label}).")
+        return 0
+    try:
+        rows, unpaired = seed.plan(await store.list_keys(seed.SOUNDS), await store.list_keys(seed.THUMBS),
+                                   store.public_url)
+    except StorageError:
+        print("Could not list the R2 sound library.", file=sys.stderr)
+        return 1
+    for key in unpaired:
+        print(f"skipped (no thumbnail): {key}")
+    for row in rows:
+        print(f"{row['default_order_index']:2d}  {row['display_name']}  {row['audio_key']}  {row['image_key']}")
+    if not rows:
+        print("Refusing: no sound has a matching thumbnail.", file=sys.stderr)
+        return 1
+    if len(rows) > seed.MAX_SLOTS:
+        print(f"Refusing: {len(rows)} paired sounds, but the platform soundboard has {seed.MAX_SLOTS} slots.",
+              file=sys.stderr)
+        return 1
+    if dry_run:
+        print(f"Dry run: would insert {len(rows)} platform slots (database label: {settings.db_label}).")
+        return 0
+    existing = await seed.insert_if_empty(connect, rows)
+    if existing:
+        print(f"Nothing inserted: {existing} platform soundboard slots appeared meanwhile.")
+        return 0
+    security_event("platform_soundboard_seeded", level=20, count=len(rows))
+    print(f"Inserted {len(rows)} platform soundboard slots (database label: {settings.db_label}).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--env-file", help="read HYPERCHAT_* settings from this file (e.g. /etc/hyperchat/api.env)")
@@ -161,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
     dc = sub.add_parser("bots-set-discord-endpoint", help="register this environment's Discord interactions URL")
     dc.add_argument("--url", required=True)
     dc.add_argument("--expect-application-id", required=True)
+    sb = sub.add_parser("seed-platform-soundboard", help="fill the empty platform soundboard from the R2 library")
+    sb.add_argument("--dry-run", action="store_true", help="only list what would be inserted")
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
@@ -176,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "cleanup":
         return asyncio.run(run_cleanup(settings, connection_factory(settings), dry_run=args.dry_run))
+    if args.command == "seed-platform-soundboard":
+        return asyncio.run(seed_platform_soundboard(settings, args.dry_run))
     if args.command == "enqueue-donation-audio":
         return asyncio.run(enqueue_donation_audio(settings, args.donation_id))
     return asyncio.run(bootstrap_admin(settings, args.email, read_password(args.password_stdin)))

@@ -39,6 +39,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | **D11** | **Admin email change** (legacy `admin-update-email`). Needed? | AUTH-9 | Yes, small: admin-only endpoint with session revocation. |
 | **D12** | **Razorpay account for new creators.** Onboarding currently requires the admin to name a *configured* account per creator (no default). Keep that, or default to one account? | CRE-2 | Keep it explicit until D6 settles the second account. |
 | **D13** | **Creator ownership transfer.** Owner assignment only claims an *unclaimed* creator; a claimed creator answers 409. Allow admin transfers (and what happens to the old owner's sessions)? | CRE-2 | Not for launch; transfers stay a manual, reviewed operation. |
+| **D14** | **Duplicate signup answer.** Legacy told the visitor "This email is already registered", which lets anyone test whether an address signed up. V2 answers a repeated email exactly like a new one (201, nothing stored or overwritten). Keep, or restore the legacy message? | PLAT-5 | Keep the identical answer (privacy); the frontend can say "Thanks, we'll be in touch" in both cases. |
 
 ## Capabilities
 
@@ -130,8 +131,8 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | PLAT-1 | Platform / showcase metrics | VERIFIED | – | – | A+D |
 | PLAT-2 | Partner API keys | BLOCKED | Per D4 | D4 | – |
 | PLAT-3 | Partner signup / check | BLOCKED | Per D4 | D4 | – |
-| PLAT-4 | Platform soundboard seeding | MISSING | Idempotent CLI (`app.cli`) from the R2 hypersound library → tests: re-run changes nothing | – | – |
-| PLAT-5 | Signup interest form | MISSING | `POST /api/v1/public/signups` → validation, per-IP rate limit, no data echoed back, tests | – | 232 legacy rows on DEV |
+| PLAT-4 | Platform soundboard seeding | TESTED | `python -m app.cli seed-platform-soundboard [--dry-run]`: legacy pairing (`hypersounds/<stem>.mp3` + `hypersound-thumbs/<stem>.<ext>`, case-insensitive stem, gif > png > jpg > jpeg > webp, `jpeg` stored as `jpg`, unpaired sounds skipped and listed), title-cased names, legacy 3.0 s duration placeholder (the server may not read library objects); only fills an **empty** table, all rows in one transaction under an advisory lock; refuses 0 or more than 44 pairs; `--dry-run` writes nothing; `platform_soundboard_seeded` event. Not run on DEV (DEV already has its 44 slots, so it would answer "Nothing to do") | 5 unit tests with the in-memory R2 store (pairing, dry run, refusals incl. R2 list failure and 45 pairs, existing rows → R2 never listed, exactly 44) + 3 PostgreSQL tests (seeds once then nothing; 4 concurrent seeders → one set; a failing row inserts nothing) | – | A (G3) |
+| PLAT-5 | Signup interest form | TESTED | `POST /api/v1/public/signups` (public, no cookies): trusted frontend Origin (checked before the body), 5 per IP per hour (`rate_limits`, bucket `signup:create`), legacy field rules (name 1–100, email 5–255 + legacy pattern, mobile 8–20 of digits / `+ - ( )` / spaces, YouTube ≤ 500, Instagram ≤ 100), trimmed, email lowercased, control characters refused, extra fields refused; a repeated email (any letter case, incl. legacy mixed-case rows) answers the same 201 and stores / overwrites nothing (D14); database errors → 503 without details; nothing is emailed; `signup_rejected` / `signup_failed` events without the email | 27 unit tests (origin, 19 invalid bodies, missing fields, normalisation, rate limit, DB failure in insert and in the limiter, not configured) + 3 PostgreSQL tests (stored row, duplicates incl. legacy mixed case, real limiter + no email in logs) | D14 (current behaviour is the privacy-preserving default) | A (G3) |
 | PLAT-6 | Security logs, nonces, rate limits | TESTED | – | – | A |
 | PLAT-7 | **Order-lookup cleanup** | TESTED | Legacy daily rule `created_at < now() - 30 days` in `maintenance.RULES` (the existing daily cleanup timer) → cleanup test counts/keeps; a webhook for an order whose lookup row was cleaned still completes via `donations.provider_order_id` | – | A (G1) |
 | PLAT-8 | Contact form | BLOCKED | Per D5 | D5 | legacy broken |
@@ -143,9 +144,9 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | ID | Item | Status | Required change → acceptance | Blockers |
 |---|---|---|---|---|
 | SEC-L1 | Unused HMAC / partner-key / cron-secret layer | BLOCKED | Remove after tracing; the partner verifier depends on D4 | D4 |
-| SEC-L2 | Dead upload-grant helpers (legacy 4-part grant, `verify_and_consume_upload_grant`, `fetch_order`) | MISSING | Remove with their tests; full suite green | – |
-| SEC-L3 | Duplicated IST constant | MISSING | One definition, one import | – |
-| DOC-1 | Stale README status table | MISSING | Matches the actual phases | – |
+| SEC-L2 | Dead upload-grant helpers (legacy 4-part grant, `verify_and_consume_upload_grant`, `fetch_order`) | PARTIAL | **Done (G3):** the legacy untyped 4-part grant is no longer issued or accepted (`kind` is required for issue and verify; a correctly signed 4-part token is refused as malformed) and `verify_and_consume_upload_grant` is removed; the upload API already used only typed grants + `consume_upload_grant`, so no client changes. Tests now cover the refusal of the legacy form, missing / unknown kinds, and that a refused grant is never burned. **Left in place:** `RazorpayClient.fetch_order` (unused by app code, but part of the payments client, outside G3's upload-grant scope; remove or use with the PAY-7 poll work) | – |
+| SEC-L3 | Duplicated IST constant | TESTED | `app.core.timezones.IST` is the one definition (dashboard validation / CSV export and bot message formatting import it; the bots' copy had no name, so `tzname` is now "IST" there too, which no output uses) → 4 tests: offset, no DST, identity, the 18:30 UTC day boundary, month / year-end bounds, unchanged bot and CSV text | – |
+| DOC-1 | Stale README status table | TESTED | README status table, `docs/architecture.md` delivery plan, `database/README.md` (revisions 0001–0016, order) and `docs/target-schema.md` now match `main`: phases 1–11 merged, backend completion G1/G2/G3 in open PRs, DEV and production state, external verification status pointing at this checklist | – |
 
 ## Out of scope for this phase (tracked elsewhere)
 - Frontend (plan phase 13): every page type; nothing built.
@@ -156,8 +157,8 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | Group | Scope | Status |
 |---|---|---|
 | G1 | DASH-4 ban list + unban by id (migration 0016); PLAT-7 order-lookup cleanup | merged into `main` (#18, `7b21cad`); TESTED; not deployed (DEV deploy needs approval) |
-| G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | done in #19 (TESTED; not merged yet; DEV deploy needs approval) |
-| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2, SEC-L3, DOC-1 | in #20 (not merged) |
-| G4 | OBS-4 URL mapping + cutover compatibility checklist; PAY-11 | planned |
+| G2 | CRE-2 creator onboarding + owner assignment (admin); DASH-12 moderator permission editing | merged into `main` (#19, `c526d2e`); TESTED; not deployed (DEV deploy needs approval) |
+| G3 | PLAT-5 signup form, PLAT-4 soundboard seed CLI, SEC-L2 (upload grants; `fetch_order` left), SEC-L3, DOC-1 | done in #20 (TESTED; no migration; not deployed, DEV deploy needs approval) |
+| G4 | OBS-4 URL mapping + cutover compatibility checklist; PAY-11 | next |
 | G5+ | Items unblocked by decisions D1–D11 | waiting |
 | SEC | Full backend security audit (`docs/backend-security-audit.md`) after G1–G4 | planned |
