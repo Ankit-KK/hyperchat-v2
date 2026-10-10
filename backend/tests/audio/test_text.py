@@ -10,8 +10,8 @@ from app.audio import text as t
 
 
 def test_sanitize_for_tts_strips_tags_invisibles_controls_and_cuts():
-    assert t.sanitize_for_tts("<b>hi</b>​ there\x07\n\n  you") == "hi there you"
-    assert t.sanitize_for_tts("‮evil⁦") == "evil"
+    assert t.sanitize_for_tts("<b>hi</b>\u200B there\x07\n\n  you") == "hi there you"
+    assert t.sanitize_for_tts("\u202Eevil\u2066") == "evil"
     assert len(t.sanitize_for_tts("x" * 900)) == 500 and len(t.sanitize_for_tts("x" * 900, 80)) == 80
     assert t.sanitize_for_tts(None) == "" and t.sanitize_for_tts("") == ""
 

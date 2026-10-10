@@ -19,7 +19,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P2**: fix before launch | **3** | F2, F3, F4 |
 | **P3**: hardening | **3** | F5, F6, F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
-| Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters); all other Bandit results are false positives or informational |
+| Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; fixed in the repository, not merged); all other Bandit results are false positives or informational |
 
 No route lacks authentication where it needs it, no cross-creator access path was found, and payment completion
 cannot be forged without a provider secret. The open items are logging hygiene, abuse resistance and hardening.
@@ -201,6 +201,17 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 - **Impact:** "Trojan Source" class (CVE-2021-42574). Editors and GitHub may display those lines differently from what Python executes, so a reviewer could be misled by a future change on those lines.
 - **Exploitability:** not exploitable at runtime; it's a code-review risk.
 - **Remediation (not applied; findings first):** write the characters as `\u` escapes, which compile to the same regex. Add a CI check (Bandit B613 or a grep) that rejects literal bidi characters in `backend/`.
+- **Status: fixed in the repository (branch `security-f8-bidi-escapes`; not merged, nothing to deploy).**
+  - **The rewrite:** every literal invisible character on the two regex lines (`moderation.py:29-30`, `text.py:32`), on the two test lines, and the one U+202E in the legacy golden fixture (`tests/audio/fixtures/moderation_golden.json`, as a JSON escape, so `json.loads` gives the same value) is now a `\u` escape.
+  - **Untouched:** other invisible characters that belong to visible text (emoji variation selectors and joiners in bot messages, Hindi combining marks in tests).
+  - **Same behaviour, proven:**
+    - `tests/audio/test_invisible_patterns.py` pins both patterns' text and the exact set of code points they match, over **all 1,114,112** code points (185 and 15, SHA-256 of the list taken *before* the rewrite).
+    - Five hostile donor texts give outputs recorded with the old patterns.
+    - A side-by-side run of `main`'s modules and the new ones gave identical outputs.
+  - **Regression check:** `tests/test_source_hygiene.py` scans every source and config file in the repository (`.py`, `.sh`, `.sql`, `.conf`, `.yml`, `.md`, `.json`, …) and fails on any literal bidi control: U+061C, U+200E/F, U+202A–U+202E, U+2066–U+2069.
+    - **Exception:** `docs/security-evidence/` is skipped, because it holds verbatim scanner output quoting the old lines.
+    - **Proof:** with `main`'s `text.py` restored, the check fails and names all five characters on line 32.
+- **Observation (not changed; outside F8):** `sanitize_for_tts` strips most bidi controls but **not** U+061C ARABIC LETTER MARK, nor the soft hyphen or Hangul fillers. The moderation normaliser does strip them. Text-to-speech output is audio, so there is no display effect; recorded only so a future change to the TTS filter can include it.
 
 ## Tracked decisions and approvals (unchanged by this audit)
 
@@ -225,7 +236,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 2. **F3** (P2): limit current-password checks. Small code change with tests.
 3. **F2** (P2): owner decision on the lockout model, then code and tests.
 4. **F6, F5** (P3): production guard for invite links; trim the public health response.
-5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover.
+5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: fixed in the repository** (`\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.
 7. **F7**: after D4 and SEC-L2.
 
