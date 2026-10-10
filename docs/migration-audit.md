@@ -172,7 +172,7 @@ FastAPI login/sessions/reset/invites (Supabase Auth provides them now) · RPC `i
 2 Auth (needs 1) → 3 Authorization/security (reuse Phase 2 code; needs 2) →
 4 Public read APIs → 5 Dashboard APIs → 6 Uploads/R2 → 7 Payments + webhooks → 8 Jobs (TTS/notify/health/cleanup) → 9 Realtime outbox + Pusher auth → 10 OBS endpoints → 11 Bots → 12 Admin/payouts/partners (4–12 each depend on 3) ·
 13 New frontend (starts with 4, feature-by-feature against OpenAPI) ·
-14 Cutover rehearsal: fresh `pg_dump` of public (+ credential export if chosen), Storage copy, data validation, freeze window, re-point Razorpay/Telegram/Discord webhooks, streamer comms for OBS media-source URL change, DNS switch ·
+14 Cutover rehearsal: fresh `pg_dump` of public (+ credential export if chosen), Storage copy, data validation, freeze window, re-point Razorpay/Telegram/Discord webhooks, streamer comms for OBS media-source URL change (mapping and checklist: [`obs-cutover.md`](obs-cutover.md)), DNS switch ·
 15 Decommission Supabase + rotate every secret.
 
 ## N. Security risks  [C → P mitigation]
