@@ -47,6 +47,29 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 
     Neither is covered by this fix; both are tracked as F1-R below.
 
+#### F1-R (P3): tokens in the Nginx error log and the DEV redirect log
+- **Assessment:**
+  - **Upstream failures** (connect refused, timeouts, early closes): Nginx writes an `error`-level line whose context includes `request: "GET /api/v1/obs/audio/next?token=… HTTP/x"`, plus the `referrer`. Nginx can't drop the query from that line, because the error-log format isn't configurable. So whenever the API is down or slow, every OBS request would put its token in `error.log`.
+  - **Rate-limit rejections** are logged the same way, but `limit_req` only applies to `/api/v1/public/` and `/api/v1/metrics/`, which carry no credentials.
+  - **The bootstrap config** (`.acme.conf`) only redirects and serves ACME files. Tokens aren't sent there, but a client that did send one would get it logged as a query string on a failed file lookup. Not mitigated; negligible.
+  - **DEV's port-80 redirect** logged with the default format, query string included.
+- **Mitigation (`9cd6093`, `f15c5a8`), in the repository and not deployed:**
+  - **Token-path location:** production and DEV proxy `/api/v1/obs/` and `/api/v1/realtime/` in their own location with `error_log … crit`. Upstream failures there are not written to the error log. Other paths keep full error logging.
+  - **Diagnostics kept:** the production access-log format gains `us=$upstream_status rt=$request_time`, so a failed token-path request still shows as `502 … us=502 rt=…`, without the query. The API's own logs are unaffected.
+  - **DEV port 80:** DEV's redirect block now uses `hyperchat_dev_noquery`.
+  - **Parity:** DEV gets the identical location, so `tests/test_deploy_production.py` (production and DEV keep the same proxy and timeout directives) still holds.
+- **Cost:** for those two paths, `error`-level Nginx diagnostics (for example the upstream address and errno) are no longer written. The status, upstream status and timing in the access log, plus the API logs, identify such failures.
+- **Test:** `tests/e2e/nginx_ratelimit_check.sh` (real site files, sandboxed):
+  - it requests the DEV port-80 redirect with a marker;
+  - it then runs both sites with the upstream **down**, requesting production `/obs/` and `/realtime/` and DEV `/obs/`, each with a marker in the query and the `Referer`.
+  - **Assertions:** all four requests get 502; the marker appears in **no** log file; the access log records the production failures with `us=502`.
+  - **Control:** a failing request on another production path *is* written to the error log with its query string, which shows the check would see a leak.
+- **Evidence:** CI run on `f15c5a8`, green in both Nginx environments: `upstream-down requests: 502 502 502 502`, `error log: no OBS token from the token paths, production and DEV`, access log 9 of 9 requests and no marker. The first attempt (`9cd6093`) failed the backend parity test, because the location was only in production; fixed by `f15c5a8`, not by changing the test.
+- **Limits:**
+  - These only prove the configuration under the tested failure (connection refused). Other `error`-level messages for those paths are suppressed by the same directive, but weren't each exercised.
+  - `crit`-level messages (rare: for example, worker or system failures) can still include the request line.
+  - Non-token query strings on other paths still reach the error log on failures, by design, for diagnostics.
+
 ### F2 (P2): anyone can lock a creator out of password login
 - **Evidence:** `AuthService.login` (`backend/app/auth/service.py`) records a failed attempt for any existing, active
   account with a password; 5 failures lock it for 15 minutes (`login_lockout_threshold`, `login_lockout_minutes`). The
@@ -148,9 +171,10 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 
 ## Remediation plan
 
-1. **F1** (P1): **done in the repository** (`cc961df`; not deployed). **F1-R** (P3, residual):
-   - **Error log:** entries for upstream failures and rate-limit rejections carry the query string. Options are a lower `error_log` level for `/api/v1/obs/` and `/api/v1/realtime/`, or restricting who can read the error log.
-   - **DEV port-80 block:** it uses the default log. Give it the query-free format as well.
+1. **F1** (P1): **done in the repository** (`cc961df`; not deployed). **F1-R** (P3, residual): **mitigated in the repository** (`9cd6093`, `f15c5a8`; not deployed):
+   - **Token paths:** they log errors only at `crit`, and the access log carries the upstream status and timing.
+   - **DEV port 80:** logs without the query.
+   - **Remaining:** only `crit`-level lines and the negligible bootstrap case; see F1-R above.
 
    Original plan: production log format without query strings + CI assertion. Small, configuration only; deploying it
    to production needs approval.
