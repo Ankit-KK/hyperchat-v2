@@ -138,6 +138,57 @@ syntax "dev site" api.quicktestspace.site.conf
 syntax "catch-all + dev + production bootstrap (port 80)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.acme.conf
 syntax "catch-all + dev + production (80 + 443)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.conf
 
+# Access logs (security audit F1): run the REAL DEV and production site files, with their listen ports, log file,
+# ACME root and upstream pointed into this sandbox (the upstream is a stub that answers 200), send requests that
+# carry a secret marker in the query string and in the Referer, and require that the marker never reaches the
+# log. Production must drop every query string and referrer; DEV drops them under /api/v1/obs/ and
+# /api/v1/realtime/. A control proves the log would show a query string if one were written.
+P80=$((PORT + 2)); P443=$((PORT + 3)); STUB=$((PORT + 4))
+SECRET="obs_logcanary$$$RANDOM"; CONTROL="visiblecontrol$$$RANDOM"
+logsite() { site "$1" | sed -e "s#listen 80;#listen 127.0.0.1:$P80;#" -e "s#listen 443 ssl;#listen 127.0.0.1:$P443 ssl;#" \
+    -e "s#/var/log/nginx/access.log#$T/logs/site-access.log#g" -e "s#root /var/www/acme;#root $T/www;#" \
+    -e "s#proxy_pass http://127.0.0.1:800[01];#proxy_pass http://127.0.0.1:$STUB;#"; }
+{ logsite api.quicktestspace.site.conf; logsite api.hyperchat.space.conf; } > "$T/logtest-sites.conf"
+cat > "$T/logtest.conf" <<EOF
+pid $T/logtest.pid;
+error_log $T/logs/logtest-error.log warn;
+events {}
+http {
+    $ISOLATED
+    server { listen 127.0.0.1:$STUB; access_log off; return 200 "stub\n"; }
+    include $T/logtest-sites.conf;
+}
+EOF
+ngx -t -q -c "$T/logtest.conf" && ngx -c "$T/logtest.conf"
+tls() {  # $1 = host, $2 = path and query
+    curl -sk -o /dev/null -w '%{http_code}' -H "Referer: https://evil.invalid/?token=$SECRET" \
+        --resolve "$1:$P443:127.0.0.1" "https://$1:$P443$2"
+}
+codes=""
+for path in "/api/v1/obs/audio/next?token=$SECRET" "/api/v1/realtime/pusher/auth?token=$SECRET" \
+            "/api/v1/public/streamers/x?token=$SECRET" "/api/v1/auth/session?reset=$SECRET"; do
+    codes="$codes $(tls api.hyperchat.space "$path")"
+done
+codes="$codes $(curl -s -o /dev/null -w '%{http_code}' -H 'Host: api.hyperchat.space' \
+    "http://127.0.0.1:$P80/api/v1/obs/audio/next?token=$SECRET")"  # port 80: the redirect to HTTPS
+for path in "/api/v1/obs/audio/next?token=$SECRET" "/api/v1/realtime/pusher/auth?token=$SECRET"; do
+    codes="$codes $(tls api.quicktestspace.site "$path")"
+done
+codes="$codes $(curl -sk -o /dev/null -w '%{http_code}' --resolve "api.quicktestspace.site:$P443:127.0.0.1" \
+    "https://api.quicktestspace.site:$P443/api/v1/auth/session?control=$CONTROL")"  # DEV logs other queries in full
+ngx -c "$T/logtest.conf" -s quit 2>/dev/null || true; sleep 0.3
+echo "access-log requests:$codes"
+[ "$codes" = " 200 200 200 200 301 200 200 200" ] || { echo "FAIL access-log requests did not reach the sites"; fail=1; }
+lines=$(grep -c . "$T/logs/site-access.log" || true)
+echo "access-log lines written: $lines"
+[ "$lines" -eq 8 ] || { echo "FAIL access log should have 8 lines"; fail=1; }
+if grep -q "$SECRET" "$T/logs/site-access.log"; then
+    echo "FAIL a query string or referrer secret reached the access log:"; grep -n "$SECRET" "$T/logs/site-access.log" | sed "s/$SECRET/<secret>/g"; fail=1
+else echo "access log: no query-string or referrer secret (production: every request; DEV: /obs/, /realtime/)"; fi
+grep -q "$CONTROL" "$T/logs/site-access.log" || { echo "FAIL control: the DEV query string was not logged, so this check proves nothing"; fail=1; }
+[ "$(grep -c 'GET /api/v1/obs/audio/next HTTP' "$T/logs/site-access.log" || true)" -eq 3 ] \
+    || { echo "FAIL the redacted lines should still show the path"; fail=1; }
+
 ngx -c "$T/nginx.conf" -s quit 2>/dev/null || true; sleep 0.3
 if [ "$(host_state)" = "$HOST_BEFORE" ]; then echo "host nginx state ($(host_dirs | tr '\n' ' ')): unchanged"
 else echo "FAIL host nginx state changed:"; diff <(echo "$HOST_BEFORE") <(host_state) || true; fail=1; fi
