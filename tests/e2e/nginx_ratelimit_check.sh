@@ -192,7 +192,7 @@ grep -q "$CONTROL" "$T/logs/site-access.log" || { echo "FAIL control: the DEV qu
     || { echo "FAIL the redacted lines should still show the path"; fail=1; }
 
 # Error logs (F1-R): with the upstream down, nginx writes an error-log line holding the full request line. The
-# production token paths must not; other production paths keep that diagnostic (a control proves the check would
+# token paths (production and DEV) must not; other production paths keep that diagnostic (a control proves the check would
 # see a query string there), and the access log still records each failure with its upstream status.
 DOWN=$((PORT + 5))  # nothing listens here: connection refused
 rm -f "$T"/logs/site-*.log
@@ -201,14 +201,15 @@ sed -i "s#error_log $T/logs/logtest-error.log warn;#error_log $T/logs/site-error
 ngx -t -q -c "$T/logtest.conf" && ngx -c "$T/logtest.conf"
 CONTROL2="errorcontrol$$$RANDOM"
 codes="$(tls api.hyperchat.space "/api/v1/obs/audio/next?token=$SECRET") $(tls api.hyperchat.space "/api/v1/realtime/pusher/auth?token=$SECRET")"
+codes="$codes $(tls api.quicktestspace.site "/api/v1/obs/audio/next?token=$SECRET")"  # DEV: the same location
 codes="$codes $(curl -sk -o /dev/null -w '%{http_code}' --resolve "api.hyperchat.space:$P443:127.0.0.1" \
     "https://api.hyperchat.space:$P443/api/v1/auth/session?probe=$CONTROL2")"
 ngx -c "$T/logtest.conf" -s quit 2>/dev/null || true; sleep 0.3
 echo "upstream-down requests: $codes"
-[ "$codes" = "502 502 502" ] || { echo "FAIL upstream-down requests should all be 502"; fail=1; }
+[ "$codes" = "502 502 502 502" ] || { echo "FAIL upstream-down requests should all be 502"; fail=1; }
 if grep -rq "$SECRET" "$T/logs/"; then
     echo "FAIL an OBS token reached a log with the upstream down:"; grep -rn "$SECRET" "$T/logs/" | sed "s/$SECRET/<secret>/g"; fail=1
-else echo "error log: no OBS token from the production token paths (upstream down)"; fi
+else echo "error log: no OBS token from the token paths, production and DEV (upstream down)"; fi
 grep -q "$CONTROL2" "$T/logs/site-error.log" \
     || { echo "FAIL control: the error log did not record the failing request elsewhere, so this check proves nothing"; fail=1; }
 [ "$(grep -c '" 502 .* us=502 rt=' "$T/logs/site-access.log" || true)" -eq 3 ] \
