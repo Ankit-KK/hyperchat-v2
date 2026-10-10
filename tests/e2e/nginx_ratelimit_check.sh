@@ -138,6 +138,83 @@ syntax "dev site" api.quicktestspace.site.conf
 syntax "catch-all + dev + production bootstrap (port 80)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.acme.conf
 syntax "catch-all + dev + production (80 + 443)" 00-catchall.conf api.quicktestspace.site.conf api.hyperchat.space.conf
 
+# Access logs (security audit F1): run the REAL DEV and production site files, with their listen ports, log file,
+# ACME root and upstream pointed into this sandbox (the upstream is a stub that answers 200), send requests that
+# carry a secret marker in the query string and in the Referer, and require that the marker never reaches the
+# log. Production must drop every query string and referrer; DEV drops them under /api/v1/obs/ and
+# /api/v1/realtime/. A control proves the log would show a query string if one were written.
+P80=$((PORT + 2)); P443=$((PORT + 3)); STUB=$((PORT + 4))
+SECRET="obs_logcanary$$$RANDOM"; CONTROL="visiblecontrol$$$RANDOM"
+logsite() { site "$1" | sed -e "s#listen 80;#listen 127.0.0.1:$P80;#" -e "s#listen 443 ssl;#listen 127.0.0.1:$P443 ssl;#" \
+    -e "s#/var/log/nginx/access.log#$T/logs/site-access.log#g" -e "s#/var/log/nginx/error.log#$T/logs/site-error.log#g" \
+    -e "s#root /var/www/acme;#root $T/www;#" -e "s#proxy_pass http://127.0.0.1:800[01];#proxy_pass http://127.0.0.1:${UPSTREAM:-$STUB};#"; }
+{ logsite api.quicktestspace.site.conf; logsite api.hyperchat.space.conf; } > "$T/logtest-sites.conf"
+cat > "$T/logtest.conf" <<EOF
+pid $T/logtest.pid;
+error_log $T/logs/logtest-error.log warn;
+events {}
+http {
+    $ISOLATED
+    server { listen 127.0.0.1:$STUB; access_log off; return 200 "stub\n"; }
+    include $T/logtest-sites.conf;
+}
+EOF
+ngx -t -q -c "$T/logtest.conf" && ngx -c "$T/logtest.conf"
+tls() {  # $1 = host, $2 = path and query
+    curl -sk -o /dev/null -w '%{http_code}' -H "Referer: https://evil.invalid/?token=$SECRET" \
+        --resolve "$1:$P443:127.0.0.1" "https://$1:$P443$2"
+}
+codes=""
+for path in "/api/v1/obs/audio/next?token=$SECRET" "/api/v1/realtime/pusher/auth?token=$SECRET" \
+            "/api/v1/public/streamers/x?token=$SECRET" "/api/v1/auth/session?reset=$SECRET"; do
+    codes="$codes $(tls api.hyperchat.space "$path")"
+done
+codes="$codes $(curl -s -o /dev/null -w '%{http_code}' -H 'Host: api.hyperchat.space' \
+    "http://127.0.0.1:$P80/api/v1/obs/audio/next?token=$SECRET")"  # port 80: the redirect to HTTPS
+for path in "/api/v1/obs/audio/next?token=$SECRET" "/api/v1/realtime/pusher/auth?token=$SECRET"; do
+    codes="$codes $(tls api.quicktestspace.site "$path")"
+done
+codes="$codes $(curl -s -o /dev/null -w '%{http_code}' -H 'Host: api.quicktestspace.site' \
+    "http://127.0.0.1:$P80/api/v1/obs/audio/next?token=$SECRET")"  # DEV port 80: the redirect (F1-R)
+codes="$codes $(curl -sk -o /dev/null -w '%{http_code}' --resolve "api.quicktestspace.site:$P443:127.0.0.1" \
+    "https://api.quicktestspace.site:$P443/api/v1/auth/session?control=$CONTROL")"  # DEV logs other queries in full
+ngx -c "$T/logtest.conf" -s quit 2>/dev/null || true; sleep 0.3
+echo "access-log requests:$codes"
+[ "$codes" = " 200 200 200 200 301 200 200 301 200" ] || { echo "FAIL access-log requests did not reach the sites"; fail=1; }
+lines=$(grep -c . "$T/logs/site-access.log" || true)
+echo "access-log lines written: $lines"
+[ "$lines" -eq 9 ] || { echo "FAIL access log should have 9 lines"; fail=1; }
+if grep -q "$SECRET" "$T/logs/site-access.log"; then
+    echo "FAIL a query string or referrer secret reached the access log:"; grep -n "$SECRET" "$T/logs/site-access.log" | sed "s/$SECRET/<secret>/g"; fail=1
+else echo "access log: no query-string or referrer secret (production: every request; DEV: /obs/, /realtime/)"; fi
+grep -q "$CONTROL" "$T/logs/site-access.log" || { echo "FAIL control: the DEV query string was not logged, so this check proves nothing"; fail=1; }
+[ "$(grep -c 'GET /api/v1/obs/audio/next HTTP' "$T/logs/site-access.log" || true)" -eq 4 ] \
+    || { echo "FAIL the redacted lines should still show the path"; fail=1; }
+
+# Error logs (F1-R): with the upstream down, nginx writes an error-log line holding the full request line. The
+# token paths (production and DEV) must not; other production paths keep that diagnostic (a control proves the check would
+# see a query string there), and the access log still records each failure with its upstream status.
+DOWN=$((PORT + 5))  # nothing listens here: connection refused
+rm -f "$T"/logs/site-*.log
+{ UPSTREAM=$DOWN logsite api.quicktestspace.site.conf; UPSTREAM=$DOWN logsite api.hyperchat.space.conf; } > "$T/logtest-sites.conf"
+sed -i "s#error_log $T/logs/logtest-error.log warn;#error_log $T/logs/site-error.log warn;#" "$T/logtest.conf"
+ngx -t -q -c "$T/logtest.conf" && ngx -c "$T/logtest.conf"
+CONTROL2="errorcontrol$$$RANDOM"
+codes="$(tls api.hyperchat.space "/api/v1/obs/audio/next?token=$SECRET") $(tls api.hyperchat.space "/api/v1/realtime/pusher/auth?token=$SECRET")"
+codes="$codes $(tls api.quicktestspace.site "/api/v1/obs/audio/next?token=$SECRET")"  # DEV: the same location
+codes="$codes $(curl -sk -o /dev/null -w '%{http_code}' --resolve "api.hyperchat.space:$P443:127.0.0.1" \
+    "https://api.hyperchat.space:$P443/api/v1/auth/session?probe=$CONTROL2")"
+ngx -c "$T/logtest.conf" -s quit 2>/dev/null || true; sleep 0.3
+echo "upstream-down requests: $codes"
+[ "$codes" = "502 502 502 502" ] || { echo "FAIL upstream-down requests should all be 502"; fail=1; }
+if grep -rq "$SECRET" "$T/logs/"; then
+    echo "FAIL an OBS token reached a log with the upstream down:"; grep -rn "$SECRET" "$T/logs/" | sed "s/$SECRET/<secret>/g"; fail=1
+else echo "error log: no OBS token from the token paths, production and DEV (upstream down)"; fi
+grep -q "$CONTROL2" "$T/logs/site-error.log" \
+    || { echo "FAIL control: the error log did not record the failing request elsewhere, so this check proves nothing"; fail=1; }
+[ "$(grep -c '" 502 .* us=502 rt=' "$T/logs/site-access.log" || true)" -eq 3 ] \
+    || { echo "FAIL the access log should record the 3 failures with their upstream status"; fail=1; }
+
 ngx -c "$T/nginx.conf" -s quit 2>/dev/null || true; sleep 0.3
 if [ "$(host_state)" = "$HOST_BEFORE" ]; then echo "host nginx state ($(host_dirs | tr '\n' ' ')): unchanged"
 else echo "FAIL host nginx state changed:"; diff <(echo "$HOST_BEFORE") <(host_state) || true; fail=1; fi
