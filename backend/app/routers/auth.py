@@ -106,7 +106,7 @@ async def reset(body: ResetIn, request: Request) -> dict:
 @router.post("/password/change")
 async def change(body: ChangeIn, request: Request, current: CurrentUser = Depends(require_user)) -> dict:
     await auth_service(request).change_password(current.user, current.session, body.current_password,
-                                                body.new_password)
+                                                body.new_password, client_ip(request))
     return {"success": True}
 
 

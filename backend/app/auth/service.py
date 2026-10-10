@@ -15,6 +15,7 @@ from app.security.audit import security_event
 
 GENERIC_LOGIN_ERROR = "Invalid email or password"
 TOO_MANY = "Too many attempts. Please try again later."
+PASSWORD_CHANGE_LIMIT = (5, 3600)  # current-password verifications per user per hour (security audit F3)
 
 
 class AuthError(Exception):
@@ -159,9 +160,16 @@ class AuthService:
         security_event("password_reset_completed", level=20, user_id=user_id, client_ip=ip,
                        reason=f"sessions_revoked:{revoked}")
 
-    async def change_password(self, user: User, session: Session, current: str, new_password: str) -> None:
+    async def change_password(self, user: User, session: Session, current: str, new_password: str,
+                              ip: str | None = None) -> None:
         self._check_new_password(new_password)
+        # Security audit F3: bound guesses of the current password from a (possibly stolen) session. Every
+        # verification counts, so once the limit is reached even the right password answers 429 (no oracle).
+        if not await self.repo.hit_rate_limit(f"user:{user.id}", "auth:password-change", *PASSWORD_CHANGE_LIMIT):
+            security_event("password_change_rate_limited", reason="user_limit", user_id=user.id, client_ip=ip)
+            raise AuthError(429, TOO_MANY, "password_change_rate_limited")
         if not verify_password(current or "", user.password_hash):
+            security_event("password_change_rejected", reason="bad_current_password", user_id=user.id, client_ip=ip)
             raise AuthError(400, "Current password is incorrect", "bad_current_password")
         await self.repo.set_password(user.id, hash_password(new_password))
         await self.repo.revoke_all_sessions(user.id, except_session_id=session.id)

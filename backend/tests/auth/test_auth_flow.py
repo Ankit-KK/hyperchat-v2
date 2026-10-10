@@ -202,6 +202,101 @@ def test_change_password_keeps_current_session_and_revokes_others(app):
     assert other.get("/api/v1/auth/session").status_code == 401
 
 
+def _change(client, r, current):
+    return client.post("/api/v1/auth/password/change", headers=_csrf(r),
+                       json={"current_password": current, "new_password": "Changed-Pass-42"})
+
+
+def test_current_password_guesses_are_limited_per_user(app):
+    """Security audit F3: a stolen session cannot guess the current password without limit."""
+    _user("guess" + DOMAIN)
+    r = _login(app, "guess" + DOMAIN)
+    assert [_change(app, r, f"wrong-{i}").status_code for i in range(5)] == [400] * 5
+    blocked = _change(app, r, PASSWORD)  # the right password, after the limit: refused, so no oracle
+    assert (blocked.status_code, blocked.json()) == (429, {"error": "Too many attempts. Please try again later."})
+    assert _login(_new_client(app), "guess" + DOMAIN).status_code == 200  # password unchanged
+    records = app.app_state.log_capture.records
+    assert any("password_change_rate_limited" in rec for rec in records)
+    assert sum("password_change_rejected" in rec for rec in records) == 5
+    assert not any(PASSWORD in rec for rec in records)
+
+
+def test_legitimate_retries_and_the_limit_window(app):
+    _user("retry" + DOMAIN)
+    r = _login(app, "retry" + DOMAIN)
+    weak = app.post("/api/v1/auth/password/change", headers=_csrf(r),
+                    json={"current_password": PASSWORD, "new_password": "short"})
+    assert weak.status_code == 400  # rejected before any verification: not counted
+    assert [_change(app, r, "typo").status_code for _ in range(4)] == [400] * 4
+    assert _change(app, r, PASSWORD).status_code == 200  # 5th verification, within the limit
+    # the window passes: the user may verify again
+    with _db() as conn:
+        conn.execute("UPDATE public.rate_limits SET window_start = now() - interval '2 hours' "
+                     "WHERE endpoint = 'auth:password-change'")
+    again = app.post("/api/v1/auth/password/change", headers=_csrf(r),
+                     json={"current_password": "Changed-Pass-42", "new_password": "Changed-Again-42"})
+    assert again.status_code == 200
+
+
+def test_the_limit_is_per_user(app):
+    _user("victim" + DOMAIN)
+    _user("bystander" + DOMAIN)
+    r = _login(app, "victim" + DOMAIN)
+    assert [_change(app, r, "wrong").status_code for _ in range(6)] == [400] * 5 + [429]
+    other = _new_client(app)
+    r2 = _login(other, "bystander" + DOMAIN)
+    assert _change(other, r2, PASSWORD).status_code == 200
+
+
+def test_switching_sessions_does_not_reset_the_limit(app):
+    """The counter belongs to the user, not to the session: guesses spread over several sessions (and a fresh
+    sign-in after signing out) share one budget."""
+    _user("hopper" + DOMAIN)
+    first, second = app, _new_client(app)
+    r1, r2 = _login(first, "hopper" + DOMAIN), _login(second, "hopper" + DOMAIN)
+    assert [_change(first, r1, "wrong").status_code for _ in range(3)] == [400] * 3
+    assert [_change(second, r2, "wrong").status_code for _ in range(2)] == [400] * 2
+    assert first.post("/api/v1/auth/logout", headers=_csrf(r1)).status_code == 200
+    r3 = _login(first, "hopper" + DOMAIN)  # a brand-new session
+    assert _change(first, r3, PASSWORD).status_code == 429
+    assert _change(second, r2, PASSWORD).status_code == 429
+    assert second.get("/api/v1/auth/session").status_code == 200  # the session stays active at the limit
+
+
+def test_concurrent_guesses_cannot_exceed_the_limit(env):
+    """12 wrong guesses at once, each on its own database connection, through the real service: the atomic
+    counter lets exactly 5 reach the password check; the rest get 429."""
+    import asyncio
+
+    from app.auth.repository import AuthRepository
+    from app.auth.service import AuthError, AuthService
+    from app.cli import connection_factory
+    from app.core.config import Settings
+
+    _user("racer" + DOMAIN)
+    settings = Settings()
+    service = AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+
+    async def race():
+        user = await service.repo.user_by_email("racer" + DOMAIN)
+        session = (await service.issue_session(user, "203.0.113.7", None)).session
+
+        async def guess(i):
+            try:
+                await service.change_password(user, session, f"wrong-{i}", "Changed-Pass-42", "203.0.113.7")
+            except AuthError as exc:
+                return exc.status
+            return 200
+        return await asyncio.gather(*(guess(i) for i in range(12)))
+    results = asyncio.run(race())
+    assert sorted(results) == [400] * 5 + [429] * 7
+    with _db() as conn:
+        count = conn.execute("SELECT request_count FROM public.rate_limits WHERE ip_address = "
+                             "(SELECT 'user:' || id::text FROM public.users WHERE email = %s) "
+                             "AND endpoint = 'auth:password-change'", ("racer" + DOMAIN,)).fetchone()[0]
+    assert count == 12  # every attempt was counted, none lost to the race
+
+
 # ── invites ─────────────────────────────────────────────────────────────────────
 
 
