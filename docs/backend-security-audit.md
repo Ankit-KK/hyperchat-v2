@@ -15,7 +15,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | Priority | Count | Findings |
 |---|---|---|
 | **P0**: exploitable now, stop everything | **0** | – |
-| **P1**: fix before production traffic | **1** | F1 |
+| **P1**: fix before production traffic | **1** | F1 (fixed in the repository, `cc961df`; not deployed) |
 | **P2**: fix before launch | **3** | F2, F3, F4 |
 | **P3**: hardening | **3** | F5, F6, F7 |
 | Tracked owner decisions / approvals | 7 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11, tool approval |
@@ -35,6 +35,17 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Exploitability:** needs read access to the logs. **Not yet exposed:** production takes no traffic.
 - **Remediation:** port the DEV `log_format` and both `map`s to the production site (production names), extend the
   Nginx CI check to assert that no `?token=` reaches the production log. Deploying it needs approval.
+- **Status: fixed in the repository, not deployed.**
+  - **The fix:** the production site files (`api.hyperchat.space.conf` and the bootstrap `.acme.conf`) log every request with `hyperchat_prod_noquery`: the path only (`$uri`), no query string and no referrer. Both server blocks are covered, including the port-80 redirect. This goes further than DEV, which only strips `/api/v1/obs/` and `/api/v1/realtime/`.
+  - **The test:** `tests/e2e/nginx_ratelimit_check.sh` now runs the real DEV and production site files in its throwaway Nginx. It sends requests carrying a secret marker in the query string and in the `Referer`, and fails if the marker reaches the access log.
+  - **The control:** a DEV query string that should be logged is checked to be visible, so the check is able to detect a leak. The old production config used the default `combined` format, which the control shows records query strings.
+  - **Evidence:** CI run 38060888737 on `cc961df` passed in both Nginx environments: 8 of 8 requests reached the sites, 8 log lines, no marker.
+  - **Deployment:** production keeps its current config until a deployment is approved.
+  - **Residuals:**
+    1. Nginx's **error** log has no configurable format, and its entries for upstream failures and rate-limit rejections include the full request line, query string included.
+    2. DEV's port-80 redirect block uses the default log.
+
+    Neither is covered by this fix; both are tracked as F1-R below.
 
 ### F2 (P2): anyone can lock a creator out of password login
 - **Evidence:** `AuthService.login` (`backend/app/auth/service.py`) records a failed attempt for any existing, active
@@ -137,7 +148,11 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 
 ## Remediation plan
 
-1. **F1** (P1): production log format without query strings + CI assertion. Small, configuration only; deploying it
+1. **F1** (P1): **done in the repository** (`cc961df`; not deployed). **F1-R** (P3, residual):
+   - **Error log:** entries for upstream failures and rate-limit rejections carry the query string. Options are a lower `error_log` level for `/api/v1/obs/` and `/api/v1/realtime/`, or restricting who can read the error log.
+   - **DEV port-80 block:** it uses the default log. Give it the query-free format as well.
+
+   Original plan: production log format without query strings + CI assertion. Small, configuration only; deploying it
    to production needs approval.
 2. **F3** (P2): limit current-password checks. Small code change with tests.
 3. **F2** (P2): owner decision on the lockout model, then code and tests.
