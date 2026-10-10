@@ -175,7 +175,8 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
     `install -o root -g root -m 644 deploy/nginx/api.hyperchat.space.conf /etc/nginx/sites-available/api.hyperchat.space`;
     `nginx -t`, then `systemctl reload nginx` (if it fails: restore the port-80 file, remove the two
     production snippets, `nginx -t`, no reload).
-12. **Health** — `curl -fsS https://api.hyperchat.space/health`; `curl -sI http://api.hyperchat.space/` → 301;
+12. **Health** — `curl -fsS https://api.hyperchat.space/health` → only `{"status":"ok","database":{"status":"ok"}}` (release,
+    environment and label are shown to 127.0.0.1 callers only, security audit F5); `curl -sI http://api.hyperchat.space/` → 301;
     bare IP still 444 / handshake rejected; listeners: only 22/80/443 public, 5432/5433/8000/8001 on
     127.0.0.1; DEV fingerprints unchanged; journals and nginx error log clean.
 13. **Smoke tests** — read-only first (Phase 4 public endpoints, unauthenticated 401/403/CSRF/CORS

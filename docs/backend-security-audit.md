@@ -17,7 +17,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P0**: exploitable now, stop everything | **0** | – |
 | **P1**: fix before production traffic | **1** | F1 (fixed in the repository, `cc961df`; not deployed) |
 | **P2**: fix before launch | **3** | F2, F3 (fixed and verified in the repository, #25; policy approved 2026-10-11; not deployed), F4 |
-| **P3**: hardening | **3** | F5, F6, F7 |
+| **P3**: hardening | **3** | F5, F6 (fixed in the repository, not merged / deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; fixed in the repository, not merged); all other Bandit results are false positives or informational |
 
@@ -118,6 +118,38 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Remediation:** keep `status` / `database.status` public; return the rest only to localhost (the deploy checks
   run on the server).
 
+- **Status: fixed in the repository (branch `security-f5-f6-health-invite-guard`; not merged, not deployed).**
+  - **The change:** `GET /health` (`backend/app/routers/health.py`) answers public callers with exactly `{"status": "ok", "database": {"status": …}}`. Release, environment, database label and service name go only to loopback callers (`127.0.0.1`, `::1`), i.e. the deploy checks on the server (`curl 127.0.0.1:<port>/health`, `deploy/README.md`).
+  - **Why loopback can't be faked:**
+    - uvicorn listens on 127.0.0.1 only (`deploy/systemd`).
+    - It trusts `X-Forwarded-For` only from Nginx, and it takes the client address Nginx appended (verified earlier in this audit). So every proxied request carries the real, non-loopback client address.
+    - The app itself never reads the header.
+  - **Evidence, automated (CI):**
+    - **The route** (`tests/test_health.py`):
+      - the public response is exactly status + database status;
+      - loopback callers (IPv4, IPv6) get the details;
+      - the route never reads `X-Forwarded-For` itself. This runs through Starlette's `TestClient`, so it says nothing about Uvicorn or Nginx.
+      - **Regression proof:** fails against the previous implementation.
+    - **Uvicorn's real proxy middleware** (`tests/test_health_proxy_chain.py`): the real app wrapped in `uvicorn.middleware.proxy_headers.ProxyHeadersMiddleware`, the class `--proxy-headers` installs, with `trusted_hosts="127.0.0.1"` as in the units.
+      - Through the trusted proxy, `X-Forwarded-For` values `203.0.113.9`, `127.0.0.1, 203.0.113.9`, `::1, 127.0.0.1, 203.0.113.9` and `127.0.0.1,203.0.113.9` all get the public response.
+      - From an untrusted peer, `X-Forwarded-For: 127.0.0.1` is ignored.
+      - A genuine local request without the header keeps the details.
+      - **Sensitivity proof:** these tests fail against the previous route, and also fail when the middleware is configured to trust every proxy (`*`). So they test the real boundary, not just the route.
+    - **Real end to end** (`tests/test_health_proxy_chain.py::test_real_nginx_and_uvicorn_never_treat_a_forged_header_as_local`):
+      - **Setup:** a real Nginx, using the production site's own `location /` forwarding directives (read from `api.hyperchat.space.conf`), in front of a real Uvicorn process started with the production unit's flags (read from `hyperchat-prod-api.service`: `--host 127.0.0.1 --proxy-headers --forwarded-allow-ips 127.0.0.1`, …).
+      - **Requests:** from a non-loopback address of the CI machine, without and with forged `X-Forwarded-For: 127.0.0.1`, `::1, 127.0.0.1` and `X-Real-IP: 127.0.0.1`. All get the public response. A direct local request to Uvicorn keeps the details.
+      - **When it runs:** only where an `nginx` binary exists; it skips otherwise (e.g. on Windows).
+    - **Configuration consistency** (`tests/test_health_proxy_chain.py`):
+      - both systemd units listen on 127.0.0.1 and trust forwarded headers only from 127.0.0.1 (no wildcard);
+      - both Nginx sites set `X-Forwarded-For $proxy_add_x_forwarded_for` in every proxied location and never rewrite the client address (`real_ip`).
+
+      If either changes, CI fails.
+  - **Evidence, configuration audit only (not exercised by a test):**
+    - the TLS front of the real site (the end-to-end test uses plain HTTP and only the `location /` directives);
+    - the installed files on the server matching the repository (they're deployed from it);
+    - a request from the server itself through Nginx counts as local, by design: its client address is loopback.
+  - **Deploy docs:** `deploy/README.md` (public health step) and `deploy/api.env.example` (label comment) are updated. **Deployment prerequisite:** the operator's deploy scripts outside the repository (`p8d_deploy.sh`, `p9d_deploy.sh`, `p10d_deploy.sh`, `p11d_deploy.sh`, `p11e_deploy.sh`, `p17_verify.sh`, `p17_build.sh` in the operator scratch directory) read `"release"` from the **public** URL `https://api.quicktestspace.site/health`. Before the next deploy they must read it on the server instead: `curl -fsS http://127.0.0.1:8000/health` (DEV) or `curl -fsS http://127.0.0.1:8001/health` (production). The public URL keeps answering `status`.
+
 ### F6 (P3): the invite-link convenience setting is not refused in production
 - **Evidence:** `HYPERCHAT_AUTH_RETURN_INVITE_LINKS=true` returns the accept URL to the inviting admin. Accepting an
   invite sets the password of an existing password-less account (`AuthRepository.accept_invite`, intended for the
@@ -125,6 +157,13 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   its mailbox. It is `false` on DEV and production today (checked read-only).
 - **Remediation:** refuse to start with it in production (like the other production guards in
   `app/core/config.py`).
+
+- **Status: fixed in the repository (same branch; not merged, not deployed).**
+  - **The guard:** `Settings` now refuses to start with `HYPERCHAT_APP_ENV=production` and `HYPERCHAT_AUTH_RETURN_INVITE_LINKS=true` ("Refusing to start: HYPERCHAT_AUTH_RETURN_INVITE_LINKS is not allowed in production."). It's a model validator next to the other production guards, so an administrator can't enable it by mistake.
+  - **Unchanged elsewhere:** development and test may still use the setting.
+  - **Production today:** `false` (checked read-only earlier), so the guard changes nothing about how production currently starts.
+  - **Test:** production with the setting is refused; production without it, and development with it, still start.
+  - **Regression proof:** the test **fails** against the previous configuration code.
 
 ### F7 (P3): unused security code remains
 - **Evidence:** the HMAC request signing, shared-secret and partner-key verifiers in `backend/app/security/` have no
@@ -251,7 +290,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
    to production needs approval.
 2. **F3** (P2): limit current-password checks: **fixed and verified in the repository** (#25; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): owner decision on the lockout model, then code and tests.
-4. **F6, F5** (P3): production guard for invite links; trim the public health response.
+4. **F6, F5** (P3): production guard for invite links; trim the public health response: **fixed in the repository** (branch `security-f5-f6-health-invite-guard`; not merged, not deployed).
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: fixed in the repository** (`\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.
 7. **F7**: after D4 and SEC-L2.
