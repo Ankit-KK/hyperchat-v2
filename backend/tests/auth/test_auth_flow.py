@@ -202,6 +202,52 @@ def test_change_password_keeps_current_session_and_revokes_others(app):
     assert other.get("/api/v1/auth/session").status_code == 401
 
 
+def _change(client, r, current):
+    return client.post("/api/v1/auth/password/change", headers=_csrf(r),
+                       json={"current_password": current, "new_password": "Changed-Pass-42"})
+
+
+def test_current_password_guesses_are_limited_per_user(app):
+    """Security audit F3: a stolen session cannot guess the current password without limit."""
+    _user("guess" + DOMAIN)
+    r = _login(app, "guess" + DOMAIN)
+    assert [_change(app, r, f"wrong-{i}").status_code for i in range(5)] == [400] * 5
+    blocked = _change(app, r, PASSWORD)  # the right password, after the limit: refused, so no oracle
+    assert (blocked.status_code, blocked.json()) == (429, {"error": "Too many attempts. Please try again later."})
+    assert _login(_new_client(app), "guess" + DOMAIN).status_code == 200  # password unchanged
+    records = app.app_state.log_capture.records
+    assert any("password_change_rate_limited" in rec for rec in records)
+    assert sum("password_change_rejected" in rec for rec in records) == 5
+    assert not any(PASSWORD in rec for rec in records)
+
+
+def test_legitimate_retries_and_the_limit_window(app):
+    _user("retry" + DOMAIN)
+    r = _login(app, "retry" + DOMAIN)
+    weak = app.post("/api/v1/auth/password/change", headers=_csrf(r),
+                    json={"current_password": PASSWORD, "new_password": "short"})
+    assert weak.status_code == 400  # rejected before any verification: not counted
+    assert [_change(app, r, "typo").status_code for _ in range(4)] == [400] * 4
+    assert _change(app, r, PASSWORD).status_code == 200  # 5th verification, within the limit
+    # the window passes: the user may verify again
+    with _db() as conn:
+        conn.execute("UPDATE public.rate_limits SET window_start = now() - interval '2 hours' "
+                     "WHERE endpoint = 'auth:password-change'")
+    again = app.post("/api/v1/auth/password/change", headers=_csrf(r),
+                     json={"current_password": "Changed-Pass-42", "new_password": "Changed-Again-42"})
+    assert again.status_code == 200
+
+
+def test_the_limit_is_per_user(app):
+    _user("victim" + DOMAIN)
+    _user("bystander" + DOMAIN)
+    r = _login(app, "victim" + DOMAIN)
+    assert [_change(app, r, "wrong").status_code for _ in range(6)] == [400] * 5 + [429]
+    other = _new_client(app)
+    r2 = _login(other, "bystander" + DOMAIN)
+    assert _change(other, r2, PASSWORD).status_code == 200
+
+
 # ── invites ─────────────────────────────────────────────────────────────────────
 
 
