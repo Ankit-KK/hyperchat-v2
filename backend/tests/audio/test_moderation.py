@@ -47,8 +47,8 @@ def test_legacy_normalization_examples():
     assert m.base_normalize("HELLO") == "hello"
     assert m.base_normalize("Ｈｅｌｌｏ") == "hello"
     assert m.base_normalize("hеllо") == "hello"  # Cyrillic е, о
-    assert m.base_normalize("he​l‍lo") == "hello"
-    assert m.base_normalize("‮hello") == "hello"
+    assert m.base_normalize("he\u200Bl\u200Dlo") == "hello"
+    assert m.base_normalize("\u202Ehello") == "hello"
     assert m.base_normalize("héllö") == "hello"
     assert m.normalize_text("h3ll0 w0rld").tokens == ["hello", "world"]
     assert m.normalize_text("niiiiice").tokens == ["niice"]
