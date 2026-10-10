@@ -332,6 +332,14 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _refuse_invite_links_in_production(self) -> "Settings":
+        # Security audit F6: the accept URL would let the inviting admin set the password of any password-less
+        # (e.g. migrated) account without access to its mailbox. A development convenience only.
+        if self.app_env == "production" and self.auth_return_invite_links:
+            raise ValueError("Refusing to start: HYPERCHAT_AUTH_RETURN_INVITE_LINKS is not allowed in production.")
+        return self
+
+    @model_validator(mode="after")
     def _validate_browser_origins(self) -> "Settings":
         try:
             origins = self.browser_origins
