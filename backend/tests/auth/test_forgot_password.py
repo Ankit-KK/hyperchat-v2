@@ -138,3 +138,18 @@ def test_a_successful_request_logs_the_event_but_never_the_token(app):
     records = app.app_state.log_capture.records
     assert any("password_reset_requested" in rec and user_id in rec for rec in records)
     assert all(token not in rec and "f11-log" not in rec for rec in records)
+
+
+def test_a_saturated_dispatcher_still_answers_the_generic_202_and_sends_nothing(app):
+    """Security audit F11 follow-up: with every reset-email slot of the process busy, the request is shed after the
+    response: same 202 and body, no token, no email, and the shed event names no address."""
+    user_id = _user("f11-shed" + DOMAIN)
+    app.app_state.auth.reset_slots = asyncio.Semaphore(0)  # every slot taken
+    r = _forgot(app, "f11-shed" + DOMAIN)
+    assert (r.status_code, r.json()) == (202, GENERIC)
+    assert app.app_state.auth.sender.sent == []
+    with _db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.password_reset_tokens WHERE user_id = %s",
+                            (user_id,)).fetchone()[0] == 0
+    shed = [rec for rec in app.app_state.log_capture.records if "password_reset_email_shed" in rec]
+    assert len(shed) == 1 and "f11-shed" not in shed[0]

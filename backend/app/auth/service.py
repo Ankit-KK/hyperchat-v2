@@ -29,6 +29,13 @@ LOGIN_LIMITS = (
     ("account_ip", "auth:login-account-day", 15, 24 * 3600),
 )
 PASSWORD_CHANGE_LIMIT = (5, 3600)  # current-password verifications per user per hour (security audit F3)
+# Reset-email work after the response (security audit F11 follow-up). Each API process runs at most RESET_EMAIL_SLOTS
+# at once and sheds the rest instead of queueing them, so memory and provider calls stay bounded; with the fixed
+# `--workers 2` of the systemd units that is at most 2 x 4 per environment (tests/test_deploy_production.py pins
+# it). Each one ends within RESET_EMAIL_DEADLINE_SECONDS (lookup, token, send), inside the units' TimeoutStopSec=20,
+# so a restart lets in-flight sends finish or time out instead of killing them midway.
+RESET_EMAIL_SLOTS = 4
+RESET_EMAIL_DEADLINE_SECONDS = 15.0
 
 
 class AuthError(Exception):
@@ -70,6 +77,7 @@ class AuthService:
     def __init__(self, settings: Settings, repo: AuthRepository, sender: EmailSender,
                  google: GoogleOAuth | None) -> None:
         self.settings, self.repo, self.sender, self.google = settings, repo, sender, google
+        self.reset_slots = asyncio.Semaphore(RESET_EMAIL_SLOTS)  # per process; see RESET_EMAIL_SLOTS
 
     @classmethod
     def from_settings(cls, settings: Settings, repo: AuthRepository) -> "AuthService":
@@ -184,20 +192,28 @@ class AuthService:
 
     async def send_reset_link(self, email: str, ip: str | None) -> None:
         """After the response: create the token and send the link to an existing active account. Never raises (there
-        is no caller left to tell); a failure is logged without the email address, token or link."""
-        user = None
-        try:
-            user = await self.repo.user_by_email(email)
-            if not user or not user.is_active:
-                return
-            token = new_hex_token(32)
-            await self.repo.create_reset_token(user.id, sha256_hex(token), self.settings.reset_token_ttl_minutes)
-            url = f"{self.settings.frontend_url.rstrip('/')}/reset-password?token={token}"
-            await self.sender.send(render("reset-password", user.email, url))
-            security_event("password_reset_requested", level=20, user_id=user.id, client_ip=ip)
-        except Exception as exc:  # noqa: BLE001 - background work: log and stop, never propagate
-            security_event("password_reset_email_failed", level=40, reason=type(exc).__name__,
-                           user_id=user.id if user else None, client_ip=ip)
+        is no caller left to tell); a failure is logged without the email address, token or link. Bounded: when all
+        of this process's slots are busy the request is shed (nothing looked up, no token, nothing sent; the caller
+        already had the generic 202 and may ask again), and each run ends within RESET_EMAIL_DEADLINE_SECONDS."""
+        if self.reset_slots.locked():  # no await between this check and the acquire below: no other task can interleave
+            security_event("password_reset_email_shed", level=40, reason="overloaded", client_ip=ip)
+            return
+        async with self.reset_slots:
+            user = None
+            try:
+                async with asyncio.timeout(RESET_EMAIL_DEADLINE_SECONDS):
+                    user = await self.repo.user_by_email(email)
+                    if not user or not user.is_active:
+                        return
+                    token = new_hex_token(32)
+                    await self.repo.create_reset_token(user.id, sha256_hex(token),
+                                                       self.settings.reset_token_ttl_minutes)
+                    url = f"{self.settings.frontend_url.rstrip('/')}/reset-password?token={token}"
+                    await self.sender.send(render("reset-password", user.email, url))
+                security_event("password_reset_requested", level=20, user_id=user.id, client_ip=ip)
+            except Exception as exc:  # noqa: BLE001 - background work: log and stop, never propagate
+                security_event("password_reset_email_failed", level=40, reason=type(exc).__name__,
+                               user_id=user.id if user else None, client_ip=ip)
 
     async def reset_password(self, token: str, new_password: str, ip: str | None) -> None:
         self._check_new_password(new_password)
