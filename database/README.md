@@ -169,11 +169,9 @@ cd /root/d1-import/database
 Exit codes: 0 done (dry run, nothing to do, or APPLIED printed), 2 refused, 3 confirmation not typed, 1 error (no
 row was written unless APPLIED was printed), 130 cancelled.
 
-**Cutover order:** (1) stop password changes in the legacy app at the agreed cutoff (still to be decided, see above);
-(2) fresh dump,
-ETL and the read-only report; (3) dry run and review every exclusion count; (4) `--apply` on the production database
-(prompted name, e.g. `hyperchat` on port 5432) with the owner present; (5) re-run the dry run: `eligible` must be 0 and
-`target_already_has_password` must have grown by the applied count; (6) drop the Supabase role and the directory.
+**Cutover order:** (1) resolve account-specific identity conflicts and recovery paths; (2) schedule the maintenance window and temporarily freeze legacy password-change/reset writes while allowing ordinary legacy sign-ins; drain and verify all in-flight password mutations have completed; (3) take the final source snapshot/dump only after the drain, then run the ETL and fresh read-only reconciliation report; (4) run the importer dry run against that final snapshot and review every eligibility/exclusion count; (5) obtain separate explicit operator approval before `--apply` on the production database (prompted name, e.g. `hyperchat` on port 5432); (6) while legacy password mutations remain frozen and V2 authentication remains inactive, re-run the report/dry run, reconcile applied counts, and test migrated-account sign-in; (7) switch authentication only after all checks pass; (8) remove the temporary Supabase role and importer directory only after successful verification.
+
+If any source password mutation occurs after the snapshot, the snapshot is invalid and the report/dry run must be repeated. If cutover aborts before `--apply`, keep V2 authentication inactive and resume legacy mutations only after confirming legacy remains authoritative. If it aborts after `--apply`, do not re-run the importer or resume legacy mutations by default: target hashes are not overwritten by the importer. Keep V2 authentication inactive and follow a separately approved rollback/reconciliation plan before retrying.
 
 **Rollback:** V2 itself only ever writes Argon2id hashes and the ETL loads none, so imported hashes are exactly the
 bcrypt ones still stored. To undo the import (users who already signed in keep their upgraded Argon2id hash):
