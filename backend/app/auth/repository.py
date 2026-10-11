@@ -31,6 +31,12 @@ _USER_COLS = ("id::text, email::text, username, role, streamer_id::text, is_acti
               "failed_login_attempts, locked_until")
 
 
+async def burn_reset_tokens(cur, user_id: str) -> None:
+    """Invalidate every open password-reset link of the user (inside the caller's transaction)."""
+    await cur.execute("UPDATE public.password_reset_tokens SET used_at = now() WHERE user_id = %s AND used_at IS NULL",
+                      (user_id,))
+
+
 class AuthRepository:
     def __init__(self, connection_factory) -> None:
         self._conn = connection_factory
@@ -62,11 +68,15 @@ class AuthRepository:
         """, (new_hash, user_id))
 
     async def set_password(self, user_id: str, new_hash: str) -> None:
-        await self._exec("""
-            UPDATE public.users SET password_hash = %s, password_changed_at = now(),
-                   failed_login_attempts = 0, locked_until = NULL
-            WHERE id = %s
-        """, (new_hash, user_id))
+        """Password reset and change. Burns the user's open reset links in the same transaction (security audit F10):
+        a link sent before the password changed must not be able to set it again."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute("""
+                UPDATE public.users SET password_hash = %s, password_changed_at = now(),
+                       failed_login_attempts = 0, locked_until = NULL
+                WHERE id = %s
+            """, (new_hash, user_id))
+            await burn_reset_tokens(cur, user_id)
 
     # ── sessions ───────────────────────────────────────────────────────────
     async def create_session(self, session_id: str, user_id: str, token_hash: str, csrf_hash: str,
@@ -109,18 +119,20 @@ class AuthRepository:
         """, (user_id, token_hash, ttl_minutes))
 
     async def consume_reset_token(self, token_hash: str) -> str | None:
-        """Mark a valid token used and return its user id; also burns the user's other open tokens."""
+        """Mark a valid token used and return its user id; also burns the user's other open tokens. A token of a
+        deactivated account is never redeemed (security audit F10)."""
         async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
             await cur.execute("""
-                UPDATE public.password_reset_tokens SET used_at = now()
-                WHERE token_hash = %s AND used_at IS NULL AND expires_at > now()
-                RETURNING user_id::text
+                UPDATE public.password_reset_tokens t SET used_at = now()
+                FROM public.users u
+                WHERE t.token_hash = %s AND t.used_at IS NULL AND t.expires_at > now()
+                  AND u.id = t.user_id AND u.is_active
+                RETURNING t.user_id::text
             """, (token_hash,))
             row = await cur.fetchone()
             if not row:
                 return None
-            await cur.execute("UPDATE public.password_reset_tokens SET used_at = now() "
-                              "WHERE user_id = %s AND used_at IS NULL", (row[0],))
+            await burn_reset_tokens(cur, row[0])
             return row[0]
 
     # ── invites ────────────────────────────────────────────────────────────
@@ -163,6 +175,7 @@ class AuthRepository:
                 raise InviteConflict()
             await cur.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s",
                               (user["id"], invite["id"]))
+            await burn_reset_tokens(cur, user["id"])  # F10: the account now has a password
             return User(**user)
 
     # ── Google identities ──────────────────────────────────────────────────

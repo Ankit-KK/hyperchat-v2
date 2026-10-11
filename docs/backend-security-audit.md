@@ -18,6 +18,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P1**: fix before production traffic | **1** | F1 (merged in #24, `aa76d78`; not deployed) |
 | **P2**: fix before launch | **3** | F2 (merged in #29, `1c018a7`; not deployed), F3 (merged in #25, `dc4c7d8`; policy approved 2026-10-11; not deployed), F4 |
 | **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; implemented in PR #30; not merged, not deployed) |
+| **P3** (found after the first round) | **2** | F10 (reset links outlived a password change; PR #31, not merged / deployed), F11 (forgot-password timing; open, fix before enabling email) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
@@ -246,6 +247,38 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Pool queue:** the thread pool bounds concurrent hashing, but its queue is not bounded. Under a large distributed flood, requests wait rather than fail. The pool is the default one, **shared** with the existing R2 and MP3/voice work, so heavy sign-in load can delay uploads (bounded per IP by the limits above).
   - **Not done:** an Nginx `limit_req` on `/api/v1/auth/` would cut this off before the API. It's a separate deployment-configuration change, not part of this fix.
 
+### F10 (P3): password-reset links outlived a password change
+- **Evidence (before the fix):**
+  - `AuthRepository.set_password`, used by password reset **and** change, updated the password but left the user's open `password_reset_tokens` alone. Only `consume_reset_token` burned them.
+  - Invite acceptance (`accept_invite`) and `bootstrap-admin` set a password the same way, without touching reset tokens.
+  - `consume_reset_token` didn't check `users.is_active`.
+- **Scenario:**
+  - **Password change:** someone sees a reset link (a forwarded email, a shared inbox, brief mailbox access). The owner notices and changes the password. The old link still worked for up to 60 minutes and took the account over.
+  - **Deactivation:** a link issued before an admin deactivated an account could still set its password, which then worked once the account was reactivated.
+- **Severity: P3.** The impact is account takeover, but it requires an unexpired reset link: the 60-minute TTL, single use, and stored only as a hash.
+- **Status: implemented in PR #31 (branch `security-f10-reset-token-lifecycle`); not merged, not deployed.** No policy decision needed; standard practice.
+  - **Burned whenever a password is set:** `set_password` (reset and change), `accept_invite` and `bootstrap_admin` now burn every open reset token of the user **in the same transaction** that sets the password (`burn_reset_tokens`).
+  - **Active accounts only:** `consume_reset_token` redeems a token only for an **active** account; a deactivated account's link gets the generic "invalid or expired" answer.
+  - **Unchanged:** a link requested after the change works; reset is still single use and still revokes all sessions.
+- **Tests:**
+  - **Password change:** a link sent before a password change is refused, the owner's new password stays, and a link requested afterwards works.
+  - **Deactivated account:** a deactivated account's link is refused, and after reactivation the original password still works.
+  - **Invite acceptance:** accepting an invite burns a password-less account's open reset link (`tests/auth/test_auth_flow.py`).
+  - **`bootstrap-admin`:** does the same (`tests/admin/test_bootstrap_cli.py`).
+- **Regression proof:** all four tests **fail** against the previous repository code.
+- **Limitations:**
+  - an admin deactivating an account doesn't burn its links (redemption is refused instead, so the effect is the same);
+  - links still travel in the URL query (F4, frontend).
+
+### F11 (P3, open): the forgot-password endpoint answers faster for unknown emails
+- **Evidence:**
+  - `AuthService.request_reset` returns at once for an unknown or inactive email.
+  - For an existing active account it first inserts a token and **awaits the email send** (`self.sender.send`, an HTTPS call to Resend when email is enabled).
+  - The response is the same 202, but the latency differs.
+- **Impact:** once email delivery is enabled (D8), the response time can reveal which emails have accounts. The per-email (3 per hour) and per-IP (10 per hour) limits slow but don't stop this. Email is `disabled` on DEV and production today, so it's **not exploitable yet**.
+- **Proposed fix:** send the email after the response (e.g. FastAPI `BackgroundTasks`), so both paths return after the same work. Delivery failures are already invisible to the client.
+- **Status:** recorded, not implemented. Fix before enabling email delivery.
+
 ## Verified controls
 
 | Area | Control | Evidence |
@@ -365,6 +398,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 2. **F3** (P2): limit current-password checks: **merged in #25** (`dc4c7d8`; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): **merged in #29** (`1c018a7`; layered IP and account-at-IP throttling, policy approved 2026-10-11; not deployed).
 3a. **F9** (P1): **implemented in PR #30** (no hashing over the IP limit; hashing off the event loop; not merged, not deployed); must ship together with or before F2.
+3b. **F10** (P3): **implemented in PR #31** (reset links burned whenever a password is set; not redeemable for inactive accounts; not merged, not deployed). **F11** (P3): open; send the reset email after the response, before email delivery is enabled.
 4. **F6, F5** (P3): production guard for invite links; trim the public health response: **merged in #28** (`ca76614`; not deployed).
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: merged in #27** (`0c6f03b`; `\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.

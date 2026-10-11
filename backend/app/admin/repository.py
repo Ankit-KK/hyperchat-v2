@@ -6,6 +6,8 @@ from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from app.auth.repository import burn_reset_tokens
+
 _ADMIN_USER_COLS = """id::text, email::text, username, role, streamer_id::text, is_active,
     password_hash IS NOT NULL AS has_password, (locked_until IS NOT NULL AND locked_until > now()) AS locked,
     last_login_at, created_at"""
@@ -235,6 +237,7 @@ class AdminRepository:
             if row is None:
                 raise BootstrapRefused("account_has_password")
             await self._revoke_sessions(cur, row["id"])
+            await burn_reset_tokens(cur, row["id"])  # security audit F10: the account now has a password
             return row["id"]
 
 

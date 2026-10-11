@@ -46,6 +46,19 @@ def test_bootstrap_activates_imported_account_without_password(strict_scratch_db
                             (uid,)).fetchone() == ("admin", True, True)
 
 
+def test_bootstrap_burns_open_reset_links(strict_scratch_db, app, monkeypatch, capsys):
+    """Security audit F10: a reset link the password-less account requested earlier must not override the
+    password bootstrap-admin just set."""
+    make_user("bootstrap-reset" + DOMAIN, password=None)
+    assert app.post("/api/v1/auth/password/forgot", json={"email": "bootstrap-reset" + DOMAIN}).status_code == 202
+    link = app.app_state.auth.sender.last_token()
+    code, _ = _run(monkeypatch, capsys, "bootstrap-reset" + DOMAIN)
+    assert code == 0
+    late = app.post("/api/v1/auth/password/reset", json={"token": link, "new_password": "Attacker-Pass-42"})
+    assert late.status_code == 400
+    assert login(new_browser(app), "bootstrap-reset" + DOMAIN, PASSWORD).status_code == 200
+
+
 def test_bootstrap_refuses_account_with_password_and_weak_passwords(strict_scratch_db, app, monkeypatch, capsys):
     make_user("has-password" + DOMAIN)
     code, out = _run(monkeypatch, capsys, "has-password" + DOMAIN)

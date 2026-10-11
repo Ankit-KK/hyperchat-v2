@@ -176,6 +176,43 @@ def test_expired_reset_token_is_rejected(app):
     assert r.status_code == 400
 
 
+def _reset_link(app, email: str) -> str:
+    assert app.post("/api/v1/auth/password/forgot", json={"email": email}).status_code == 202
+    return app.app_state.auth.sender.last_token()
+
+
+def test_password_change_burns_reset_links_sent_before_it(app):
+    """Security audit F10: someone who saw a reset link must not be able to use it after the owner changed the
+    password."""
+    _user("changed" + DOMAIN)
+    stolen = _reset_link(app, "changed" + DOMAIN)
+    r = _login(app, "changed" + DOMAIN)
+    assert app.post("/api/v1/auth/password/change", headers=_csrf(r),
+                    json={"current_password": PASSWORD, "new_password": "Owner-New-Pass-42"}).status_code == 200
+    late = app.post("/api/v1/auth/password/reset", json={"token": stolen, "new_password": "Attacker-Pass-42"})
+    assert late.status_code == 400
+    assert _login(_new_client(app), "changed" + DOMAIN, "Attacker-Pass-42").status_code == 401
+    assert _login(_new_client(app), "changed" + DOMAIN, "Owner-New-Pass-42").status_code == 200
+    fresh = _reset_link(app, "changed" + DOMAIN)  # a link requested after the change still works
+    assert app.post("/api/v1/auth/password/reset",
+                    json={"token": fresh, "new_password": "Owner-Reset-Pass-42"}).status_code == 200
+
+
+def test_reset_link_of_a_deactivated_account_is_refused(app):
+    """Security audit F10: a link issued before an admin deactivated the account cannot set its password (which
+    would otherwise work again once the account is reactivated)."""
+    _user("disabled" + DOMAIN)
+    link = _reset_link(app, "disabled" + DOMAIN)
+    with _db() as conn:
+        conn.execute("UPDATE public.users SET is_active = false WHERE email = %s", ("disabled" + DOMAIN,))
+    r = app.post("/api/v1/auth/password/reset", json={"token": link, "new_password": "Attacker-Pass-42"})
+    assert r.status_code == 400
+    with _db() as conn:
+        conn.execute("UPDATE public.users SET is_active = true WHERE email = %s", ("disabled" + DOMAIN,))
+    assert _login(_new_client(app), "disabled" + DOMAIN, "Attacker-Pass-42").status_code == 401
+    assert _login(_new_client(app), "disabled" + DOMAIN).status_code == 200  # the original password is untouched
+
+
 def test_change_password_keeps_current_session_and_revokes_others(app):
     _user("change" + DOMAIN)
     other = _new_client(app)
@@ -342,6 +379,22 @@ def test_invite_activates_imported_account_without_password(app):
     acc = _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
                                 json={"token": token, "password": "Imported-Pass-42"})
     assert acc.status_code == 200 and acc.json()["user"]["id"] == uid
+
+
+def test_invite_acceptance_burns_open_reset_links(app):
+    """Security audit F10: a password-less (e.g. migrated) account that requested a reset link, then accepted an
+    invite, has a password now; the earlier link must not override it."""
+    headers = _admin(app)
+    _user("invited-reset" + DOMAIN, password=None)
+    link = _reset_link(app, "invited-reset" + DOMAIN)
+    assert app.post("/api/v1/auth/invites", headers=headers,
+                    json={"email": "invited-reset" + DOMAIN}).status_code == 201
+    invite = app.app_state.auth.sender.last_token()
+    assert _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
+                                 json={"token": invite, "password": "Invited-Pass-42"}).status_code == 200
+    late = app.post("/api/v1/auth/password/reset", json={"token": link, "new_password": "Attacker-Pass-42"})
+    assert late.status_code == 400
+    assert _login(_new_client(app), "invited-reset" + DOMAIN, "Invited-Pass-42").status_code == 200
 
 
 def test_expired_invite_is_rejected(app):
