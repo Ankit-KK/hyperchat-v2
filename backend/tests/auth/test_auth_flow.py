@@ -213,6 +213,29 @@ def test_reset_link_of_a_deactivated_account_is_refused(app):
     assert _login(_new_client(app), "disabled" + DOMAIN).status_code == 200  # the original password is untouched
 
 
+def test_admin_deactivation_burns_reset_links_for_good(app):
+    """Security audit F10: deactivating an account (the admin API, the only runtime path that sets is_active to
+    false) burns its open reset links in the same transaction, so a link issued before cannot be used even after the
+    account is reactivated. The password and normal activation are unaffected."""
+    headers = _admin(app)
+    uid = _user("deact" + DOMAIN)
+    link = _reset_link(app, "deact" + DOMAIN)
+    off = app.patch(f"/api/v1/admin/users/{uid}", headers=headers, json={"is_active": False})
+    assert off.status_code == 200 and off.json()["user"]["is_active"] is False
+    on = app.patch(f"/api/v1/admin/users/{uid}", headers=headers, json={"is_active": True})
+    assert on.status_code == 200 and on.json()["user"]["is_active"] is True
+    late = app.post("/api/v1/auth/password/reset", json={"token": link, "new_password": "Attacker-Pass-42"})
+    assert late.status_code == 400
+    with _db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.password_reset_tokens t JOIN public.users u ON u.id = t.user_id "
+                            "WHERE u.email = %s AND t.used_at IS NULL", ("deact" + DOMAIN,)).fetchone()[0] == 0
+    assert _login(_new_client(app), "deact" + DOMAIN, "Attacker-Pass-42").status_code == 401
+    assert _login(_new_client(app), "deact" + DOMAIN).status_code == 200  # the original password still works
+    fresh = _reset_link(app, "deact" + DOMAIN)  # a link requested after reactivation works normally
+    assert app.post("/api/v1/auth/password/reset",
+                    json={"token": fresh, "new_password": "After-Reactivation-42"}).status_code == 200
+
+
 def test_change_password_keeps_current_session_and_revokes_others(app):
     _user("change" + DOMAIN)
     other = _new_client(app)

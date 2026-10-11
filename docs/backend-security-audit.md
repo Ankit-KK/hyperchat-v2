@@ -17,7 +17,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P0**: exploitable now, stop everything | **0** | – |
 | **P1**: fix before production traffic | **1** | F1 (merged in #24, `aa76d78`; not deployed) |
 | **P2**: fix before launch | **3** | F2 (merged in #29, `1c018a7`; not deployed), F3 (merged in #25, `dc4c7d8`; policy approved 2026-10-11; not deployed), F4 |
-| **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; implemented in PR #30; not merged, not deployed) |
+| **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; merged in #30, `4a30786`; not deployed) |
 | **P3** (found after the first round) | **2** | F10 (reset links outlived a password change; PR #31, not merged / deployed), F11 (forgot-password timing; open, fix before enabling email) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
@@ -83,7 +83,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   growing delays; keep the per-IP limit. Add a test for the abuse case.
 
 - **Root cause found during the fix:** the per-account counter (`users.failed_login_attempts`) was reset only by a successful sign-in or a password change, never when the lock expired. Once at 5, **each further failure re-locked the account**, so one wrong guess per 15 minutes kept a creator locked out indefinitely, needing only their email. A locked account also answered 429 while an unknown email answered 401, which revealed that the account exists.
-- **Status: merged in #29 (`1c018a7`); not deployed. Must not be deployed without F9 (PR #30).** Policy approved by the owner on 2026-10-11: layered throttling instead of an account-wide lockout.
+- **Status: merged in #29 (`1c018a7`); not deployed. Deploy only together with F9 (merged in #30, `4a30786`).** Policy approved by the owner on 2026-10-11: layered throttling instead of an account-wide lockout.
   - **Limits** (`app/auth/service.py`, `LOGIN_LIMITS`), all in the existing `rate_limits` table:
 
     | Bucket | Key | Limit | Reset |
@@ -227,7 +227,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - Before F2, an IP over its limit was refused before any hashing.
 - **Impact:** availability of the whole API, unauthenticated, from a single IP. No data exposure.
 - **Exploitability:** trivial once #29 is deployed. **Not exposed:** DEV and production still run older releases.
-- **Status: implemented in PR #30; not merged, not deployed.** Owner-approved 2026-10-11.
+- **Status: merged in #30 (`4a30786`); not deployed.** Owner-approved 2026-10-11.
   - **No hashing over the IP limit:** `AuthService.login` checks both IP buckets first. Once either is over its limit, it returns the generic 401 **without any password hashing**, and without touching the account buckets.
     - Within the IP limits, account-at-IP throttling still runs one dummy verification, so account-specific state can't be told apart by timing.
     - Total hashing per IP is therefore capped by the IP limits (20 per 15 min, 100 per 24 h).
@@ -269,13 +269,26 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
     - **Lock order:** every password-setting path (change, reset, invite acceptance, `bootstrap-admin`) takes the users row before `password_reset_tokens`, so they can't deadlock.
     - **Removed:** the old `consume_reset_token` / `set_password` pair.
     - **Sign-in rehash (found in self-review):** a legacy bcrypt sign-in re-hashes the verified password to Argon2id and used to write it back unconditionally (`record_successful_login`), so a reset or change committed meanwhile could be undone by the **old** password. That write is now compare-and-set too: if the password changed since verification, the sign-in fails with the generic 401. Google sign-in writes no password and is unchanged.
-    - **Remaining window (not fixed):** if a reset commits *after* a sign-in's compare-and-set but *before* that sign-in inserts its session, the reset's session revocation runs before the new session exists, so that session survives. Closing it needs session creation inside the same transaction, a wider change to `issue_session`.
+    - **Deactivation (owner review):** `AdminRepository.update_user`, the only runtime path that sets `is_active` to false, now burns the account's open reset links in the same transaction (user row locked first, then links, then sessions). A link issued before deactivation stays invalid after reactivation; the password and normal activation are unchanged.
+    - **Sign-in sessions (owner review):** a password sign-in now finishes in ONE transaction (`AuthRepository.password_sign_in`): it locks the user row, requires an active account whose stored hash is still the verified one, records the sign-in (with the optional rehash) and inserts the session.
+      - **Reset** sets the password, burns the links and revokes **all** sessions in its own transaction.
+      - **Change** sets the password, burns the links and revokes every **other** session in its own transaction (the current one is kept).
+      - **Why this closes the window:** whichever commits second sees the first. A sign-in that commits first has its session revoked by the reset or change; one that comes after is refused (no session). A session authenticated against an old password can no longer outlive a completed reset or change. This closes the window recorded in the first version of this fix.
+      - **Lock order:** users row, then `password_reset_tokens`, then `sessions`, on every path (`bootstrap-admin` now burns links before revoking sessions to match).
+      - **Argon2 stays outside the transactions.** Google sign-in and invite acceptance still create their session separately, since no password that could go stale is involved.
+      - **Residual (not fixed):** a Google sign-in creates its session outside the user-row lock, so one racing a password reset can keep its session. It wasn't authenticated by the old password, and no DEV account has a Google identity today; serializing it the same way is a small follow-up if wanted.
   - **Race tests** (`backend/tests/auth/test_password_races.py`, deterministic: each interleaving is forced with events or a held row lock, never by timing):
     - **Change finishes first:** a change that completes while a reset is between its hash and its write wins; the reset is refused (`bad_reset_token`).
     - **Reset finishes first:** a reset that completes while a change is between its verification and its write wins; the change is refused (`bad_current_password`).
     - **Open change transaction:** a reset arriving while a change transaction holds the user row waits for that row lock (seen in `pg_stat_activity`), then finds its link burned and is refused.
     - **Rehash race:** a legacy bcrypt sign-in paused while re-hashing, with a reset completing meanwhile: the sign-in is refused (401) and the reset's password stays.
     - **Regression proof:** all four **fail** against the previous PR #31 head (`9f3d5f4`).
+    - **Second review round** (`tests/auth/test_auth_flow.py`, `tests/auth/test_password_races.py`):
+      - **Deactivation:** an admin deactivates and reactivates an account, and its earlier reset link stays dead (no open link remains), while the original password still signs in and a new link works.
+      - **Sign-in vs reset:** a sign-in paused right after its critical section while a reset completes ends with no valid session.
+      - **Sign-in vs change:** the same against a password change; only the changing session survives.
+      - **Lock contention:** a sign-in arriving during an open reset transaction waits for the user-row lock and gets no session.
+      - **Regression proof:** all four **fail** against the previous head `c9d61406`.
 - **Tests:**
   - **Password change:** a link sent before a password change is refused, the owner's new password stays, and a link requested afterwards works.
   - **Deactivated account:** a deactivated account's link is refused, and after reactivation the original password still works.
@@ -413,8 +426,8 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
    to production needs approval.
 2. **F3** (P2): limit current-password checks: **merged in #25** (`dc4c7d8`; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): **merged in #29** (`1c018a7`; layered IP and account-at-IP throttling, policy approved 2026-10-11; not deployed).
-3a. **F9** (P1): **implemented in PR #30** (no hashing over the IP limit; hashing off the event loop; not merged, not deployed); must ship together with or before F2.
-3b. **F10** (P3): **implemented in PR #31** (reset links burned whenever a password is set; not redeemable for inactive accounts; not merged, not deployed). **F11** (P3): open; send the reset email after the response, before email delivery is enabled.
+3a. **F9** (P1): **merged in #30** (`4a30786`; no hashing over the IP limit; hashing off the event loop; not deployed); must ship together with or before F2.
+3b. **F10** (P3): **implemented in PR #31** (reset links burned whenever a password is set or the account is deactivated; not redeemable for inactive accounts; atomic reset, compare-and-set change, race-safe password sign-in sessions; not merged, not deployed). **F11** (P3): open; send the reset email after the response, before email delivery is enabled.
 4. **F6, F5** (P3): production guard for invite links; trim the public health response: **merged in #28** (`ca76614`; not deployed).
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: merged in #27** (`0c6f03b`; `\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.

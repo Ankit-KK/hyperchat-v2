@@ -178,7 +178,9 @@ class AdminRepository:
                                   {**{k: changes[k] for k in changed}, "id": user_id})
             except pg_errors.ForeignKeyViolation:
                 raise UnknownStreamerError() from None
-            revoked = await self._revoke_sessions(cur, user_id)
+            if changes.get("is_active") is False:  # security audit F10: deactivation also kills open reset links
+                await burn_reset_tokens(cur, user_id)
+            revoked = await self._revoke_sessions(cur, user_id)  # users -> reset tokens -> sessions (lock order)
             return await self._fetch_user(cur, user_id), changed, revoked
 
     async def revoke_sessions(self, user_id: str) -> int:
@@ -236,8 +238,8 @@ class AdminRepository:
             row = await cur.fetchone()
             if row is None:
                 raise BootstrapRefused("account_has_password")
-            await self._revoke_sessions(cur, row["id"])
             await burn_reset_tokens(cur, row["id"])  # security audit F10: the account now has a password
+            await self._revoke_sessions(cur, row["id"])  # users -> reset tokens -> sessions (lock order)
             return row["id"]
 
 
