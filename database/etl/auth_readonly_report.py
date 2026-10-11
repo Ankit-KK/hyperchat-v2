@@ -109,7 +109,8 @@ def summarize(source: list[Account], target: list[Account]) -> dict[str, int]:
 
 
 def render(summary: dict[str, int]) -> str:
-    assert all(type(v) is int for v in summary.values()), "the report holds counts only"
+    if not all(type(v) is int for v in summary.values()):  # a real check, not assert: `python -O` drops asserts
+        raise ValueError("the report holds counts only")
     width = max(map(len, summary))
     return "\n".join(["READ-ONLY REPORT (aggregate counts only; nothing was changed)"] +
                      [f"  {k.ljust(width)}  {v}" for k, v in summary.items()])

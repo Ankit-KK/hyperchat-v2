@@ -8,6 +8,7 @@ connection that is not to those local fixture databases, so no test can reach Su
 import hashlib
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -143,8 +144,26 @@ def test_hashes_never_appear_in_reprs_or_summaries():
     text = repr(p) + repr(p.updates) + repr(_sources()) + imp.render(p.counts, "PLAN")
     assert not any(h in text for h in HASHES.values()) and "$2a$" not in text
     assert not any(e in text for e, *_ in SOURCE.values() if e)
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         imp.render({"leak": HASHES["e1"]}, "x")
+
+
+def test_a_plan_whose_counts_do_not_add_up_is_refused(monkeypatch):
+    """The accounting invariant is a real check (security audit F13), so a miscounted plan can never be applied."""
+    monkeypatch.setattr(imp, "EXCLUSIONS", tuple(e for e in imp.EXCLUSIONS if e != "source_without_password"))
+    with pytest.raises(Refused, match="do not add up"):
+        plan(_sources(), _targets())
+
+
+@pytest.mark.parametrize("call", ["auth_hash_import.render({'leak': 'x'}, 'T')",
+                                  "auth_readonly_report.render({'leak': 'x'})"])
+def test_the_counts_only_guard_survives_python_optimisation(call):
+    """Security audit F13: `python -O` strips assert statements; the output guards must still refuse a non-count."""
+    code = ("import sys\nfrom etl import auth_hash_import, auth_readonly_report\n"
+            f"try:\n    {call}\nexcept ValueError:\n    sys.exit(0)\nsys.exit(1)\n")
+    run = subprocess.run([sys.executable, "-O", "-c", code], cwd=Path(__file__).resolve().parents[1],
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr[-500:]
 
 
 def test_the_select_reads_no_metadata_and_the_update_touches_one_column():

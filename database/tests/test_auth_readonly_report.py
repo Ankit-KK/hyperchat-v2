@@ -85,7 +85,7 @@ def test_report_prints_counts_only():
         if email:
             assert email not in out and _digest(email) not in out and _norm(email) not in out
     assert not any(i in out for i in IDS.values()) and "$2a$" not in out
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         rep.render({"leak": "one" + D})
 
 
