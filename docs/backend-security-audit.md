@@ -3,7 +3,7 @@
 **Scope:** the V2 backend on `main` at `bfb9a1e` (backend completion groups 1–4 merged): every HTTP route, authentication,
 authorization, payments and webhooks, uploads and media, OBS tokens, realtime, bots, admin and moderator permissions,
 background jobs, logging, database roles, and the deployment configuration in `deploy/`.
-**Status updated 2026-10-11** against `main` at `06b884b` (fixes #24-#40, D1 tooling #33/#34; delta review below;
+**Status updated 2026-10-12** against `main` at `ce074d3` (fixes #24-#40, D1 tooling #33/#34; delta review below;
 F12-R accepted by the owner).
 None of the fixes is deployed: DEV still runs `9042fb7fff40`, production `940137070657`.
 **Date:** 2026-10-10. **Method:** code and configuration review; safe automated tests; read-only checks on the VPS
@@ -23,7 +23,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; merged in #30, `4a30786`; not deployed) |
 | **P3** (found after the first round) | **4** | F10 (reset links outlived a password change; merged in #31, `3b834d8`, not deployed), F11 (forgot-password timing; merged in #32, `9a33fe8`, not deployed), F12 (bcrypt cost unbounded at sign-in; merged in #34, `c53a8c9`, not deployed); F13 (safety guards written as `assert`; found in the delta review; merged in #40, `06b884b`, not deployed); **F12-R** (imported-bcrypt sign-in timing: accepted residual risk, not remediated) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
-| Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
+| Tracked owner decisions / approvals | 8 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 (open); D1 (policy approved 2026-10-12, execution pending); F12-R (accepted residual risk) |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
 
 No route lacks authentication where it needs it, no cross-creator access path was found, and payment completion
@@ -462,7 +462,7 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
 | Email delivery, Google sign-in, TTS / transcription providers | No DEV credentials (D8) | D8 |
 | Live payment status poll / confirm | Needs a Razorpay test-mode run (PAY-7) | Owner-run test-mode checkout |
 | Production as deployed | Production runs release `940137070657` (Phase 5) at migration `0009`; this audit covers `main` | Redeploy from `main` before cutover, then re-check F1 |
-| Migrated-user password import (D1) | Importer merged (#34) and tested with synthetic hashes only; never run against real Supabase data, no hash imported, migrated sign-in not verified | Owner approval for the cutover import, then the dry run, apply and sign-in check |
+| Migrated-user password import (D1) | Importer merged (#34) and tested with synthetic hashes only; never run against real Supabase data, no hash imported, migrated sign-in not verified. Policy approved 2026-10-12 (import at cutover; not in DEV) | At the cutover: the open execution details settled (exclusions, password-change cutoff), a fresh report, a reviewed dry run, explicit operator approval for `--apply`, reconciliation, then a migrated sign-in |
 | Frontend | Not built | Frontend phase; F4 is its first requirement |
 | Media URLs | Public to anyone holding the URL (unguessable key), as legacy | Owner decision D9 |
 
@@ -532,6 +532,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 | PAY-11 | Stale smoke assertions | needs approval for a live DEV smoke run |
 | D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | awaiting owner |
 | D9 | Media access model | awaiting owner |
+| D1 | Migrated-user credentials | **policy approved 2026-10-12**: import eligible Supabase bcrypt hashes at the production cutover with the existing importer and its safeguards; no real hashes in DEV without separate approval; excluded users recover by reset or Google only where configured and live-verified; legacy confirmation fields not mapped to `email_verified_at`. Policy only: no import, data access, external service, deployment or cutover authorized. Open: exclusion handling, password-change cutoff, the cutover run itself |
 | F12-R | Sign-in timing difference for imported bcrypt hashes during the migration | **accepted by the owner 2026-10-11**; accepted residual risk, not remediated; re-evaluate before cutover, before the bcrypt migration is considered complete, and if the timing or upgrade flow changes |
 
 ## Remediation plan

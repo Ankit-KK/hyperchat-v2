@@ -111,7 +111,14 @@ SQLSTATE. Exit codes: 0 report printed, 2 refused by a safety check, 1 database 
 
 ## Supabase password-hash import (D1, phase 2)
 **Status:** merged in #34 (`c53a8c9`); tested with synthetic hashes only. It has **not** been run against real
-Supabase data and no hash has been imported anywhere; running it needs the owner's approval (D1).
+Supabase data and no hash has been imported anywhere. **D1 policy approved by the owner on 2026-10-12:** import
+eligible hashes at the production cutover with this tool and its safeguards; never into DEV without separate approval;
+legacy confirmation fields are not mapped to `email_verified_at`. That is policy only: running the tool against real
+data still needs explicit operator approval at the cutover, after the open details below are settled.
+
+**Open before the cutover:** how each exclusion category regains access (reset or Google only where configured and
+live-verified; never by importing on email alone or changing ownership); the exact cutoff at which legacy password
+changes stop relative to the final snapshot and the import, so no change is silently lost.
 
 `etl/auth_hash_import.py` copies Supabase bcrypt hashes into `public.users.password_hash` so migrated users keep
 their passwords. **Dry run by default.** Nothing is ever written to a file, log or the terminal except counts.
@@ -160,7 +167,8 @@ cd /root/d1-import/database
 Exit codes: 0 done (dry run, nothing to do, or APPLIED printed), 2 refused, 3 confirmation not typed, 1 error (no
 row was written unless APPLIED was printed), 130 cancelled.
 
-**Cutover order:** (1) stop password changes in the legacy app (or accept that later changes are lost); (2) fresh dump,
+**Cutover order:** (1) stop password changes in the legacy app at the agreed cutoff (still to be decided, see above);
+(2) fresh dump,
 ETL and the read-only report; (3) dry run and review every exclusion count; (4) `--apply` on the production database
 (prompted name, e.g. `hyperchat` on port 5432) with the owner present; (5) re-run the dry run: `eligible` must be 0 and
 `target_already_has_password` must have grown by the applied count; (6) drop the Supabase role and the directory.
