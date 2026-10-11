@@ -3,6 +3,8 @@
 **Scope:** the V2 backend on `main` at `bfb9a1e` (backend completion groups 1–4 merged): every HTTP route, authentication,
 authorization, payments and webhooks, uploads and media, OBS tokens, realtime, bots, admin and moderator permissions,
 background jobs, logging, database roles, and the deployment configuration in `deploy/`.
+**Status updated 2026-10-11** against `main` at `c53a8c9` (fixes #24-#32, D1 tooling #33/#34). None of the fixes is
+deployed: DEV still runs `9042fb7fff40`, production `940137070657`.
 **Date:** 2026-10-10. **Method:** code and configuration review; safe automated tests; read-only checks on the VPS
 (file modes, a few non-secret settings, release and migration). No live payment, R2, webhook, bot or production
 operation was run. The frontend does not exist yet and is out of scope, except where the backend relies on it.
@@ -18,7 +20,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P1**: fix before production traffic | **1** | F1 (merged in #24, `aa76d78`; not deployed) |
 | **P2**: fix before launch | **3** | F2 (merged in #29, `1c018a7`; not deployed), F3 (merged in #25, `dc4c7d8`; policy approved 2026-10-11; not deployed), F4 |
 | **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; merged in #30, `4a30786`; not deployed) |
-| **P3** (found after the first round) | **2** | F10 (reset links outlived a password change; merged in #31, `3b834d8`, not deployed), F11 (forgot-password timing; fixed in PR #32, not merged / deployed) |
+| **P3** (found after the first round) | **3** | F10 (reset links outlived a password change; merged in #31, `3b834d8`, not deployed), F11 (forgot-password timing; merged in #32, `9a33fe8`, not deployed), F12 (bcrypt cost unbounded at sign-in; merged in #34, `c53a8c9`, not deployed) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
@@ -299,13 +301,13 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Google sign-in session (follow-up):** a Google sign-in still creates its session outside the user-row lock (`AuthService.issue_session`), so a Google sign-in racing a password reset can keep its session. Google session creation is **not** serialized with resets or changes. It is not authenticated by the old password, and no DEV account has a Google identity today.
   - **Links in the URL:** reset links still travel in the URL query (F4, frontend).
 
-### F11 (P3, fixed in the repository): the forgot-password endpoint answered faster for unknown emails
+### F11 (P3, merged in #32, `9a33fe8`; not deployed): the forgot-password endpoint answered faster for unknown emails
 - **Evidence:**
   - `AuthService.request_reset` returns at once for an unknown or inactive email.
   - For an existing active account it first inserts a token and **awaits the email send** (`self.sender.send`, an HTTPS call to Resend when email is enabled).
   - The response is the same 202, but the latency differs.
 - **Impact:** once email delivery is enabled (D8), the response time can reveal which emails have accounts. The per-email (3 per hour) and per-IP (10 per hour) limits slow but don't stop this. Email is `disabled` on DEV and production today, so it's **not exploitable yet**.
-- **Fix (PR #32, not merged / deployed):**
+- **Fix (merged in #32, `9a33fe8`; not deployed):**
   - `POST /auth/password/forgot` now does only the per-IP and per-email rate limits before answering. That work is the same for every email.
   - The account lookup, the reset token and the email run in `AuthService.send_reset_link`, scheduled with FastAPI `BackgroundTasks`. Starlette runs it **after the response body has been sent**, inside the API process (not a separate worker or queue). No new dependency.
   - **Unchanged:** the 202 and its body, the 429 over the per-IP limit, the per-email limit (silently no link), token hashing, 60-minute expiry, single use, and the `password_reset_requested` event (now logged when the link was actually sent).
@@ -321,6 +323,13 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Not a durable queue:** the task lives only in the API process's memory. A link whose send fails, or whose process is stopped or restarted before the task finishes, is never sent; the user asks again. The unused token row expires normally.
   - **Rate-limit path:** the per-email limit row is still written for every email (the same work), and over the per-IP limit every email gets the same 429.
   - **No global concurrency cap:** the per-IP (10/h) and per-email (3/h) limits apply per key, so requests from many IP addresses for many email addresses each start their own task; nothing in the code caps the total number of tasks in flight. A slow email provider can leave many tasks waiting at once, each bounded only by the sender's httpx timeout (10 s per connect, read or write step, not a total deadline). Only an existing active account reaches the email call (3 sends per account per hour); for other emails the task is one lookup. The request handler did the same work inline before this fix, so the load is not new, but it no longer holds the request open. A global cap would be a separate change.
+
+### F12 (P3, merged in #34, `c53a8c9`; not deployed): bcrypt hashes of any cost were verified at sign-in
+- **Evidence (found while reviewing the D1 importer, PR #34):** `verify_password` handed any `$2a$`/`$2b$`/`$2y$` value to `bcrypt.checkpw`. Each cost step doubles the work: on the 2-vCPU VPS cost 10 takes ~52 ms, 12 ~213 ms, 13 ~423 ms, and cost 31 would take ~30 hours (Argon2id: ~90 ms).
+- **Impact:** a stored hash with a very high cost would make every sign-in attempt for that account tie up a hashing thread for hours. No such hash could exist before the importer (V2 writes only Argon2id and the ETL loads no hashes), so nothing was exploitable; the importer would have been the way in.
+- **Fix:** `backend/app/auth/bcrypt_format.py` is the one definition of an accepted bcrypt hash: `$2a$`/`$2b$`/`$2y$`, cost 04-12 (`MAX_BCRYPT_COST`; GoTrue writes 10), `$`, then exactly 53 characters of bcrypt's base64 alphabet, 60 ASCII characters in all. The sign-in verifier hands only such hashes to bcrypt (anything else: one dummy Argon2 check, generic 401), and the importer loads the same function (anything else is `unsupported_hash_format` and blocks `--apply`).
+- **Tests:** costs 04-12 accepted (real hashes verified at 04 and 12); costs 00-03 and 13-99, non-ASCII digits, invalid body characters, broken separators and wrong lengths never reach `bcrypt.checkpw` (monkeypatched); sign-in with a stored `$2a$31$` hash answers the generic 401 without bcrypt work; the importer refuses such hashes before its confirmation prompt and writes nothing.
+- **Limitation:** a wrong-password attempt on an account still holding an imported cost-10 hash answers in ~52 ms, an unknown email in ~90 ms (dummy Argon2), until the user signs in once and the hash is upgraded to Argon2id. That can reveal which emails have migrated accounts; the F2 sign-in throttling limits it, and equalizing it would be a separate change. Only relevant after a real import (D1).
 
 ## Verified controls
 
@@ -359,6 +368,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 | Email delivery, Google sign-in, TTS / transcription providers | No DEV credentials (D8) | D8 |
 | Live payment status poll / confirm | Needs a Razorpay test-mode run (PAY-7) | Owner-run test-mode checkout |
 | Production as deployed | Production runs release `940137070657` (Phase 5) at migration `0009`; this audit covers `main` | Redeploy from `main` before cutover, then re-check F1 |
+| Migrated-user password import (D1) | Importer merged (#34) and tested with synthetic hashes only; never run against real Supabase data, no hash imported, migrated sign-in not verified | Owner approval for the cutover import, then the dry run, apply and sign-in check |
 | Frontend | Not built | Frontend phase; F4 is its first requirement |
 | Media URLs | Public to anyone holding the URL (unguessable key), as legacy | Owner decision D9 |
 
@@ -441,7 +451,8 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 2. **F3** (P2): limit current-password checks: **merged in #25** (`dc4c7d8`; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): **merged in #29** (`1c018a7`; layered IP and account-at-IP throttling, policy approved 2026-10-11; not deployed).
 3a. **F9** (P1): **merged in #30** (`4a30786`; no hashing over the IP limit; hashing off the event loop; not deployed); must ship together with or before F2.
-3b. **F10** (P3): **merged in #31** (`3b834d8`; reset links burned whenever a password is set or the account is deactivated; not redeemable for inactive accounts; atomic reset, compare-and-set change, race-safe password sign-in sessions; not deployed). **F11** (P3): **fixed in PR #32** (reset email sent after the response via `BackgroundTasks`; failures logged without email or token; not merged, not deployed).
+3b. **F10** (P3): **merged in #31** (`3b834d8`; reset links burned whenever a password is set or the account is deactivated; not redeemable for inactive accounts; atomic reset, compare-and-set change, race-safe password sign-in sessions; not deployed). **F11** (P3): **merged in #32** (`9a33fe8`; reset email sent after the response via `BackgroundTasks`; failures logged without email or token; not deployed).
+3c. **F12** (P3): **merged in #34** (`c53a8c9`; one shared bcrypt format check, cost 04-12, for sign-in and the importer; not deployed).
 4. **F6, F5** (P3): production guard for invite links; trim the public health response: **merged in #28** (`ca76614`; not deployed).
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: merged in #27** (`0c6f03b`; `\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.
