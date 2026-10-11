@@ -110,7 +110,12 @@ their passwords. **Dry run by default.** Nothing is ever written to a file, log 
 - A target row is eligible only if `auth.users.id = legacy_supabase_user_id` **and** the top-level email matches
   exactly (case-only differences are excluded), the Supabase account is not deleted (`deleted_at`) or currently
   banned (`banned_until`), the source hash is a bcrypt hash the V2 verifier accepts (`$2a$`/`$2b$`/`$2y$`, cost
-  04-31, 60 characters) and the target hash is NULL or empty.
+  04-12, 60 characters) and the target hash is NULL or empty.
+- **Cost cap 12 (`MAX_BCRYPT_COST`, the same value in `backend/app/auth/passwords.py`):** GoTrue writes cost 10.
+  Measured on the 2-vCPU VPS: cost 10 ~52 ms, 11 ~106 ms, 12 ~213 ms, 13 ~423 ms per verification (Argon2id ~90
+  ms); every step doubles, so cost 31 would take ~30 hours. 12 leaves two steps of headroom over GoTrue's default
+  at about 2.4x the cost of a normal V2 sign-in. A higher cost is "unsupported": it blocks `--apply`, and the
+  verifier never runs bcrypt on it (one dummy Argon2 check, generic 401).
 - Never by email alone. No account is created or deleted; only `password_hash` is written (roles, creator ownership,
   activation, `email_verified_at`, `password_changed_at` stay as they are). `email_confirmed_at` is only counted
   (`eligible_email_confirmed`); `confirmed_at` is never used (it can be a phone confirmation).

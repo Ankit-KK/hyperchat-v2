@@ -5,7 +5,14 @@ import time
 import bcrypt
 import pytest
 
-from app.auth.passwords import hash_password, needs_rehash, validate_new_password, verify_password
+from app.auth import passwords
+from app.auth.passwords import (
+    MAX_BCRYPT_COST,
+    hash_password,
+    needs_rehash,
+    validate_new_password,
+    verify_password,
+)
 from app.auth.tokens import (
     constant_time_equal,
     csrf_token_for,
@@ -50,6 +57,33 @@ def test_bcrypt_long_password_uses_first_72_bytes_like_the_old_systems():
 @pytest.mark.parametrize("stored", [None, "", "plaintext", "$1$md5crypt", "$argon2id$garbage", "$2b$broken"])
 def test_missing_or_unknown_hash_never_matches(stored):
     assert not verify_password("anything", stored)
+
+
+def test_bcrypt_at_the_maximum_cost_verifies():
+    assert MAX_BCRYPT_COST == 12
+    h = bcrypt.hashpw(b"legacy-pass", bcrypt.gensalt(rounds=MAX_BCRYPT_COST)).decode()
+    assert h[4:6] == "12" and verify_password("legacy-pass", h) and not verify_password("legacy-pasS", h)
+    assert needs_rehash(h)
+
+
+def _with_cost(cost: str) -> str:
+    """A well-formed bcrypt string whose cost field says `cost` (never hashed at that cost here)."""
+    h = bcrypt.hashpw(b"legacy-pass", bcrypt.gensalt(rounds=4)).decode()
+    return h[:4] + cost + h[6:]
+
+
+@pytest.mark.parametrize("stored", [
+    _with_cost("13"), _with_cost("31"), _with_cost("99"), _with_cost("03"), _with_cost("1x"), _with_cost("\u0661\u0662"),
+    _with_cost("04")[:59], _with_cost("04") + "x", _with_cost("04")[:6] + "x" + _with_cost("04")[7:],
+])
+def test_expensive_or_malformed_bcrypt_is_never_run(monkeypatch, stored):
+    """Security: a stored hash above the cost cap (or malformed) costs one dummy Argon2 check, never bcrypt work."""
+    calls = []
+    monkeypatch.setattr(passwords.bcrypt, "checkpw", lambda *a: calls.append(1) or True)
+    started = time.monotonic()
+    assert not verify_password("legacy-pass", stored)
+    assert calls == [] and time.monotonic() - started < 2
+    assert needs_rehash(stored)
 
 
 def test_unknown_format_needs_rehash():

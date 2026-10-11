@@ -14,6 +14,11 @@ _argon2 = PasswordHasher()  # library defaults: Argon2id, RFC 9106 low-memory pr
 _DUMMY_HASH = _argon2.hash("hyperchat-timing-equalizer")
 
 BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
+# Highest bcrypt cost verified at sign-in. Supabase Auth (GoTrue) writes cost 10. Measured on the 2-vCPU VPS: cost 10
+# ~52 ms, 12 ~213 ms (Argon2id ~90 ms); every step doubles, so cost 31 would take ~30 hours. A higher cost (or a
+# malformed bcrypt string) is treated like an unknown format, so no stored hash can make a sign-in unboundedly
+# expensive. database/etl/auth_hash_import.py refuses to import anything above it.
+MAX_BCRYPT_COST = 12
 
 
 def hash_password(password: str) -> str:
@@ -24,7 +29,7 @@ def verify_password(password: str, stored_hash: str | None) -> bool:
     if not stored_hash:
         _argon2_verify(_DUMMY_HASH, password)
         return False
-    if stored_hash.startswith(BCRYPT_PREFIXES):
+    if stored_hash.startswith(BCRYPT_PREFIXES) and _bcrypt_cost_ok(stored_hash):
         # bcrypt only uses the first 72 bytes; bcrypt>=5 raises instead of truncating.
         try:
             return bcrypt.checkpw(password.encode("utf-8")[:72], stored_hash.encode("utf-8"))
@@ -34,6 +39,12 @@ def verify_password(password: str, stored_hash: str | None) -> bool:
         return _argon2_verify(stored_hash, password)
     _argon2_verify(_DUMMY_HASH, password)  # unknown format: never matches, same cost
     return False
+
+
+def _bcrypt_cost_ok(stored_hash: str) -> bool:
+    cost = stored_hash[4:6]
+    return (len(stored_hash) == 60 and stored_hash[6:7] == "$" and cost.isascii() and cost.isdigit()
+            and 4 <= int(cost) <= MAX_BCRYPT_COST)
 
 
 def needs_rehash(stored_hash: str) -> bool:

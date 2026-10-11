@@ -20,7 +20,13 @@ from etl import auth_hash_import as imp
 from etl.auth_hash_import import Refused, Source, Target, plan
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
-from app.auth.passwords import BCRYPT_PREFIXES, hash_password, needs_rehash, verify_password  # noqa: E402
+from app.auth.passwords import (  # noqa: E402
+    BCRYPT_PREFIXES,
+    MAX_BCRYPT_COST,
+    hash_password,
+    needs_rehash,
+    verify_password,
+)
 
 PASSWORD = "Synthetic-Pass-42"
 D = "@authimport.invalid"
@@ -102,12 +108,25 @@ def test_duplicates_and_unsupported_formats_block():
     assert plan(s, t + [Target(str(uuid.uuid4()), t[0].legacy_id, _d("z" + D), _n("z" + D), False)]).blocked == \
         ["duplicate_target_legacy_ids"]
     for bad in ("$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA", "$2a$10$tooshort", "$2x$10$" + "a" * 53,
-                "$2a$03$" + "a" * 53, "plaintext-password"):
+                "$2a$03$" + "a" * 53, "plaintext-password", "$2a$13$" + "a" * 53, "$2b$31$" + "a" * 53,
+                "$2a$1x$" + "a" * 53, "$2a$10$" + "a" * 52 + "!"):
         s2 = [x if x.id != IDS["e1"] else Source(x.id, x.email, x.email_norm, bad, True, False, False) for x in s]
         p = plan(s2, _targets())
         assert p.counts["unsupported_hash_format"] == 1 and p.blocked == ["unsupported_hash_format"]
         with pytest.raises(Refused, match="blocked"):
             imp.apply(None, p)
+
+
+def test_cost_cap_matches_the_verifier_and_the_boundary_is_exact():
+    assert imp.MAX_BCRYPT_COST == MAX_BCRYPT_COST == 12
+    at_max = "$2a$" + bcrypt.hashpw(PASSWORD.encode(), bcrypt.gensalt(rounds=12)).decode()[4:]
+    assert imp.BCRYPT.fullmatch(at_max) and verify_password(PASSWORD, at_max)  # cost 12: imported and verified
+    above = at_max[:4] + "13" + at_max[6:]  # well-formed, one step too expensive
+    assert not imp.BCRYPT.fullmatch(above) and not verify_password(PASSWORD, above)
+    for cost in range(4, 13):
+        assert imp.BCRYPT.fullmatch(at_max[:4] + f"{cost:02d}" + at_max[6:])
+    for cost in (0, 1, 2, 3, *range(13, 100)):
+        assert not imp.BCRYPT.fullmatch(at_max[:4] + f"{cost:02d}" + at_max[6:])
 
 
 def test_accepted_formats_are_exactly_what_the_v2_verifier_supports():
@@ -394,11 +413,17 @@ def test_cli_refuses_apply_into_dev_and_blocked_plans(loaded, monkeypatch, capsy
     assert imp.main(["--apply"]) == 2 and not called  # refused before any connection
     assert "allow-dev-target" in capsys.readouterr().err
     before = _rows()
-    with _admin(SRC_DB) as c:
-        c.execute("UPDATE auth.users SET encrypted_password = '$argon2id$v=19$unsupported' WHERE id = %s", (IDS["e1"],))
-    _cli(monkeypatch, ["unused"])
-    assert imp.main(["--apply"]) == 2 and _rows() == before
-    assert "unsupported_hash_format" in capsys.readouterr().err
+    too_expensive = HASHES["e1"][:4] + "13" + HASHES["e1"][6:]  # valid bcrypt shape, above the cost cap
+    for bad in ("$argon2id$v=19$unsupported", too_expensive):
+        with _admin(SRC_DB) as c:
+            c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (bad, IDS["e1"]))
+        _cli(monkeypatch, ["unused"])
+        assert imp.main(["--apply"]) == 2 and _rows() == before  # blocked: nothing written, no prompt reached
+        out = capsys.readouterr()
+        assert "unsupported_hash_format" in out.err and bad not in out.out + out.err
+        _cli(monkeypatch, [], role=VIEWER)
+        assert imp.main([]) == 0 and _rows() == before  # the dry run still reports it
+        assert "unsupported_hash_format" in capsys.readouterr().out
 
 
 def test_there_is_no_export_option():

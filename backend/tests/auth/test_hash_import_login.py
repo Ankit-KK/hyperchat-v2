@@ -10,6 +10,8 @@ from pathlib import Path
 import bcrypt
 import psycopg
 
+from app.auth import passwords
+
 from tests.integration import DOMAIN, PASSWORD, PG_HOST, requires_db, target
 from tests.integration import db as _db
 from tests.integration import login as _login
@@ -49,3 +51,18 @@ def test_imported_supabase_hash_signs_in_and_is_upgraded(app):
                                         (uid,)).fetchone()
     assert stored.startswith("$argon2id$") and verified is None  # upgraded on sign-in; verification untouched
     assert _login(_new_client(app), email).status_code == 200
+
+
+def test_an_unexpectedly_expensive_bcrypt_hash_fails_sign_in_without_bcrypt_work(app, monkeypatch):
+    """A hash above MAX_BCRYPT_COST (however it got into the table) is refused with the generic 401 after one dummy
+    Argon2 check; bcrypt.checkpw is never called, so it cannot tie up the hashing threads."""
+    cheap = bcrypt.hashpw(PASSWORD.encode(), bcrypt.gensalt(rounds=4)).decode()
+    _user("expensive-hash" + DOMAIN, hashed="$2a$31$" + cheap[7:])
+    calls = []
+    monkeypatch.setattr(passwords.bcrypt, "checkpw", lambda *a: calls.append(1) or True)
+    r = _login(_new_client(app), "expensive-hash" + DOMAIN)
+    assert r.status_code == 401 and calls == []
+    with _db() as conn:
+        stored = conn.execute("SELECT password_hash FROM public.users WHERE email = %s",
+                              ("expensive-hash" + DOMAIN,)).fetchone()[0]
+    assert stored.startswith("$2a$31$")  # nothing rewritten
