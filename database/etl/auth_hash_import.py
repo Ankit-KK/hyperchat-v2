@@ -13,14 +13,19 @@ since the plan rolls everything back. Operator guide: database/README.md. Run:  
 """
 
 import argparse
-import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import psycopg
 
-from etl.auth_readonly_report import (
+# The bcrypt format the sign-in verifier accepts (cost 04-12, exact shape) lives in the backend, next to the verifier;
+# load that one definition instead of keeping a copy here. Missing backend code is an ImportError: the tool won't run.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
+from app.auth.bcrypt_format import is_supported_bcrypt  # noqa: E402
+
+from etl.auth_readonly_report import (  # noqa: E402
     _DIGEST,
     STATEMENT_TIMEOUT_MS,
     Refused,
@@ -45,12 +50,6 @@ SOURCE_SQL = (f"SELECT id::text, {_DIGEST.format('email')}, {_DIGEST.format('low
 _TARGET_SELECT = (f"SELECT id::text, legacy_supabase_user_id::text, {_DIGEST.format('email::text')}, "
                   f"{_DIGEST.format('lower(btrim(email::text))')}, coalesce(password_hash, '') <> '' FROM public.users")
 
-# What both GoTrue writes and backend/app/auth/passwords.py verifies: bcrypt ($2a$/$2b$/$2y$), 60 chars, cost 04 up
-# to MAX_BCRYPT_COST (the verifier's cap: GoTrue writes 10; 12 takes ~213 ms per sign-in on the VPS, each step
-# doubles). Anything else (higher cost, argon2, scrypt, truncated or placeholder values) is "unsupported" and blocks
-# --apply.
-MAX_BCRYPT_COST = 12
-BCRYPT = re.compile(r"\$2[aby]\$(0[4-9]|1[0-2])\$[./A-Za-z0-9]{53}")
 LOCK_TIMEOUT = "5s"
 
 # Exclusion reasons, in the order they are tested; each target row with a legacy id gets exactly one outcome.
@@ -126,7 +125,7 @@ def plan(source: list[Source], target: list[Target]) -> Plan:
             reason = "target_already_has_password"
         elif not s.password_hash:
             reason = "source_without_password"
-        elif not BCRYPT.fullmatch(s.password_hash):
+        elif not is_supported_bcrypt(s.password_hash):
             reason = "unsupported_hash_format"
         else:
             reason = "eligible"

@@ -111,7 +111,10 @@ their passwords. **Dry run by default.** Nothing is ever written to a file, log 
   exactly (case-only differences are excluded), the Supabase account is not deleted (`deleted_at`) or currently
   banned (`banned_until`), the source hash is a bcrypt hash the V2 verifier accepts (`$2a$`/`$2b$`/`$2y$`, cost
   04-12, 60 characters) and the target hash is NULL or empty.
-- **Cost cap 12 (`MAX_BCRYPT_COST`, the same value in `backend/app/auth/passwords.py`):** GoTrue writes cost 10.
+- **One shared format check (`backend/app/auth/bcrypt_format.py`, used by both the sign-in verifier and the importer):**
+  prefix `$2a$`/`$2b$`/`$2y$`, cost 04-12, `$`, then exactly 53 characters of bcrypt's base64 alphabet (60 ASCII
+  characters, nothing else). Anything else is never handed to bcrypt at sign-in and is unsupported for import.
+- **Cost cap 12 (`MAX_BCRYPT_COST`):** GoTrue writes cost 10.
   Measured on the 2-vCPU VPS: cost 10 ~52 ms, 11 ~106 ms, 12 ~213 ms, 13 ~423 ms per verification (Argon2id ~90
   ms); every step doubles, so cost 31 would take ~30 hours. 12 leaves two steps of headroom over GoTrue's default
   at about 2.4x the cost of a normal V2 sign-in. A higher cost is "unsupported": it blocks `--apply`, and the
@@ -132,7 +135,10 @@ lock timeout or error rolls back **every** row. `--apply` into `hyperchat_dev` a
 
 **Prerequisites:** as for the read-only report (a read-only Supabase role, now with `SELECT (id, email,
 encrypted_password, email_confirmed_at, deleted_at, banned_until)` on `auth.users`; the Supabase CA file; the session
-pooler host from an IPv4-only VPS; the code in a private directory such as `/root/d1-import`). The target role for
+pooler host from an IPv4-only VPS; the code in a private directory such as `/root/d1-import`, i.e. `database/etl` **plus** `backend/app/__init__.py`,
+`backend/app/auth/__init__.py` and `backend/app/auth/bcrypt_format.py`, which the importer loads; without them it
+refuses to start: `git archive <commit> database/etl backend/app/__init__.py backend/app/auth/__init__.py
+backend/app/auth/bcrypt_format.py`). The target role for
 `--apply` needs `UPDATE` on `public.users.password_hash` and must not be a superuser (default `hyperchat_app`).
 
 **Run (as root on the VPS, in your own SSH terminal):**

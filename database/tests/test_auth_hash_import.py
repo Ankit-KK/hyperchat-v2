@@ -20,9 +20,9 @@ from etl import auth_hash_import as imp
 from etl.auth_hash_import import Refused, Source, Target, plan
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
+from app.auth import bcrypt_format  # noqa: E402
 from app.auth.passwords import (  # noqa: E402
     BCRYPT_PREFIXES,
-    MAX_BCRYPT_COST,
     hash_password,
     needs_rehash,
     verify_password,
@@ -109,7 +109,8 @@ def test_duplicates_and_unsupported_formats_block():
         ["duplicate_target_legacy_ids"]
     for bad in ("$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA", "$2a$10$tooshort", "$2x$10$" + "a" * 53,
                 "$2a$03$" + "a" * 53, "plaintext-password", "$2a$13$" + "a" * 53, "$2b$31$" + "a" * 53,
-                "$2a$1x$" + "a" * 53, "$2a$10$" + "a" * 52 + "!"):
+                "$2a$1x$" + "a" * 53, "$2a$10$" + "a" * 52 + "!", HASHES["e1"][:30] + "-" + HASHES["e1"][31:],
+                HASHES["e1"][:6] + "#" + HASHES["e1"][7:], HASHES["e1"] + "a"):
         s2 = [x if x.id != IDS["e1"] else Source(x.id, x.email, x.email_norm, bad, True, False, False) for x in s]
         p = plan(s2, _targets())
         assert p.counts["unsupported_hash_format"] == 1 and p.blocked == ["unsupported_hash_format"]
@@ -118,22 +119,23 @@ def test_duplicates_and_unsupported_formats_block():
 
 
 def test_cost_cap_matches_the_verifier_and_the_boundary_is_exact():
-    assert imp.MAX_BCRYPT_COST == MAX_BCRYPT_COST == 12
+    assert bcrypt_format.MAX_BCRYPT_COST == 12
+    assert imp.is_supported_bcrypt is bcrypt_format.is_supported_bcrypt  # one shared validator, no copy
     at_max = "$2a$" + bcrypt.hashpw(PASSWORD.encode(), bcrypt.gensalt(rounds=12)).decode()[4:]
-    assert imp.BCRYPT.fullmatch(at_max) and verify_password(PASSWORD, at_max)  # cost 12: imported and verified
+    assert imp.is_supported_bcrypt(at_max) and verify_password(PASSWORD, at_max)  # cost 12: imported and verified
     above = at_max[:4] + "13" + at_max[6:]  # well-formed, one step too expensive
-    assert not imp.BCRYPT.fullmatch(above) and not verify_password(PASSWORD, above)
+    assert not imp.is_supported_bcrypt(above) and not verify_password(PASSWORD, above)
     for cost in range(4, 13):
-        assert imp.BCRYPT.fullmatch(at_max[:4] + f"{cost:02d}" + at_max[6:])
+        assert imp.is_supported_bcrypt(at_max[:4] + f"{cost:02d}" + at_max[6:])
     for cost in (0, 1, 2, 3, *range(13, 100)):
-        assert not imp.BCRYPT.fullmatch(at_max[:4] + f"{cost:02d}" + at_max[6:])
+        assert not imp.is_supported_bcrypt(at_max[:4] + f"{cost:02d}" + at_max[6:])
 
 
 def test_accepted_formats_are_exactly_what_the_v2_verifier_supports():
     assert {"$2a$", "$2b$", "$2y$"} == set(BCRYPT_PREFIXES)
     for prefix in BCRYPT_PREFIXES:
         h = prefix + _bcrypt()[4:]
-        assert imp.BCRYPT.fullmatch(h) and verify_password(PASSWORD, h) and not verify_password("wrong", h)
+        assert imp.is_supported_bcrypt(h) and verify_password(PASSWORD, h) and not verify_password("wrong", h)
 
 
 def test_hashes_never_appear_in_reprs_or_summaries():
@@ -414,10 +416,11 @@ def test_cli_refuses_apply_into_dev_and_blocked_plans(loaded, monkeypatch, capsy
     assert "allow-dev-target" in capsys.readouterr().err
     before = _rows()
     too_expensive = HASHES["e1"][:4] + "13" + HASHES["e1"][6:]  # valid bcrypt shape, above the cost cap
-    for bad in ("$argon2id$v=19$unsupported", too_expensive):
+    bad_body = HASHES["e1"][:30] + "-" + HASHES["e1"][31:]  # right length and cost, invalid salt/hash character
+    for bad in ("$argon2id$v=19$unsupported", too_expensive, bad_body):
         with _admin(SRC_DB) as c:
             c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (bad, IDS["e1"]))
-        _cli(monkeypatch, ["unused"])
+        _cli(monkeypatch, [])  # no answer available: reaching the confirmation prompt would fail the run (exit 1)
         assert imp.main(["--apply"]) == 2 and _rows() == before  # blocked: nothing written, no prompt reached
         out = capsys.readouterr()
         assert "unsupported_hash_format" in out.err and bad not in out.out + out.err
