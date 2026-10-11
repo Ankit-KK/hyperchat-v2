@@ -263,9 +263,6 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
-    except ValueError:
-        print("refused: a port must be a number", file=sys.stderr)
-        return 2
     except psycopg.Error as exc:  # messages may name hosts or roles: print only the class and SQLSTATE
         print(f"failed: {type(exc).__name__} (SQLSTATE {exc.sqlstate or 'n/a'}); nothing was written by this run "
               "unless APPLIED was printed", file=sys.stderr)

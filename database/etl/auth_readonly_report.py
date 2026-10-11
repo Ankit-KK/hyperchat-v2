@@ -182,13 +182,20 @@ def _ask(prompt: str, default: str | None = None) -> str:
     return value
 
 
+def _port(prompt: str, default: str) -> int:
+    value = _ask(prompt, default)
+    if not (value.isascii() and value.isdigit()):
+        raise Refused(f"{prompt} must be a number")
+    return int(value)
+
+
 def source_params() -> dict:
     """Supabase: TLS with certificate AND hostname verification against the CA file the operator downloaded."""
     host = _ask("Supabase host (e.g. db.<project-ref>.supabase.co)")
     ca = Path(_ask("Path to the Supabase CA certificate (PEM)")).expanduser()
     if not ca.is_file():
         raise Refused("the CA certificate file does not exist")
-    return {"host": host, "port": int(_ask("Supabase port", "5432")), "dbname": _ask("Supabase database", "postgres"),
+    return {"host": host, "port": _port("Supabase port", "5432"), "dbname": _ask("Supabase database", "postgres"),
             "user": _ask("Supabase role (read-only role recommended)"),
             "password": getpass.getpass("Supabase password (not echoed): ") or None,
             "sslmode": "verify-full", "sslrootcert": str(ca)}
@@ -199,7 +206,7 @@ def target_params(role: str = "hyperchat_readonly", dbname: str | None = "hyperc
     host = _ask("Target host or socket directory", "/var/run/postgresql")
     if not (host.startswith("/") or host in ("127.0.0.1", "localhost", "::1")):
         raise Refused("the target must be a local socket directory or loopback address")
-    params = {"host": host, "port": int(_ask("Target port", "5433")), "dbname": _ask("Target database", dbname),
+    params = {"host": host, "port": _port("Target port", "5433"), "dbname": _ask("Target database", dbname),
               "user": _ask("Target role", role)}
     password = getpass.getpass("Target password (not echoed; empty = peer auth / .pgpass): ")
     return params | ({"password": password} if password else {})
@@ -226,9 +233,6 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
-    except ValueError:
-        print("refused: a port must be a number", file=sys.stderr)
-        return 2
     except psycopg.Error as exc:  # the message may name hosts or roles: print only the class and SQLSTATE
         print(f"failed: {type(exc).__name__} (SQLSTATE {exc.sqlstate or 'n/a'}); check the host, port, CA file "
               "and credentials", file=sys.stderr)
@@ -236,7 +240,12 @@ def main(argv: list[str] | None = None) -> int:
     except (KeyboardInterrupt, EOFError):
         print("cancelled", file=sys.stderr)
         return 130
-    print(render(summary))
+    try:
+        text = render(summary)
+    except ValueError as exc:  # never print a summary that is not counts only
+        print(f"failed: {exc}", file=sys.stderr)
+        return 1
+    print(text)
     return 0
 
 

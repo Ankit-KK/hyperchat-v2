@@ -374,10 +374,20 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
 - **Impact:** low. The documented command runs `python -B -E -s`, so `-O` is not used and `-E` ignores
   `PYTHONOPTIMIZE`; the guards held in practice. But a fail-closed check must not depend on how Python is started.
 - **Fix:** the three asserts are now explicit checks: the renderers raise `ValueError` on any non-count value, and a
-  plan whose counts don't add up raises `Refused` ("nothing was written") before anything can be applied.
-- **Tests:** both renderers refuse a non-count in a subprocess started with `python -O`; a miscounted plan is
-  refused. All three **fail against the previous code** (under `-O` the leak goes through; the invariant raised a bare
-  `AssertionError`).
+  plan whose counts don't add up raises `Refused` ("nothing was written") before anything can be applied. Found while
+  validating this: both tools' `main()` caught every `ValueError` as "a port must be a number" (the importer would
+  have mislabelled a counts-only failure that way, exit 2), and the report let a renderer failure escape as a
+  traceback. Ports are now parsed explicitly (`Refused`: "<prompt> must be a number", ASCII digits only), the broad
+  handlers are gone, and a counts-only failure ends as `failed: ...` with exit 1 in both tools, never printing the
+  value.
+- **Tests (6):** both renderers refuse a non-count in a subprocess started with `python -O`; a miscounted plan is
+  refused; through each tool's `main()`, a non-count summary exits 1 with a clear message and without the value; a
+  non-numeric (or non-ASCII-digit) port is refused by name. All six **fail against the previous code** (`7685425`):
+  under `-O` the leak goes through, the invariant raised a bare `AssertionError`, and the messages were wrong.
+- **`python -O` probe (all guards, synthetic secret):** with asserts disabled (`sys.flags.optimize == 1`), both
+  renderers raise `ValueError` ("... holds counts only"), the miscounted plan raises `Refused`, the importer's `main()`
+  exits 1 (`failed: ValueError`) and the report's exits 1 (`failed: the report holds counts only`); the secret
+  appears in no message or output.
 
 ## Verified controls
 

@@ -448,6 +448,28 @@ def test_cli_refuses_apply_into_dev_and_blocked_plans(loaded, monkeypatch, capsy
         assert "unsupported_hash_format" in capsys.readouterr().out
 
 
+def test_a_summary_that_is_not_counts_only_fails_clearly_without_printing_it(monkeypatch, capsys):
+    """Security audit F13: a non-count value in the plan is refused by the renderer; main() reports the error class
+    (exit 1), not a misleading message, and never the value."""
+    class Conn:
+        read_only = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+    secret = HASHES["e1"]
+    monkeypatch.setattr(imp, "source_params", lambda: {})
+    monkeypatch.setattr(imp, "target_params", lambda **kw: {"dbname": TGT_DB})
+    monkeypatch.setattr(imp, "connect_source", lambda params: Conn())
+    monkeypatch.setattr(imp.psycopg, "connect", lambda **kw: Conn())
+    monkeypatch.setattr(imp, "read_plan", lambda *a: imp.Plan({"leak": secret}, []))
+    assert imp.main([]) == 1
+    out = capsys.readouterr()
+    assert "failed: ValueError" in out.err and secret not in out.out + out.err
+
+
 def test_there_is_no_export_option():
     for flag in ("--export", "--output", "--file", "--json"):
         with pytest.raises(SystemExit):

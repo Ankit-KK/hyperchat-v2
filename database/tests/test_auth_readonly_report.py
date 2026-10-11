@@ -148,6 +148,40 @@ def test_there_is_no_import_option():
         rep.main(["--import"])
 
 
+def test_a_non_numeric_port_is_refused_by_name(monkeypatch, tmp_path):
+    ca = tmp_path / "ca.pem"
+    ca.write_text("synthetic")
+    _answers(monkeypatch, ["db.example.invalid", str(ca), "54x2"], [])
+    with pytest.raises(Refused, match="Supabase port must be a number"):
+        rep.source_params()
+    _answers(monkeypatch, ["", "\u0665\u0664\u0663\u0663"], [])  # non-ASCII digits are not a port either
+    with pytest.raises(Refused, match="Target port must be a number"):
+        rep.target_params()
+
+
+class _Conn:
+    pgconn = type("PG", (), {"ssl_in_use": True})()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_a_summary_that_is_not_counts_only_is_never_printed(monkeypatch, capsys):
+    """Security audit F13: the guard is a real check, and main() turns it into a clear failure (exit 1), not a
+    traceback and never the value itself."""
+    secret = "synthetic-secret-" + D
+    monkeypatch.setattr(rep, "source_params", lambda: {})
+    monkeypatch.setattr(rep, "target_params", lambda **kw: {})
+    monkeypatch.setattr(rep, "open_readonly", lambda **kw: _Conn())
+    monkeypatch.setattr(rep, "report", lambda *a, **kw: {"leak": secret})
+    assert rep.main([]) == 1
+    out = capsys.readouterr()
+    assert "failed: the report holds counts only" in out.err and secret not in out.out + out.err
+
+
 # ── against PostgreSQL (throwaway fixture database) ─────────────────────────
 
 FIXTURE_DB = "hyperchat_authrec_fixture"
