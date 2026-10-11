@@ -8,8 +8,11 @@ connection that is not to those local fixture databases, so no test can reach Su
 import hashlib
 import logging
 import os
+import re
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -235,7 +238,8 @@ def fixtures():
             c.execute("CREATE SCHEMA auth")
             c.execute("CREATE TABLE auth.users (id uuid PRIMARY KEY, email varchar(255), encrypted_password "
                       "varchar(255), confirmed_at timestamptz, phone_confirmed_at timestamptz, email_confirmed_at "
-                      "timestamptz, deleted_at timestamptz, banned_until timestamptz, raw_user_meta_data jsonb)")
+                      "timestamptz, deleted_at timestamptz, banned_until timestamptz, raw_user_meta_data jsonb, "
+                      "last_sign_in_at timestamptz)")
             c.execute(f"GRANT USAGE ON SCHEMA auth TO {READER}")
             c.execute(f"GRANT SELECT (id, email, encrypted_password, email_confirmed_at, deleted_at, banned_until) "
                       f"ON auth.users TO {READER}")
@@ -258,6 +262,7 @@ def fixtures():
 
 @pytest.fixture
 def loaded(fixtures):
+    _run_freeze_sql("unfreeze.sql")
     _reset()
 
 
@@ -411,16 +416,20 @@ def _cli(monkeypatch, answers: list[str], target_db: str = TGT_DB, role: str = W
 def test_cli_dry_run_by_default_and_apply_needs_the_typed_phrase(loaded, monkeypatch, capsys, caplog):
     caplog.set_level(logging.DEBUG)
     before = _rows()
+    _run_freeze_sql("freeze.sql")
     _cli(monkeypatch, [], role=VIEWER)
     assert imp.main([]) == 0 and _rows() == before
+    dry = capsys.readouterr()
+    reviewed = _printed_fingerprint(dry.out)
+    assert "dry run" in dry.err
     _cli(monkeypatch, ["yes"])
-    assert imp.main(["--apply"]) == 3 and _rows() == before  # wrong phrase: cancelled
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 3 and _rows() == before  # wrong phrase
     _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
-    assert imp.main(["--apply"]) == 0
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 0
     assert all(_rows()[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
     out = capsys.readouterr()
     text = out.out + out.err + caplog.text
-    assert "updated" in out.out and "dry run" in out.err
+    assert "updated" in out.out
     for secret in [*HASHES.values(), *IDS.values(), *(e for e, *_ in SOURCE.values() if e), "$2a$"]:
         assert secret not in text
 
@@ -431,7 +440,7 @@ def test_cli_refuses_apply_into_dev_and_blocked_plans(loaded, monkeypatch, capsy
     monkeypatch.setattr(imp, "connect_source", lambda params: called.append(1))
     monkeypatch.setattr(imp, "source_params", lambda: {})
     monkeypatch.setattr(imp, "target_params", lambda **kw: {"dbname": "hyperchat_dev", "user": WRITER})
-    assert imp.main(["--apply"]) == 2 and not called  # refused before any connection
+    assert imp.main(["--apply", "--expected-fingerprint", "0" * 64]) == 2 and not called  # before any connection
     assert "allow-dev-target" in capsys.readouterr().err
     before = _rows()
     too_expensive = HASHES["e1"][:4] + "13" + HASHES["e1"][6:]  # valid bcrypt shape, above the cost cap
@@ -440,7 +449,7 @@ def test_cli_refuses_apply_into_dev_and_blocked_plans(loaded, monkeypatch, capsy
         with _admin(SRC_DB) as c:
             c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (bad, IDS["e1"]))
         _cli(monkeypatch, [])  # no answer available: reaching the confirmation prompt would fail the run (exit 1)
-        assert imp.main(["--apply"]) == 2 and _rows() == before  # blocked: nothing written, no prompt reached
+        assert imp.main(["--apply", "--expected-fingerprint", "0" * 64]) == 2 and _rows() == before  # blocked
         out = capsys.readouterr()
         assert "unsupported_hash_format" in out.err and bad not in out.out + out.err
         _cli(monkeypatch, [], role=VIEWER)
@@ -474,3 +483,327 @@ def test_there_is_no_export_option():
     for flag in ("--export", "--output", "--file", "--json"):
         with pytest.raises(SystemExit):
             imp.main([flag])
+
+
+# ── D1 cutover safeguards: source freeze trigger, fingerprint, --apply guard ─
+
+FREEZE_DIR = Path(__file__).resolve().parents[2] / "docs" / "operations" / "d1-auth-freeze"
+
+
+def _run_freeze_sql(name: str, replace: tuple[str, str] | None = None) -> None:
+    sql = (FREEZE_DIR / name).read_text(encoding="utf-8")
+    if replace:
+        sql = sql.replace(*replace)
+    with _admin(SRC_DB) as c:
+        c.execute(sql)
+
+
+def _printed_fingerprint(out: str) -> str:
+    line = next(x for x in out.splitlines() if x.startswith("source_fingerprint"))
+    value = line.split()[-1]
+    assert len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
+    return value
+
+
+def _reference_fingerprint(rows: list[tuple]) -> str:
+    """An independent implementation of the documented serialization: rows of (id, email, password, deleted, banned)."""
+    def field(v):
+        return "-|" if v is None else f"{len(v)}:{v}|"
+    body = "".join(field(i) + field(e) + field(pw or None) + ("d1|" if dele else "d0|") + ("b1" if ban else "b0") + "\n"
+                   for i, e, pw, dele, ban in sorted(rows, key=lambda r: r[0]))
+    return hashlib.sha256(f"{imp.FINGERPRINT_VERSION}\n{body}".encode()).hexdigest()
+
+
+def _fixture_rows() -> list[tuple]:
+    return [(IDS[k], e, pw, dele, ban == "future") for k, (e, pw, conf, dele, ban) in SOURCE.items()]
+
+
+def _fingerprint_now() -> str:
+    with _src() as s:
+        try:
+            return imp.source_fingerprint(s)
+        finally:
+            s.rollback()
+
+
+def _freeze_state() -> str | None:
+    with _src() as s:
+        try:
+            return imp.freeze_problem(s)
+        finally:
+            s.rollback()
+
+
+def _safe(errors: list, fn) -> None:
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 - surfaced by the test
+        errors.append(exc)
+
+
+def _wait_for_lock(fragment: str) -> bool:
+    deadline = time.monotonic() + 10
+    with _admin(SRC_DB) as probe:
+        while time.monotonic() < deadline:
+            if probe.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE %s",
+                             (f"%{fragment}%",)).fetchone()[0]:
+                return True
+            time.sleep(0.01)  # probe interval only; the lock decides the outcome
+    return False
+
+
+def test_the_pinned_function_hash_is_the_body_in_freeze_sql():
+    body = re.search(r"AS \$freeze\$(.*?)\$freeze\$", (FREEZE_DIR / "freeze.sql").read_text(encoding="utf-8"), re.S)
+    assert hashlib.sha256(body.group(1).replace("\r", "").encode()).hexdigest() == imp.FREEZE_FUNCTION_SHA256
+
+
+def test_the_serialization_is_unambiguous():
+    # Naive concatenation of email and password gives "x||y" for both of the first two rows; length prefixes do not.
+    one = "00000000-0000-0000-0000-000000000001"
+    a = _reference_fingerprint([(one, "x|", "y", False, False)])
+    b = _reference_fingerprint([(one, "x", "|y", False, False)])
+    c = _reference_fingerprint([(one, None, "", False, False)])
+    d = _reference_fingerprint([(one, "", None, False, False)])
+    assert len({a, b, c, d}) == 4
+
+
+@db_only
+def test_the_database_fingerprint_matches_the_documented_serialization(loaded):
+    assert _fingerprint_now() == _reference_fingerprint(_fixture_rows())
+    assert _fingerprint_now() == _fingerprint_now()  # deterministic
+
+
+@db_only
+@pytest.mark.parametrize("change, sql", [
+    ("email", "UPDATE auth.users SET email = 'changed@authimport.invalid' WHERE id = %(e1)s"),
+    ("password", "UPDATE auth.users SET encrypted_password = %(other)s WHERE id = %(e1)s"),
+    ("insertion", "INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000000000ff', 'n@x.invalid')"),
+    ("deletion", "DELETE FROM auth.users WHERE id = %(e1)s"),
+    ("deleted_at", "UPDATE auth.users SET deleted_at = now() WHERE id = %(e1)s"),
+    ("ban", "UPDATE auth.users SET banned_until = now() + interval '1 day' WHERE id = %(e1)s"),
+])
+def test_every_change_that_matters_changes_the_fingerprint(loaded, change, sql):
+    base = _fingerprint_now()
+    with _admin(SRC_DB) as c:
+        c.execute(sql, {"e1": IDS["e1"], "other": HASHES["e2"]})
+    assert _fingerprint_now() != base, change
+
+
+@db_only
+def test_unrelated_columns_do_not_change_the_fingerprint(loaded):
+    base = _fingerprint_now()
+    with _admin(SRC_DB) as c:
+        c.execute("UPDATE auth.users SET last_sign_in_at = now(), email_confirmed_at = now(), "
+                  "raw_user_meta_data = '{}'::jsonb")
+    assert _fingerprint_now() == base
+
+
+@db_only
+def test_freeze_check_requires_the_reviewed_trigger(loaded):
+    assert "missing" in _freeze_state()
+    _run_freeze_sql("freeze.sql")
+    assert _freeze_state() is None
+    _run_freeze_sql("freeze.sql")  # idempotent
+    assert _freeze_state() is None
+    with _admin(SRC_DB) as c:
+        c.execute("ALTER TABLE auth.users DISABLE TRIGGER hyperchat_d1_auth_freeze")
+    assert "not enabled" in _freeze_state() and "'D'" in _freeze_state()
+    with _admin(SRC_DB) as c:
+        c.execute("ALTER TABLE auth.users ENABLE REPLICA TRIGGER hyperchat_d1_auth_freeze")
+    assert "'R'" in _freeze_state()
+    with _admin(SRC_DB) as c:
+        c.execute("ALTER TABLE auth.users ENABLE ALWAYS TRIGGER hyperchat_d1_auth_freeze")
+    assert _freeze_state() is None  # 'A' counts as active
+
+
+_GUARD = "EXECUTE FUNCTION hyperchat_ops.d1_auth_freeze_guard()"
+_ON = "ON auth.users FOR EACH ROW"
+
+
+@db_only
+@pytest.mark.parametrize("sql, expected", [
+    (f"CREATE OR REPLACE TRIGGER hyperchat_d1_auth_freeze BEFORE UPDATE {_ON} {_GUARD}", "malformed"),
+    (f"CREATE OR REPLACE TRIGGER hyperchat_d1_auth_freeze BEFORE INSERT OR UPDATE OF email OR DELETE {_ON} {_GUARD}",
+     "malformed"),
+    (f"CREATE OR REPLACE TRIGGER hyperchat_d1_auth_freeze BEFORE INSERT OR UPDATE OR DELETE {_ON} WHEN (false) "
+     f"{_GUARD}", "malformed"),
+    (f"CREATE OR REPLACE TRIGGER hyperchat_d1_auth_freeze AFTER INSERT OR UPDATE OR DELETE {_ON} {_GUARD}",
+     "malformed"),
+    ("CREATE OR REPLACE TRIGGER hyperchat_d1_auth_freeze BEFORE INSERT OR UPDATE OR DELETE ON auth.users "
+     f"FOR EACH STATEMENT {_GUARD}", "malformed"),
+    ("CREATE FUNCTION hyperchat_ops.other_guard() RETURNS trigger LANGUAGE plpgsql AS $x$BEGIN RETURN NEW; END;$x$; "
+     f"CREATE OR REPLACE TRIGGER hyperchat_d1_auth_freeze BEFORE INSERT OR UPDATE OR DELETE {_ON} "
+     "EXECUTE FUNCTION hyperchat_ops.other_guard()", "calls hyperchat_ops.other_guard"),
+    ("CREATE OR REPLACE FUNCTION hyperchat_ops.d1_auth_freeze_guard() RETURNS trigger LANGUAGE plpgsql AS "
+     "$x$BEGIN RETURN NEW; END;$x$", "body differs"),
+], ids=["update-only", "column-list", "when", "after", "statement", "other-function", "changed-body"])
+def test_a_wrong_trigger_or_function_is_not_a_freeze(loaded, sql, expected):
+    _run_freeze_sql("freeze.sql")
+    try:
+        with _admin(SRC_DB) as c:
+            c.execute(sql)
+        assert expected in (_freeze_state() or "")
+    finally:
+        with _admin(SRC_DB) as c:
+            c.execute("DROP TRIGGER IF EXISTS hyperchat_d1_auth_freeze ON auth.users")
+            c.execute("DROP FUNCTION IF EXISTS hyperchat_ops.other_guard()")
+
+
+@db_only
+@pytest.mark.parametrize("sql", [
+    "UPDATE auth.users SET encrypted_password = %(other)s WHERE id = %(e1)s",
+    "UPDATE auth.users SET email = 'other@authimport.invalid' WHERE id = %(e1)s",
+    "UPDATE auth.users SET deleted_at = now() WHERE id = %(e1)s",
+    "UPDATE auth.users SET banned_until = now() + interval '1 day' WHERE id = %(e1)s",
+    "UPDATE auth.users SET id = '00000000-0000-0000-0000-0000000000fe' WHERE id = %(e1)s",
+    "INSERT INTO auth.users (id, email) VALUES ('00000000-0000-0000-0000-0000000000fd', 'new@authimport.invalid')",
+    "DELETE FROM auth.users WHERE id = %(e1)s",
+], ids=["password", "email", "deleted_at", "banned_until", "id", "insert", "delete"])
+def test_the_freeze_rejects_every_change_to_the_import_set(loaded, sql):
+    """Plain PostgreSQL only: this proves the SQL, not GoTrue (that needs the Supabase rehearsal in the README)."""
+    _run_freeze_sql("freeze.sql")
+    base = _fingerprint_now()
+    with _admin(SRC_DB) as c:
+        with pytest.raises(psycopg.errors.RaiseException, match="hyperchat_d1_freeze"):
+            c.execute(sql, {"e1": IDS["e1"], "other": HASHES["e2"]})
+    assert _fingerprint_now() == base
+
+
+@db_only
+def test_the_freeze_lets_unrelated_updates_through_and_lifts_cleanly(loaded):
+    _run_freeze_sql("freeze.sql")
+    with _admin(SRC_DB) as c:
+        assert c.execute("UPDATE auth.users SET last_sign_in_at = now(), email_confirmed_at = now() WHERE id = %s",
+                         (IDS["e1"],)).rowcount == 1  # what an ordinary sign-in writes
+    _run_freeze_sql("unfreeze.sql")
+    _run_freeze_sql("unfreeze.sql")  # idempotent
+    assert "missing" in _freeze_state()
+    with _admin(SRC_DB) as c:
+        assert c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s",
+                         (HASHES["e2"], IDS["e1"])).rowcount == 1
+
+
+@db_only
+def test_installing_the_freeze_drains_an_in_flight_password_change(loaded):
+    """A password change still open when freeze.sql runs: creating the trigger waits for it, so once the freeze is in
+    place the change has landed, and a fingerprint taken afterwards includes it."""
+    writer = _admin(SRC_DB)
+    writer.autocommit = False
+    writer.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (HASHES["e2"], IDS["e1"]))
+    errors: list = []
+    installing = threading.Thread(target=_safe, args=(errors, lambda: _run_freeze_sql("freeze.sql")))
+    try:
+        installing.start()
+        # pg_stat_activity shows the script's first 1 KB (track_activity_query_size), i.e. its header line
+        assert _wait_for_lock("D1 auth freeze: PROPOSED")
+        assert installing.is_alive()  # the freeze cannot be in place before the change commits
+        writer.commit()
+        installing.join(15)
+        assert not installing.is_alive() and errors == []
+    finally:
+        writer.rollback()
+        writer.close()
+        installing.join(15)
+    assert _freeze_state() is None
+    rows = [(i, e, HASHES["e2"] if i == IDS["e1"] else pw, dele, ban) for i, e, pw, dele, ban in _fixture_rows()]
+    assert _fingerprint_now() == _reference_fingerprint(rows)
+
+
+@db_only
+def test_the_freeze_gives_up_safely_when_it_cannot_drain_in_time(loaded):
+    writer = _admin(SRC_DB)
+    writer.autocommit = False
+    writer.execute("UPDATE auth.users SET last_sign_in_at = now() WHERE id = %s", (IDS["e1"],))
+    try:
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            _run_freeze_sql("freeze.sql", replace=("lock_timeout = '10s'", "lock_timeout = '200ms'"))
+    finally:
+        writer.rollback()
+        writer.close()
+    assert "missing" in _freeze_state()  # nothing half-installed
+
+
+@db_only
+def test_dry_run_prints_the_fingerprint_and_the_freeze_state(loaded, monkeypatch, capsys):
+    before = _rows()
+    _cli(monkeypatch, [], role=VIEWER)
+    assert imp.main([]) == 0 and _rows() == before
+    out = capsys.readouterr().out
+    assert _printed_fingerprint(out) == _reference_fingerprint(_fixture_rows())
+    assert "source_freeze       NOT ACTIVE: the trigger hyperchat_d1_auth_freeze is missing" in out
+    _run_freeze_sql("freeze.sql")
+    assert imp.main([]) == 0 and "source_freeze       active" in capsys.readouterr().out
+
+
+def test_apply_without_a_fingerprint_is_refused_before_any_connection(monkeypatch, capsys):
+    monkeypatch.setattr(imp, "source_params", lambda: pytest.fail("must not prompt or connect"))
+    assert imp.main(["--apply"]) == 2
+    assert "--expected-fingerprint" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        imp.main(["--apply", "--expected-fingerprint", "not-a-digest"])
+
+
+@db_only
+def test_apply_is_refused_without_the_freeze(loaded, monkeypatch, capsys):
+    before = _rows()
+    _cli(monkeypatch, [])  # no answers: reaching the confirmation prompt would fail the run
+    assert imp.main(["--apply", "--expected-fingerprint", _fingerprint_now()]) == 2 and _rows() == before
+    assert "the source freeze is not active: the trigger hyperchat_d1_auth_freeze is missing" in capsys.readouterr().err
+
+
+@db_only
+def test_apply_is_refused_when_the_freeze_is_disabled(loaded, monkeypatch, capsys):
+    _run_freeze_sql("freeze.sql")
+    reviewed = _fingerprint_now()
+    with _admin(SRC_DB) as c:
+        c.execute("ALTER TABLE auth.users DISABLE TRIGGER hyperchat_d1_auth_freeze")
+    before = _rows()
+    _cli(monkeypatch, [])
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2 and _rows() == before
+    assert "not enabled" in capsys.readouterr().err
+
+
+@db_only
+def test_apply_is_refused_when_the_source_changed_since_the_review(loaded, monkeypatch, capsys):
+    """The dry run was reviewed, then a password changed (before the freeze went in): the reviewed fingerprint no
+    longer describes the source, so --apply refuses even though the freeze is active now."""
+    reviewed = _fingerprint_now()
+    with _admin(SRC_DB) as c:
+        c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (HASHES["e2"], IDS["e1"]))
+    _run_freeze_sql("freeze.sql")
+    before = _rows()
+    _cli(monkeypatch, [])
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2 and _rows() == before
+    err = capsys.readouterr().err
+    assert "fingerprint differs" in err and HASHES["e2"] not in err
+
+
+@db_only
+def test_the_fingerprint_and_the_imported_hashes_come_from_one_snapshot(loaded, monkeypatch):
+    """A change committed between the fingerprint query and the hash read inside read_plan is invisible to that run:
+    the plan's hashes are exactly the fingerprinted ones, so a matching fingerprint proves what will be written."""
+    reviewed = _fingerprint_now()
+    real = imp.read_sources
+
+    def change_then_read(conn):
+        with _admin(SRC_DB) as c:  # another session commits a new password for e1 right now
+            c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (HASHES["e2"], IDS["e1"]))
+        return real(conn)
+    monkeypatch.setattr(imp, "read_sources", change_then_read)
+    with _src() as s, _tgt(VIEWER, read_only=True) as t:
+        p = imp.read_plan(s, t, False)
+    assert p.fingerprint == reviewed
+    e1 = next(u for u in p.updates if u.target_id == _tid("e1"))
+    assert e1.password_hash == HASHES["e1"]  # the snapshot's value, not the one committed meanwhile
+    assert _fingerprint_now() != reviewed  # a fresh run sees the change and would refuse
+
+
+@db_only
+def test_apply_with_the_freeze_and_the_reviewed_fingerprint_imports(loaded, monkeypatch, capsys):
+    _run_freeze_sql("freeze.sql")
+    _cli(monkeypatch, [], role=VIEWER)
+    assert imp.main([]) == 0
+    reviewed = _printed_fingerprint(capsys.readouterr().out)
+    _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed.upper()]) == 0  # case-insensitive input
+    assert all(_rows()[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
