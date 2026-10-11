@@ -53,7 +53,7 @@ service (Razorpay test mode, the DEV Pusher app, the DEV Telegram/Discord bots, 
 | AUTH-3 | Password reset (email) | IMPLEMENTED_UNVERIFIED | Live Resend delivery on DEV → mail received, token works once | existing | Resend on DEV | D8 | A; DEV email `disabled` |
 | AUTH-4 | Invites (create/accept, email) | IMPLEMENTED_UNVERIFIED | Live delivery on DEV | existing | Resend on DEV | D8 | A |
 | AUTH-5 | Google sign-in | IMPLEMENTED_UNVERIFIED | DEV OAuth client → login with a test Google account links an existing user only | existing | Google | D8 | A |
-| AUTH-6 | **Migrated users can log in** | BLOCKED | Per D1 (hash import tooling and/or reset flow) → a migrated test user signs in on DEV | import + login tests | DEV | **D1**, D8 | 0/137 hashes on DEV |
+| AUTH-6 | **Migrated users can log in** | BLOCKED | Per D1 (hash import tooling and/or reset flow) → a migrated test user signs in on DEV | import + login tests | DEV | **D1**, D8 | 0/137 hashes on DEV; phase 1 read-only Supabase report (`database/etl/auth_readonly_report.py`, aggregate counts only) built, not yet run |
 | AUTH-7 | Terms gate | TESTED | – | dashboard tests | – | – | A |
 | AUTH-8 | Admin user / invite management | TESTED | – | admin tests | – | – | A |
 | AUTH-9 | Admin email change | BLOCKED | Admin-only endpoint; unique email; revokes the user's sessions; audit event | unit + PostgreSQL | – | D11 | – |
