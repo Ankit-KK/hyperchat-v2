@@ -122,6 +122,20 @@ def check_session(conn: psycopg.Connection, table: tuple[str, str], columns: dic
     schema, name = table
     if conn.execute("SELECT current_setting('transaction_read_only')").fetchone()[0] != "on":
         raise Refused(f"{label}: the transaction is not read-only")
+    check_columns(conn, table, columns, label)
+    writable = conn.execute(
+        "SELECT r.rolsuper OR has_table_privilege(%s, 'INSERT, UPDATE, DELETE, TRUNCATE') "
+        "FROM pg_roles r WHERE r.rolname = current_user", (f"{schema}.{name}",)).fetchone()[0]
+    if writable and not accept_writable_role:
+        raise Refused(f"{label}: this role can write to {schema}.{name}; use a read-only role "
+                      f"(or pass --accept-writable-{label}-role to rely on the read-only transaction alone)")
+    if writable:
+        print(f"note: the {label} role can write; relying on the READ ONLY transaction", file=sys.stderr)
+
+
+def check_columns(conn: psycopg.Connection, table: tuple[str, str], columns: dict[str, set[str]], label: str) -> None:
+    """Fail closed unless every expected column exists with an expected type and is readable by this role."""
+    schema, name = table
     # pg_catalog, not information_schema: the latter hides columns the role cannot read.
     found = dict(conn.execute(
         "SELECT a.attname, t.typname FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
@@ -134,14 +148,6 @@ def check_session(conn: psycopg.Connection, table: tuple[str, str], columns: dic
         if not conn.execute("SELECT has_column_privilege(%s, %s, 'SELECT')",
                             (f"{schema}.{name}", column)).fetchone()[0]:
             raise Refused(f"{label}: no SELECT privilege on {schema}.{name}.{column}")
-    writable = conn.execute(
-        "SELECT r.rolsuper OR has_table_privilege(%s, 'INSERT, UPDATE, DELETE, TRUNCATE') "
-        "FROM pg_roles r WHERE r.rolname = current_user", (f"{schema}.{name}",)).fetchone()[0]
-    if writable and not accept_writable_role:
-        raise Refused(f"{label}: this role can write to {schema}.{name}; use a read-only role "
-                      f"(or pass --accept-writable-{label}-role to rely on the read-only transaction alone)")
-    if writable:
-        print(f"note: the {label} role can write; relying on the READ ONLY transaction", file=sys.stderr)
 
 
 def read_accounts(conn: psycopg.Connection, query: str) -> list[Account]:
@@ -161,8 +167,8 @@ def report(source: psycopg.Connection, target: psycopg.Connection, *, accept_wri
         target.rollback()
 
 
-def open_readonly(**params) -> psycopg.Connection:
-    conn = psycopg.connect(**params, application_name="hyperchat-auth-readonly-report", connect_timeout=15)
+def open_readonly(application_name: str = "hyperchat-auth-readonly-report", **params) -> psycopg.Connection:
+    conn = psycopg.connect(**params, application_name=application_name, connect_timeout=15)
     conn.read_only = True  # every transaction starts as BEGIN READ ONLY
     conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ  # one consistent snapshot per database
     return conn
@@ -187,13 +193,13 @@ def source_params() -> dict:
             "sslmode": "verify-full", "sslrootcert": str(ca)}
 
 
-def target_params() -> dict:
+def target_params(role: str = "hyperchat_readonly", dbname: str | None = "hyperchat_dev") -> dict:
     """HyperChat V2 on the same VPS: Unix socket or loopback only, so no credentials cross the network."""
     host = _ask("Target host or socket directory", "/var/run/postgresql")
     if not (host.startswith("/") or host in ("127.0.0.1", "localhost", "::1")):
         raise Refused("the target must be a local socket directory or loopback address")
-    params = {"host": host, "port": int(_ask("Target port", "5433")), "dbname": _ask("Target database", "hyperchat_dev"),
-              "user": _ask("Target role", "hyperchat_readonly")}
+    params = {"host": host, "port": int(_ask("Target port", "5433")), "dbname": _ask("Target database", dbname),
+              "user": _ask("Target role", role)}
     password = getpass.getpass("Target password (not echoed; empty = peer auth / .pgpass): ")
     return params | ({"password": password} if password else {})
 
