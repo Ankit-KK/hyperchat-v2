@@ -293,3 +293,118 @@ def test_a_failing_session_insert_leaves_no_trace(auth, monkeypatch, existing):
     assert not consumed(token)
     user_id, password_hash, live = user_state(email)
     assert (user_id is not None) == existing and password_hash is None and live == 0
+
+
+# ── deactivated accounts: refused under the row lock, nothing changed ───────
+
+
+def account_snapshot(user_id: str) -> tuple:
+    """(password_hash, is_active, open reset links, live sessions, password_changed_at, email_verified_at)."""
+    with db() as conn:
+        return conn.execute("""
+            SELECT u.password_hash, u.is_active,
+                   (SELECT count(*) FROM public.password_reset_tokens t WHERE t.user_id = u.id AND t.used_at IS NULL),
+                   (SELECT count(*) FROM public.sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL),
+                   u.password_changed_at, u.email_verified_at
+            FROM public.users u WHERE u.id = %s""", (user_id,)).fetchone()
+
+
+def test_an_invite_for_a_deactivated_password_less_account_is_refused_and_changes_nothing(auth):
+    from app.auth.service import AuthError
+
+    email = "inv-off-a" + DOMAIN
+    user_id = make_user(email, password=None, is_active=False)
+
+    async def scenario():
+        await reset_link(auth, user_id)  # an open link must survive the refused acceptance untouched
+        token = await invite(auth, email)
+        before = account_snapshot(user_id)
+        with pytest.raises(AuthError) as refused:
+            await accept(auth, token)
+        return token, before, refused.value
+    token, before, refused = asyncio.run(scenario())
+    assert (refused.status, refused.reason, refused.error) == (403, "account_disabled", "This account is disabled")
+    assert not consumed(token)
+    assert account_snapshot(user_id) == before == (None, False, 1, 0, None, None)
+
+
+def test_an_invite_for_a_deactivated_account_with_a_password_still_answers_account_exists(auth):
+    """Unchanged: an account that has a password answers 409 whether or not it is active."""
+    from app.auth.service import AuthError
+
+    email = "inv-off-b" + DOMAIN
+    user_id = make_user(email, is_active=False)
+
+    async def scenario():
+        token = await invite(auth, email)
+        with pytest.raises(AuthError) as refused:
+            await accept(auth, token)
+        return token, refused.value
+    token, refused = asyncio.run(scenario())
+    assert (refused.status, refused.reason) == (409, "account_exists")
+    assert not consumed(token) and account_snapshot(user_id)[1] is False
+
+
+def test_an_acceptance_waiting_on_an_open_deactivation_is_refused_and_changes_nothing(auth):
+    """A deactivation transaction holds the password-less account's row (is_active false, links burned, sessions
+    revoked; uncommitted). The acceptance must wait for the row; once the deactivation commits it is refused (403)
+    and changes nothing: an earlier, unlocked status check would have let it through."""
+    from app.auth.service import AuthError
+
+    email = "inv-off-c" + DOMAIN
+    user_id = make_user(email, password=None)
+
+    async def scenario():
+        token = await invite(auth, email)
+        deactivate = held([
+            ("SELECT 1 FROM public.users WHERE id = %s FOR UPDATE", (user_id,)),
+            ("UPDATE public.users SET is_active = false WHERE id = %s", (user_id,)),
+            ("UPDATE public.password_reset_tokens SET used_at = now() WHERE user_id = %s AND used_at IS NULL",
+             (user_id,)),
+            ("UPDATE public.sessions SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL", (user_id,)),
+        ])
+        try:
+            accepting = asyncio.create_task(accept(auth, token))
+            assert await asyncio.to_thread(waiting_on_lock, "INSERT INTO public.users")
+            await finish(deactivate, commit=True)
+        finally:
+            await finish(deactivate, commit=False)
+        with pytest.raises(AuthError) as refused:
+            await accepting
+        return token, refused.value
+    token, refused = asyncio.run(scenario())
+    assert (refused.status, refused.reason) == (403, "account_disabled")
+    assert not consumed(token)
+    assert account_snapshot(user_id)[:4] == (None, False, 0, 0)
+
+
+def test_a_deactivation_arriving_during_an_acceptance_waits_then_revokes_its_session(auth):
+    """The acceptance holds the account row (its link burn is blocked by a held link row) when an admin deactivates
+    the account (real code path): the deactivation waits, then revokes the invite's session. Nothing survives."""
+    from app.admin.repository import AdminRepository
+    from app.cli import connection_factory
+    from app.core.config import Settings
+
+    email = "inv-off-d" + DOMAIN
+    user_id = make_user(email, password=None)
+    admin_repo = AdminRepository(connection_factory(Settings()))
+
+    async def scenario():
+        await reset_link(auth, user_id)
+        token = await invite(auth, email)
+        blocker = held([("SELECT 1 FROM public.password_reset_tokens WHERE user_id = %s FOR UPDATE", (user_id,))])
+        try:
+            accepting = asyncio.create_task(accept(auth, token))
+            assert await asyncio.to_thread(waiting_on_lock, "UPDATE public.password_reset_tokens")
+            deactivating = asyncio.create_task(admin_repo.update_user(user_id, {"is_active": False}))
+            assert await asyncio.to_thread(waiting_on_lock, "AS can_sign_in FROM public.users u")
+            await finish(blocker, commit=False)
+        finally:
+            await finish(blocker, commit=False)
+        _, issued = await accepting
+        _, changed, revoked = await deactivating
+        return token, issued, changed, revoked, await auth.resolve(issued.token)
+    token, issued, changed, revoked, session = asyncio.run(scenario())
+    assert consumed(token) and changed == ["is_active"] and revoked == 1 and session is None
+    password_hash, active, links, live = account_snapshot(user_id)[:4]
+    assert verify_password(NEW, password_hash) and active is False and links == 0 and live == 0
