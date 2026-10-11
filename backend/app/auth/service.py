@@ -167,22 +167,35 @@ class AuthService:
         return await self.repo.revoke_all_sessions(user.id)
 
     # ── password reset / change ────────────────────────────────────────────
-    async def request_reset(self, email: str, ip: str | None) -> None:
-        """Always succeeds from the caller's point of view (no account enumeration)."""
+    async def request_reset(self, email: str, ip: str | None, defer) -> None:
+        """Always succeeds from the caller's point of view (no account enumeration). Security audit F11: the
+        response path only applies the rate limits, which are the same for every email; the account lookup, the
+        token and the email happen in `defer` (the route's BackgroundTasks.add_task), after the response is sent,
+        so the response time no longer depends on whether the account exists."""
         email = (email or "").strip()
         if not await self.repo.hit_rate_limit(f"ip:{ip}", "auth:reset", 10, 3600):
             raise AuthError(429, TOO_MANY, "ip_rate_limited")
         if not email or not await self.repo.hit_rate_limit(f"email:{sha256_hex(email.lower())}",
                                                            "auth:reset", 3, 3600):
             return
-        user = await self.repo.user_by_email(email)
-        if not user or not user.is_active:
-            return
-        token = new_hex_token(32)
-        await self.repo.create_reset_token(user.id, sha256_hex(token), self.settings.reset_token_ttl_minutes)
-        url = f"{self.settings.frontend_url.rstrip('/')}/reset-password?token={token}"
-        await self.sender.send(render("reset-password", user.email, url))
-        security_event("password_reset_requested", level=20, user_id=user.id, client_ip=ip)
+        defer(self.send_reset_link, email, ip)
+
+    async def send_reset_link(self, email: str, ip: str | None) -> None:
+        """After the response: create the token and send the link to an existing active account. Never raises (there
+        is no caller left to tell); a failure is logged without the email address, token or link."""
+        user = None
+        try:
+            user = await self.repo.user_by_email(email)
+            if not user or not user.is_active:
+                return
+            token = new_hex_token(32)
+            await self.repo.create_reset_token(user.id, sha256_hex(token), self.settings.reset_token_ttl_minutes)
+            url = f"{self.settings.frontend_url.rstrip('/')}/reset-password?token={token}"
+            await self.sender.send(render("reset-password", user.email, url))
+            security_event("password_reset_requested", level=20, user_id=user.id, client_ip=ip)
+        except Exception as exc:  # noqa: BLE001 - background work: log and stop, never propagate
+            security_event("password_reset_email_failed", level=40, reason=type(exc).__name__,
+                           user_id=user.id if user else None, client_ip=ip)
 
     async def reset_password(self, token: str, new_password: str, ip: str | None) -> None:
         self._check_new_password(new_password)

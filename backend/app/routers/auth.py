@@ -2,7 +2,7 @@
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -92,8 +92,9 @@ async def logout_all(request: Request, response: Response, current: CurrentUser 
 
 
 @router.post("/password/forgot", status_code=202)
-async def forgot(body: EmailIn, request: Request) -> dict:
-    await auth_service(request).request_reset(body.email, client_ip(request))
+async def forgot(body: EmailIn, request: Request, background: BackgroundTasks) -> dict:
+    # The reset email (and the account lookup behind it) runs after this response is sent (security audit F11).
+    await auth_service(request).request_reset(body.email, client_ip(request), background.add_task)
     return {"message": "If an account exists for this email, a reset link has been sent."}
 
 

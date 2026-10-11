@@ -18,7 +18,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P1**: fix before production traffic | **1** | F1 (merged in #24, `aa76d78`; not deployed) |
 | **P2**: fix before launch | **3** | F2 (merged in #29, `1c018a7`; not deployed), F3 (merged in #25, `dc4c7d8`; policy approved 2026-10-11; not deployed), F4 |
 | **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; merged in #30, `4a30786`; not deployed) |
-| **P3** (found after the first round) | **2** | F10 (reset links outlived a password change; PR #31, not merged / deployed), F11 (forgot-password timing; open, fix before enabling email) |
+| **P3** (found after the first round) | **2** | F10 (reset links outlived a password change; merged in #31, `3b834d8`, not deployed), F11 (forgot-password timing; fixed in PR #32, not merged / deployed) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
@@ -256,7 +256,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Password change:** someone sees a reset link (a forwarded email, a shared inbox, brief mailbox access). The owner notices and changes the password. The old link still worked for up to 60 minutes and took the account over.
   - **Deactivation:** a link issued before an admin deactivated an account could still set its password, which then worked once the account was reactivated.
 - **Severity: P3.** The impact is account takeover, but it requires an unexpired reset link: the 60-minute TTL, single use, and stored only as a hash.
-- **Status: implemented in PR #31 (branch `security-f10-reset-token-lifecycle`); not merged, not deployed.** No policy decision needed; standard practice.
+- **Status: merged in #31 (`3b834d8`); not deployed.** No policy decision needed; standard practice.
   - **Burned whenever a password is set or the account is deactivated:** `AuthRepository.reset_password`, `AuthRepository.change_password`, `accept_invite`, `AdminRepository.bootstrap_admin` and `AdminRepository.update_user` (deactivation) burn every open reset token of the user **in the same transaction** (`burn_reset_tokens`).
   - **Active accounts only:** `AuthRepository.reset_password` redeems a token only for an **active** account; a deactivated account's link gets the generic "invalid or expired" answer.
   - **Unchanged:** a link requested after the change works; reset is still single use and still revokes all sessions.
@@ -299,14 +299,28 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Google sign-in session (follow-up):** a Google sign-in still creates its session outside the user-row lock (`AuthService.issue_session`), so a Google sign-in racing a password reset can keep its session. Google session creation is **not** serialized with resets or changes. It is not authenticated by the old password, and no DEV account has a Google identity today.
   - **Links in the URL:** reset links still travel in the URL query (F4, frontend).
 
-### F11 (P3, open): the forgot-password endpoint answers faster for unknown emails
+### F11 (P3, fixed in the repository): the forgot-password endpoint answered faster for unknown emails
 - **Evidence:**
   - `AuthService.request_reset` returns at once for an unknown or inactive email.
   - For an existing active account it first inserts a token and **awaits the email send** (`self.sender.send`, an HTTPS call to Resend when email is enabled).
   - The response is the same 202, but the latency differs.
 - **Impact:** once email delivery is enabled (D8), the response time can reveal which emails have accounts. The per-email (3 per hour) and per-IP (10 per hour) limits slow but don't stop this. Email is `disabled` on DEV and production today, so it's **not exploitable yet**.
-- **Proposed fix:** send the email after the response (e.g. FastAPI `BackgroundTasks`), so both paths return after the same work. Delivery failures are already invisible to the client.
-- **Status:** recorded, not implemented. Fix before enabling email delivery.
+- **Fix (PR #32, not merged / deployed):**
+  - `POST /auth/password/forgot` now does only the per-IP and per-email rate limits before answering. That work is the same for every email.
+  - The account lookup, the reset token and the email run in `AuthService.send_reset_link`, scheduled with FastAPI `BackgroundTasks`. Starlette runs it **after the response body has been sent**, inside the API process (not a separate worker or queue). No new dependency.
+  - **Unchanged:** the 202 and its body, the 429 over the per-IP limit, the per-email limit (silently no link), token hashing, 60-minute expiry, single use, and the `password_reset_requested` event (now logged when the link was actually sent).
+  - **Failures:** an exception while looking up the account, storing the token or sending is caught and logged as `password_reset_email_failed` (level ERROR, exception class name, user id, client IP). The email address, token, link and exception message are never logged; the caller already had its 202.
+- **Tests** (`tests/auth/test_forgot_password.py`):
+  - unknown, inactive and active accounts get the same status and body; only the active one gets a link;
+  - **response before delivery:** the ASGI app is driven directly on the test client's event loop with a sender that blocks; the complete 202 body is sent while the sender is still blocked (no timing thresholds);
+  - the per-email and per-IP limits, single use and token storage still hold;
+  - a failing sender: same 202 and body, one ERROR event, no email address, token or exception text in the logs;
+  - a successful request logs the event but never the token or the email address.
+- **Regression proof:** the response-before-delivery and failing-sender tests **fail** against the previous code.
+- **Limitations:**
+  - **Not a durable queue:** the task lives only in the API process's memory. A link whose send fails, or whose process is stopped or restarted before the task finishes, is never sent; the user asks again. The unused token row expires normally.
+  - **Rate-limit path:** the per-email limit row is still written for every email (the same work), and over the per-IP limit every email gets the same 429.
+  - **No global concurrency cap:** the per-IP (10/h) and per-email (3/h) limits apply per key, so requests from many IP addresses for many email addresses each start their own task; nothing in the code caps the total number of tasks in flight. A slow email provider can leave many tasks waiting at once, each bounded only by the sender's httpx timeout (10 s per connect, read or write step, not a total deadline). Only an existing active account reaches the email call (3 sends per account per hour); for other emails the task is one lookup. The request handler did the same work inline before this fix, so the load is not new, but it no longer holds the request open. A global cap would be a separate change.
 
 ## Verified controls
 
@@ -427,7 +441,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 2. **F3** (P2): limit current-password checks: **merged in #25** (`dc4c7d8`; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
 3. **F2** (P2): **merged in #29** (`1c018a7`; layered IP and account-at-IP throttling, policy approved 2026-10-11; not deployed).
 3a. **F9** (P1): **merged in #30** (`4a30786`; no hashing over the IP limit; hashing off the event loop; not deployed); must ship together with or before F2.
-3b. **F10** (P3): **implemented in PR #31** (reset links burned whenever a password is set or the account is deactivated; not redeemable for inactive accounts; atomic reset, compare-and-set change, race-safe password sign-in sessions; not merged, not deployed). **F11** (P3): open; send the reset email after the response, before email delivery is enabled.
+3b. **F10** (P3): **merged in #31** (`3b834d8`; reset links burned whenever a password is set or the account is deactivated; not redeemable for inactive accounts; atomic reset, compare-and-set change, race-safe password sign-in sessions; not deployed). **F11** (P3): **fixed in PR #32** (reset email sent after the response via `BackgroundTasks`; failures logged without email or token; not merged, not deployed).
 4. **F6, F5** (P3): production guard for invite links; trim the public health response: **merged in #28** (`ca76614`; not deployed).
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: merged in #27** (`0c6f03b`; `\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.
