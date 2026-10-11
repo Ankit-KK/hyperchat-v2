@@ -9,7 +9,10 @@ creator ownership, activation and email verification stay as they are (email_con
 Without --apply it only reads (READ ONLY transactions on both sides) and prints aggregate counts. --apply also needs a
 typed confirmation, refuses on any blocker (duplicate mappings, unsupported hash formats), re-checks every planned row
 under a row lock and writes all rows in ONE transaction, each conditional on the hash still being empty; any change
-since the plan rolls everything back. Operator guide: database/README.md. Run:  python -m etl.auth_hash_import
+since the plan rolls everything back. --apply also needs --expected-fingerprint from the reviewed dry run and the D1
+source freeze (docs/operations/d1-auth-freeze/) in place: the freeze check, the fingerprint and the hashes are read in ONE
+source snapshot, so what is written is exactly what was reviewed. Operator guide: database/README.md.
+Run:  python -m etl.auth_hash_import
 """
 
 import argparse
@@ -52,6 +55,46 @@ _TARGET_SELECT = (f"SELECT id::text, legacy_supabase_user_id::text, {_DIGEST.for
 
 LOCK_TIMEOUT = "5s"
 
+# ── source freeze and fingerprint (D1 cutover safeguards) ──────────────────
+# The freeze is the trigger in docs/operations/d1-auth-freeze/freeze.sql. It counts as active only if the trigger is
+# enabled ('O' or 'A'), a row-level before trigger on insert, update and delete (tgtype 31) with no column list or
+# WHEN, and calls
+# hyperchat_ops.d1_auth_freeze_guard (plpgsql) whose body hashes to FREEZE_FUNCTION_SHA256 (pinned by a test against
+# freeze.sql). A trigger name alone proves nothing.
+FREEZE_TRIGGER = "hyperchat_d1_auth_freeze"
+FREEZE_FUNCTION = ("hyperchat_ops", "d1_auth_freeze_guard", "plpgsql")
+FREEZE_FUNCTION_SHA256 = "243e5a50f507b66ece282566ff76419e9c99963a841a09faa0b9003be0e0d760"
+FREEZE_TGTYPE = 1 | 2 | 4 | 8 | 16  # row | before | insert | delete | update
+FREEZE_SQL = """
+    SELECT t.tgenabled::text, t.tgtype::int, t.tgattr::text, t.tgqual IS NOT NULL, pn.nspname::text, p.proname::text,
+           l.lanname::text, encode(sha256(convert_to(replace(p.prosrc, chr(13), ''), 'UTF8')), 'hex')
+    FROM pg_catalog.pg_trigger t
+    JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+    JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+    JOIN pg_catalog.pg_language l ON l.oid = p.prolang
+    WHERE n.nspname = 'auth' AND c.relname = 'users' AND t.tgname = %s AND NOT t.tgisinternal
+"""
+
+# The fingerprint covers exactly what decides matching and eligibility: id, the exact email, the password hash (empty
+# = none, as above), and the deleted / banned flags as the importer evaluates them. One row per account in id order,
+# each field length-prefixed ("<chars>:<value>|", "-|" for NULL), so no two different sets serialize alike. Computed
+# inside PostgreSQL, so no hash leaves the server for it; email_confirmed_at is only counted, so it is not included.
+FINGERPRINT_VERSION = "hyperchat-d1-source-v1"
+
+
+def _field(expr: str) -> str:
+    return f"coalesce(length({expr})::text || ':' || {expr}, '-') || '|'"
+
+
+FINGERPRINT_SQL = (
+    "SELECT encode(sha256(convert_to(%s || E'\\n' || coalesce(string_agg("
+    + " || ".join([_field("id::text"), _field("email::text"), _field("nullif(encrypted_password, '')"),
+                   "CASE WHEN deleted_at IS NOT NULL THEN 'd1|' ELSE 'd0|' END",
+                   "CASE WHEN coalesce(banned_until > now(), false) THEN 'b1' ELSE 'b0' END"])
+    + " || E'\\n', '' ORDER BY id), ''), 'UTF8')), 'hex') FROM auth.users")
+
 # Exclusion reasons, in the order they are tested; each target row with a legacy id gets exactly one outcome.
 EXCLUSIONS = ("target_legacy_id_not_in_source", "target_email_used_by_other_source_id", "id_match_email_mismatch",
               "source_deleted", "source_banned", "target_already_has_password", "source_without_password",
@@ -91,6 +134,8 @@ class Update:
 class Plan:
     counts: dict[str, int]
     updates: list[Update] = field(repr=False)
+    fingerprint: str = ""  # of the source snapshot the updates were read from (read_plan)
+    freeze_problem: str | None = "not checked"  # None = the freeze is active on the source
 
     @property
     def blocked(self) -> list[str]:
@@ -209,17 +254,64 @@ def connect_source(params: dict) -> psycopg.Connection:
     return conn
 
 
+def freeze_problem(conn: psycopg.Connection) -> str | None:
+    """None when the freeze trigger is in place exactly as reviewed; otherwise why not (safe to print)."""
+    rows = conn.execute(FREEZE_SQL, (FREEZE_TRIGGER,)).fetchall()
+    if not rows:
+        return f"the trigger {FREEZE_TRIGGER} is missing on auth.users (run freeze.sql)"
+    enabled, tgtype, columns, has_when, schema, name, language, body_sha256 = rows[0]
+    if enabled not in ("O", "A"):
+        return f"the trigger {FREEZE_TRIGGER} is not enabled (tgenabled={enabled!r}; 'D' disabled, 'R' replica only)"
+    if tgtype != FREEZE_TGTYPE or columns.strip() or has_when:
+        return (f"the trigger {FREEZE_TRIGGER} is malformed: it must fire before every insert, update and delete, for "
+                "each row, without a column list or WHEN condition")
+    if (schema, name, language) != FREEZE_FUNCTION:
+        return f"the trigger {FREEZE_TRIGGER} calls {schema}.{name} ({language}), not hyperchat_ops.d1_auth_freeze_guard"
+    if body_sha256 != FREEZE_FUNCTION_SHA256:
+        return "the freeze function's body differs from the reviewed freeze.sql"
+    return None
+
+
+def source_fingerprint(conn: psycopg.Connection) -> str:
+    return conn.execute(FINGERPRINT_SQL, (FINGERPRINT_VERSION,)).fetchone()[0]
+
+
 def read_plan(src: psycopg.Connection, tgt: psycopg.Connection, accept_writable_source_role: bool) -> Plan:
+    """The freeze check, the fingerprint and the hashes come from ONE source transaction (REPEATABLE READ, see
+    open_readonly): the fingerprint describes exactly the rows this plan would import, so comparing it with the reviewed
+    dry run's leaves no window between the check and the data used."""
     try:
         check_session(src, SOURCE_TABLE, SOURCE_COLUMNS, "source", accept_writable_source_role)
+        problem = freeze_problem(src)
+        fingerprint = source_fingerprint(src)
         sources = read_sources(src)
     finally:
         src.rollback()
     try:
         check_columns(tgt, TARGET_TABLE, TARGET_COLUMNS, "target")
-        return plan(sources, read_targets(tgt))
+        p = plan(sources, read_targets(tgt))
     finally:
         tgt.rollback()
+    p.fingerprint, p.freeze_problem = fingerprint, problem
+    return p
+
+
+def check_apply_guard(p: Plan, expected_fingerprint: str | None) -> None:
+    """--apply only for the exact source set that was reviewed, and only while the freeze holds it still."""
+    if not expected_fingerprint:
+        raise Refused("--apply needs --expected-fingerprint (the source_fingerprint of the reviewed dry run)")
+    if p.freeze_problem:
+        raise Refused(f"the source freeze is not active: {p.freeze_problem}; nothing was written")
+    if p.fingerprint != expected_fingerprint:
+        raise Refused("the source fingerprint differs from the reviewed dry run: the source changed since it was "
+                      "reviewed; run the report and the dry run again; nothing was written")
+
+
+def _fingerprint_arg(value: str) -> str:
+    value = value.strip().lower()
+    if len(value) != 64 or not all(ch in "0123456789abcdef" for ch in value):
+        raise argparse.ArgumentTypeError("a SHA-256 hex digest (64 hex characters) is required")
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -232,11 +324,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="permit --apply into hyperchat_dev (real hashes stay out of DEV without separate approval)")
     ap.add_argument("--accept-writable-source-role", action="store_true",
                     help="allow a source role that has write privileges (the source transaction is still READ ONLY)")
+    ap.add_argument("--expected-fingerprint", type=_fingerprint_arg, metavar="SHA256",
+                    help="with --apply: the source_fingerprint printed by the reviewed dry run (required)")
     args = ap.parse_args(argv)
     print("APPLY: hashes will be written after confirmation." if args.apply
           else "DRY RUN: nothing will be written.", file=sys.stderr)
     p = None
     try:
+        if args.apply and not args.expected_fingerprint:
+            raise Refused("--apply needs --expected-fingerprint (the source_fingerprint of the reviewed dry run)")
         source = source_params()
         target = target_params(role="hyperchat_app" if args.apply else "hyperchat_readonly",
                                dbname=None if args.apply else "hyperchat_dev")
@@ -247,11 +343,15 @@ def main(argv: list[str] | None = None) -> int:
                 tgt.read_only = not args.apply
                 p = read_plan(src, tgt, args.accept_writable_source_role)
                 print(render(p.counts, "PLAN (aggregate counts only)"))
+                print(f"source_fingerprint  {p.fingerprint}")
+                print("source_freeze       " + ("active" if p.freeze_problem is None
+                                                else f"NOT ACTIVE: {p.freeze_problem}"))
                 if not args.apply:
                     print("dry run: nothing was written", file=sys.stderr)
                     return 0
                 if p.blocked:
                     raise Refused(f"blocked by {', '.join(p.blocked)}; nothing was written")
+                check_apply_guard(p, args.expected_fingerprint)
                 if not p.updates:
                     print("nothing to import", file=sys.stderr)
                     return 0

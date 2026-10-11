@@ -146,6 +146,14 @@ their passwords. **Dry run by default.** Nothing is ever written to a file, log 
 - `--apply` refuses on any blocker: duplicate ids on either side, or **any** unsupported hash format among otherwise
   eligible rows.
 
+**Freeze and fingerprint guard:** the dry run also prints `source_fingerprint` (SHA-256 over every source account's
+id, email, password hash and deleted / banned state, computed inside PostgreSQL) and `source_freeze` (whether the D1
+freeze trigger from `docs/operations/d1-auth-freeze/` is in place exactly as reviewed). `--apply` additionally needs
+`--expected-fingerprint <the reviewed value>` and refuses, before the confirmation prompt, when the freeze is missing,
+disabled or malformed or when the fingerprint differs. The freeze check, the fingerprint and the hashes come from one
+source snapshot, so a matching fingerprint proves exactly what will be written. The freeze SQL is **proposed and not
+yet rehearsed** against GoTrue; see that folder's README for the procedure and the rehearsal.
+
 **How `--apply` writes:** after the plan it asks you to type `IMPORT <n> HASHES INTO <database>`. Then, in **one
 transaction**, it locks the planned `users` rows (5 s lock timeout), re-checks each is unchanged (same legacy id,
 same email, still no hash) and updates each with `WHERE ... AND coalesce(password_hash, '') = ''`. Any difference,
