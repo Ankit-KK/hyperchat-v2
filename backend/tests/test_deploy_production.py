@@ -77,6 +77,19 @@ def test_ports_and_workers():
     assert "--host 127.0.0.1 --port 8000 --workers 2" in dev and "8001" not in dev
 
 
+def test_reset_email_work_is_bounded_for_the_deployed_topology():
+    """Security audit F11 follow-up: the reset-email cap is per process, so it is only a bound because the worker count
+    is fixed here. Raising --workers or the cap must be a reviewed change (this test fails), and each send's deadline
+    must end before systemd kills the process on a restart."""
+    from app.auth import service
+
+    for rel in ("systemd/hyperchat-api.service", "systemd/hyperchat-prod-api.service"):
+        u = unit(rel)
+        workers = int(re.search(r"--workers (\d+)", u["ExecStart"]).group(1))
+        assert workers * service.RESET_EMAIL_SLOTS <= 8, rel  # at most 8 reset emails in flight per environment
+        assert service.RESET_EMAIL_DEADLINE_SECONDS < int(u["TimeoutStopSec"]), rel
+
+
 def test_cleanup_timer_is_separate():
     prod, dev = read("systemd/hyperchat-prod-cleanup.timer"), read("systemd/hyperchat-cleanup.timer")
     assert "OnCalendar=*-*-* 03:45:00 UTC" in prod and "OnCalendar=*-*-* 03:15:00 UTC" in dev
