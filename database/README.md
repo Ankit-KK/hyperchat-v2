@@ -116,9 +116,9 @@ eligible hashes at the production cutover with this tool and its safeguards; nev
 legacy confirmation fields are not mapped to `email_verified_at`. That is policy only: running the tool against real
 data still needs explicit operator approval at the cutover, after the open details below are settled.
 
-**Open before the cutover:** how each exclusion category regains access (reset or Google only where configured and
-live-verified; never by importing on email alone or changing ownership); the exact cutoff at which legacy password
-changes stop relative to the final snapshot and the import, so no change is silently lost.
+**Exclusion policy approved by the owner on 2026-10-12 (policy only; execution pending):** keep email mismatches excluded until identity is manually reconciled; do not import for V2 IDs missing in Supabase; block V2 emails that match a different Supabase ID pending manual review; do not create V2 accounts automatically for source-only Supabase IDs; leave deleted/banned accounts and accounts with existing hashes, missing hashes or unsupported formats excluded under importer rules. Never import by email alone or change account ownership. Reset or Google recovery is allowed only after identity is resolved and the specific flow has been configured and live-verified; otherwise keep the account on hold for separate resolution. Account-specific conflicts and recovery paths remain to be resolved before cutover.
+
+**Still open before the cutover:** the exact cutoff at which legacy password changes stop relative to the final snapshot and import, so no change is silently lost. The cutover still requires a fresh read-only report, reviewed dry run and all exclusion counts, explicit operator approval before production `--apply`, and post-import reconciliation.
 
 `etl/auth_hash_import.py` copies Supabase bcrypt hashes into `public.users.password_hash` so migrated users keep
 their passwords. **Dry run by default.** Nothing is ever written to a file, log or the terminal except counts.
