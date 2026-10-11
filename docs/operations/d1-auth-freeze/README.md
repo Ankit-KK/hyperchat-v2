@@ -44,19 +44,37 @@ on the source database:
 Every failure prints why (`missing`, `not enabled ('D')`, `malformed`, `calls <other function>`, `body differs`) and
 stops `--apply` before anything is written. `verify.sql` shows the same facts to the operator.
 
-## Fingerprint and the time-of-check problem
+## Fingerprint, snapshots and what each check can see
 The dry run prints `source_fingerprint`: SHA-256, computed **inside PostgreSQL**, over every `auth.users` row in `id`
 order, serialized as `"<chars>:<value>|"` per field (`"-|"` for NULL) for `id`, exact `email`, the password hash
 (empty = none), then `d0|`/`d1|` (deleted) and `b0`/`b1` (banned now), one row per line, prefixed with
 `hyperchat-d1-source-v1`. No hash leaves the server to compute it. `email_confirmed_at` is only counted by the
 importer, so it is not part of it.
 
-`--apply` requires `--expected-fingerprint <the reviewed value>`. In the same run, the freeze check, the fingerprint
-and the hashes to import are all read in **one REPEATABLE READ snapshot** of the source, so a matching fingerprint
-proves that the hashes being written are exactly the reviewed set (a test commits a change between the fingerprint
-query and the hash read: the run still uses the snapshot's values). Changes after that snapshot cannot affect what is
-written; they would only be lost updates in legacy, which is what the freeze prevents. Keep the freeze on until users
-are switched to V2.
+`--apply` requires `--expected-fingerprint <the reviewed value>` and then looks at the source **three times**, each in
+its own transaction:
+
+1. **Plan snapshot** (REPEATABLE READ): freeze check, fingerprint and the hashes to import, all from one snapshot, so
+   the hashes are exactly the fingerprinted rows. This snapshot **cannot see anything committed after it began**: a
+   change made later (including by someone bypassing the freeze) leaves this fingerprint, and the plan's hashes,
+   unchanged. That is why the next two checks exist.
+2. **Pre-commit re-check:** after the target rows are written and **before the target transaction commits**, a fresh
+   source transaction re-runs the freeze check and the fingerprint. Any difference (data changed, freeze dropped,
+   disabled or altered) raises, the target transaction rolls back, and nothing is written. This covers the whole time
+   spent at the confirmation prompt and writing.
+3. **Post-commit check:** right after the commit, a fresh check again. It covers the remaining instant between check 2
+   and the target COMMIT, which a read-only source connection cannot close. If it finds a difference, the import has
+   already committed with the reviewed hashes: the run prints `ALERT` and exits **4**; follow the abort rules.
+
+| Source change | When | Outcome |
+|---|---|---|
+| Any change to a fingerprinted field | before the dry run that was reviewed | part of the reviewed fingerprint |
+| Same | between that review and the start of the `--apply` run | **detected**: plan fingerprint differs, refused before the prompt |
+| Same, or the freeze dropped / disabled / changed | during the `--apply` run, after its plan snapshot, until check 2 | **detected** by check 2 (fresh snapshot): refused, nothing written |
+| Same | in the instant between check 2 and the target COMMIT | **not prevented**; **detected** by check 3: exit 4, rollback needed |
+| Same | after check 3, until users are switched to V2 | **prevented** only by the active freeze; a privileged bypass is not detected unless a later fresh dry run is compared (procedure step 10) |
+| A privileged change that restores the identical values | any time | harmless to the import (same fingerprint) |
+| Non-fingerprinted columns (sign-in times, tokens, `email_confirmed_at`, ...) | any time | not checked, by design: they don't affect the import |
 
 A ban that expires on its own between the dry run and `--apply` flips `b1` to `b0`, changes the fingerprint and makes
 `--apply` refuse: re-run the report and the dry run.
@@ -73,13 +91,21 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
 6. Fresh read-only report (`etl.auth_readonly_report`), then the importer dry run: it must print
    `source_freeze active`. Record `source_fingerprint`; review every exclusion count.
 7. Owner approval for production `--apply`.
-8. `python -m etl.auth_hash_import --apply --expected-fingerprint <recorded value>`, then the typed phrase.
+8. `python -m etl.auth_hash_import --apply --expected-fingerprint <recorded value>`, then the typed phrase. Exit 0
+   = committed and both later source checks passed; 2 = refused, nothing written; 4 = committed but the source changed
+   at the last instant (abort rules).
 9. Reconciliation: dry run again: `eligible` 0, `target_already_has_password` up by the applied count,
    `source_fingerprint` unchanged, `source_freeze active`; then the read-only report.
-10. Keep the freeze on until users are switched to V2. Run `unfreeze.sql` only per the rules below.
+10. Immediately before switching users to V2, one more dry run: `source_fingerprint` must still equal the recorded
+    value and `source_freeze active`. This is the only check that catches a privileged bypass made after the
+    import committed. If it differs, do not switch: abort rules.
+11. Keep the freeze on until users are switched to V2. Run `unfreeze.sql` only per the rules below.
 
 ## Abort rules
 - **Before `--apply`:** nothing was written to V2. `unfreeze.sql`; legacy continues.
+- **Exit 4, or a later fingerprint mismatch (step 10):** the source changed after the import committed. Keep V2
+  sign-in off and legacy frozen, undo the import with the rollback in `database/README.md`, find out who changed the
+  source and why, then start again from a fresh report and dry run.
 - **After `--apply`, before the switch:** keep the freeze. If legacy must be unfrozen, first undo the import in V2 with
   the rollback in `database/README.md` (clears the imported bcrypt hashes; accounts already upgraded to Argon2id keep
   theirs). The importer never overwrites a target hash, so a later re-import cannot repair hashes made stale by legacy
@@ -87,10 +113,24 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
 - **After the switch:** legacy auth is retired; remove the freeze when Supabase is decommissioned.
 
 ## Limitations (known)
-- **Privileged bypass:** the table owner or a superuser can drop or disable the trigger, `TRUNCATE auth.users` (row
-  triggers don't fire) or, unless the trigger is ENABLE ALWAYS, write with `session_replication_role = replica`. The
-  checks prove the trigger is present and correct at that moment; they cannot prove nobody with those rights bypassed
-  it. The fingerprint comparison still catches any change to the fingerprinted fields between review and `--apply`.
+- **Privileged bypass cannot be prevented, only detected (within limits).** The table owner or a superuser (on
+  Supabase: the dashboard `postgres` role, the SQL editor, anyone with the database password, and the GoTrue service
+  role `supabase_auth_admin`) can drop or disable the trigger, `TRUNCATE auth.users` (row triggers don't fire), or,
+  unless the trigger is ENABLE ALWAYS, write with `session_replication_role = replica`. PostgreSQL gives no way to stop
+  a superuser. What the importer adds: the three source checks above detect such a change up to the target commit
+  (and, with step 10, up to the switch). It cannot detect a change that happens after the last check it runs.
+- **`ENABLE ALWAYS`** only closes the `session_replication_role = replica` path, and only for non-owners; it needs
+  ownership of `auth.users` to set (unverified on Supabase). It does not stop an owner or superuser from disabling
+  or dropping the trigger.
+- **Considered and rejected: holding a source lock through the import.** A `SHARE` lock on `auth.users` would block
+  every bypass that writes, but it needs a source role with write-level table privileges (the importer's source role
+  is read-only by design), it blocks every legacy sign-in (they update `auth.users`) for as long as it is held,
+  including the operator's confirmation time, and a superuser can still end the importer's session.
+- **Required operator controls for the window:** only the named operator holds the legacy database password, the
+  service-role key and dashboard access during the window (others' sessions ended, keys not shared); no other
+  migrations, SQL editor or dashboard user edits; a second person watches the import; the fingerprint is recorded
+  at review, at `--apply` and at step 10; afterwards, check the Supabase logs for `ALTER TABLE` / `DROP TRIGGER` /
+  `TRUNCATE` on `auth.users` during the window.
 - **Unverified on Supabase:** whether the dashboard `postgres` role may create a trigger on `auth.users` today (the
   legacy project has an older `AFTER INSERT` trigger there), and whether `ENABLE ALWAYS` is permitted (needs
   ownership; `auth.users` is owned by `supabase_auth_admin`).

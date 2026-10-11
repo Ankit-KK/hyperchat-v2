@@ -807,3 +807,133 @@ def test_apply_with_the_freeze_and_the_reviewed_fingerprint_imports(loaded, monk
     _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
     assert imp.main(["--apply", "--expected-fingerprint", reviewed.upper()]) == 0  # case-insensitive input
     assert all(_rows()[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
+
+
+# ── privileged bypass during the import run (post-#45 audit) ────────────────
+# A superuser (the fixture's admin role) can disable or drop the freeze trigger, write, and put the trigger back, or
+# TRUNCATE the table (no row trigger fires). These tests do exactly that at the real boundaries of a run.
+
+def _bypass_password_change(key: str = "e1") -> None:
+    """A privileged change that leaves the freeze looking intact: disable the trigger, write, enable it again."""
+    with _admin(SRC_DB) as c:
+        c.execute("ALTER TABLE auth.users DISABLE TRIGGER hyperchat_d1_auth_freeze")
+        c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (HASHES["e2"], IDS[key]))
+        c.execute("ALTER TABLE auth.users ENABLE TRIGGER hyperchat_d1_auth_freeze")
+
+
+def _bypass_truncate() -> None:
+    with _admin(SRC_DB) as c:
+        c.execute("TRUNCATE auth.users")
+
+
+def _bypass_drop_trigger() -> None:
+    with _admin(SRC_DB) as c:
+        c.execute("DROP TRIGGER hyperchat_d1_auth_freeze ON auth.users")
+
+
+def _reviewed_and_frozen(monkeypatch, capsys) -> str:
+    _run_freeze_sql("freeze.sql")
+    _cli(monkeypatch, [], role=VIEWER)
+    assert imp.main([]) == 0
+    return _printed_fingerprint(capsys.readouterr().out)
+
+
+@db_only
+def test_the_plan_snapshot_alone_cannot_see_a_bypass_made_after_it(loaded):
+    """The limitation behind this follow-up, shown with real transactions: a privileged change committed after the
+    plan's snapshot is invisible to it; the plan still carries the old hash and still matches the reviewed
+    fingerprint. Only a fresh snapshot sees the change."""
+    _run_freeze_sql("freeze.sql")
+    reviewed = _fingerprint_now()
+    with _src() as s, _tgt(VIEWER, read_only=True) as t:
+        p = imp.read_plan(s, t, False)
+        _bypass_password_change()
+        assert p.fingerprint == reviewed and p.freeze_problem is None  # the snapshot still looks perfect
+        assert next(u for u in p.updates if u.target_id == _tid("e1")).password_hash == HASHES["e1"]  # old hash
+        assert "changed after the plan" in imp.source_drift(s, reviewed)  # a fresh snapshot sees it
+
+
+@db_only
+@pytest.mark.parametrize("bypass, expected", [
+    (_bypass_password_change, "changed after the plan"),
+    (_bypass_truncate, "changed after the plan"),
+    (_bypass_drop_trigger, "freeze is no longer active"),
+], ids=["disable-write-enable", "truncate", "drop-trigger"])
+def test_a_bypass_during_the_confirmation_prompt_is_refused_and_nothing_is_written(loaded, monkeypatch, capsys,
+                                                                                   bypass, expected):
+    """The bypass happens while the operator is at the confirmation prompt, i.e. after the plan was read and checked,
+    before any target write. The pre-commit re-check in a fresh snapshot must refuse and roll the target back."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    _cli(monkeypatch, [])
+    phrase = f"IMPORT 4 HASHES INTO {TGT_DB}"
+
+    def operator_types_the_phrase(prompt=""):
+        bypass()  # meanwhile, someone with superuser rights changes the source
+        return phrase
+    monkeypatch.setattr("builtins.input", operator_types_the_phrase)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2
+    assert _rows() == before
+    err = capsys.readouterr().err
+    assert expected in err and "nothing was written" in err and HASHES["e2"] not in err
+
+
+@db_only
+def test_a_bypass_after_the_pre_commit_check_is_detected_after_commit(loaded, monkeypatch, capsys):
+    """The remaining window: a change between the pre-commit re-check and the target COMMIT cannot be prevented by a
+    read-only source role. It must not pass silently: the post-commit fresh check alerts (exit 4)."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
+    real = imp.revalidate_source
+
+    def check_then_bypass(src, expected):
+        real(src, expected)  # passes: the source is still as reviewed
+        _bypass_password_change()  # ...and changes right after, before the target commits
+    monkeypatch.setattr(imp, "revalidate_source", check_then_bypass)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 4
+    assert _rows()[_tid("e1")][0] == HASHES["e1"]  # committed with the reviewed (now stale) hash
+    err = capsys.readouterr().err
+    assert "ALERT" in err and "rollback" in err and HASHES["e2"] not in err
+
+
+@db_only
+def test_the_pre_commit_check_does_not_block_sign_ins_or_refuse_unrelated_updates(loaded, monkeypatch, capsys):
+    """During the re-check (target rows locked), a legacy sign-in still updates auth.users without waiting, and an
+    unrelated column change does not count as drift: the import commits and the post-commit check passes."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
+    real = imp.revalidate_source
+
+    def sign_in_meanwhile(src, expected):
+        with _admin(SRC_DB) as c:
+            c.execute("SET lock_timeout = '1s'")
+            assert c.execute("UPDATE auth.users SET last_sign_in_at = now() WHERE id = %s",
+                             (IDS["e3"],)).rowcount == 1  # not blocked, allowed by the freeze
+        real(src, expected)
+    monkeypatch.setattr(imp, "revalidate_source", sign_in_meanwhile)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 0
+    assert all(_rows()[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
+
+
+@db_only
+def test_a_source_failure_during_the_pre_commit_check_writes_nothing(loaded, monkeypatch, capsys):
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
+
+    def connection_lost(src, expected):
+        raise psycopg.OperationalError("synthetic: source connection lost")
+    monkeypatch.setattr(imp, "revalidate_source", connection_lost)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 1
+    assert _rows() == before
+    assert "OperationalError" in capsys.readouterr().err
+
+
+@db_only
+def test_source_drift_is_none_while_the_source_is_unchanged(loaded):
+    _run_freeze_sql("freeze.sql")
+    reviewed = _fingerprint_now()
+    with _src() as s:
+        assert imp.source_drift(s, reviewed) is None
+        assert imp.source_drift(s, reviewed) is None  # repeatable: each call is its own fresh transaction
+        assert "changed" in imp.source_drift(s, "0" * 64)

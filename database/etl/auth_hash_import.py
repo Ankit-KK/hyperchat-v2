@@ -11,7 +11,9 @@ typed confirmation, refuses on any blocker (duplicate mappings, unsupported hash
 under a row lock and writes all rows in ONE transaction, each conditional on the hash still being empty; any change
 since the plan rolls everything back. --apply also needs --expected-fingerprint from the reviewed dry run and the D1
 source freeze (docs/operations/d1-auth-freeze/) in place: the freeze check, the fingerprint and the hashes are read in ONE
-source snapshot, so what is written is exactly what was reviewed. Operator guide: database/README.md.
+source snapshot, and the source is re-checked in a fresh snapshot just before the target commit (drift: rollback) and
+right after it (drift: exit 4). A privileged operator can still bypass the freeze after the last check; see that
+folder's README for the remaining risk and the operator controls. Operator guide: database/README.md.
 Run:  python -m etl.auth_hash_import
 """
 
@@ -217,9 +219,10 @@ def _write(cur: psycopg.Cursor, u: Update) -> int:
     return cur.rowcount
 
 
-def apply(conn: psycopg.Connection, p: Plan) -> int:
+def apply(conn: psycopg.Connection, p: Plan, before_commit=None) -> int:
     """All planned rows in ONE transaction: lock them (users rows, the app's first lock), re-check that each is still
-    exactly as planned, then write each conditionally. Any difference raises and rolls back every row."""
+    exactly as planned, then write each conditionally. Any difference raises and rolls back every row. `before_commit`
+    runs last inside that transaction (main() re-checks the source there); if it raises, nothing is committed."""
     if p.blocked:
         raise Refused(f"blocked by {', '.join(p.blocked)}; nothing was written")
     with conn.transaction(), conn.cursor() as cur:
@@ -236,6 +239,8 @@ def apply(conn: psycopg.Connection, p: Plan) -> int:
         for u in p.updates:
             if _write(cur, u) != 1:
                 raise Refused("target changed while writing; nothing was written")
+        if before_commit:
+            before_commit()
     return len(p.updates)
 
 
@@ -278,8 +283,9 @@ def source_fingerprint(conn: psycopg.Connection) -> str:
 
 def read_plan(src: psycopg.Connection, tgt: psycopg.Connection, accept_writable_source_role: bool) -> Plan:
     """The freeze check, the fingerprint and the hashes come from ONE source transaction (REPEATABLE READ, see
-    open_readonly): the fingerprint describes exactly the rows this plan would import, so comparing it with the reviewed
-    dry run's leaves no window between the check and the data used."""
+    open_readonly): the fingerprint describes exactly the rows this plan would import. That snapshot cannot see changes
+    committed after it began, so main() re-checks the source in fresh snapshots before and after the target commit
+    (source_drift / revalidate_source)."""
     try:
         check_session(src, SOURCE_TABLE, SOURCE_COLUMNS, "source", accept_writable_source_role)
         problem = freeze_problem(src)
@@ -294,6 +300,28 @@ def read_plan(src: psycopg.Connection, tgt: psycopg.Connection, accept_writable_
         tgt.rollback()
     p.fingerprint, p.freeze_problem = fingerprint, problem
     return p
+
+
+def source_drift(src: psycopg.Connection, expected_fingerprint: str) -> str | None:
+    """Look at the source again in a FRESH snapshot (a new read-only transaction on the same connection). The plan's
+    snapshot cannot show changes committed after it began; this can. None = freeze in place and data unchanged."""
+    try:
+        problem = freeze_problem(src)
+        fingerprint = source_fingerprint(src)
+    finally:
+        src.rollback()
+    if problem:
+        return f"the source freeze is no longer active: {problem}"
+    if fingerprint != expected_fingerprint:
+        return "the source changed after the plan was read (a fresh snapshot no longer matches the reviewed fingerprint)"
+    return None
+
+
+def revalidate_source(src: psycopg.Connection, expected_fingerprint: str) -> None:
+    """Called inside the target transaction, after the writes and before COMMIT: any drift aborts everything."""
+    drift = source_drift(src, expected_fingerprint)
+    if drift:
+        raise Refused(f"{drift}; nothing was written")
 
 
 def check_apply_guard(p: Plan, expected_fingerprint: str | None) -> None:
@@ -359,7 +387,15 @@ def main(argv: list[str] | None = None) -> int:
                 if input(f'Type exactly "{phrase}" to write, anything else cancels: ').strip() != phrase:
                     print("cancelled: nothing was written", file=sys.stderr)
                     return 3
-                print(render({"updated": apply(tgt, p)}, "APPLIED (one transaction, committed)"))
+                updated = apply(tgt, p, before_commit=lambda: revalidate_source(src, args.expected_fingerprint))
+                print(render({"updated": updated}, "APPLIED (one transaction, committed)"))
+                # The pre-commit check cannot cover the instant between it and the target COMMIT: look once more.
+                late = source_drift(src, args.expected_fingerprint)
+                if late:
+                    print(f"ALERT: {late} after the import committed. The imported hashes may be stale: keep V2 "
+                          "sign-in off, keep legacy frozen, and follow the abort rules (rollback) before retrying.",
+                          file=sys.stderr)
+                    return 4
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
