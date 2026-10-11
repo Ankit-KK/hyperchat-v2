@@ -3,7 +3,8 @@
 **Scope:** the V2 backend on `main` at `bfb9a1e` (backend completion groups 1–4 merged): every HTTP route, authentication,
 authorization, payments and webhooks, uploads and media, OBS tokens, realtime, bots, admin and moderator permissions,
 background jobs, logging, database roles, and the deployment configuration in `deploy/`.
-**Status updated 2026-10-11** against `main` at `7685425` (fixes #24-#39, D1 tooling #33/#34; delta review below).
+**Status updated 2026-10-11** against `main` at `06b884b` (fixes #24-#40, D1 tooling #33/#34; delta review below;
+F12-R accepted by the owner).
 None of the fixes is deployed: DEV still runs `9042fb7fff40`, production `940137070657`.
 **Date:** 2026-10-10. **Method:** code and configuration review; safe automated tests; read-only checks on the VPS
 (file modes, a few non-secret settings, release and migration). No live payment, R2, webhook, bot or production
@@ -20,7 +21,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P1**: fix before production traffic | **1** | F1 (merged in #24, `aa76d78`; not deployed) |
 | **P2**: fix before launch | **3** | F2 (merged in #29, `1c018a7`; not deployed), F3 (merged in #25, `dc4c7d8`; policy approved 2026-10-11; not deployed), F4 |
 | **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; merged in #30, `4a30786`; not deployed) |
-| **P3** (found after the first round) | **4** | F10 (reset links outlived a password change; merged in #31, `3b834d8`, not deployed), F11 (forgot-password timing; merged in #32, `9a33fe8`, not deployed), F12 (bcrypt cost unbounded at sign-in; merged in #34, `c53a8c9`, not deployed); F13 (safety guards written as `assert`; found in the delta review, fix in PR, not merged / deployed) |
+| **P3** (found after the first round) | **4** | F10 (reset links outlived a password change; merged in #31, `3b834d8`, not deployed), F11 (forgot-password timing; merged in #32, `9a33fe8`, not deployed), F12 (bcrypt cost unbounded at sign-in; merged in #34, `c53a8c9`, not deployed); F13 (safety guards written as `assert`; found in the delta review; merged in #40, `06b884b`, not deployed); **F12-R** (imported-bcrypt sign-in timing: accepted residual risk, not remediated) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
@@ -344,7 +345,42 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Impact:** a stored hash with a very high cost would make every sign-in attempt for that account tie up a hashing thread for hours. No such hash could exist before the importer (V2 writes only Argon2id and the ETL loads no hashes), so nothing was exploitable; the importer would have been the way in.
 - **Fix:** `backend/app/auth/bcrypt_format.py` is the one definition of an accepted bcrypt hash: `$2a$`/`$2b$`/`$2y$`, cost 04-12 (`MAX_BCRYPT_COST`; GoTrue writes 10), `$`, then exactly 53 characters of bcrypt's base64 alphabet, 60 ASCII characters in all. The sign-in verifier hands only such hashes to bcrypt (anything else: one dummy Argon2 check, generic 401), and the importer loads the same function (anything else is `unsupported_hash_format` and blocks `--apply`).
 - **Tests:** costs 04-12 accepted (real hashes verified at 04 and 12); costs 00-03 and 13-99, non-ASCII digits, invalid body characters, broken separators and wrong lengths never reach `bcrypt.checkpw` (monkeypatched); sign-in with a stored `$2a$31$` hash answers the generic 401 without bcrypt work; the importer refuses such hashes before its confirmation prompt and writes nothing.
-- **Limitation:** a wrong-password attempt on an account still holding an imported cost-10 hash answers in ~52 ms, an unknown email in ~90 ms (dummy Argon2), until the user signs in once and the hash is upgraded to Argon2id. That can reveal which emails have migrated accounts; the F2 sign-in throttling limits it, and equalizing it would be a separate change. Only relevant after a real import (D1). **Owner decision (trade-off):** accept it during the migration window, or equalize by running one extra dummy bcrypt (cost 10, ~52 ms) on every non-bcrypt verification (or padding every verification to a fixed floor) until the imported hashes are upgraded, at the cost of ~52 ms and ~58% more hashing CPU per sign-in attempt (see F9).
+- **Limitation: see F12-R** (accepted residual risk, below). The cost cap above is remediated; the sign-in timing
+  difference for imported bcrypt hashes is **not** remediated and was accepted by the owner.
+
+### F12-R (P3 residual of F12): imported bcrypt hashes answer faster. **Accepted residual risk, not remediated**
+- **Owner decision (2026-10-11):** accept the temporary sign-in timing difference associated with imported bcrypt
+  password hashes during the bcrypt-to-Argon2id migration. **No timing equalization is implemented.** This entry
+  records the decision; it does not claim the risk is removed.
+- **Scope (narrow):** a **wrong-password** attempt against an account whose stored hash is still an **imported bcrypt**
+  hash (GoTrue cost 10, ~52 ms on the 2-vCPU VPS) can answer faster than an attempt for an **unknown email address**
+  (one dummy Argon2id verification, ~90 ms). Measured once on synthetic hashes (F12 evidence). Accounts whose hash is
+  Argon2id, and unknown addresses, are not affected by this difference; nothing else about sign-in changes.
+- **What it can reveal:** that an email address belongs to a migrated account that has not signed in to V2 since the
+  import. It reveals nothing about the password. F2's per-IP and account-at-IP throttling limit how many attempts can
+  be timed.
+- **How it shrinks:** a **successful** sign-in with the correct password re-hashes the password to Argon2id
+  (`needs_rehash`, written in `AuthRepository.password_sign_in`), which removes this bcrypt-versus-Argon2id difference
+  **for that account**. A password reset or an invite acceptance also replaces the hash with Argon2id. Accounts are
+  **not** upgraded automatically: an account whose owner never signs in, resets or accepts an invite keeps its bcrypt
+  hash.
+- **Dormant accounts:** a migrated account that is never used again **may keep this timing difference indefinitely**.
+- **Why accepted:** equalizing it would add one dummy bcrypt (~52 ms) to every non-bcrypt verification, or pad every
+  verification to a fixed floor: about 52 ms and ~58% more hashing CPU per sign-in attempt for every user, which works
+  against F9's hashing bound, to hide a difference that reveals account existence only, for a shrinking set of accounts.
+- **Current count of imported bcrypt hashes: 0.** No real import has happened: the importer (#34) has never been run
+  against real data, and the ETL loads no password hashes (`database/etl/reconcile.py` asserts `users: no password hashes
+  migrated`). Last recorded aggregate on DEV: 0 of 137 users have any password hash (read-only count, 2026-10-10/11).
+  Production was not queried for this (not permitted). After an approved import, the operator can obtain the remaining
+  count as a single aggregate, with no emails or hashes, using the query already documented for rollback in
+  `database/README.md` (`SELECT count(*) FROM public.users WHERE password_hash LIKE '$2_$%'`); V2 itself writes only
+  Argon2id, so that count is exactly the not-yet-upgraded imported hashes.
+- **Re-evaluate:**
+  - **before the production cutover** (with the import run, D1);
+  - **before the bcrypt migration is considered complete** (decide what happens to dormant accounts that still hold
+    bcrypt hashes, e.g. leave, force a reset, or clear them; that is a separate owner decision);
+  - **if the timing behaviour or the password-hash upgrade flow changes** (e.g. a different bcrypt cost cap, a change to
+    `verify_password` / `needs_rehash` / the dummy verification, or to where the rehash is written).
 
 ## Delta review (2026-10-11, `main` at `7685425`)
 Everything merged since the audit baseline `bfb9a1e` (#24-#39: F1-F3, F5, F6, F8-F12 and the F10 follow-ups, the
@@ -364,10 +400,10 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
     (false positives, no user input), B105 on the column name `razorpay-keysecret` (false positive), and **B101 on
     three `assert` statements used as safety guards: F13**.
 - **Dependencies:** no pin changed since the 2026-10-10 scan, so it was not re-run (re-run before cutover, as planned).
-- **Still open:** F4 (frontend), F7 (after D4 / SEC-L2), the F12 timing residual (owner trade-off, below), and every
-  credential-dependent control in "Not verified".
+- **Still open:** F4 (frontend), F7 (after D4 / SEC-L2), and every credential-dependent control in "Not verified".
+  The F12 timing residual is an **accepted residual risk** (F12-R, owner decision 2026-10-11), not remediated.
 
-### F13 (P3, found in the delta review; fixed on branch `security-audit-delta-review`, PR open; not merged, not deployed): safety guards written as `assert`
+### F13 (P3, found in the delta review; merged in #40, `06b884b`; not deployed): safety guards written as `assert`
 - **Evidence:** the D1 tools' "counts only" output guards (`auth_readonly_report.render`, `auth_hash_import.render`)
   and the importer's accounting invariant (eligible + exclusions = rows with a legacy id) were `assert` statements.
   `python -O` (or `PYTHONOPTIMIZE`) removes asserts, so those checks would silently disappear.
@@ -496,6 +532,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 | PAY-11 | Stale smoke assertions | needs approval for a live DEV smoke run |
 | D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | awaiting owner |
 | D9 | Media access model | awaiting owner |
+| F12-R | Sign-in timing difference for imported bcrypt hashes during the migration | **accepted by the owner 2026-10-11**; accepted residual risk, not remediated; re-evaluate before cutover, before the bcrypt migration is considered complete, and if the timing or upgrade flow changes |
 
 ## Remediation plan
 
@@ -515,7 +552,8 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: merged in #27** (`0c6f03b`; `\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.
 7. **F7**: after D4 and SEC-L2.
-8. **F13** (P3): fix in the delta-review PR (explicit checks instead of `assert`; not merged, not deployed).
+8. **F13** (P3): **merged in #40** (`06b884b`; explicit checks instead of `assert`; not deployed).
+9. **F12-R** (P3 residual): **accepted by the owner 2026-10-11**, not remediated; no timing equalization. Re-evaluate before cutover, before the bcrypt migration is considered complete, and if the timing or upgrade flow changes.
 
 ## Evidence: route inventory and test runs
 
