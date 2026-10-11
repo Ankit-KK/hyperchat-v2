@@ -77,12 +77,29 @@ class AuthRepository:
         row = await self._one(f"SELECT {_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
         return User(**row) if row else None
 
-    async def record_successful_login(self, user_id: str) -> None:
-        """Google sign-in (no password involved). Password sign-in uses password_sign_in."""
-        await self._exec("""
-            UPDATE public.users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now()
-            WHERE id = %s
-        """, (user_id,))
+    async def google_sign_in(self, user_id: str, subject: str, email: str | None, session: tuple) -> Session | None:
+        """Finish a Google sign-in in ONE transaction under the user-row lock (security audit F10 follow-up): require
+        that the account is still active, link the Google identity, record the sign-in and insert the session.
+        Serialized with every reset, password change and deactivation, which take the same row lock first: one that
+        commits before this is seen here (a deactivated account gets None: no session, no link, nothing recorded; a
+        reset or change doesn't affect a Google sign-in, so this session is simply issued after it); one that commits
+        after this revokes the session in its own transaction. Nothing is written unless the session is."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT is_active AS active FROM public.users WHERE id = %s FOR UPDATE", (user_id,))
+            row = await cur.fetchone()
+            if row is None or not row["active"]:
+                return None
+            await cur.execute("""
+                INSERT INTO public.user_identities (user_id, provider, provider_subject, email, last_login_at)
+                VALUES (%s, 'google', %s, %s, now())
+                ON CONFLICT (provider, provider_subject) DO UPDATE SET last_login_at = now()
+            """, (user_id, subject, email))
+            await cur.execute("""
+                UPDATE public.users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now()
+                WHERE id = %s
+            """, (user_id,))
+            await cur.execute(_INSERT_SESSION, session)
+            return Session(**await cur.fetchone())
 
     async def password_sign_in(self, user_id: str, verified_hash: str, new_hash: str | None,
                                session: tuple) -> Session | None:
@@ -105,9 +122,10 @@ class AuthRepository:
             await cur.execute(_INSERT_SESSION, session)
             return Session(**await cur.fetchone())
 
-    # Lock order for every path that sets a password, changes is_active or issues a password session:
-    # users row -> password_reset_tokens -> sessions (change_password, reset_password, password_sign_in, accept_invite,
-    # AdminRepository.bootstrap_admin / update_user), so two of them can never deadlock (security audit F10).
+    # Lock order for every path that sets a password, changes is_active or issues a password or Google session:
+    # users row -> password_reset_tokens / user_identities -> sessions (change_password, reset_password,
+    # password_sign_in, google_sign_in, accept_invite, AdminRepository.bootstrap_admin / update_user), so two of them
+    # can never deadlock (security audit F10).
 
     async def change_password(self, user_id: str, verified_hash: str, new_hash: str,
                               keep_session_id: str) -> int | None:
@@ -243,13 +261,6 @@ class AuthRepository:
             WHERE i.provider = %s AND i.provider_subject = %s
         """, (provider, subject))
         return User(**row) if row else None
-
-    async def link_identity(self, user_id: str, provider: str, subject: str, email: str | None) -> None:
-        await self._exec("""
-            INSERT INTO public.user_identities (user_id, provider, provider_subject, email, last_login_at)
-            VALUES (%s, %s, %s, %s, now())
-            ON CONFLICT (provider, provider_subject) DO UPDATE SET last_login_at = now()
-        """, (user_id, provider, subject, email))
 
     # ── rate limiting (fixed window in public.rate_limits) ─────────────────
     async def hit_rate_limit(self, key: str, bucket: str, limit: int, window_seconds: int) -> bool:

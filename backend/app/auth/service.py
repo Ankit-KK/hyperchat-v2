@@ -106,8 +106,8 @@ class AuthService:
                              s.session_absolute_days)
 
     async def issue_session(self, user: User, ip: str | None, user_agent: str | None) -> IssuedSession:
-        """Google sign-in and invite acceptance (no password that could go stale). Password sign-in inserts its session
-        in AuthRepository.password_sign_in instead (security audit F10)."""
+        """Invite acceptance. Password and Google sign-in insert their sessions under the user-row lock instead
+        (AuthRepository.password_sign_in / google_sign_in, security audit F10)."""
         token, csrf, row = self._new_session(user, ip, user_agent)
         return IssuedSession(token=token, csrf_token=csrf, session=await self.repo.create_session(*row))
 
@@ -284,7 +284,10 @@ class AuthService:
                 raise AuthError(403, "No HyperChat account uses this Google address", "no_account")
         if not user.is_active:
             raise AuthError(403, "This account is disabled", "account_disabled")
-        await self.repo.link_identity(user.id, "google", identity.subject, identity.email)
-        await self.repo.record_successful_login(user.id)
+        token, csrf, row = self._new_session(user, ip, user_agent)
+        session = await self.repo.google_sign_in(user.id, identity.subject, identity.email, row)
+        if session is None:  # deactivated after the check above: same answer, nothing written
+            security_event("google_login_rejected", reason="account_disabled_meanwhile", user_id=user.id, client_ip=ip)
+            raise AuthError(403, "This account is disabled", "account_disabled")
         security_event("login_succeeded", level=20, reason="google", user_id=user.id, client_ip=ip)
-        return user, await self.issue_session(user, ip, user_agent)
+        return user, IssuedSession(token=token, csrf_token=csrf, session=session)
