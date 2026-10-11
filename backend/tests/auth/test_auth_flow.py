@@ -404,6 +404,25 @@ def test_invite_activates_imported_account_without_password(app):
     assert acc.status_code == 200 and acc.json()["user"]["id"] == uid
 
 
+def test_invite_for_a_deactivated_imported_account_is_refused_without_a_session(app):
+    """A deactivated password-less account: 403 with the generic disabled message, no cookie, the invite unused."""
+    headers = _admin(app)
+    uid = _user("imported-off" + DOMAIN, password=None, is_active=False)
+    assert app.post("/api/v1/auth/invites", headers=headers,
+                    json={"email": "imported-off" + DOMAIN}).status_code == 201
+    token = app.app_state.auth.sender.last_token()
+    acc = _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
+                                json={"token": token, "password": "Imported-Pass-42"})
+    assert acc.status_code == 403 and acc.json() == {"error": "This account is disabled"}
+    assert "set-cookie" not in acc.headers
+    with _db() as conn:
+        hashed, active = conn.execute("SELECT password_hash, is_active FROM public.users WHERE id = %s",
+                                      (uid,)).fetchone()
+        unused = conn.execute("SELECT accepted_at IS NULL FROM public.user_invites WHERE token_hash = %s",
+                              (sha256_hex(token),)).fetchone()[0]
+    assert hashed is None and active is False and unused
+
+
 def test_invite_acceptance_burns_open_reset_links(app):
     """Security audit F10: a password-less (e.g. migrated) account that requested a reset link, then accepted an
     invite, has a password now; the earlier link must not override it."""

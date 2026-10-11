@@ -227,9 +227,12 @@ class AuthRepository:
         reset is serialized with it: one that commits first gave the account a password, so the invite is refused
         (InviteConflict) and nothing is consumed; one that commits after finds its link burned (if it predates the
         acceptance) or revokes this session (if requested afterwards). Any failure leaves nothing behind: no consumed
-        invite, no account or password, no session. `session` holds _INSERT_SESSION's parameters; its user id is
-        replaced by the accepted account's. Lock order: user_invites -> users -> password_reset_tokens -> sessions;
-        no path locks a user row before an invite row."""
+        invite, no account or password, no session. An existing account must be password-less AND active: the check
+        is the upsert's own condition, evaluated under that row lock (ON CONFLICT locks the row even when the condition
+        fails), so a deactivation that commits first is always seen (InviteAccountDisabled, nothing changed) and one
+        that commits after revokes this session and burns the links as usual. `session` holds _INSERT_SESSION's
+        parameters; its user id is replaced by the accepted account's. Lock order: user_invites -> users ->
+        password_reset_tokens -> sessions; no path locks a user row before an invite row."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
                 UPDATE public.user_invites SET accepted_at = now()
@@ -250,13 +253,18 @@ class AuthRepository:
                     role = CASE WHEN public.users.role = 'admin' THEN 'admin' ELSE EXCLUDED.role END,
                     email_verified_at = COALESCE(public.users.email_verified_at, now()),
                     password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL
-                WHERE public.users.password_hash IS NULL
+                WHERE public.users.password_hash IS NULL AND public.users.is_active
                 RETURNING {_USER_COLS}
             """, {"email": invite["email"], "hash": password_hash, "username": username, "role": invite["role"],
                   "streamer_id": invite["streamer_id"]})
             user = await cur.fetchone()
-            if not user:  # account already has a password: the invite cannot take it over
-                raise InviteConflict()
+            if not user:  # the existing row is locked now (ON CONFLICT), so this reading is stable
+                await cur.execute("SELECT password_hash IS NULL AS password_less FROM public.users WHERE email = %s",
+                                  (invite["email"],))
+                existing = await cur.fetchone()
+                if existing and existing["password_less"]:
+                    raise InviteAccountDisabled()  # password-less but deactivated
+                raise InviteConflict()  # already has a password: the invite cannot take it over (active or not)
             await cur.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s",
                               (user["id"], invite["id"]))
             await burn_reset_tokens(cur, user["id"])  # F10: the account now has a password
@@ -293,3 +301,7 @@ class AuthRepository:
 
 class InviteConflict(Exception):
     """The invited email already belongs to an account that has a password."""
+
+
+class InviteAccountDisabled(Exception):
+    """The invited email belongs to a password-less account that is deactivated."""
