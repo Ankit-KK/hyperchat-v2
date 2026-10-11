@@ -3,7 +3,7 @@
 **Scope:** the V2 backend on `main` at `bfb9a1e` (backend completion groups 1–4 merged): every HTTP route, authentication,
 authorization, payments and webhooks, uploads and media, OBS tokens, realtime, bots, admin and moderator permissions,
 background jobs, logging, database roles, and the deployment configuration in `deploy/`.
-**Status updated 2026-10-12** against `main` at `ce074d3` (fixes #24-#40, D1 tooling #33/#34; delta review below;
+**Status updated 2026-10-12** against `main` at `ae6371e` (fixes #24-#40, D1 tooling #33/#34, D1 policy and exclusion/cutoff decisions in #42/#43; delta review below;
 F12-R accepted by the owner).
 None of the fixes is deployed: DEV still runs `9042fb7fff40`, production `940137070657`.
 **Date:** 2026-10-10. **Method:** code and configuration review; safe automated tests; read-only checks on the VPS
@@ -462,7 +462,7 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
 | Email delivery, Google sign-in, TTS / transcription providers | No DEV credentials (D8) | D8 |
 | Live payment status poll / confirm | Needs a Razorpay test-mode run (PAY-7) | Owner-run test-mode checkout |
 | Production as deployed | Production runs release `940137070657` (Phase 5) at migration `0009`; this audit covers `main` | Redeploy from `main` before cutover, then re-check F1 |
-| Migrated-user password import (D1) | Importer merged (#34) and tested with synthetic hashes only; never run against real Supabase data, no hash imported, migrated sign-in not verified. Policy approved 2026-10-12 (import at cutover; not in DEV) | At cutover: resolve account-specific identity conflicts under the approved exclusion policy, decide the password-change cutoff, run a fresh report and reviewed dry run, obtain explicit operator approval for `--apply`, reconcile, then test migrated sign-in |
+| Migrated-user password import (D1) | Importer merged (#34) and tested with synthetic hashes only; never run against real Supabase data, no hash imported, migrated sign-in not verified. Policy approved 2026-10-12 (import at cutover; not in DEV) | Before cutover: resolve account-specific identity conflicts and schedule the maintenance window. During cutover: freeze legacy password mutations, drain in-flight changes, snapshot, report, reviewed dry run, explicit approval for `--apply`, reconciliation and migrated sign-in verification; use the documented abort/rollback procedure if cutover stops |
 | Frontend | Not built | Frontend phase; F4 is its first requirement |
 | Media URLs | Public to anyone holding the URL (unguessable key), as legacy | Owner decision D9 |
 
@@ -532,7 +532,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 | PAY-11 | Stale smoke assertions | needs approval for a live DEV smoke run |
 | D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | awaiting owner |
 | D9 | Media access model | awaiting owner |
-| D1 | Migrated-user credentials | **policy approved 2026-10-12**: import eligible Supabase bcrypt hashes at the production cutover with the existing importer and its safeguards; no real hashes in DEV without separate approval; excluded users recover by reset or Google only where configured and live-verified; legacy confirmation fields not mapped to `email_verified_at`. Policy only: no import, data access, external service, deployment or cutover authorized. Exclusion policy approved 2026-10-12; account-specific conflict resolution remains pending. Password-change cutoff and cutover run remain open |
+| D1 | Migrated-user credentials | **policy approved 2026-10-12**: import eligible Supabase bcrypt hashes at the production cutover with the existing importer and its safeguards; no real hashes in DEV without separate approval; excluded users recover by reset or Google only where configured and live-verified; legacy confirmation fields not mapped to `email_verified_at`. Policy only: no import, data access, external service, deployment or cutover authorized. Exclusion policy and password-change cutoff procedure approved 2026-10-12 (policy only); account-specific conflict resolution and the scheduled maintenance time remain pending. Actual cutover still requires separate explicit approval |
 | F12-R | Sign-in timing difference for imported bcrypt hashes during the migration | **accepted by the owner 2026-10-11**; accepted residual risk, not remediated; re-evaluate before cutover, before the bcrypt migration is considered complete, and if the timing or upgrade flow changes |
 
 ## Remediation plan
