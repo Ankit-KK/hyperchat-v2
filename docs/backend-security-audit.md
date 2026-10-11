@@ -3,7 +3,7 @@
 **Scope:** the V2 backend on `main` at `bfb9a1e` (backend completion groups 1–4 merged): every HTTP route, authentication,
 authorization, payments and webhooks, uploads and media, OBS tokens, realtime, bots, admin and moderator permissions,
 background jobs, logging, database roles, and the deployment configuration in `deploy/`.
-**Status updated 2026-10-12** against `main` at `ce074d3` (fixes #24-#40, D1 tooling #33/#34; delta review below;
+**Status updated 2026-10-12** against `main` at `ae6371e` (fixes #24-#40, D1 tooling #33/#34, D1 policy and exclusion/cutoff decisions in #42/#43; delta review below;
 F12-R accepted by the owner).
 None of the fixes is deployed: DEV still runs `9042fb7fff40`, production `940137070657`.
 **Date:** 2026-10-10. **Method:** code and configuration review; safe automated tests; read-only checks on the VPS
