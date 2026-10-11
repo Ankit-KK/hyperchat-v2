@@ -122,10 +122,11 @@ class AuthRepository:
             await cur.execute(_INSERT_SESSION, session)
             return Session(**await cur.fetchone())
 
-    # Lock order for every path that sets a password, changes is_active or issues a password or Google session:
+    # Lock order for every path that sets a password, changes is_active or issues a session:
     # users row -> password_reset_tokens / user_identities -> sessions (change_password, reset_password,
     # password_sign_in, google_sign_in, accept_invite, AdminRepository.bootstrap_admin / update_user), so two of them
-    # can never deadlock (security audit F10).
+    # can never deadlock (security audit F10). accept_invite locks its user_invites row first; no path locks an invite
+    # row while holding a user row.
 
     async def change_password(self, user_id: str, verified_hash: str, new_hash: str,
                               keep_session_id: str) -> int | None:
@@ -219,8 +220,16 @@ class AuthRepository:
             RETURNING id::text, expires_at
         """, (email, role, streamer_id, token_hash, invited_by, ttl_days))
 
-    async def accept_invite(self, token_hash: str, password_hash: str, username: str | None) -> User | None:
-        """Atomically consume the invite and create (or activate) the account."""
+    async def accept_invite(self, token_hash: str, password_hash: str, username: str | None,
+                            session: tuple) -> tuple[User, Session] | None:
+        """Consume the invite, create (or give a password to) the account, burn its reset links and insert its session,
+        all in ONE transaction (security audit F10 follow-up). The account's row is locked from the upsert on, so a
+        reset is serialized with it: one that commits first gave the account a password, so the invite is refused
+        (InviteConflict) and nothing is consumed; one that commits after finds its link burned (if it predates the
+        acceptance) or revokes this session (if requested afterwards). Any failure leaves nothing behind: no consumed
+        invite, no account or password, no session. `session` holds _INSERT_SESSION's parameters; its user id is
+        replaced by the accepted account's. Lock order: user_invites -> users -> password_reset_tokens -> sessions;
+        no path locks a user row before an invite row."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
                 UPDATE public.user_invites SET accepted_at = now()
@@ -251,7 +260,8 @@ class AuthRepository:
             await cur.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s",
                               (user["id"], invite["id"]))
             await burn_reset_tokens(cur, user["id"])  # F10: the account now has a password
-            return User(**user)
+            await cur.execute(_INSERT_SESSION, (session[0], user["id"], *session[2:]))
+            return User(**user), Session(**await cur.fetchone())
 
     # ── Google identities ──────────────────────────────────────────────────
     async def user_by_identity(self, provider: str, subject: str) -> User | None:

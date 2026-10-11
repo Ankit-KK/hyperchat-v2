@@ -96,19 +96,21 @@ class AuthService:
         return csrf_token_for(self.secret, session.id)
 
     # ── sessions ───────────────────────────────────────────────────────────
-    def _new_session(self, user: User, ip: str | None, user_agent: str | None) -> tuple[str, str, tuple]:
-        """(token, csrf token, the session row's insert parameters); nothing is stored yet."""
+    def _new_session(self, user_id: str | None, ip: str | None, user_agent: str | None) -> tuple[str, str, tuple]:
+        """(token, csrf token, the session row's insert parameters); nothing is stored yet. `user_id` is None only for
+        invite acceptance, where the repository fills in the accepted account's id."""
         token, session_id = new_token(32), str(uuid.uuid4())
         csrf = csrf_token_for(self.secret, session_id)
         s = self.settings
-        return token, csrf, (session_id, user.id, sha256_hex(token), sha256_hex(csrf),
+        return token, csrf, (session_id, user_id, sha256_hex(token), sha256_hex(csrf),
                              sha256_hex(user_agent) if user_agent else None, _valid_ip(ip), s.session_idle_days,
                              s.session_absolute_days)
 
     async def issue_session(self, user: User, ip: str | None, user_agent: str | None) -> IssuedSession:
-        """Invite acceptance. Password and Google sign-in insert their sessions under the user-row lock instead
-        (AuthRepository.password_sign_in / google_sign_in, security audit F10)."""
-        token, csrf, row = self._new_session(user, ip, user_agent)
+        """A session outside any sign-in flow (tests and tooling). Password sign-in, Google sign-in and invite
+        acceptance insert theirs under the user-row lock (AuthRepository.password_sign_in / google_sign_in /
+        accept_invite, security audit F10)."""
+        token, csrf, row = self._new_session(user.id, ip, user_agent)
         return IssuedSession(token=token, csrf_token=csrf, session=await self.repo.create_session(*row))
 
     async def resolve(self, token: str | None) -> tuple[Session, User] | None:
@@ -149,7 +151,7 @@ class AuthService:
                            user_id=user.id if user else None, client_ip=ip)
             raise AuthError(401, GENERIC_LOGIN_ERROR, "bad_credentials")
         new_hash = await _hash(password) if needs_rehash(user.password_hash) else None  # Argon2 before the lock
-        token, csrf, row = self._new_session(user, ip, user_agent)
+        token, csrf, row = self._new_session(user.id, ip, user_agent)
         session = await self.repo.password_sign_in(user.id, user.password_hash, new_hash, row)
         if session is None:
             # The password was reset or changed (or the account deactivated) after it was verified: no session.
@@ -257,14 +259,17 @@ class AuthService:
     async def accept_invite(self, token: str, password: str, username: str | None, ip: str | None,
                             user_agent: str | None) -> tuple[User, IssuedSession]:
         self._check_new_password(password)
+        password_hash = await _hash(password)  # Argon2 before any row lock
+        session_token, csrf, row = self._new_session(None, ip, user_agent)
         try:
-            user = await self.repo.accept_invite(sha256_hex(token or ""), await _hash(password), username)
+            accepted = await self.repo.accept_invite(sha256_hex(token or ""), password_hash, username, row)
         except InviteConflict:
             raise AuthError(409, "This account already exists. Please sign in.", "account_exists") from None
-        if user is None:
+        if accepted is None:
             raise AuthError(400, "Invalid or expired invite link", "bad_invite_token")
+        user, session = accepted
         security_event("invite_accepted", level=20, user_id=user.id, client_ip=ip)
-        return user, await self.issue_session(user, ip, user_agent)
+        return user, IssuedSession(token=session_token, csrf_token=csrf, session=session)
 
     # ── Google ─────────────────────────────────────────────────────────────
     async def google_login(self, code: str, code_verifier: str, nonce: str, ip: str | None,
@@ -284,7 +289,7 @@ class AuthService:
                 raise AuthError(403, "No HyperChat account uses this Google address", "no_account")
         if not user.is_active:
             raise AuthError(403, "This account is disabled", "account_disabled")
-        token, csrf, row = self._new_session(user, ip, user_agent)
+        token, csrf, row = self._new_session(user.id, ip, user_agent)
         session = await self.repo.google_sign_in(user.id, identity.subject, identity.email, row)
         if session is None:  # deactivated after the check above: same answer, nothing written
             security_event("google_login_rejected", reason="account_disabled_meanwhile", user_id=user.id, client_ip=ip)
