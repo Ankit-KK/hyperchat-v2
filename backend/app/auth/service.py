@@ -96,17 +96,20 @@ class AuthService:
         return csrf_token_for(self.secret, session.id)
 
     # ── sessions ───────────────────────────────────────────────────────────
-    async def issue_session(self, user: User, ip: str | None, user_agent: str | None) -> IssuedSession:
-        secret = self.secret
-        token = new_token(32)
-        session_id = str(uuid.uuid4())
-        csrf = csrf_token_for(secret, session_id)
+    def _new_session(self, user: User, ip: str | None, user_agent: str | None) -> tuple[str, str, tuple]:
+        """(token, csrf token, the session row's insert parameters); nothing is stored yet."""
+        token, session_id = new_token(32), str(uuid.uuid4())
+        csrf = csrf_token_for(self.secret, session_id)
         s = self.settings
-        session = await self.repo.create_session(
-            session_id, user.id, sha256_hex(token), sha256_hex(csrf),
-            sha256_hex(user_agent) if user_agent else None, _valid_ip(ip), s.session_idle_days,
-            s.session_absolute_days)
-        return IssuedSession(token=token, csrf_token=csrf, session=session)
+        return token, csrf, (session_id, user.id, sha256_hex(token), sha256_hex(csrf),
+                             sha256_hex(user_agent) if user_agent else None, _valid_ip(ip), s.session_idle_days,
+                             s.session_absolute_days)
+
+    async def issue_session(self, user: User, ip: str | None, user_agent: str | None) -> IssuedSession:
+        """Google sign-in and invite acceptance (no password that could go stale). Password sign-in inserts its session
+        in AuthRepository.password_sign_in instead (security audit F10)."""
+        token, csrf, row = self._new_session(user, ip, user_agent)
+        return IssuedSession(token=token, csrf_token=csrf, session=await self.repo.create_session(*row))
 
     async def resolve(self, token: str | None) -> tuple[Session, User] | None:
         if not token:
@@ -145,10 +148,15 @@ class AuthService:
             security_event("login_rejected", reason="bad_credentials" if user else "unknown_account",
                            user_id=user.id if user else None, client_ip=ip)
             raise AuthError(401, GENERIC_LOGIN_ERROR, "bad_credentials")
+        new_hash = await _hash(password) if needs_rehash(user.password_hash) else None  # Argon2 before the lock
+        token, csrf, row = self._new_session(user, ip, user_agent)
+        session = await self.repo.password_sign_in(user.id, user.password_hash, new_hash, row)
+        if session is None:
+            # The password was reset or changed (or the account deactivated) after it was verified: no session.
+            security_event("login_rejected", reason="password_changed_meanwhile", user_id=user.id, client_ip=ip)
+            raise AuthError(401, GENERIC_LOGIN_ERROR, "bad_credentials")
         await self.repo.clear_rate_limits(keys["account_ip"], [b for k, b, _, _ in LOGIN_LIMITS if k == "account_ip"])
-        new_hash = await _hash(password) if needs_rehash(user.password_hash) else None
-        await self.repo.record_successful_login(user.id, new_hash)
-        issued = await self.issue_session(user, ip, user_agent)
+        issued = IssuedSession(token=token, csrf_token=csrf, session=session)
         security_event("login_succeeded", level=20, reason="password", user_id=user.id, client_ip=ip)
         return user, issued
 
@@ -180,11 +188,11 @@ class AuthService:
         self._check_new_password(new_password)
         if not await self.repo.hit_rate_limit(f"ip:{ip}", "auth:reset-confirm", 20, 3600):
             raise AuthError(429, TOO_MANY, "ip_rate_limited")
-        user_id = await self.repo.consume_reset_token(sha256_hex(token or ""))
-        if not user_id:
+        new_hash = await _hash(new_password)  # before any row lock (security audit F10)
+        done = await self.repo.reset_password(sha256_hex(token or ""), new_hash)  # also revokes every session
+        if not done:
             raise AuthError(400, "Invalid or expired reset link. Please request a new one.", "bad_reset_token")
-        await self.repo.set_password(user_id, await _hash(new_password))
-        revoked = await self.repo.revoke_all_sessions(user_id)
+        user_id, revoked = done
         security_event("password_reset_completed", level=20, user_id=user_id, client_ip=ip,
                        reason=f"sessions_revoked:{revoked}")
 
@@ -199,8 +207,13 @@ class AuthService:
         if not await _verify(current or "", user.password_hash):
             security_event("password_change_rejected", reason="bad_current_password", user_id=user.id, client_ip=ip)
             raise AuthError(400, "Current password is incorrect", "bad_current_password")
-        await self.repo.set_password(user.id, await _hash(new_password))
-        await self.repo.revoke_all_sessions(user.id, except_session_id=session.id)
+        new_hash = await _hash(new_password)  # before any row lock
+        revoked = await self.repo.change_password(user.id, user.password_hash, new_hash, keep_session_id=session.id)
+        if revoked is None:  # (other sessions are revoked in the same transaction as the password change)
+            # The password changed since it was verified (a reset or another change finished first): that one wins.
+            security_event("password_change_rejected", reason="password_changed_meanwhile", user_id=user.id,
+                           client_ip=ip)
+            raise AuthError(400, "Current password is incorrect", "bad_current_password")
 
     def _check_new_password(self, password: str) -> None:
         err = validate_new_password(password, self.settings.password_min_length, self.settings.password_max_length)
@@ -259,6 +272,6 @@ class AuthService:
         if not user.is_active:
             raise AuthError(403, "This account is disabled", "account_disabled")
         await self.repo.link_identity(user.id, "google", identity.subject, identity.email)
-        await self.repo.record_successful_login(user.id, None)
+        await self.repo.record_successful_login(user.id)
         security_event("login_succeeded", level=20, reason="google", user_id=user.id, client_ip=ip)
         return user, await self.issue_session(user, ip, user_agent)

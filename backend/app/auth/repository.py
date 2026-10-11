@@ -31,6 +31,29 @@ _USER_COLS = ("id::text, email::text, username, role, streamer_id::text, is_acti
               "failed_login_attempts, locked_until")
 
 
+async def burn_reset_tokens(cur, user_id: str) -> None:
+    """Invalidate every open password-reset link of the user (inside the caller's transaction)."""
+    await cur.execute("UPDATE public.password_reset_tokens SET used_at = now() WHERE user_id = %s AND used_at IS NULL",
+                      (user_id,))
+
+
+async def revoke_sessions(cur, user_id: str, except_session_id: str | None = None) -> int:
+    """Revoke the user's open sessions (optionally keeping one), inside the caller's transaction."""
+    await cur.execute("""
+        UPDATE public.sessions SET revoked_at = now()
+        WHERE user_id = %s AND revoked_at IS NULL AND (%s::uuid IS NULL OR id <> %s::uuid)
+    """, (user_id, except_session_id, except_session_id))
+    return cur.rowcount
+
+
+_INSERT_SESSION = """
+    INSERT INTO public.sessions (id, user_id, token_hash, csrf_token_hash, ua_hash, ip_address,
+                                 idle_expires_at, absolute_expires_at)
+    VALUES (%s, %s, %s, %s, %s, %s::inet, now() + make_interval(days => %s), now() + make_interval(days => %s))
+    RETURNING id::text, user_id::text, idle_expires_at, absolute_expires_at
+"""
+
+
 class AuthRepository:
     def __init__(self, connection_factory) -> None:
         self._conn = connection_factory
@@ -54,30 +77,60 @@ class AuthRepository:
         row = await self._one(f"SELECT {_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
         return User(**row) if row else None
 
-    async def record_successful_login(self, user_id: str, new_hash: str | None) -> None:
+    async def record_successful_login(self, user_id: str) -> None:
+        """Google sign-in (no password involved). Password sign-in uses password_sign_in."""
         await self._exec("""
-            UPDATE public.users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now(),
-                   password_hash = COALESCE(%s, password_hash)
+            UPDATE public.users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now()
             WHERE id = %s
-        """, (new_hash, user_id))
+        """, (user_id,))
 
-    async def set_password(self, user_id: str, new_hash: str) -> None:
-        await self._exec("""
-            UPDATE public.users SET password_hash = %s, password_changed_at = now(),
-                   failed_login_attempts = 0, locked_until = NULL
-            WHERE id = %s
-        """, (new_hash, user_id))
+    async def password_sign_in(self, user_id: str, verified_hash: str, new_hash: str | None,
+                               session: tuple) -> Session | None:
+        """Finish a password sign-in in ONE transaction (security audit F10): lock the user row, require that the
+        account is still active and its stored hash is still the one the password was verified against, record the
+        sign-in (with the optional rehash) and insert the session. A reset or change that commits first makes this
+        return None (no session); one that commits after it revokes the session in its own transaction, so a session
+        authenticated against an old password can never outlive a completed reset or change. `session` holds
+        _INSERT_SESSION's parameters; Argon2 runs before the call."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT password_hash, is_active FROM public.users WHERE id = %s FOR UPDATE", (user_id,))
+            row = await cur.fetchone()
+            if row is None or not row["is_active"] or row["password_hash"] != verified_hash:
+                return None
+            await cur.execute("""
+                UPDATE public.users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now(),
+                       password_hash = COALESCE(%s, password_hash)
+                WHERE id = %s
+            """, (new_hash, user_id))
+            await cur.execute(_INSERT_SESSION, session)
+            return Session(**await cur.fetchone())
+
+    # Lock order for every path that sets a password, changes is_active or issues a password session:
+    # users row -> password_reset_tokens -> sessions (change_password, reset_password, password_sign_in, accept_invite,
+    # AdminRepository.bootstrap_admin / update_user), so two of them can never deadlock (security audit F10).
+
+    async def change_password(self, user_id: str, verified_hash: str, new_hash: str,
+                              keep_session_id: str) -> int | None:
+        """Set a new password only if the stored hash is still the one the current password was verified against
+        (compare-and-set): a reset or another change that finished in the meantime wins, and this one is refused
+        (None). In the same transaction: burn the user's open reset links and revoke every other session (the
+        current one is kept). Returns the number of sessions revoked (security audit F10)."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute("""
+                UPDATE public.users SET password_hash = %s, password_changed_at = now(),
+                       failed_login_attempts = 0, locked_until = NULL
+                WHERE id = %s AND password_hash = %s
+            """, (new_hash, user_id, verified_hash))
+            if cur.rowcount != 1:
+                return None
+            await burn_reset_tokens(cur, user_id)
+            return await revoke_sessions(cur, user_id, except_session_id=keep_session_id)
 
     # ── sessions ───────────────────────────────────────────────────────────
     async def create_session(self, session_id: str, user_id: str, token_hash: str, csrf_hash: str,
                              ua_hash: str | None, ip: str | None, idle_days: int, absolute_days: int) -> Session:
-        row = await self._one("""
-            INSERT INTO public.sessions (id, user_id, token_hash, csrf_token_hash, ua_hash, ip_address,
-                                         idle_expires_at, absolute_expires_at)
-            VALUES (%s, %s, %s, %s, %s, %s::inet, now() + make_interval(days => %s),
-                    now() + make_interval(days => %s))
-            RETURNING id::text, user_id::text, idle_expires_at, absolute_expires_at
-        """, (session_id, user_id, token_hash, csrf_hash, ua_hash, ip, idle_days, absolute_days))
+        row = await self._one(_INSERT_SESSION,
+                              (session_id, user_id, token_hash, csrf_hash, ua_hash, ip, idle_days, absolute_days))
         return Session(**row)
 
     async def active_session(self, token_hash: str, idle_days: int) -> Session | None:
@@ -108,20 +161,36 @@ class AuthRepository:
             VALUES (%s, %s, now() + make_interval(mins => %s))
         """, (user_id, token_hash, ttl_minutes))
 
-    async def consume_reset_token(self, token_hash: str) -> str | None:
-        """Mark a valid token used and return its user id; also burns the user's other open tokens."""
+    async def reset_password(self, token_hash: str, new_hash: str) -> str | None:
+        """Redeem a reset link and set the password in ONE transaction (security audit F10): lock the user row,
+        require an active account and a valid (unused, unexpired) link, set the password, burn every open link.
+        A change or reset that committed first has burned the link, so this one is refused and never overwrites it.
+        Revokes every session in the same transaction. The caller hashes before calling, so no row lock is held while
+        Argon2 runs. Returns (user id, sessions revoked) or None."""
         async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute("SELECT user_id::text FROM public.password_reset_tokens WHERE token_hash = %s",
+                              (token_hash,))
+            found = await cur.fetchone()
+            if found is None:
+                return None
+            user_id = found[0]
+            await cur.execute("SELECT is_active FROM public.users WHERE id = %s FOR UPDATE", (user_id,))  # users first
+            user = await cur.fetchone()
+            if user is None or not user[0]:
+                return None
             await cur.execute("""
                 UPDATE public.password_reset_tokens SET used_at = now()
-                WHERE token_hash = %s AND used_at IS NULL AND expires_at > now()
-                RETURNING user_id::text
-            """, (token_hash,))
-            row = await cur.fetchone()
-            if not row:
-                return None
-            await cur.execute("UPDATE public.password_reset_tokens SET used_at = now() "
-                              "WHERE user_id = %s AND used_at IS NULL", (row[0],))
-            return row[0]
+                WHERE token_hash = %s AND user_id = %s AND used_at IS NULL AND expires_at > now()
+            """, (token_hash, user_id))
+            if cur.rowcount != 1:
+                return None  # used, burned by a password change, or expired (re-checked under the user lock)
+            await cur.execute("""
+                UPDATE public.users SET password_hash = %s, password_changed_at = now(),
+                       failed_login_attempts = 0, locked_until = NULL
+                WHERE id = %s
+            """, (new_hash, user_id))
+            await burn_reset_tokens(cur, user_id)
+            return user_id, await revoke_sessions(cur, user_id)
 
     # ── invites ────────────────────────────────────────────────────────────
     async def create_invite(self, email: str, role: str, streamer_id: str | None, token_hash: str,
@@ -163,6 +232,7 @@ class AuthRepository:
                 raise InviteConflict()
             await cur.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s",
                               (user["id"], invite["id"]))
+            await burn_reset_tokens(cur, user["id"])  # F10: the account now has a password
             return User(**user)
 
     # ── Google identities ──────────────────────────────────────────────────
