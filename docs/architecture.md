@@ -104,7 +104,8 @@ primitives, explicit origins, cleanup, CI), 4 (public read API), 5 (creator dash
 migration 0009), 6 (uploads, hypersounds, soundboard on R2), 7 (payments, 0010), 8 (jobs and worker, 0011),
 9 (realtime, 0012), 10 (OBS audio, 0013), 11 (moderation bots, 0014–0015; bots disabled on DEV) — all running
 on the development API (migration 0015). In progress: closing the gaps of the full backend audit
-([`backend-completion-checklist.md`](backend-completion-checklist.md); groups 1–3 merged, migration 0016, not yet deployed),
-which covers the parts of phase 12 that need no owner decision. Next: the new frontend (13), then integration,
+([`backend-completion-checklist.md`](backend-completion-checklist.md); groups 1–4 merged, migration 0016, security
+audit fixes and the D1 password-import tooling merged, none of it deployed yet; the importer has not been run against
+real data), which covers the parts of phase 12 that need no owner decision. Next: the new frontend (13), then integration,
 security and regression testing. Only then: production deployment and data migration (14) and the cutover
 and Supabase decommissioning (15).

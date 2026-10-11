@@ -61,9 +61,13 @@ HYPERCHAT_TEST_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<scratch_
 HYPERCHAT_TEST_ROLE_DB=<scratch_db>:5432 ../backend/.venv/bin/pytest
 ```
 Database tests only run against a scratch database; they refuse `hyperchat`, `hyperchat_dev`
-and `hyperchat_restore_test`.
+and `hyperchat_restore_test`. The D1 report and importer tests build their own throwaway fixture databases and run
+only where `HYPERCHAT_CI_DB_SETUP=1` (CI's service container or the throwaway cluster).
 
 ## Supabase Auth read-only report (D1, phase 1)
+**Status:** merged in #33 (`3e9c687`); run once by the owner from an isolated copy on the VPS (counts in the
+checklist, AUTH-6); the temporary files and the Supabase role were removed afterwards.
+
 `etl/auth_readonly_report.py` compares the live Supabase `auth.users` with `public.users` and prints
 **aggregate counts only**. It is not an import: it has no write statements, runs inside `READ ONLY`
 transactions on both databases, never selects a password hash (only whether `encrypted_password` is set),
@@ -83,8 +87,11 @@ digests computed by each server and kept in memory for the run only.
 - The Supabase CA certificate (dashboard -> Database settings -> SSL configuration -> download) copied to the
   VPS, e.g. `/root/supabase-ca.crt` (mode 600). The connection uses `sslmode=verify-full` (certificate and
   host name); the tool refuses a missing file and a connection without TLS.
-- A host the VPS can reach: the direct host `db.<project-ref>.supabase.co:5432` or the session pooler.
-- The code on the VPS: a release or checkout that contains this file (DEV's current release does not).
+- A host the VPS can reach: the VPS has no IPv6, so use the **session pooler** (IPv4) rather than the direct host
+  `db.<project-ref>.supabase.co`, which is usually IPv6-only.
+- The code on the VPS: an isolated copy (e.g. `git archive <commit> database/etl` into a private directory), run
+  with a release's interpreter and `-B -E -s` so nothing is written into the release; DEV's current release does
+  not contain it.
 
 **Run (on the VPS, as root, in a separate SSH terminal):**
 ```
@@ -103,6 +110,9 @@ SQLSTATE. Exit codes: 0 report printed, 2 refused by a safety check, 1 database 
 `exact_match_source_password_target_none` is the number of accounts a later hash import could cover.
 
 ## Supabase password-hash import (D1, phase 2)
+**Status:** merged in #34 (`c53a8c9`); tested with synthetic hashes only. It has **not** been run against real
+Supabase data and no hash has been imported anywhere; running it needs the owner's approval (D1).
+
 `etl/auth_hash_import.py` copies Supabase bcrypt hashes into `public.users.password_hash` so migrated users keep
 their passwords. **Dry run by default.** Nothing is ever written to a file, log or the terminal except counts.
 
