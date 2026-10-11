@@ -257,8 +257,8 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Deactivation:** a link issued before an admin deactivated an account could still set its password, which then worked once the account was reactivated.
 - **Severity: P3.** The impact is account takeover, but it requires an unexpired reset link: the 60-minute TTL, single use, and stored only as a hash.
 - **Status: implemented in PR #31 (branch `security-f10-reset-token-lifecycle`); not merged, not deployed.** No policy decision needed; standard practice.
-  - **Burned whenever a password is set:** `set_password` (reset and change), `accept_invite` and `bootstrap_admin` now burn every open reset token of the user **in the same transaction** that sets the password (`burn_reset_tokens`).
-  - **Active accounts only:** `consume_reset_token` redeems a token only for an **active** account; a deactivated account's link gets the generic "invalid or expired" answer.
+  - **Burned whenever a password is set or the account is deactivated:** `AuthRepository.reset_password`, `AuthRepository.change_password`, `accept_invite`, `AdminRepository.bootstrap_admin` and `AdminRepository.update_user` (deactivation) burn every open reset token of the user **in the same transaction** (`burn_reset_tokens`).
+  - **Active accounts only:** `AuthRepository.reset_password` redeems a token only for an **active** account; a deactivated account's link gets the generic "invalid or expired" answer.
   - **Unchanged:** a link requested after the change works; reset is still single use and still revokes all sessions.
   - **Race fixed (owner review of PR #31):**
     - **The race:** the first version still redeemed the link and saved the new password in **two transactions**, with about 50 ms of Argon2 hashing between them. A password change that finished in that gap was overwritten by the reset.
@@ -268,7 +268,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
     - **Hashing happens first:** both hash the new password **before** opening the transaction, so no lock is held while Argon2 runs. The reset rate limit is still checked before hashing.
     - **Lock order:** every password-setting path (change, reset, invite acceptance, `bootstrap-admin`) takes the users row before `password_reset_tokens`, so they can't deadlock.
     - **Removed:** the old `consume_reset_token` / `set_password` pair.
-    - **Sign-in rehash (found in self-review):** a legacy bcrypt sign-in re-hashes the verified password to Argon2id and used to write it back unconditionally (`record_successful_login`), so a reset or change committed meanwhile could be undone by the **old** password. That write is now compare-and-set too: if the password changed since verification, the sign-in fails with the generic 401. Google sign-in writes no password and is unchanged.
+    - **Sign-in rehash (found in self-review):** a legacy bcrypt sign-in re-hashes the verified password to Argon2id and used to write it back unconditionally (`record_successful_login`), so a reset or change committed meanwhile could be undone by the **old** password. That write now happens inside `AuthRepository.password_sign_in` (below), which writes nothing and issues no session if the password changed since verification; the sign-in then fails with the generic 401. `record_successful_login` is now used only by Google sign-in, which writes no password.
     - **Deactivation (owner review):** `AdminRepository.update_user`, the only runtime path that sets `is_active` to false, now burns the account's open reset links in the same transaction (user row locked first, then links, then sessions). A link issued before deactivation stays invalid after reactivation; the password and normal activation are unchanged.
     - **Sign-in sessions (owner review):** a password sign-in now finishes in ONE transaction (`AuthRepository.password_sign_in`): it locks the user row, requires an active account whose stored hash is still the verified one, records the sign-in (with the optional rehash) and inserts the session.
       - **Reset** sets the password, burns the links and revokes **all** sessions in its own transaction.
@@ -296,8 +296,8 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **`bootstrap-admin`:** does the same (`tests/admin/test_bootstrap_cli.py`).
 - **Regression proof:** all four tests **fail** against the previous repository code.
 - **Limitations:**
-  - an admin deactivating an account doesn't burn its links (redemption is refused instead, so the effect is the same);
-  - links still travel in the URL query (F4, frontend).
+  - **Google sign-in session (follow-up):** a Google sign-in still creates its session outside the user-row lock (`AuthService.issue_session`), so a Google sign-in racing a password reset can keep its session. Google session creation is **not** serialized with resets or changes. It is not authenticated by the old password, and no DEV account has a Google identity today.
+  - **Links in the URL:** reset links still travel in the URL query (F4, frontend).
 
 ### F11 (P3, open): the forgot-password endpoint answers faster for unknown emails
 - **Evidence:**
