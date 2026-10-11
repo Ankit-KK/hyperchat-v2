@@ -12,6 +12,7 @@ etl/rehearsal.py           load the legacy data (restored dump) into the new sch
 etl/mapping.py             value mapping rules (currencies, roles, slugs, OBS token hashing, ...)
 etl/reconcile.py           post-load reconciliation (counts, per-creator sums, invariants)
 etl/auth_readonly_report.py READ-ONLY count report: Supabase auth.users vs public.users (D1 phase 1)
+etl/auth_hash_import.py     Supabase bcrypt hash import into public.users, dry run by default (D1 phase 2)
 tests/                     migration round trip, role privileges, ETL mapping rules
 ```
 
@@ -100,3 +101,65 @@ SQLSTATE. Exit codes: 0 report printed, 2 refused by a safety check, 1 database 
 `id_match_email_mismatch`, `id_match_source_email_missing`, `target_legacy_id_not_in_source`,
 `target_email_used_by_other_source_id` and the `duplicate_*` counts need a decision before any import.
 `exact_match_source_password_target_none` is the number of accounts a later hash import could cover.
+
+## Supabase password-hash import (D1, phase 2)
+`etl/auth_hash_import.py` copies Supabase bcrypt hashes into `public.users.password_hash` so migrated users keep
+their passwords. **Dry run by default.** Nothing is ever written to a file, log or the terminal except counts.
+
+**Rules (enforced in code):**
+- A target row is eligible only if `auth.users.id = legacy_supabase_user_id` **and** the top-level email matches
+  exactly (case-only differences are excluded), the Supabase account is not deleted (`deleted_at`) or currently
+  banned (`banned_until`), the source hash is a bcrypt hash the V2 verifier accepts (`$2a$`/`$2b$`/`$2y$`, cost
+  04-12, 60 characters) and the target hash is NULL or empty.
+- **One shared format check (`backend/app/auth/bcrypt_format.py`, used by both the sign-in verifier and the importer):**
+  prefix `$2a$`/`$2b$`/`$2y$`, cost 04-12, `$`, then exactly 53 characters of bcrypt's base64 alphabet (60 ASCII
+  characters, nothing else). Anything else is never handed to bcrypt at sign-in and is unsupported for import.
+- **Cost cap 12 (`MAX_BCRYPT_COST`):** GoTrue writes cost 10.
+  Measured on the 2-vCPU VPS: cost 10 ~52 ms, 11 ~106 ms, 12 ~213 ms, 13 ~423 ms per verification (Argon2id ~90
+  ms); every step doubles, so cost 31 would take ~30 hours. 12 leaves two steps of headroom over GoTrue's default
+  at about 2.4x the cost of a normal V2 sign-in. A higher cost is "unsupported": it blocks `--apply`, and the
+  verifier never runs bcrypt on it (one dummy Argon2 check, generic 401).
+- Never by email alone. No account is created or deleted; only `password_hash` is written (roles, creator ownership,
+  activation, `email_verified_at`, `password_changed_at` stay as they are). `email_confirmed_at` is only counted
+  (`eligible_email_confirmed`); `confirmed_at` is never used (it can be a phone confirmation).
+- Excluded rows are counted by reason: orphaned target ids, target email belonging to another Supabase id, email
+  mismatch, deleted, banned, already has a password, no source hash, unsupported format.
+- `--apply` refuses on any blocker: duplicate ids on either side, or **any** unsupported hash format among otherwise
+  eligible rows.
+
+**How `--apply` writes:** after the plan it asks you to type `IMPORT <n> HASHES INTO <database>`. Then, in **one
+transaction**, it locks the planned `users` rows (5 s lock timeout), re-checks each is unchanged (same legacy id,
+same email, still no hash) and updates each with `WHERE ... AND coalesce(password_hash, '') = ''`. Any difference,
+lock timeout or error rolls back **every** row. `--apply` into `hyperchat_dev` additionally needs
+`--allow-dev-target`; real hashes stay out of DEV unless the owner approves it separately.
+
+**Prerequisites:** as for the read-only report (a read-only Supabase role, now with `SELECT (id, email,
+encrypted_password, email_confirmed_at, deleted_at, banned_until)` on `auth.users`; the Supabase CA file; the session
+pooler host from an IPv4-only VPS; the code in a private directory such as `/root/d1-import`, i.e. `database/etl` **plus** `backend/app/__init__.py`,
+`backend/app/auth/__init__.py` and `backend/app/auth/bcrypt_format.py`, which the importer loads; without them it
+refuses to start: `git archive <commit> database/etl backend/app/__init__.py backend/app/auth/__init__.py
+backend/app/auth/bcrypt_format.py`). The target role for
+`--apply` needs `UPDATE` on `public.users.password_hash` and must not be a superuser (default `hyperchat_app`).
+
+**Run (as root on the VPS, in your own SSH terminal):**
+```
+cd /root/d1-import/database
+/opt/hyperchat/releases/<release>/venv/bin/python -B -E -s -m etl.auth_hash_import            # dry run
+/opt/hyperchat/releases/<release>/venv/bin/python -B -E -s -m etl.auth_hash_import --apply    # writes, after the phrase
+```
+Exit codes: 0 done (dry run, nothing to do, or APPLIED printed), 2 refused, 3 confirmation not typed, 1 error (no
+row was written unless APPLIED was printed), 130 cancelled.
+
+**Cutover order:** (1) stop password changes in the legacy app (or accept that later changes are lost); (2) fresh dump,
+ETL and the read-only report; (3) dry run and review every exclusion count; (4) `--apply` on the production database
+(prompted name, e.g. `hyperchat` on port 5432) with the owner present; (5) re-run the dry run: `eligible` must be 0 and
+`target_already_has_password` must have grown by the applied count; (6) drop the Supabase role and the directory.
+
+**Rollback:** V2 itself only ever writes Argon2id hashes and the ETL loads none, so imported hashes are exactly the
+bcrypt ones still stored. To undo the import (users who already signed in keep their upgraded Argon2id hash):
+```
+BEGIN;
+SELECT count(*) FROM public.users WHERE password_hash LIKE '$2_$%';   -- compare with the applied count
+UPDATE public.users SET password_hash = NULL WHERE password_hash LIKE '$2_$%' AND legacy_supabase_user_id IS NOT NULL;
+COMMIT;
+```
