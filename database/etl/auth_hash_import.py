@@ -141,7 +141,8 @@ def plan(source: list[Source], target: list[Target]) -> Plan:
         "duplicate_source_ids": sum(1 for n in src_ids.values() if n > 1),
         "duplicate_target_legacy_ids": sum(1 for n in tgt_ids.values() if n > 1),
     }
-    assert counts["eligible"] + sum(counts[e] for e in EXCLUSIONS) == counts["target_with_legacy_id"]
+    if counts["eligible"] + sum(counts[e] for e in EXCLUSIONS) != counts["target_with_legacy_id"]:
+        raise Refused("internal error: the plan's counts do not add up; nothing was written")
     return Plan(counts, updates)
 
 
@@ -194,7 +195,8 @@ def apply(conn: psycopg.Connection, p: Plan) -> int:
 
 
 def render(counts: dict[str, int], title: str) -> str:
-    assert all(type(v) is int for v in counts.values()), "the summary holds counts only"
+    if not all(type(v) is int for v in counts.values()):  # a real check, not assert: `python -O` drops asserts
+        raise ValueError("the summary holds counts only")
     width = max(map(len, counts))
     return "\n".join([title] + [f"  {k.ljust(width)}  {v}" for k, v in counts.items()])
 
@@ -260,9 +262,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(render({"updated": apply(tgt, p)}, "APPLIED (one transaction, committed)"))
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
-        return 2
-    except ValueError:
-        print("refused: a port must be a number", file=sys.stderr)
         return 2
     except psycopg.Error as exc:  # messages may name hosts or roles: print only the class and SQLSTATE
         print(f"failed: {type(exc).__name__} (SQLSTATE {exc.sqlstate or 'n/a'}); nothing was written by this run "
