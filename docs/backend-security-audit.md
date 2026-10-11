@@ -260,6 +260,22 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Burned whenever a password is set:** `set_password` (reset and change), `accept_invite` and `bootstrap_admin` now burn every open reset token of the user **in the same transaction** that sets the password (`burn_reset_tokens`).
   - **Active accounts only:** `consume_reset_token` redeems a token only for an **active** account; a deactivated account's link gets the generic "invalid or expired" answer.
   - **Unchanged:** a link requested after the change works; reset is still single use and still revokes all sessions.
+  - **Race fixed (owner review of PR #31):**
+    - **The race:** the first version still redeemed the link and saved the new password in **two transactions**, with about 50 ms of Argon2 hashing between them. A password change that finished in that gap was overwritten by the reset.
+    - **The mirror case:** `change_password` checked the current password against the hash loaded when the request began, then saved unconditionally. A reset that finished meanwhile was overwritten by a change whose "current" password was no longer current.
+    - **`AuthRepository.reset_password`:** now one transaction. It finds the link's user, **locks the user row** (`FOR UPDATE`), requires an active account, redeems the link only if unused and unexpired (re-checked under the lock), sets the password, and burns every open link.
+    - **`AuthRepository.change_password`:** a compare-and-set. It updates only while the stored hash is still the one that was verified; otherwise the change gets the same generic "current password is incorrect".
+    - **Hashing happens first:** both hash the new password **before** opening the transaction, so no lock is held while Argon2 runs. The reset rate limit is still checked before hashing.
+    - **Lock order:** every password-setting path (change, reset, invite acceptance, `bootstrap-admin`) takes the users row before `password_reset_tokens`, so they can't deadlock.
+    - **Removed:** the old `consume_reset_token` / `set_password` pair.
+    - **Sign-in rehash (found in self-review):** a legacy bcrypt sign-in re-hashes the verified password to Argon2id and used to write it back unconditionally (`record_successful_login`), so a reset or change committed meanwhile could be undone by the **old** password. That write is now compare-and-set too: if the password changed since verification, the sign-in fails with the generic 401. Google sign-in writes no password and is unchanged.
+    - **Remaining window (not fixed):** if a reset commits *after* a sign-in's compare-and-set but *before* that sign-in inserts its session, the reset's session revocation runs before the new session exists, so that session survives. Closing it needs session creation inside the same transaction, a wider change to `issue_session`.
+  - **Race tests** (`backend/tests/auth/test_password_races.py`, deterministic: each interleaving is forced with events or a held row lock, never by timing):
+    - **Change finishes first:** a change that completes while a reset is between its hash and its write wins; the reset is refused (`bad_reset_token`).
+    - **Reset finishes first:** a reset that completes while a change is between its verification and its write wins; the change is refused (`bad_current_password`).
+    - **Open change transaction:** a reset arriving while a change transaction holds the user row waits for that row lock (seen in `pg_stat_activity`), then finds its link burned and is refused.
+    - **Rehash race:** a legacy bcrypt sign-in paused while re-hashing, with a reset completing meanwhile: the sign-in is refused (401) and the reset's password stays.
+    - **Regression proof:** all four **fail** against the previous PR #31 head (`9f3d5f4`).
 - **Tests:**
   - **Password change:** a link sent before a password change is refused, the owner's new password stays, and a link requested afterwards works.
   - **Deactivated account:** a deactivated account's link is refused, and after reactivation the original password still works.

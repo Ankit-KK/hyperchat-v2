@@ -60,23 +60,33 @@ class AuthRepository:
         row = await self._one(f"SELECT {_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
         return User(**row) if row else None
 
-    async def record_successful_login(self, user_id: str, new_hash: str | None) -> None:
-        await self._exec("""
+    async def record_successful_login(self, user_id: str, new_hash: str | None, verified_hash: str | None = None) -> bool:
+        """With `verified_hash` (password sign-in): only while the stored hash is still the one the password was
+        verified against, so a rehash can never write an old password back over a reset or change that finished
+        meanwhile (security audit F10). Returns False when the password changed. Google sign-in passes no hash."""
+        return await self._exec("""
             UPDATE public.users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = now(),
                    password_hash = COALESCE(%s, password_hash)
-            WHERE id = %s
-        """, (new_hash, user_id))
+            WHERE id = %s AND (%s::text IS NULL OR password_hash = %s)
+        """, (new_hash, user_id, verified_hash, verified_hash)) == 1
 
-    async def set_password(self, user_id: str, new_hash: str) -> None:
-        """Password reset and change. Burns the user's open reset links in the same transaction (security audit F10):
-        a link sent before the password changed must not be able to set it again."""
+    # Password-setting paths lock the users row BEFORE touching password_reset_tokens (here, reset_password below,
+    # accept_invite, AdminRepository.bootstrap_admin), so two of them can never deadlock (security audit F10).
+
+    async def change_password(self, user_id: str, verified_hash: str, new_hash: str) -> bool:
+        """Set a new password only if the stored hash is still the one the current password was verified against
+        (compare-and-set): a reset or another change that finished in the meantime wins, and this one is refused.
+        Burns the user's open reset links in the same transaction (security audit F10)."""
         async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
             await cur.execute("""
                 UPDATE public.users SET password_hash = %s, password_changed_at = now(),
                        failed_login_attempts = 0, locked_until = NULL
-                WHERE id = %s
-            """, (new_hash, user_id))
+                WHERE id = %s AND password_hash = %s
+            """, (new_hash, user_id, verified_hash))
+            if cur.rowcount != 1:
+                return False
             await burn_reset_tokens(cur, user_id)
+            return True
 
     # ── sessions ───────────────────────────────────────────────────────────
     async def create_session(self, session_id: str, user_id: str, token_hash: str, csrf_hash: str,
@@ -118,22 +128,35 @@ class AuthRepository:
             VALUES (%s, %s, now() + make_interval(mins => %s))
         """, (user_id, token_hash, ttl_minutes))
 
-    async def consume_reset_token(self, token_hash: str) -> str | None:
-        """Mark a valid token used and return its user id; also burns the user's other open tokens. A token of a
-        deactivated account is never redeemed (security audit F10)."""
+    async def reset_password(self, token_hash: str, new_hash: str) -> str | None:
+        """Redeem a reset link and set the password in ONE transaction (security audit F10): lock the user row,
+        require an active account and a valid (unused, unexpired) link, set the password, burn every open link.
+        A change or reset that committed first has burned the link, so this one is refused and never overwrites it.
+        The caller hashes before calling, so no row lock is held while Argon2 runs. Returns the user id or None."""
         async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
-            await cur.execute("""
-                UPDATE public.password_reset_tokens t SET used_at = now()
-                FROM public.users u
-                WHERE t.token_hash = %s AND t.used_at IS NULL AND t.expires_at > now()
-                  AND u.id = t.user_id AND u.is_active
-                RETURNING t.user_id::text
-            """, (token_hash,))
-            row = await cur.fetchone()
-            if not row:
+            await cur.execute("SELECT user_id::text FROM public.password_reset_tokens WHERE token_hash = %s",
+                              (token_hash,))
+            found = await cur.fetchone()
+            if found is None:
                 return None
-            await burn_reset_tokens(cur, row[0])
-            return row[0]
+            user_id = found[0]
+            await cur.execute("SELECT is_active FROM public.users WHERE id = %s FOR UPDATE", (user_id,))  # users first
+            user = await cur.fetchone()
+            if user is None or not user[0]:
+                return None
+            await cur.execute("""
+                UPDATE public.password_reset_tokens SET used_at = now()
+                WHERE token_hash = %s AND user_id = %s AND used_at IS NULL AND expires_at > now()
+            """, (token_hash, user_id))
+            if cur.rowcount != 1:
+                return None  # used, burned by a password change, or expired (re-checked under the user lock)
+            await cur.execute("""
+                UPDATE public.users SET password_hash = %s, password_changed_at = now(),
+                       failed_login_attempts = 0, locked_until = NULL
+                WHERE id = %s
+            """, (new_hash, user_id))
+            await burn_reset_tokens(cur, user_id)
+            return user_id
 
     # ── invites ────────────────────────────────────────────────────────────
     async def create_invite(self, email: str, role: str, streamer_id: str | None, token_hash: str,

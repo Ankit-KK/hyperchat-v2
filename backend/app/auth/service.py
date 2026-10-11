@@ -145,9 +145,12 @@ class AuthService:
             security_event("login_rejected", reason="bad_credentials" if user else "unknown_account",
                            user_id=user.id if user else None, client_ip=ip)
             raise AuthError(401, GENERIC_LOGIN_ERROR, "bad_credentials")
-        await self.repo.clear_rate_limits(keys["account_ip"], [b for k, b, _, _ in LOGIN_LIMITS if k == "account_ip"])
         new_hash = await _hash(password) if needs_rehash(user.password_hash) else None
-        await self.repo.record_successful_login(user.id, new_hash)
+        if not await self.repo.record_successful_login(user.id, new_hash, verified_hash=user.password_hash):
+            # The password was reset or changed after it was verified here: the old password no longer signs in.
+            security_event("login_rejected", reason="password_changed_meanwhile", user_id=user.id, client_ip=ip)
+            raise AuthError(401, GENERIC_LOGIN_ERROR, "bad_credentials")
+        await self.repo.clear_rate_limits(keys["account_ip"], [b for k, b, _, _ in LOGIN_LIMITS if k == "account_ip"])
         issued = await self.issue_session(user, ip, user_agent)
         security_event("login_succeeded", level=20, reason="password", user_id=user.id, client_ip=ip)
         return user, issued
@@ -180,10 +183,10 @@ class AuthService:
         self._check_new_password(new_password)
         if not await self.repo.hit_rate_limit(f"ip:{ip}", "auth:reset-confirm", 20, 3600):
             raise AuthError(429, TOO_MANY, "ip_rate_limited")
-        user_id = await self.repo.consume_reset_token(sha256_hex(token or ""))
+        new_hash = await _hash(new_password)  # before any row lock (security audit F10)
+        user_id = await self.repo.reset_password(sha256_hex(token or ""), new_hash)
         if not user_id:
             raise AuthError(400, "Invalid or expired reset link. Please request a new one.", "bad_reset_token")
-        await self.repo.set_password(user_id, await _hash(new_password))
         revoked = await self.repo.revoke_all_sessions(user_id)
         security_event("password_reset_completed", level=20, user_id=user_id, client_ip=ip,
                        reason=f"sessions_revoked:{revoked}")
@@ -199,7 +202,12 @@ class AuthService:
         if not await _verify(current or "", user.password_hash):
             security_event("password_change_rejected", reason="bad_current_password", user_id=user.id, client_ip=ip)
             raise AuthError(400, "Current password is incorrect", "bad_current_password")
-        await self.repo.set_password(user.id, await _hash(new_password))
+        new_hash = await _hash(new_password)  # before any row lock
+        if not await self.repo.change_password(user.id, user.password_hash, new_hash):
+            # The password changed since it was verified (a reset or another change finished first): that one wins.
+            security_event("password_change_rejected", reason="password_changed_meanwhile", user_id=user.id,
+                           client_ip=ip)
+            raise AuthError(400, "Current password is incorrect", "bad_current_password")
         await self.repo.revoke_all_sessions(user.id, except_session_id=session.id)
 
     def _check_new_password(self, password: str) -> None:
