@@ -247,3 +247,121 @@ def test_security_logs_hold_no_password_email_or_token(nginx):
     for secret in (PASSWORD, "Not-The-Password-77", body["csrf_token"], "logged" + DOMAIN):
         assert secret not in text
     assert "login_rejected" in text and "login_rate_limited" in text and "login_succeeded" in text
+
+
+# ── security audit F9: no hashing once the IP is over its limit; hashing off the event loop ─────────────────────
+
+def counting_verify(monkeypatch):
+    """Record every password verification (None = the dummy hash), still running the real one."""
+    import app.auth.service as service
+
+    calls = []
+    real = service.verify_password
+
+    def counting(password, stored_hash):
+        calls.append(stored_hash)
+        return real(password, stored_hash)
+    monkeypatch.setattr(service, "verify_password", counting)
+    return calls
+
+
+def test_ip_throttled_attempts_never_hash(nginx, monkeypatch):
+    calls = counting_verify(monkeypatch)
+    ip = "203.0.113.110"
+    results = [attempt(nginx, f"flood{i}" + DOMAIN, "guess", ip) for i in range(50)]
+    assert results == [GENERIC] * 50  # the same answer before and after the limit
+    assert len(calls) == 20  # only the 20 attempts within the IP limit were hashed
+    with db() as conn:  # IP-throttled attempts do not touch the account buckets either
+        rows = conn.execute("SELECT count(*) FROM public.rate_limits WHERE ip_address LIKE %s",
+                            ("acct:%:ip:" + ip,)).fetchone()[0]
+        ip_count = conn.execute("SELECT request_count FROM public.rate_limits WHERE ip_address = %s "
+                                "AND endpoint = 'auth:login'", (f"ip:{ip}",)).fetchone()[0]
+    assert rows == 2 * 20 and ip_count == 50  # every attempt is still counted against the IP
+
+
+def test_account_throttled_attempts_still_cost_one_hash(nginx, monkeypatch):
+    """Within the IP limit, account-specific throttling must stay indistinguishable from a real attempt."""
+    make_user("costly" + DOMAIN)
+    calls = counting_verify(monkeypatch)
+    ip = "203.0.113.111"
+    assert [attempt(nginx, "costly" + DOMAIN, "guess", ip) for _ in range(5)] == [GENERIC] * 5
+    assert all(h is not None for h in calls) and len(calls) == 5
+    calls.clear()
+    assert [attempt(nginx, "costly" + DOMAIN, PASSWORD, ip) for _ in range(3)] == [GENERIC] * 3  # throttled
+    assert calls == [None, None, None]  # one dummy verification each
+
+
+def test_concurrent_attempts_cannot_get_past_the_ip_limit(env, monkeypatch):
+    """30 simultaneous attempts from one IP (different accounts) through the app's own connection pool (10
+    connections; the role allows 20): the atomic IP counter lets exactly 20 reach a password check."""
+    import app.auth.service as service
+    from app.auth.repository import AuthRepository
+    from app.core.config import Settings
+    from app.db.pool import Database
+
+    calls = counting_verify(monkeypatch)
+    settings = Settings(db_pool_min=10, db_pool_max=10)
+
+    async def race():
+        db_pool = Database(settings)
+        await db_pool.open()
+        auth = service.AuthService.from_settings(settings, AuthRepository(db_pool.connection))
+
+        async def one(i):
+            try:
+                await auth.login(f"crowd{i}" + DOMAIN, "guess", "203.0.113.112", None)
+            except service.AuthError as exc:
+                return exc.status, exc.error
+        try:
+            return await asyncio.gather(*(one(i) for i in range(30)))
+        finally:
+            await db_pool.close()
+    assert asyncio.run(race()) == [(401, GENERIC_LOGIN_ERROR)] * 30
+    assert len(calls) == 20
+    with db() as conn:
+        assert conn.execute("SELECT request_count FROM public.rate_limits WHERE ip_address = 'ip:203.0.113.112' "
+                            "AND endpoint = 'auth:login'").fetchone()[0] == 30  # none lost to the race
+
+
+def test_the_event_loop_keeps_running_while_a_password_is_hashed(env, monkeypatch):
+    """A sign-in whose hashing takes 0.6 s must not freeze the worker: a ticker on the same event loop keeps
+    ticking (with hashing on the loop, it would stall for the whole 0.6 s)."""
+    import time
+
+    import app.auth.service as service
+    from app.auth.repository import AuthRepository
+    from app.cli import connection_factory
+    from app.core.config import Settings
+
+    real = service.verify_password
+
+    def slow(password, stored_hash):
+        time.sleep(0.6)
+        return real(password, stored_hash)
+    monkeypatch.setattr(service, "verify_password", slow)
+    make_user("patient2" + DOMAIN)
+    settings = Settings()
+    auth = service.AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+
+    async def scenario():
+        gaps, done = [], asyncio.Event()
+
+        async def tick():
+            loop = asyncio.get_running_loop()
+            last = loop.time()
+            while not done.is_set():
+                await asyncio.sleep(0.02)
+                now = loop.time()
+                gaps.append(now - last)
+                last = now
+        ticker = asyncio.create_task(tick())
+        start = time.perf_counter()
+        try:
+            user, _ = await auth.login("patient2" + DOMAIN, PASSWORD, "203.0.113.113", None)
+        finally:
+            done.set()
+            await ticker
+        return user.email, time.perf_counter() - start, max(gaps)
+    email, elapsed, worst_gap = asyncio.run(scenario())
+    assert email == "patient2" + DOMAIN and elapsed >= 0.6  # the slow check really ran, and the sign-in succeeded
+    assert worst_gap < 0.3, f"event loop stalled for {worst_gap:.2f} s"

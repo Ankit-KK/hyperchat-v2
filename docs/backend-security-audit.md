@@ -15,11 +15,12 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | Priority | Count | Findings |
 |---|---|---|
 | **P0**: exploitable now, stop everything | **0** | – |
-| **P1**: fix before production traffic | **1** | F1 (fixed in the repository, `cc961df`; not deployed) |
-| **P2**: fix before launch | **3** | F2 (fixed in the repository, branch `security-f2-login-throttling`; not merged / deployed), F3 (fixed and verified in the repository, #25; policy approved 2026-10-11; not deployed), F4 |
-| **P3**: hardening | **3** | F5, F6 (fixed in the repository, not merged / deployed), F7 |
+| **P1**: fix before production traffic | **1** | F1 (merged in #24, `aa76d78`; not deployed) |
+| **P2**: fix before launch | **3** | F2 (merged in #29, `1c018a7`; not deployed), F3 (merged in #25, `dc4c7d8`; policy approved 2026-10-11; not deployed), F4 |
+| **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; implemented in PR #30; not merged, not deployed) |
+| **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
 | Tracked owner decisions / approvals | 6 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 |
-| Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; fixed in the repository, not merged); all other Bandit results are false positives or informational |
+| Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
 
 No route lacks authentication where it needs it, no cross-creator access path was found, and payment completion
 cannot be forged without a provider secret. The open items are logging hygiene, abuse resistance and hardening.
@@ -36,7 +37,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Exploitability:** needs read access to the logs. **Not yet exposed:** production takes no traffic.
 - **Remediation:** port the DEV `log_format` and both `map`s to the production site (production names), extend the
   Nginx CI check to assert that no `?token=` reaches the production log. Deploying it needs approval.
-- **Status: fixed in the repository, not deployed.**
+- **Status: merged in #24 (`aa76d78`), with F1-R; not deployed.**
   - **The fix:** the production site files (`api.hyperchat.space.conf` and the bootstrap `.acme.conf`) log every request with `hyperchat_prod_noquery`: the path only (`$uri`), no query string and no referrer. Both server blocks are covered, including the port-80 redirect. This goes further than DEV, which only strips `/api/v1/obs/` and `/api/v1/realtime/`.
   - **The test:** `tests/e2e/nginx_ratelimit_check.sh` now runs the real DEV and production site files in its throwaway Nginx. It sends requests carrying a secret marker in the query string and in the `Referer`, and fails if the marker reaches the access log.
   - **The control:** a DEV query string that should be logged is checked to be visible, so the check is able to detect a leak. The old production config used the default `combined` format, which the control shows records query strings.
@@ -54,7 +55,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Rate-limit rejections** are logged the same way, but `limit_req` only applies to `/api/v1/public/` and `/api/v1/metrics/`, which carry no credentials.
   - **The bootstrap config** (`.acme.conf`) only redirects and serves ACME files. Tokens aren't sent there, but a client that did send one would get it logged as a query string on a failed file lookup. Not mitigated; negligible.
   - **DEV's port-80 redirect** logged with the default format, query string included.
-- **Mitigation (`9cd6093`, `f15c5a8`), in the repository and not deployed:**
+- **Mitigation (`9cd6093`, `f15c5a8`), merged in #24 (`aa76d78`) and not deployed:**
   - **Token-path location:** production and DEV proxy `/api/v1/obs/` and `/api/v1/realtime/` in their own location with `error_log … crit`. Upstream failures there are not written to the error log. Other paths keep full error logging.
   - **Diagnostics kept:** the production access-log format gains `us=$upstream_status rt=$request_time`, so a failed token-path request still shows as `502 … us=502 rt=…`, without the query. The API's own logs are unaffected.
   - **DEV port 80:** DEV's redirect block now uses `hyperchat_dev_noquery`.
@@ -81,7 +82,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   growing delays; keep the per-IP limit. Add a test for the abuse case.
 
 - **Root cause found during the fix:** the per-account counter (`users.failed_login_attempts`) was reset only by a successful sign-in or a password change, never when the lock expired. Once at 5, **each further failure re-locked the account**, so one wrong guess per 15 minutes kept a creator locked out indefinitely, needing only their email. A locked account also answered 429 while an unknown email answered 401, which revealed that the account exists.
-- **Status: fixed in the repository (branch `security-f2-login-throttling`; not merged, not deployed).** Policy approved by the owner on 2026-10-11: layered throttling instead of an account-wide lockout.
+- **Status: merged in #29 (`1c018a7`); not deployed. Must not be deployed without F9 (PR #30).** Policy approved by the owner on 2026-10-11: layered throttling instead of an account-wide lockout.
   - **Limits** (`app/auth/service.py`, `LOGIN_LIMITS`), all in the existing `rate_limits` table:
 
     | Bucket | Key | Limit | Reset |
@@ -131,7 +132,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Remediation:** per-user limit on failed current-password checks (e.g. 5 per hour), counted with the login
   lockout, and a security event.
 
-- **Status: implemented; policy approved by the owner on 2026-10-11 (5 current-password verifications per user per hour; the session stays active at the limit; 429 until the window resets; a weak new password does not count). In #25; not deployed.**
+- **Status: implemented; policy approved by the owner on 2026-10-11 (5 current-password verifications per user per hour; the session stays active at the limit; 429 until the window resets; a weak new password does not count). Merged in #25 (`dc4c7d8`); not deployed.**
   - **The limit:** `AuthService.change_password` allows **5 current-password verifications per user per hour** (`PASSWORD_CHANGE_LIMIT`, existing `rate_limits` table, bucket `auth:password-change`, key `user:<id>`).
   - **What counts:** every verification counts before the password is checked, so once the limit is reached even the right password gets 429 (no oracle). A rejected weak new password is refused before verification and is not counted.
   - **Logging:** security events `password_change_rejected` and `password_change_rate_limited`, without the password.
@@ -161,7 +162,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Remediation:** keep `status` / `database.status` public; return the rest only to localhost (the deploy checks
   run on the server).
 
-- **Status: fixed in the repository (branch `security-f5-f6-health-invite-guard`; not merged, not deployed).**
+- **Status: merged in #28 (`ca76614`); not deployed.**
   - **The change:** `GET /health` (`backend/app/routers/health.py`) answers public callers with exactly `{"status": "ok", "database": {"status": …}}`. Release, environment, database label and service name go only to loopback callers (`127.0.0.1`, `::1`), i.e. the deploy checks on the server (`curl 127.0.0.1:<port>/health`, `deploy/README.md`).
   - **Why loopback can't be faked:**
     - uvicorn listens on 127.0.0.1 only (`deploy/systemd`).
@@ -201,7 +202,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 - **Remediation:** refuse to start with it in production (like the other production guards in
   `app/core/config.py`).
 
-- **Status: fixed in the repository (same branch; not merged, not deployed).**
+- **Status: merged in #28 (`ca76614`), with F5; not deployed.**
   - **The guard:** `Settings` now refuses to start with `HYPERCHAT_APP_ENV=production` and `HYPERCHAT_AUTH_RETURN_INVITE_LINKS=true` ("Refusing to start: HYPERCHAT_AUTH_RETURN_INVITE_LINKS is not allowed in production."). It's a model validator next to the other production guards, so an administrator can't enable it by mistake.
   - **Unchanged elsewhere:** development and test may still use the setting.
   - **Production today:** `false` (checked read-only earlier), so the guard changes nothing about how production currently starts.
@@ -214,6 +215,36 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   in G3: read-only, validated, no security issue).
 - **Impact:** none today; unused code tends to be forgotten when the rules around it change.
 - **Remediation:** delete after D4 / SEC-L2 are decided.
+
+### F9 (P1): sign-in could be used to overload the API from one IP (introduced by F2, fixed before deployment)
+- **Evidence:**
+  - The F2 change (#29) made every throttled sign-in run a dummy Argon2 verification, to keep timing equal.
+  - One Argon2 verification costs about **50 ms** (measured: 50.7 ms dummy, 52.7 ms real).
+  - It ran synchronously on the event loop, freezing the worker for that time.
+  - Nginx does not rate-limit `/api/v1/auth/`.
+  - So a client over its IP limit could still make the server hash on every request, without bound. About 40 requests per second from one IP would keep both API workers busy and stall every endpoint.
+  - Before F2, an IP over its limit was refused before any hashing.
+- **Impact:** availability of the whole API, unauthenticated, from a single IP. No data exposure.
+- **Exploitability:** trivial once #29 is deployed. **Not exposed:** DEV and production still run older releases.
+- **Status: implemented in PR #30; not merged, not deployed.** Owner-approved 2026-10-11.
+  - **No hashing over the IP limit:** `AuthService.login` checks both IP buckets first. Once either is over its limit, it returns the generic 401 **without any password hashing**, and without touching the account buckets.
+    - Within the IP limits, account-at-IP throttling still runs one dummy verification, so account-specific state can't be told apart by timing.
+    - Total hashing per IP is therefore capped by the IP limits (20 per 15 min, 100 per 24 h).
+    - Every attempt is still counted atomically against the IP before any check, so no request can pass the IP limit or reach verification after it.
+  - **Hashing off the event loop:** every Argon2 / bcrypt call in the auth service (sign-in, rehash, password reset and change, invite acceptance) runs via `asyncio.to_thread`. That's the mechanism the project already uses for blocking work; the default thread pool is bounded at `min(32, CPUs + 4)` threads. A slow hash no longer freezes the worker's other requests. Successful sign-in behaviour is unchanged.
+- **Accepted timing side channel** (owner decision, 2026-10-11):
+  - **What it reveals:** an IP-throttled attempt gets the identical status and body but answers faster, because no hash runs. That shows only that **the IP's shared bucket is exhausted**.
+  - **What it doesn't reveal:** account existence, password correctness, or account-specific throttling. The IP buckets don't depend on the account tried, and account-specific throttling still costs one verification.
+- **Tests** (`backend/tests/auth/test_login_throttling.py`, 4 more PostgreSQL tests):
+  - **IP limit, no hashing:** 50 attempts from one IP get 50 identical generic answers and exactly **20** password verifications. IP-throttled attempts create no account-bucket rows, and all 50 are counted against the IP.
+  - **Account throttle still hashes:** within the IP limits, account-throttled attempts still do exactly one dummy verification each.
+  - **Concurrency:** 30 concurrent attempts from one IP, through the app's own connection pool, reach exactly **20** verifications, with all 30 counted.
+  - **Event loop stays free:** while a sign-in's verification takes 0.6 s, a ticker on the same event loop never stalls for more than 0.3 s, and the sign-in still succeeds.
+- **Regression proof:** against the pre-F9 code, the unbounded-hashing, concurrency and event-loop tests **fail**. The account-throttled test passes on both, as intended: it checks behaviour F9 must keep.
+- **Remaining limitations:**
+  - **Distributed hashing load:** many IPs can still each cause up to 20 verifications per 15 minutes.
+  - **Pool queue:** the thread pool bounds concurrent hashing, but its queue is not bounded. Under a large distributed flood, requests wait rather than fail. The pool is the default one, **shared** with the existing R2 and MP3/voice work, so heavy sign-in load can delay uploads (bounded per IP by the limits above).
+  - **Not done:** an Nginx `limit_req` on `/api/v1/auth/` would cut this off before the API. It's a separate deployment-configuration change, not part of this fix.
 
 ## Verified controls
 
@@ -299,7 +330,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 - **Impact:** "Trojan Source" class (CVE-2021-42574). Editors and GitHub may display those lines differently from what Python executes, so a reviewer could be misled by a future change on those lines.
 - **Exploitability:** not exploitable at runtime; it's a code-review risk.
 - **Remediation (not applied; findings first):** write the characters as `\u` escapes, which compile to the same regex. Add a CI check (Bandit B613 or a grep) that rejects literal bidi characters in `backend/`.
-- **Status: fixed in the repository (branch `security-f8-bidi-escapes`; not merged, nothing to deploy).**
+- **Status: merged in #27 (`0c6f03b`); no runtime change, so nothing to deploy beyond the next release.**
   - **The rewrite:** every literal invisible character on the two regex lines (`moderation.py:29-30`, `text.py:32`), on the two test lines, and the one U+202E in the legacy golden fixture (`tests/audio/fixtures/moderation_golden.json`, as a JSON escape, so `json.loads` gives the same value) is now a `\u` escape.
   - **Untouched:** other invisible characters that belong to visible text (emoji variation selectors and joiners in bot messages, Hindi combining marks in tests).
   - **Same behaviour, proven:**
@@ -324,17 +355,18 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 
 ## Remediation plan
 
-1. **F1** (P1): **done in the repository** (`cc961df`; not deployed). **F1-R** (P3, residual): **mitigated in the repository** (`9cd6093`, `f15c5a8`; not deployed):
+1. **F1** (P1): **merged in #24** (`aa76d78`; not deployed). **F1-R** (P3, residual): **mitigated, merged in #24** (not deployed):
    - **Token paths:** they log errors only at `crit`, and the access log carries the upstream status and timing.
    - **DEV port 80:** logs without the query.
    - **Remaining:** only `crit`-level lines and the negligible bootstrap case; see F1-R above.
 
    Original plan: production log format without query strings + CI assertion. Small, configuration only; deploying it
    to production needs approval.
-2. **F3** (P2): limit current-password checks: **fixed and verified in the repository** (#25; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
-3. **F2** (P2): **fixed in the repository** (layered IP and account-at-IP throttling, policy approved 2026-10-11; not merged, not deployed).
-4. **F6, F5** (P3): production guard for invite links; trim the public health response: **fixed in the repository** (branch `security-f5-f6-health-invite-guard`; not merged, not deployed).
-5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: fixed in the repository** (`\u` escapes, behaviour pinned over all code points, repository-wide CI check).
+2. **F3** (P2): limit current-password checks: **merged in #25** (`dc4c7d8`; not deployed), policy approved 2026-10-11 (5 per user per hour, session kept, 429 until reset, weak new passwords not counted).
+3. **F2** (P2): **merged in #29** (`1c018a7`; layered IP and account-at-IP throttling, policy approved 2026-10-11; not deployed).
+3a. **F9** (P1): **implemented in PR #30** (no hashing over the IP limit; hashing off the event loop; not merged, not deployed); must ship together with or before F2.
+4. **F6, F5** (P3): production guard for invite links; trim the public health response: **merged in #28** (`ca76614`; not deployed).
+5. **Dependency scan:** done 2026-10-10, no known vulnerabilities. **F8** (P3): write the literal bidi characters as `\u` escapes and add a CI check that rejects literal bidi characters in source (no behaviour change). Re-run the scan whenever pins change and before cutover. **F8: merged in #27** (`0c6f03b`; `\u` escapes, behaviour pinned over all code points, repository-wide CI check).
 6. **F4**: carried into the frontend phase as a requirement.
 7. **F7**: after D4 and SEC-L2.
 
