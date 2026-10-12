@@ -474,6 +474,43 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
     A deliberately broken probe (`SELECT *`, which needs every column) makes the column-grant tests fail
     (`permission denied for table users`), so they would catch the case the review describes.
 
+### F15 (P2, found in the review of #48; fixed in this PR, not merged): D1 import recovery could mislead the operator
+- **Evidence** (importer on `main` at `2c4b58b`):
+  - **Ambiguous COMMIT:** a target COMMIT that took effect on the server but whose answer was lost (connection
+    dropped) reached the generic error handler. It printed "nothing was written by this run unless APPLIED was
+    printed" and exited 1, although the import had committed. Reproduced by the new test: the old code exits 1.
+  - **No record of what a run wrote:** the only documented rollback cleared every bcrypt-looking hash.
+  - **Upgraded accounts invisible:** an imported account upgraded to Argon2id by a V2 sign-in could not be told apart,
+    because that upgrade sets `last_login_at` but not `password_changed_at`.
+- **Impact:**
+  - A committed import reported as not written could be followed by unfreezing legacy or a re-run, and the re-run
+    keeps stale hashes because the importer never overwrites.
+  - After exit 4 or a fingerprint mismatch, the broad rollback could clear hashes another run wrote, and missed
+    accounts upgraded after the import.
+- **Fix:**
+  - **Ledger:** each run writes `public.d1_hash_import_ledger` (migration 0017) in the same transaction as the hashes,
+    under an `import_run_id` printed before writing. A run's rows exist if and only if it committed.
+  - **COMMIT outcome:** a COMMIT error is classified. A server-reported error on a live connection is a confirmed
+    rollback (exit 1, as before). Anything else (no SQLSTATE, a broken connection, an interrupt) gives a new
+    **exit 5**, "the import MAY HAVE COMMITTED", which never claims either outcome.
+  - **Operator SQL:** `import_status.sql` settles the outcome and lists accounts changed since the run.
+    `rollback_import.sql` clears only hashes still exactly as that run wrote them (SHA-256 match) and never touches
+    the changed accounts.
+  - **Runbook:** "Recovery after `--apply`" in `docs/operations/d1-auth-freeze/README.md`.
+- **Tests** (real PostgreSQL 17):
+  - the ledger records exactly what was written;
+  - no ledger privilege means nothing is written;
+  - a lost COMMIT acknowledgement: exit 5, the "MAY HAVE COMMITTED" wording, never "nothing was written", and the
+    ledger settles it;
+  - control: a COMMIT the server rejects means exit 1 and nothing written;
+  - exit 4 with an unchanged source: the import is kept;
+  - the full exit-4 recovery: a fingerprint mismatch, an account upgraded after the import, a rollback that clears
+    only that run's unchanged hashes (twice, idempotent), the old fingerprint refused on retry, and the retry
+    succeeding only with a freshly reviewed one;
+  - migration 0017 round trip, privileges and constraints, with both operator SQL files run against the real schema.
+
+  All 7 new or changed importer tests fail against the importer on `main`.
+
 ## Verified controls
 
 | Area | Control | Evidence |

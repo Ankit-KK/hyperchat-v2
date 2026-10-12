@@ -15,12 +15,16 @@ source snapshot; after the confirmation the source is locked (SHARE on auth.user
 kept locked until the target transaction has committed, so no source row can change between the verification and the
 commit. Losing the lock before the commit rolls everything back; losing it in the last instant is reported (exit 4).
 The lock is released right after. A privileged operator can still change the source after that; see that folder's
-README for the remaining risk and the operator controls. Operator guide: database/README.md.
+README for the remaining risk and the operator controls. Each run records what it wrote in
+public.d1_hash_import_ledger (migration 0017) in the same transaction, under the import_run_id it prints, so a run
+can be checked and undone precisely; a COMMIT that gets no reliable answer exits 5 (outcome unknown, check the
+ledger). Operator guide: database/README.md.
 Run:  python -m etl.auth_hash_import
 """
 
 import argparse
 import sys
+import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -206,12 +210,38 @@ def read_targets(conn: psycopg.Connection) -> list[Target]:
 
 
 def check_writer(conn: psycopg.Connection) -> None:
-    """The apply role: the expected columns, UPDATE on password_hash, and not a superuser."""
+    """The apply role: the expected columns, UPDATE on password_hash, insert on the import ledger, not a superuser."""
     check_columns(conn, TARGET_TABLE, TARGET_COLUMNS, "target")
     ok = conn.execute("SELECT NOT r.rolsuper AND has_column_privilege('public.users', 'password_hash', 'UPDATE') "
                       "FROM pg_roles r WHERE r.rolname = current_user").fetchone()[0]
     if not ok:
         raise Refused("target: the role needs UPDATE on public.users.password_hash and must not be a superuser")
+    ledger = conn.execute("SELECT CASE WHEN to_regclass('public.d1_hash_import_ledger') IS NULL THEN false "
+                          "ELSE has_table_privilege('public.d1_hash_import_ledger', 'INSERT') END").fetchone()[0]
+    if not ledger:
+        raise Refused("target: public.d1_hash_import_ledger (migration 0017) is missing or the role may not insert "
+                      "into it; without it a run cannot be verified or undone; nothing was written")
+
+
+# One row per imported account, in the same transaction as the hashes (migration 0017): the run's rows exist if and only
+# if its hashes were committed, and hash_sha256 lets a rollback touch only hashes that are still exactly what it wrote.
+_LEDGER_ROWS = ("INSERT INTO public.d1_hash_import_ledger (run_id, user_id, hash_sha256, source_fingerprint) "
+                f"SELECT %s, id, {_DIGEST.format('password_hash')}, %s FROM public.users WHERE id = ANY(%s::uuid[])")
+
+
+class CommitOutcomeUnknown(Exception):
+    """The target COMMIT was sent but no reliable answer came back (connection lost, interrupted): the run may or may
+    not have committed. Only the ledger rows for `run_id` can tell (docs/operations/d1-auth-freeze/import_status.sql)."""
+
+    def __init__(self, run_id: str):
+        super().__init__(run_id)
+        self.run_id = run_id
+
+
+def _rollback_confirmed(conn: psycopg.Connection, exc: BaseException) -> bool:
+    """A COMMIT the server answered with an error, on a connection that is still intact, was rolled back. Anything
+    else during COMMIT (no SQLSTATE, a closed or broken connection, an interrupt) leaves the outcome unknown."""
+    return isinstance(exc, psycopg.Error) and exc.sqlstate is not None and not conn.closed and not conn.broken
 
 
 def _write(cur: psycopg.Cursor, u: Update) -> int:
@@ -221,29 +251,49 @@ def _write(cur: psycopg.Cursor, u: Update) -> int:
     return cur.rowcount
 
 
-def apply(conn: psycopg.Connection, p: Plan, before_commit=None) -> int:
+def apply(conn: psycopg.Connection, p: Plan, before_commit=None, run_id: str | None = None) -> int:
     """All planned rows in ONE transaction: lock them (users rows, the app's first lock), re-check that each is still
-    exactly as planned, then write each conditionally. Any difference raises and rolls back every row. `before_commit`
-    runs last inside that transaction (main() checks the source lock there); if it raises, nothing is committed."""
+    exactly as planned, then write each conditionally, plus one import-ledger row each under `run_id`. Any difference
+    raises and rolls back every row. `before_commit` runs last inside that transaction (main() checks the source lock
+    there); if it raises, nothing is committed. If the COMMIT itself fails without a reliable answer, raises
+    CommitOutcomeUnknown: the run may have committed."""
     if p.blocked:
         raise Refused(f"blocked by {', '.join(p.blocked)}; nothing was written")
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
-        cur.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
-        check_writer(conn)
-        ids = [u.target_id for u in p.updates]
-        cur.execute(f"{_TARGET_SELECT} WHERE id = ANY(%s::uuid[]) ORDER BY id FOR UPDATE", (ids,))
-        now = {row[0]: Target(*row) for row in cur.fetchall()}
-        for u in p.updates:
-            t = now.get(u.target_id)
-            if t is None or (t.legacy_id, t.email, t.has_password) != (u.legacy_id, u.email, False):
-                raise Refused("target changed since the plan; nothing was written")
-        for u in p.updates:
-            if _write(cur, u) != 1:
-                raise Refused("target changed while writing; nothing was written")
-        if before_commit:
-            before_commit()
+    if len(p.fingerprint) != 64 or not all(ch in "0123456789abcdef" for ch in p.fingerprint):
+        raise Refused("the plan has no source fingerprint (read it with read_plan); nothing was written")
+    run_id = run_id or str(uuid.uuid4())
+    committing = False
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            _write_all(conn, cur, p, run_id)
+            if before_commit:
+                before_commit()
+            committing = True  # leaving this block sends COMMIT
+    except BaseException as exc:
+        if committing and not _rollback_confirmed(conn, exc):
+            raise CommitOutcomeUnknown(run_id) from exc
+        raise
     return len(p.updates)
+
+
+def _write_all(conn: psycopg.Connection, cur: psycopg.Cursor, p: Plan, run_id: str) -> None:
+    """Every write of one apply() run: lock and re-check the planned rows, write them, record them in the ledger."""
+    cur.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
+    cur.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
+    check_writer(conn)
+    ids = [u.target_id for u in p.updates]
+    cur.execute(f"{_TARGET_SELECT} WHERE id = ANY(%s::uuid[]) ORDER BY id FOR UPDATE", (ids,))
+    now = {row[0]: Target(*row) for row in cur.fetchall()}
+    for u in p.updates:
+        t = now.get(u.target_id)
+        if t is None or (t.legacy_id, t.email, t.has_password) != (u.legacy_id, u.email, False):
+            raise Refused("target changed since the plan; nothing was written")
+    for u in p.updates:
+        if _write(cur, u) != 1:
+            raise Refused("target changed while writing; nothing was written")
+    cur.execute(_LEDGER_ROWS, (run_id, p.fingerprint, ids))
+    if cur.rowcount != len(p.updates):
+        raise Refused("the import ledger could not record every row; nothing was written")
 
 
 def render(counts: dict[str, int], title: str) -> str:
@@ -377,13 +427,13 @@ def release_source(src: psycopg.Connection) -> None:
 
 
 def apply_under_source_lock(src: psycopg.Connection, tgt: psycopg.Connection, p: Plan,
-                            expected_fingerprint: str) -> tuple[int, bool]:
+                            expected_fingerprint: str, run_id: str | None = None) -> tuple[int, bool]:
     """Lock and verify the source, write the target in one transaction and commit it while the source lock is still
     held, then release the lock. Returns (rows updated, lock proven held through the target commit). Nothing is
     written if locking or verification fails or the lock is lost before the commit."""
     try:
         lock_source(src, expected_fingerprint, p)
-        updated = apply(tgt, p, before_commit=lambda: require_source_lock(src))
+        updated = apply(tgt, p, before_commit=lambda: require_source_lock(src), run_id=run_id)
         return updated, source_lock_held(src)
     finally:
         release_source(src)
@@ -452,18 +502,29 @@ def main(argv: list[str] | None = None) -> int:
                 if input(f'Type exactly "{phrase}" to write, anything else cancels: ').strip() != phrase:
                     print("cancelled: nothing was written", file=sys.stderr)
                     return 3
-                updated, lock_held = apply_under_source_lock(src, tgt, p, args.expected_fingerprint)
+                run_id = str(uuid.uuid4())
+                print(f"import_run_id       {run_id}", flush=True)  # before writing: the ledger key for this run
+                updated, lock_held = apply_under_source_lock(src, tgt, p, args.expected_fingerprint, run_id)
                 print(render({"updated": updated}, "APPLIED (one transaction, committed)"))
                 if not lock_held:  # detection only: the commit has already happened
-                    print("ALERT: the import committed, but the source lock could not be shown to have been held "
-                          "through the commit (the source session ended at the last moment), so the source may have "
-                          "changed. Keep V2 sign-in off and legacy frozen, run a fresh dry run now and compare "
-                          "source_fingerprint; if it differs or the freeze is not active, follow the abort rules.",
+                    print(f"ALERT: import run {run_id} committed, but the source lock could not be shown to have been "
+                          "held through the commit (the source session ended at the last moment), so the source may "
+                          "have changed. Keep V2 sign-in off and legacy frozen. Run a fresh dry run now: if "
+                          "source_fingerprint equals the reviewed value and the freeze is active, the import matches "
+                          "the source; otherwise roll back THIS run with rollback_import.sql and follow the exit-4 "
+                          "steps in docs/operations/d1-auth-freeze/README.md. Do not re-run --apply first.",
                           file=sys.stderr)
                     return 4
     except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
+    except CommitOutcomeUnknown as exc:  # never claim either outcome: the ledger decides
+        print(f"failed: the COMMIT of import run {exc.run_id} got no reliable answer ({type(exc.__cause__).__name__}); "
+              "the import MAY HAVE COMMITTED. Do not retry --apply and do not unfreeze legacy. Keep V2 sign-in off and "
+              "check the run with docs/operations/d1-auth-freeze/import_status.sql (run_id above): imported = the "
+              "planned count means it committed, 0 means it rolled back; then follow the README. If the target "
+              "cannot be checked, stop and escalate.", file=sys.stderr)
+        return 5
     except psycopg.Error as exc:  # messages may name hosts or roles: print only the class and SQLSTATE
         print(f"failed: {type(exc).__name__} (SQLSTATE {exc.sqlstate or 'n/a'}); nothing was written by this run "
               "unless APPLIED was printed", file=sys.stderr)

@@ -19,6 +19,8 @@ backend of ours in between), so only a database-level freeze can stop them (feas
 | `freeze.sql` | Installs `hyperchat_ops.d1_auth_freeze_guard()` and the trigger `hyperchat_d1_auth_freeze` (BEFORE INSERT OR UPDATE OR DELETE, FOR EACH ROW) on `auth.users`. One transaction, idempotent (`CREATE OR REPLACE`), `lock_timeout` 10 s. A trigger already made ENABLE ALWAYS stays ALWAYS; if the running role cannot restore that (not the table owner), the whole script fails and changes nothing. |
 | `verify.sql` | Read-only: shows the trigger's enabled state, type, column list, WHEN, function and the function body's SHA-256. |
 | `unfreeze.sql` | Removes the trigger and the function. Idempotent. |
+| `import_status.sql` | V2 target, read-only: what one import run (`import_run_id`) wrote, whether each hash is still exactly that, and which accounts changed since. |
+| `rollback_import.sql` | V2 target: undoes one import run, clearing only hashes still exactly as that run wrote them. Idempotent. |
 
 ## What is frozen, and what is not
 - **Rejected:** `INSERT` (sign-up, admin-created users, first-time OAuth users), `DELETE` (admin deletion), and any
@@ -157,17 +159,59 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
 
 ## Abort rules
 - **Before `--apply`:** nothing was written to V2. `unfreeze.sql`; legacy continues.
-- **Exit 4:** the import committed, but the source session ended at the last instant, so the source may have
-  changed. Keep V2 sign-in off and legacy frozen and run a fresh dry run at once: if `source_fingerprint` still equals
-  the recorded value and the freeze is active, the import matches the source; otherwise treat it as below.
-- **A later fingerprint mismatch (step 10, or after exit 4):** the source changed after the import committed. Keep V2
-  sign-in off and legacy frozen, undo the import with the rollback in `database/README.md`, find out who changed the
-  source and why, then start again from a fresh report and dry run.
-- **After `--apply`, before the switch:** keep the freeze. If legacy must be unfrozen, first undo the import in V2 with
-  the rollback in `database/README.md` (clears the imported bcrypt hashes; accounts already upgraded to Argon2id keep
-  theirs). The importer never overwrites a target hash, so a later re-import cannot repair hashes made stale by legacy
-  password changes.
+- **Any outcome of `--apply`** (exit 0, 1, 4 or 5, or a later fingerprint mismatch): follow "Recovery after
+  `--apply`" below. Until it says otherwise, keep legacy frozen and V2 sign-in off.
+- **After `--apply`, before the switch:** keep the freeze. If legacy must be unfrozen, first undo the run with
+  `rollback_import.sql` (below). The importer never overwrites a target hash, so a later re-import cannot repair hashes
+  made stale by legacy password changes.
 - **After the switch:** legacy auth is retired; remove the freeze when Supabase is decommissioned.
+
+## Recovery after `--apply`
+Every `--apply` prints `import_run_id <uuid>` **before** it writes. Record it with the reviewed fingerprint.
+
+The run writes the hashes and one ledger row per account (`public.d1_hash_import_ledger`, migration 0017) in **one
+transaction**: its ledger rows exist if and only if its hashes were committed.
+
+On the V2 target:
+- `import_status.sql -v run_id=<id>` shows:
+  - `imported` (0 = not committed; the planned count = committed);
+  - `still_imported_hash`;
+  - `cleared`;
+  - `changed_since_import`, and the user ids behind it.
+- `rollback_import.sql -v run_id=<id>` clears only hashes that are still exactly what that run wrote.
+
+**Throughout:** legacy stays frozen and V2 sign-in stays off until the outcome is established, and, if needed, the run
+is rolled back.
+
+| What happened | What it means | What to do |
+|---|---|---|
+| **Exit 0**, `APPLIED` printed | Committed, and the source lock was proven held through the commit | `import_status.sql`: `imported` = the APPLIED count. Continue the cutover procedure (step 10, a fresh dry run, before switching users). |
+| **Exit 2 or 3** | Refused or cancelled before anything was written | No V2 change. Fix the cause; re-run from a reviewed dry run. |
+| **Exit 1** (`failed: … nothing was written by this run`) | An error before the COMMIT, or a COMMIT the server rejected on a live connection: rolled back | Optional proof: `import_status.sql` shows `imported` = 0. Re-run only from a reviewed dry run. |
+| **Exit 5** (`the import MAY HAVE COMMITTED`) | The COMMIT got no reliable answer (connection lost, interrupted): **outcome unknown** | **Do not retry, do not unfreeze.** Run `import_status.sql` with the printed run id: `imported` = the planned count means it committed (go to the exit 0 row, then step 10); 0 means it rolled back (exit 1 row). **Any other count, or a target you cannot reach: stop and escalate.** |
+| **Exit 4** (`ALERT`) | Committed, but the source lock was not proven held through the COMMIT: the source may have changed in that instant | Run a fresh dry run at once. **Fingerprint equal** to the reviewed value **and** freeze active: the import matches the source; keep it (`import_status.sql`: `still_imported_hash` = `imported`) and continue. **Fingerprint different, or freeze not active:** roll back this run (next row). |
+| **Fingerprint mismatch** (after exit 4, or at step 10) | The source changed after this run's snapshot; some imported hashes may be stale | 1. `import_status.sql`, and note `changed_since_import`. 2. `rollback_import.sql` (as the importer's target role, V2 sign-in off). 3. `import_status.sql` again: `still_imported_hash` must be 0. 4. Decide every `changed_since_import` account (below). 5. Find who changed the source, and why. 6. Retry only as below. |
+
+**Accounts changed after the import** (`changed_since_import`): their hash is no longer what the run wrote.
+- **Why it happens:** a V2 sign-in with the imported bcrypt hash upgrades it to Argon2id. That includes the operator's
+  own migrated-account sign-in check in procedure step 6. A password reset or change does the same.
+- **Why no timestamp can be used:** the sign-in upgrade sets `last_login_at` but **not** `password_changed_at`, so only
+  the ledger's digest identifies these accounts reliably.
+- **The rollback never touches them.** After a fingerprint mismatch, such an account may hold a password derived from a
+  stale legacy hash.
+- **Each one needs an explicit owner decision**, recorded before the switch: keep it, or clear it (then reset, which
+  needs the D8 credentials). Revoke its V2 sessions when clearing. **Never clear them in bulk by hash format.**
+
+**When a retry is safe:** all of these must hold.
+- The previous run's outcome is established: exit 0/1/2/3, or exit 5 resolved by `import_status.sql`.
+- Any run to undo is rolled back (`still_imported_hash` = 0).
+- The `changed_since_import` accounts are decided.
+- The freeze is active.
+- A **fresh** dry run has been reviewed and **its** fingerprint is passed to `--apply`. The old fingerprint is
+  refused, as it should be.
+
+A fresh dry run alone does **not** make a retry safe. The importer skips accounts that already hold a hash, so
+re-running over an import that was not rolled back would keep stale hashes.
 
 ## Limitations (known)
 - **Privileged bypass cannot be prevented, only detected (within limits).** The table owner or a superuser (on

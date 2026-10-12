@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
+    "d1_hash_import_ledger",
 }
 
 
@@ -426,6 +427,50 @@ def test_0016_banned_donor_unban_round_trip(monkeypatch):
         with _owner() as conn:
             conn.execute("DELETE FROM public.users WHERE email = 'migtest-unban@authtest.invalid'")
             conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
+
+
+def test_0017_d1_hash_import_ledger_round_trip_privileges_and_constraints(monkeypatch):
+    """The D1 import ledger: append-only for the API role, nothing for the worker, readable for reporting; one row per
+    (run, user); digests and fingerprints are 64 lowercase hex characters; a deleted user takes its rows with it."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0016")
+    assert "d1_hash_import_ledger" not in _tables() and "banned_donors" in _tables()
+    command.upgrade(cfg, "head")
+    assert "d1_hash_import_ledger" in _tables()
+    checks = [("hyperchat_app", "SELECT", True), ("hyperchat_app", "INSERT", True), ("hyperchat_app", "UPDATE", False),
+              ("hyperchat_app", "DELETE", False), ("hyperchat_app", "TRUNCATE", False),
+              ("hyperchat_worker", "SELECT", False), ("hyperchat_worker", "INSERT", False),
+              ("hyperchat_readonly", "SELECT", True), ("hyperchat_readonly", "INSERT", False)]
+    ins = "INSERT INTO public.d1_hash_import_ledger (run_id, user_id, hash_sha256, source_fingerprint) VALUES (%s, %s, %s, %s)"
+    run, digest = "00000000-0000-0000-0000-0000000d1017", "a" * 64
+    with _owner() as conn:
+        got = conn.execute("SELECT " + ", ".join(f"has_table_privilege('{r}', 'public.d1_hash_import_ledger', '{p}')"
+                                                 for r, p, _ in checks)).fetchone()
+        assert list(got) == [want for _, _, want in checks]
+        conn.execute("DELETE FROM public.users WHERE email = 'migtest-ledger@authtest.invalid'")
+        uid = conn.execute("INSERT INTO public.users (email) VALUES ('migtest-ledger@authtest.invalid') "
+                           "RETURNING id").fetchone()[0]
+        try:
+            conn.execute(ins, (run, uid, digest, digest))
+            with pytest.raises(psycopg.errors.UniqueViolation):  # one row per run and user
+                conn.execute(ins, (run, uid, digest, digest))
+            for bad in (("A" * 64, digest), ("a" * 63, digest), (digest, "not-a-fingerprint")):
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    conn.execute(ins, ("00000000-0000-0000-0000-0000000d1018", uid, *bad))
+            # the operator SQL in docs/operations/d1-auth-freeze/ runs against the real schema, as written
+            ops = DATABASE.parent / "docs" / "operations" / "d1-auth-freeze"
+            conn.execute("UPDATE public.users SET password_hash = %s WHERE id = %s", ("x", uid))
+            conn.execute("UPDATE public.d1_hash_import_ledger SET hash_sha256 = encode(sha256('x'::bytea), 'hex') "
+                         "WHERE run_id = %s", (run,))
+            for name in ("import_status.sql", "rollback_import.sql"):
+                conn.execute((ops / name).read_text(encoding="utf-8").replace(":'run_id'", f"'{run}'"))
+            assert conn.execute("SELECT password_hash FROM public.users WHERE id = %s", (uid,)).fetchone()[0] is None
+        finally:
+            conn.execute("DELETE FROM public.users WHERE id = %s", (uid,))  # its ledger rows cascade
+        assert conn.execute("SELECT count(*) FROM public.d1_hash_import_ledger WHERE user_id = %s",
+                            (uid,)).fetchone()[0] == 0
 
 
 def test_no_supabase_artifacts():
