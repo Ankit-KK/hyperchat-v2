@@ -20,6 +20,7 @@ backend of ours in between), so only a database-level freeze can stop them (feas
 | `verify.sql` | Read-only: shows the trigger's enabled state, type, column list, WHEN, function and the function body's SHA-256. |
 | `unfreeze.sql` | Removes the trigger and the function. Idempotent. |
 | `import_status.sql` | V2 target, read-only: what one import run (`import_run_id`) wrote, whether each hash is still exactly that, and which accounts changed since. |
+| `hosted-rehearsal.md`, `hosted-rehearsal-results-template.md` | The hosted Supabase rehearsal (step 12): procedure and results template. Not run yet. |
 | `rollback_import.sql` | V2 target: undoes one import run, clearing only hashes still exactly as that run wrote them. Idempotent. |
 
 ## What is frozen, and what is not
@@ -298,7 +299,10 @@ before relying on the result.
     `session_replication_role`, yet it could): repeat the permission checks on a **new, empty** hosted Supabase project
     (no real users) as the dashboard role: `freeze.sql` twice and `verify.sql`; `ENABLE ALWAYS`; a replica-mode
     `UPDATE` in a rolled-back transaction; `unfreeze.sql` twice; the lock statement of step 9 as the intended source
-    role; whether that role has or can be given `BYPASSRLS`; and `relrowsecurity` on `auth.users`.
+    role; whether that role has or can be given `BYPASSRLS`; and `relrowsecurity` on `auth.users`. The exact procedure
+    (approval gates, commands, expected results, pass/fail and abort criteria, cleanup proof) is
+    [`hosted-rehearsal.md`](hosted-rehearsal.md); record results in a copy of
+    [`hosted-rehearsal-results-template.md`](hosted-rehearsal-results-template.md). **Not run yet.**
 13. `supabase stop --no-backup`. Record every result (status codes, error text, before/after md5, timings) in the PR
     or the D1 checklist row. Only then may the freeze and the lock be called rehearsed.
 
