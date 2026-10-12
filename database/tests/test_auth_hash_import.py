@@ -243,6 +243,7 @@ def fixtures():
             c.execute(f"GRANT USAGE ON SCHEMA auth TO {READER}")
             c.execute(f"GRANT SELECT (id, email, encrypted_password, email_confirmed_at, deleted_at, banned_until) "
                       f"ON auth.users TO {READER}")
+            c.execute(f"GRANT MAINTAIN ON auth.users TO {READER}")  # may take the --apply source lock, not write
         with _admin(TGT_DB) as c:
             c.execute("CREATE EXTENSION citext")
             c.execute("CREATE TABLE public.users (id uuid PRIMARY KEY, email citext NOT NULL UNIQUE, password_hash "
@@ -809,26 +810,61 @@ def test_apply_with_the_freeze_and_the_reviewed_fingerprint_imports(loaded, monk
     assert all(_rows()[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
 
 
-# ── privileged bypass during the import run (post-#45 audit) ────────────────
-# A superuser (the fixture's admin role) can disable or drop the freeze trigger, write, and put the trigger back, or
-# TRUNCATE the table (no row trigger fires). These tests do exactly that at the real boundaries of a run.
+# ── privileged bypass and the source lock (post-#45 audit) ──────────────────
+# A superuser (the fixture's admin role) can write with session_replication_role = replica, disable or drop the freeze
+# trigger, or TRUNCATE (no row trigger fires). These tests do that at the real boundaries of an --apply run and assert
+# the target database itself, not only exit codes or messages.
 
-def _bypass_password_change(key: str = "e1") -> None:
-    """A privileged change that leaves the freeze looking intact: disable the trigger, write, enable it again."""
+PHRASE = f"IMPORT 4 HASHES INTO {TGT_DB}"
+BYPASSES = {
+    "update-replica": ["SET session_replication_role = replica",
+                       "UPDATE auth.users SET encrypted_password = %(other)s WHERE id = %(e1)s"],
+    "truncate": ["TRUNCATE auth.users"],
+    "disable-write-enable": ["ALTER TABLE auth.users DISABLE TRIGGER hyperchat_d1_auth_freeze",
+                             "UPDATE auth.users SET encrypted_password = %(other)s WHERE id = %(e1)s",
+                             "ALTER TABLE auth.users ENABLE TRIGGER hyperchat_d1_auth_freeze"],
+    "drop-trigger": ["DROP TRIGGER hyperchat_d1_auth_freeze ON auth.users"],
+}
+BLOCKING_STATEMENT = {"update-replica": "UPDATE auth.users SET encrypted_password", "truncate": "TRUNCATE auth.users",
+                      "disable-write-enable": "ALTER TABLE auth.users DISABLE TRIGGER",
+                      "drop-trigger": "DROP TRIGGER hyperchat_d1_auth_freeze"}
+
+
+def _run_bypass(name: str) -> None:
+    params = {"e1": IDS["e1"], "other": HASHES["e2"]}
     with _admin(SRC_DB) as c:
-        c.execute("ALTER TABLE auth.users DISABLE TRIGGER hyperchat_d1_auth_freeze")
-        c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (HASHES["e2"], IDS[key]))
-        c.execute("ALTER TABLE auth.users ENABLE TRIGGER hyperchat_d1_auth_freeze")
+        for sql in BYPASSES[name]:
+            c.execute(sql, params if "%(" in sql else None)
 
 
-def _bypass_truncate() -> None:
+def _source_after(name: str) -> bool:
+    """Whether the bypass has taken effect on the source."""
     with _admin(SRC_DB) as c:
-        c.execute("TRUNCATE auth.users")
+        if name == "truncate":
+            return c.execute("SELECT count(*) FROM auth.users").fetchone()[0] == 0
+        if name == "drop-trigger":
+            return c.execute("SELECT count(*) FROM pg_trigger WHERE tgname = 'hyperchat_d1_auth_freeze'").fetchone()[0] == 0
+        return c.execute("SELECT encrypted_password FROM auth.users WHERE id = %s", (IDS["e1"],)).fetchone()[0] \
+            == HASHES["e2"]
 
 
-def _bypass_drop_trigger() -> None:
+def _share_locks_on_source(pid: int | None = None) -> int:
     with _admin(SRC_DB) as c:
-        c.execute("DROP TRIGGER hyperchat_d1_auth_freeze ON auth.users")
+        return c.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'relation' AND relation = 'auth.users'::regclass "
+                         "AND mode = 'ShareLock' AND granted AND (%s::int IS NULL OR pid = %s::int)",
+                         (pid, pid)).fetchone()[0]
+
+
+def _assert_source_unlocked() -> None:
+    """No session holds the importer's lock, and a sign-in style write goes through at once."""
+    assert _share_locks_on_source() == 0
+    with _admin(SRC_DB) as c:
+        c.execute("SET lock_timeout = '1s'")
+        assert c.execute("UPDATE auth.users SET last_sign_in_at = now() WHERE id = %s", (IDS["s1"],)).rowcount in (0, 1)
+
+
+def _imported_reviewed_hashes(rows: dict) -> bool:
+    return all(rows[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
 
 
 def _reviewed_and_frozen(monkeypatch, capsys) -> str:
@@ -838,102 +874,386 @@ def _reviewed_and_frozen(monkeypatch, capsys) -> str:
     return _printed_fingerprint(capsys.readouterr().out)
 
 
+def _capture_source_pid(monkeypatch, seen: dict) -> None:
+    real = imp.lock_source
+
+    def wrapper(src, expected, p):
+        seen["pid"] = src.info.backend_pid
+        return real(src, expected, p)
+    monkeypatch.setattr(imp, "lock_source", wrapper)
+
+
 @db_only
 def test_the_plan_snapshot_alone_cannot_see_a_bypass_made_after_it(loaded):
-    """The limitation behind this follow-up, shown with real transactions: a privileged change committed after the
-    plan's snapshot is invisible to it; the plan still carries the old hash and still matches the reviewed
-    fingerprint. Only a fresh snapshot sees the change."""
+    """The limitation behind this follow-up, with real transactions: a privileged change committed after the plan's
+    snapshot is invisible to it; the plan still carries the old hash and still matches the reviewed fingerprint."""
     _run_freeze_sql("freeze.sql")
     reviewed = _fingerprint_now()
     with _src() as s, _tgt(VIEWER, read_only=True) as t:
         p = imp.read_plan(s, t, False)
-        _bypass_password_change()
-        assert p.fingerprint == reviewed and p.freeze_problem is None  # the snapshot still looks perfect
-        assert next(u for u in p.updates if u.target_id == _tid("e1")).password_hash == HASHES["e1"]  # old hash
-        assert "changed after the plan" in imp.source_drift(s, reviewed)  # a fresh snapshot sees it
+    _run_bypass("disable-write-enable")
+    assert p.fingerprint == reviewed and p.freeze_problem is None  # the snapshot still looks perfect
+    assert next(u for u in p.updates if u.target_id == _tid("e1")).password_hash == HASHES["e1"]  # the old hash
+    assert _fingerprint_now() != reviewed  # only a fresh look at the source shows the change
 
 
 @db_only
-@pytest.mark.parametrize("bypass, expected", [
-    (_bypass_password_change, "changed after the plan"),
-    (_bypass_truncate, "changed after the plan"),
-    (_bypass_drop_trigger, "freeze is no longer active"),
-], ids=["disable-write-enable", "truncate", "drop-trigger"])
-def test_a_bypass_during_the_confirmation_prompt_is_refused_and_nothing_is_written(loaded, monkeypatch, capsys,
-                                                                                   bypass, expected):
-    """The bypass happens while the operator is at the confirmation prompt, i.e. after the plan was read and checked,
-    before any target write. The pre-commit re-check in a fresh snapshot must refuse and roll the target back."""
+@pytest.mark.parametrize("name, expected", [
+    ("disable-write-enable", "no longer matches the reviewed fingerprint"),
+    ("truncate", "no longer matches the reviewed fingerprint"),
+    ("drop-trigger", "freeze is not active under the lock"),
+])
+def test_a_bypass_during_the_confirmation_prompt_is_caught_under_the_lock(loaded, monkeypatch, capsys, name, expected):
+    """After the plan was read and checked, while the operator is at the prompt: the verification under the lock sees
+    the change, nothing is written, and the lock is released."""
     reviewed = _reviewed_and_frozen(monkeypatch, capsys)
     before = _rows()
     _cli(monkeypatch, [])
-    phrase = f"IMPORT 4 HASHES INTO {TGT_DB}"
 
     def operator_types_the_phrase(prompt=""):
-        bypass()  # meanwhile, someone with superuser rights changes the source
-        return phrase
+        _run_bypass(name)
+        return PHRASE
     monkeypatch.setattr("builtins.input", operator_types_the_phrase)
     assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2
-    assert _rows() == before
+    assert _rows() == before  # the target database is untouched
     err = capsys.readouterr().err
     assert expected in err and "nothing was written" in err and HASHES["e2"] not in err
+    _assert_source_unlocked()
 
 
 @db_only
-def test_a_bypass_after_the_pre_commit_check_is_detected_after_commit(loaded, monkeypatch, capsys):
-    """The remaining window: a change between the pre-commit re-check and the target COMMIT cannot be prevented by a
-    read-only source role. It must not pass silently: the post-commit fresh check alerts (exit 4)."""
-    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
-    _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
-    real = imp.revalidate_source
-
-    def check_then_bypass(src, expected):
-        real(src, expected)  # passes: the source is still as reviewed
-        _bypass_password_change()  # ...and changes right after, before the target commits
-    monkeypatch.setattr(imp, "revalidate_source", check_then_bypass)
-    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 4
-    assert _rows()[_tid("e1")][0] == HASHES["e1"]  # committed with the reviewed (now stale) hash
-    err = capsys.readouterr().err
-    assert "ALERT" in err and "rollback" in err and HASHES["e2"] not in err
-
-
-@db_only
-def test_the_pre_commit_check_does_not_block_sign_ins_or_refuse_unrelated_updates(loaded, monkeypatch, capsys):
-    """During the re-check (target rows locked), a legacy sign-in still updates auth.users without waiting, and an
-    unrelated column change does not count as drift: the import commits and the post-commit check passes."""
-    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
-    _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
-    real = imp.revalidate_source
-
-    def sign_in_meanwhile(src, expected):
-        with _admin(SRC_DB) as c:
-            c.execute("SET lock_timeout = '1s'")
-            assert c.execute("UPDATE auth.users SET last_sign_in_at = now() WHERE id = %s",
-                             (IDS["e3"],)).rowcount == 1  # not blocked, allowed by the freeze
-        real(src, expected)
-    monkeypatch.setattr(imp, "revalidate_source", sign_in_meanwhile)
-    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 0
-    assert all(_rows()[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
-
-
-@db_only
-def test_a_source_failure_during_the_pre_commit_check_writes_nothing(loaded, monkeypatch, capsys):
+@pytest.mark.parametrize("name", list(BYPASSES))
+def test_a_bypass_in_the_gap_before_the_target_commit_waits_for_it(loaded, monkeypatch, capsys, name):
+    """The exact gap: the source was verified under the lock and the target rows are written but not yet committed.
+    A privileged change fired now must block on the source lock (it cannot commit in the gap), so the import commits
+    the verified, still-current hashes, and the change lands only after the commit and the lock release."""
     reviewed = _reviewed_and_frozen(monkeypatch, capsys)
     before = _rows()
-    _cli(monkeypatch, [f"IMPORT 4 HASHES INTO {TGT_DB}"])
+    _cli(monkeypatch, [PHRASE])
+    real = imp.require_source_lock
+    bypass, state = None, {}
 
-    def connection_lost(src, expected):
-        raise psycopg.OperationalError("synthetic: source connection lost")
-    monkeypatch.setattr(imp, "revalidate_source", connection_lost)
-    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 1
-    assert _rows() == before
-    assert "OperationalError" in capsys.readouterr().err
+    def bypass_in_the_gap(src):
+        nonlocal bypass
+        errors: list = []
+        bypass = threading.Thread(target=_safe, args=(errors, lambda: _run_bypass(name)))
+        state["errors"] = errors
+        bypass.start()
+        state["blocked"] = _wait_for_lock(BLOCKING_STATEMENT[name])  # waiting for the importer's source lock
+        # Nothing reached the source yet. A fresh read of auth.users would queue behind a waiting TRUNCATE (PostgreSQL's
+        # lock queue) and so behind the importer itself; for TRUNCATE, "still waiting" below is the proof instead.
+        state["unchanged_in_gap"] = name == "truncate" or not _source_after(name)
+        state["target_uncommitted"] = _rows() == before  # we are inside the uncommitted target transaction
+        state["still_blocked"] = _wait_for_lock(BLOCKING_STATEMENT[name])  # right before the target COMMIT
+        return real(src)
+    monkeypatch.setattr(imp, "require_source_lock", bypass_in_the_gap)
+    try:
+        assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 0
+        after_import = _rows()
+    finally:
+        if bypass is not None:
+            bypass.join(15)
+    assert state == {"errors": [], "blocked": True, "unchanged_in_gap": True, "target_uncommitted": True,
+                     "still_blocked": True}
+    assert not bypass.is_alive()
+    assert _imported_reviewed_hashes(after_import)  # committed the verified hashes
+    assert {k: v for k, v in after_import.items() if k not in {_tid(e) for e in ELIGIBLE}} == \
+        {k: v for k, v in before.items() if k not in {_tid(e) for e in ELIGIBLE}}  # nothing else touched
+    assert _source_after(name)  # the privileged change landed, after the commit: the documented residual
+    assert _share_locks_on_source() == 0
 
 
 @db_only
-def test_source_drift_is_none_while_the_source_is_unchanged(loaded):
+def test_the_source_lock_is_held_from_verification_until_after_the_target_commit(loaded, monkeypatch, capsys):
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    _cli(monkeypatch, [PHRASE])
+    seen: dict = {}
+    _capture_source_pid(monkeypatch, seen)
+    held_during: list[str] = []
+    real_write, real_require, real_release = imp._write, imp.require_source_lock, imp.release_source
+
+    def write(cur, u):
+        held_during.append("write" if _share_locks_on_source(seen["pid"]) == 1 else "write:NOT HELD")
+        return real_write(cur, u)
+
+    def require(src):
+        held_during.append("pre-commit" if _share_locks_on_source(seen["pid"]) == 1 else "pre-commit:NOT HELD")
+        return real_require(src)
+
+    def release(src):
+        committed = _imported_reviewed_hashes(_rows())  # visible from another session: the commit has happened
+        held = _share_locks_on_source(seen["pid"]) == 1
+        held_during.append("after-commit" if committed and held else f"after-commit:{committed}/{held}")
+        real_release(src)
+        held_during.append("released" if _share_locks_on_source(seen["pid"]) == 0 else "released:STILL HELD")
+    monkeypatch.setattr(imp, "_write", write)
+    monkeypatch.setattr(imp, "require_source_lock", require)
+    monkeypatch.setattr(imp, "release_source", release)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 0
+    assert held_during == ["write"] * 4 + ["pre-commit", "after-commit", "released"]
+    assert _imported_reviewed_hashes(_rows()) and _rows() != before
+
+
+@db_only
+def test_losing_the_source_session_before_the_pre_commit_check_writes_nothing(loaded, monkeypatch, capsys):
+    """The source session ends while the target is written (a privileged pg_terminate_backend, an idle timeout, a
+    network failure) and the source then changes: the pre-commit check fails, the target rolls back."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    _cli(monkeypatch, [PHRASE])
+    seen: dict = {}
+    _capture_source_pid(monkeypatch, seen)
+    real = imp.require_source_lock
+
+    def kill_then_check(src):
+        with _admin(SRC_DB) as c:
+            c.execute("SELECT pg_terminate_backend(%s)", (seen["pid"],))
+        _wait_until(lambda: _share_locks_on_source(seen["pid"]) == 0)
+        _run_bypass("update-replica")  # now nothing stops it
+        return real(src)
+    monkeypatch.setattr(imp, "require_source_lock", kill_then_check)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2
+    assert _rows() == before  # rolled back: the stale hash was not imported
+    assert _source_after("update-replica")
+    assert "source lock was lost before the target commit" in capsys.readouterr().err
+    _assert_source_unlocked()
+
+
+@db_only
+def test_losing_the_source_session_right_after_the_pre_commit_check_is_reported_not_prevented(loaded, monkeypatch,
+                                                                                               capsys):
+    """The remaining window: the session ends after the pre-commit check, before the target COMMIT, and the source
+    changes at once. The import commits (a read-only source cannot stop that); the post-commit check cannot prove the
+    lock was held and alerts (exit 4). This is detection only: the target now holds a stale hash."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    _cli(monkeypatch, [PHRASE])
+    seen: dict = {}
+    _capture_source_pid(monkeypatch, seen)
+    real = imp.require_source_lock
+
+    def check_then_kill(src):
+        real(src)  # passes: the lock is held
+        with _admin(SRC_DB) as c:
+            c.execute("SELECT pg_terminate_backend(%s)", (seen["pid"],))
+        _wait_until(lambda: _share_locks_on_source(seen["pid"]) == 0)
+        _run_bypass("update-replica")
+    monkeypatch.setattr(imp, "require_source_lock", check_then_kill)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 4
+    after = _rows()
+    assert _imported_reviewed_hashes(after) and after[_tid("e1")][0] == HASHES["e1"]  # committed, now stale
+    assert _source_after("update-replica")  # the source moved on
+    err = capsys.readouterr().err
+    assert "ALERT" in err and "could not be shown to have been held" in err and HASHES["e2"] not in err
+    _assert_source_unlocked()
+
+
+@db_only
+def test_a_source_lock_that_cannot_be_taken_in_time_writes_nothing(loaded, monkeypatch, capsys):
+    """A write to auth.users is still in flight (a sign-in): the lock wait is bounded, nothing is written, and the lock
+    request does not linger after the timeout."""
+    monkeypatch.setattr(imp, "SOURCE_LOCK_TIMEOUT", "300ms")
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    _cli(monkeypatch, [PHRASE])
+    writer = _admin(SRC_DB)
+    writer.autocommit = False
+    writer.execute("UPDATE auth.users SET last_sign_in_at = now() WHERE id = %s", (IDS["s1"],))  # not committed
+    try:
+        started = time.monotonic()
+        assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2
+        assert time.monotonic() - started < 5
+    finally:
+        writer.commit()
+        writer.close()
+    assert _rows() == before
+    assert "could not lock the source within 300ms" in capsys.readouterr().err
+    _assert_source_unlocked()
+
+
+@db_only
+def test_a_source_role_that_may_not_lock_is_refused_before_any_write(loaded, monkeypatch, capsys):
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    _cli(monkeypatch, [PHRASE])
+    with _admin(SRC_DB) as c:
+        c.execute(f"REVOKE MAINTAIN ON auth.users FROM {READER}")
+    try:
+        assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2
+    finally:
+        with _admin(SRC_DB) as c:
+            c.execute(f"GRANT MAINTAIN ON auth.users TO {READER}")
+    assert _rows() == before
+    assert "may not lock auth.users" in capsys.readouterr().err
+    _assert_source_unlocked()
+
+
+@db_only
+def test_a_writable_source_role_needs_the_explicit_flag_and_still_reads_only(loaded, monkeypatch, capsys):
+    """Before PostgreSQL 17 (no MAINTAIN), only update / delete / truncate allow the lock, so the role is writable: the
+    importer refuses it unless --accept-writable-source-role, and its own transaction stays READ ONLY."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    with _admin(SRC_DB) as c:
+        c.execute(f"REVOKE MAINTAIN ON auth.users FROM {READER}")
+        c.execute(f"GRANT UPDATE ON auth.users TO {READER}")
+    try:
+        _cli(monkeypatch, [PHRASE])
+        assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2 and _rows() == before
+        assert "can write to auth.users" in capsys.readouterr().err
+        seen: dict = {}
+        real = imp.lock_source
+
+        def check_read_only(src, expected, p):
+            real(src, expected, p)
+            seen["read_only"] = src.execute("SHOW transaction_read_only").fetchone()[0]
+            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                src.execute("UPDATE auth.users SET last_sign_in_at = now() WHERE id = %s", (IDS["s1"],))
+        monkeypatch.setattr(imp, "lock_source", check_read_only)
+        _cli(monkeypatch, [PHRASE])
+        # the failed write above ended the locked transaction: the pre-commit check must see that and roll back
+        assert imp.main(["--apply", "--accept-writable-source-role", "--expected-fingerprint", reviewed]) == 2
+        assert seen["read_only"] == "on" and _rows() == before
+        monkeypatch.setattr(imp, "lock_source", real)
+        _cli(monkeypatch, [PHRASE])
+        assert imp.main(["--apply", "--accept-writable-source-role", "--expected-fingerprint", reviewed]) == 0
+        assert _imported_reviewed_hashes(_rows())
+    finally:
+        with _admin(SRC_DB) as c:
+            c.execute(f"REVOKE UPDATE ON auth.users FROM {READER}")
+            c.execute(f"GRANT MAINTAIN ON auth.users TO {READER}")
+    _assert_source_unlocked()
+
+
+@db_only
+def test_planned_hashes_are_checked_against_the_locked_source(loaded):
+    """Even with a matching fingerprint, a plan carrying a hash the locked source does not have is refused."""
     _run_freeze_sql("freeze.sql")
-    reviewed = _fingerprint_now()
-    with _src() as s:
-        assert imp.source_drift(s, reviewed) is None
-        assert imp.source_drift(s, reviewed) is None  # repeatable: each call is its own fresh transaction
-        assert "changed" in imp.source_drift(s, "0" * 64)
+    with _src() as s, _tgt(VIEWER, read_only=True) as t:
+        p = imp.read_plan(s, t, False)
+        e1 = next(u for u in p.updates if u.target_id == _tid("e1"))
+        tampered = imp.Plan(p.counts, [imp.Update(e1.target_id, e1.legacy_id, e1.email, HASHES["e2"])]
+                            + [u for u in p.updates if u is not e1], p.fingerprint, None)
+        try:
+            with pytest.raises(Refused, match="planned hash no longer matches"):
+                imp.lock_source(s, p.fingerprint, tampered)
+        finally:
+            imp.release_source(s)
+        imp.lock_source(s, p.fingerprint, p)  # the real plan verifies under the lock
+        try:
+            assert imp.source_lock_held(s)
+        finally:
+            imp.release_source(s)
+        assert not imp.source_lock_held(s)
+    _assert_source_unlocked()
+
+
+@db_only
+@pytest.mark.parametrize("failure", ["target-write-error", "target-row-changed"])
+def test_target_failures_under_the_lock_roll_back_and_release_it(loaded, monkeypatch, capsys, failure):
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    _cli(monkeypatch, [PHRASE])
+    if failure == "target-write-error":
+        calls: list = []
+        real_write = imp._write
+
+        def flaky(cur, u):
+            calls.append(1)
+            if len(calls) == 3:
+                raise RuntimeError("synthetic target failure")
+            return real_write(cur, u)
+        monkeypatch.setattr(imp, "_write", flaky)
+        before, expected_exit, expected_err = _rows(), 1, "failed: RuntimeError"
+    else:
+        real_lock = imp.lock_source
+
+        def lock_then_change_target(src, expected, p):
+            real_lock(src, expected, p)
+            with _admin(TGT_DB) as c:  # someone sets a password in V2 meanwhile
+                c.execute("UPDATE public.users SET password_hash = '$argon2id$v2-reset' WHERE id = %s", (_tid("e2"),))
+        monkeypatch.setattr(imp, "lock_source", lock_then_change_target)
+        before = None
+        expected_exit, expected_err = 2, "target changed since the plan"
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == expected_exit
+    rows = _rows()
+    if before is not None:
+        assert rows == before
+    else:
+        assert rows[_tid("e2")][0] == "$argon2id$v2-reset"
+        assert all(rows[_tid(k)][0] is None for k in ("e1", "e4")) and rows[_tid("e3")][0] == ""
+    assert expected_err in capsys.readouterr().err
+    _assert_source_unlocked()
+
+
+def _wait_until(predicate, seconds: float = 10) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)  # poll interval only
+    raise AssertionError("condition not reached")
+
+
+@db_only
+def test_measure_how_long_sign_in_writes_wait_during_a_134_account_import(loaded, monkeypatch, capsys):
+    """Impact on GoTrue-style writes: a loop of sign-in updates (last_sign_in_at) runs against the source during a
+    134-account import. They must wait while the lock is held and resume right after; the numbers are printed (run
+    with -s) for the freeze README. Local connections: production adds the round trips to Supabase."""
+    extra = 130
+    with _admin(SRC_DB) as c:
+        for i in range(extra):
+            c.execute("INSERT INTO auth.users (id, email, encrypted_password, email_confirmed_at) VALUES (%s, %s, %s, now())",
+                      (str(uuid.UUID(int=1000 + i)), f"bulk{i}{D}", _bcrypt()))
+    with _admin(TGT_DB) as c:
+        for i in range(extra):
+            c.execute("INSERT INTO public.users (id, email, legacy_supabase_user_id, role) VALUES (%s, %s, %s, 'streamer')",
+                      (str(uuid.UUID(int=5000 + i)), f"bulk{i}{D}", str(uuid.UUID(int=1000 + i))))
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    stop = threading.Event()
+    latencies: list[tuple[float, float]] = []
+
+    def sign_ins():
+        with _admin(SRC_DB) as c:
+            while not stop.is_set():
+                started = time.perf_counter()
+                c.execute("UPDATE auth.users SET last_sign_in_at = now() WHERE id = %s", (IDS["s1"],))
+                latencies.append((started, time.perf_counter() - started))
+                time.sleep(0.002)
+    marks: dict = {}
+    real_lock, real_require, real_release = imp.lock_source, imp.require_source_lock, imp.release_source
+
+    def lock(src, expected, p):
+        marks["lock_requested"] = time.perf_counter()
+        real_lock(src, expected, p)
+        marks["verified"] = time.perf_counter()
+
+    def require(src):
+        marks["sign_in_waiting"] = _wait_for_lock("UPDATE auth.users SET last_sign_in_at")
+        return real_require(src)
+
+    def release(src):
+        real_release(src)
+        marks["released"] = time.perf_counter()
+    monkeypatch.setattr(imp, "lock_source", lock)
+    monkeypatch.setattr(imp, "require_source_lock", require)
+    monkeypatch.setattr(imp, "release_source", release)
+    writer = threading.Thread(target=sign_ins)
+    writer.start()
+    try:
+        time.sleep(0.2)
+        _cli(monkeypatch, [f"IMPORT {4 + extra} HASHES INTO {TGT_DB}"])
+        assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 0
+        time.sleep(0.2)
+    finally:
+        stop.set()
+        writer.join(15)
+    assert marks["sign_in_waiting"]  # a sign-in write was waiting on the lock during the import
+    after_release = [d for s, d in latencies if s > marks["released"]]
+    assert after_release and max(after_release) < 0.5  # and writes are quick again right after
+    hold = marks["released"] - marks["lock_requested"]
+    worst = max(d for s, d in latencies)
+    assert hold < 5 and worst < 5
+    print(f"\nD1 source-lock measurement: {4 + extra} accounts imported; lock requested to released "
+          f"{hold * 1000:.0f} ms (lock + verification {(marks['verified'] - marks['lock_requested']) * 1000:.0f} ms); "
+          f"longest sign-in write {worst * 1000:.0f} ms; {len(latencies)} sign-in writes, "
+          f"{sum(1 for _, d in latencies if d > 0.05)} took over 50 ms")

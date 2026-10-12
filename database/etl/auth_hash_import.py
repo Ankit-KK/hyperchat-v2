@@ -10,10 +10,12 @@ Without --apply it only reads (READ ONLY transactions on both sides) and prints 
 typed confirmation, refuses on any blocker (duplicate mappings, unsupported hash formats), re-checks every planned row
 under a row lock and writes all rows in ONE transaction, each conditional on the hash still being empty; any change
 since the plan rolls everything back. --apply also needs --expected-fingerprint from the reviewed dry run and the D1
-source freeze (docs/operations/d1-auth-freeze/) in place: the freeze check, the fingerprint and the hashes are read in ONE
-source snapshot, and the source is re-checked in a fresh snapshot just before the target commit (drift: rollback) and
-right after it (drift: exit 4). A privileged operator can still bypass the freeze after the last check; see that
-folder's README for the remaining risk and the operator controls. Operator guide: database/README.md.
+source freeze (docs/operations/d1-auth-freeze/) in place. The plan (freeze check, fingerprint, hashes) comes from one
+source snapshot; after the confirmation the source is locked (SHARE on auth.users), verified again under the lock, and
+kept locked until the target transaction has committed, so no source row can change between the verification and the
+commit. Losing the lock before the commit rolls everything back; losing it in the last instant is reported (exit 4).
+The lock is released right after. A privileged operator can still change the source after that; see that folder's
+README for the remaining risk and the operator controls. Operator guide: database/README.md.
 Run:  python -m etl.auth_hash_import
 """
 
@@ -222,7 +224,7 @@ def _write(cur: psycopg.Cursor, u: Update) -> int:
 def apply(conn: psycopg.Connection, p: Plan, before_commit=None) -> int:
     """All planned rows in ONE transaction: lock them (users rows, the app's first lock), re-check that each is still
     exactly as planned, then write each conditionally. Any difference raises and rolls back every row. `before_commit`
-    runs last inside that transaction (main() re-checks the source there); if it raises, nothing is committed."""
+    runs last inside that transaction (main() checks the source lock there); if it raises, nothing is committed."""
     if p.blocked:
         raise Refused(f"blocked by {', '.join(p.blocked)}; nothing was written")
     with conn.transaction(), conn.cursor() as cur:
@@ -284,8 +286,8 @@ def source_fingerprint(conn: psycopg.Connection) -> str:
 def read_plan(src: psycopg.Connection, tgt: psycopg.Connection, accept_writable_source_role: bool) -> Plan:
     """The freeze check, the fingerprint and the hashes come from ONE source transaction (REPEATABLE READ, see
     open_readonly): the fingerprint describes exactly the rows this plan would import. That snapshot cannot see changes
-    committed after it began, so main() re-checks the source in fresh snapshots before and after the target commit
-    (source_drift / revalidate_source)."""
+    committed after it began, so --apply verifies the source again under a lock that it holds through the target
+    commit (apply_under_source_lock)."""
     try:
         check_session(src, SOURCE_TABLE, SOURCE_COLUMNS, "source", accept_writable_source_role)
         problem = freeze_problem(src)
@@ -302,26 +304,88 @@ def read_plan(src: psycopg.Connection, tgt: psycopg.Connection, accept_writable_
     return p
 
 
-def source_drift(src: psycopg.Connection, expected_fingerprint: str) -> str | None:
-    """Look at the source again in a FRESH snapshot (a new read-only transaction on the same connection). The plan's
-    snapshot cannot show changes committed after it began; this can. None = freeze in place and data unchanged."""
+# ── the source lock around the target commit ───────────────────────────────
+# After the operator confirms, a fresh source transaction takes SHARE on auth.users. SHARE conflicts with every insert,
+# update, delete and truncate on the table (also with session_replication_role = replica) and with enabling, disabling,
+# dropping or replacing its triggers, but not with reads: until it is released no source row can change. It is
+# released only after the target transaction has committed or rolled back. It does NOT stop a superuser from replacing
+# the trigger's function or editing pg_trigger directly; those cannot change data while the lock is held, only weaken
+# the freeze for later. Waiting for in-flight writes is bounded (SOURCE_LOCK_TIMEOUT). If the importer stalls while
+# holding it, the server ends the session (SOURCE_LOCK_IDLE_LIMIT), which frees the lock: the import then rolls back,
+# or, in the last instant, reports it (exit 4). The source role needs MAINTAIN on auth.users (PostgreSQL 17+) or table
+# update / delete / truncate (earlier versions, with --accept-writable-source-role); the transaction stays READ ONLY.
+SOURCE_LOCK_TIMEOUT = "5s"
+SOURCE_LOCK_IDLE_LIMIT = "20s"
+_LOCK_HELD_SQL = ("SELECT count(*) FROM pg_catalog.pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' "
+                  "AND relation = 'auth.users'::regclass AND mode = 'ShareLock' AND granted")
+
+
+def lock_source(src: psycopg.Connection, expected_fingerprint: str, p: Plan) -> None:
+    """Take SHARE on auth.users in a FRESH source transaction, then verify under it: the freeze is exactly the reviewed
+    one, the fingerprint equals the reviewed value, and every planned hash is still the source's current hash for an
+    eligible account. The snapshot is taken after the lock, so it is the current state, and it cannot change while the
+    lock is held. Leaves the transaction (and the lock) open on success; callers must release_source() in every case.
+    Raises Refused (or a database error) before anything is written to the target."""
+    src.execute(f"SET LOCAL lock_timeout = '{SOURCE_LOCK_TIMEOUT}'; "
+                f"SET LOCAL idle_in_transaction_session_timeout = '{SOURCE_LOCK_IDLE_LIMIT}'; "
+                f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
     try:
-        problem = freeze_problem(src)
-        fingerprint = source_fingerprint(src)
-    finally:
-        src.rollback()
+        src.execute("LOCK TABLE auth.users IN SHARE MODE")
+    except psycopg.errors.LockNotAvailable:
+        raise Refused(f"could not lock the source within {SOURCE_LOCK_TIMEOUT} (writes to auth.users in progress); "
+                      "nothing was written; try again") from None
+    except psycopg.errors.InsufficientPrivilege:
+        raise Refused("the source role may not lock auth.users: it needs MAINTAIN on it (PostgreSQL 17+) or table "
+                      "update, delete or truncate (earlier versions, with --accept-writable-source-role); nothing was "
+                      "written") from None
+    problem = freeze_problem(src)
     if problem:
-        return f"the source freeze is no longer active: {problem}"
-    if fingerprint != expected_fingerprint:
-        return "the source changed after the plan was read (a fresh snapshot no longer matches the reviewed fingerprint)"
-    return None
+        raise Refused(f"the source freeze is not active under the lock: {problem}; nothing was written")
+    if source_fingerprint(src) != expected_fingerprint:
+        raise Refused("the source changed after the plan was read (under the lock it no longer matches the reviewed "
+                      "fingerprint); nothing was written")
+    current = {s.id: s for s in read_sources(src)}
+    for u in p.updates:
+        s = current.get(u.legacy_id)
+        if s is None or s.email != u.email or s.deleted or s.banned or s.password_hash != u.password_hash:
+            raise Refused("a planned hash no longer matches the locked source; nothing was written")
 
 
-def revalidate_source(src: psycopg.Connection, expected_fingerprint: str) -> None:
-    """Called inside the target transaction, after the writes and before COMMIT: any drift aborts everything."""
-    drift = source_drift(src, expected_fingerprint)
-    if drift:
-        raise Refused(f"{drift}; nothing was written")
+def source_lock_held(src: psycopg.Connection) -> bool:
+    """True only if this session's transaction is alive and still holds the SHARE lock. Locks are kept until the
+    transaction ends, and any error in it ends them at once, so True also proves the lock was held continuously since
+    lock_source; any failure (the session ended, the query failed) means it may not have been."""
+    try:
+        return src.execute(_LOCK_HELD_SQL).fetchone()[0] == 1
+    except psycopg.Error:
+        return False
+
+
+def require_source_lock(src: psycopg.Connection) -> None:
+    """Run inside the target transaction just before its COMMIT."""
+    if not source_lock_held(src):
+        raise Refused("the source lock was lost before the target commit (the source session ended or failed); "
+                      "nothing was written")
+
+
+def release_source(src: psycopg.Connection) -> None:
+    try:
+        src.rollback()
+    except psycopg.Error:
+        src.close()  # the session is already gone, and its lock with it; never reuse the connection
+
+
+def apply_under_source_lock(src: psycopg.Connection, tgt: psycopg.Connection, p: Plan,
+                            expected_fingerprint: str) -> tuple[int, bool]:
+    """Lock and verify the source, write the target in one transaction and commit it while the source lock is still
+    held, then release the lock. Returns (rows updated, lock proven held through the target commit). Nothing is
+    written if locking or verification fails or the lock is lost before the commit."""
+    try:
+        lock_source(src, expected_fingerprint, p)
+        updated = apply(tgt, p, before_commit=lambda: require_source_lock(src))
+        return updated, source_lock_held(src)
+    finally:
+        release_source(src)
 
 
 def check_apply_guard(p: Plan, expected_fingerprint: str | None) -> None:
@@ -387,13 +451,13 @@ def main(argv: list[str] | None = None) -> int:
                 if input(f'Type exactly "{phrase}" to write, anything else cancels: ').strip() != phrase:
                     print("cancelled: nothing was written", file=sys.stderr)
                     return 3
-                updated = apply(tgt, p, before_commit=lambda: revalidate_source(src, args.expected_fingerprint))
+                updated, lock_held = apply_under_source_lock(src, tgt, p, args.expected_fingerprint)
                 print(render({"updated": updated}, "APPLIED (one transaction, committed)"))
-                # The pre-commit check cannot cover the instant between it and the target COMMIT: look once more.
-                late = source_drift(src, args.expected_fingerprint)
-                if late:
-                    print(f"ALERT: {late} after the import committed. The imported hashes may be stale: keep V2 "
-                          "sign-in off, keep legacy frozen, and follow the abort rules (rollback) before retrying.",
+                if not lock_held:  # detection only: the commit has already happened
+                    print("ALERT: the import committed, but the source lock could not be shown to have been held "
+                          "through the commit (the source session ended at the last moment), so the source may have "
+                          "changed. Keep V2 sign-in off and legacy frozen, run a fresh dry run now and compare "
+                          "source_fingerprint; if it differs or the freeze is not active, follow the abort rules.",
                           file=sys.stderr)
                     return 4
     except Refused as exc:

@@ -151,11 +151,13 @@ id, email, password hash and deleted / banned state, computed inside PostgreSQL)
 freeze trigger from `docs/operations/d1-auth-freeze/` is in place exactly as reviewed). `--apply` additionally needs
 `--expected-fingerprint <the reviewed value>` and refuses, before the confirmation prompt, when the freeze is missing,
 disabled or malformed or when the fingerprint differs. The freeze check, the fingerprint and the hashes come from one
-source snapshot, so the hashes are exactly the fingerprinted rows; that snapshot cannot see later changes, so the
-importer re-checks the source in a fresh snapshot just before the target commit (any drift: rolled back, nothing
-written) and once more right after it (drift then: exit 4, see the freeze README's abort rules). A privileged
-operator can still bypass the freeze after the last check; that remaining risk and the operator controls are in
-that README. The freeze SQL is **proposed and not
+source snapshot, so the hashes are exactly the fingerprinted rows; that snapshot cannot see later changes. So after
+the confirmation the importer locks the source (`SHARE` on `auth.users`, at most 5 s wait), verifies the freeze, the
+fingerprint and every planned hash again under the lock, and keeps the lock until the target transaction has
+committed: no source row can change in between. The source role for `--apply` therefore needs `MAINTAIN` on
+`auth.users` (PostgreSQL 17+) or table update / delete / truncate (earlier; with `--accept-writable-source-role`).
+Legacy sign-ins pause while the lock is held. Remaining risks (a superuser ending the importer's session, changes
+after the release) and the operator controls are in that README. The freeze SQL is **proposed and not
 yet rehearsed** against GoTrue; see that folder's README for the procedure and the rehearsal.
 
 **How `--apply` writes:** after the plan it asks you to type `IMPORT <n> HASHES INTO <database>`. Then, in **one
@@ -178,9 +180,10 @@ cd /root/d1-import/database
 /opt/hyperchat/releases/<release>/venv/bin/python -B -E -s -m etl.auth_hash_import            # dry run
 /opt/hyperchat/releases/<release>/venv/bin/python -B -E -s -m etl.auth_hash_import --apply    # writes, after the phrase
 ```
-Exit codes: 0 done (dry run, nothing to do, or APPLIED printed and both later source checks passed), 2 refused
-(nothing written), 3 confirmation not typed, 4 APPLIED but the source changed at the last instant (alert; follow the
-abort rules), 1 error (no row was written unless APPLIED was printed), 130 cancelled.
+Exit codes: 0 done (dry run, nothing to do, or APPLIED printed with the source lock proven held through the commit), 2
+refused (nothing written; includes a source lock not granted in time), 3 confirmation not typed, 4 APPLIED but the
+source lock could not be proven held through the commit (alert; follow the abort rules), 1 error (no row was written
+unless APPLIED was printed), 130 cancelled.
 
 **Cutover order:** (1) resolve account-specific identity conflicts and recovery paths; (2) schedule the maintenance window and temporarily freeze legacy password-change/reset writes while allowing ordinary legacy sign-ins; drain and verify all in-flight password mutations have completed; (3) take the final source snapshot/dump only after the drain, then run the ETL and fresh read-only reconciliation report; (4) run the importer dry run against that final snapshot and review every eligibility/exclusion count; (5) obtain separate explicit operator approval before `--apply` on the production database (prompted name, e.g. `hyperchat` on port 5432); (6) while legacy password mutations remain frozen and V2 authentication remains inactive, re-run the report/dry run, reconcile applied counts, and test migrated-account sign-in; (7) switch authentication only after all checks pass; (8) remove the temporary Supabase role and importer directory only after successful verification.
 
