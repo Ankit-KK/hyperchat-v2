@@ -121,7 +121,7 @@ SQLSTATE. Exit codes: 0 report printed, 2 refused by a safety check, 1 database 
 `exact_match_source_password_target_none` is the number of accounts a later hash import could cover.
 
 ## Supabase password-hash import (D1, phase 2)
-**Status:** merged in #34 (`c53a8c9`); tested with synthetic hashes only. It has **not** been run against real
+**Status:** merged in #34 (`c53a8c9`), hardened in #45–#47 and #49 (freeze guard and fingerprint, source lock, RLS fail-closed, recovery ledger with migration 0017; in `main`, not deployed); tested with synthetic hashes only. It has **not** been run against real
 Supabase data and no hash has been imported anywhere. **D1 policy approved by the owner on 2026-10-12:** import
 eligible hashes at the production cutover with this tool and its safeguards; never into DEV without separate approval;
 legacy confirmation fields are not mapped to `email_verified_at`. That is policy only: running the tool against real
