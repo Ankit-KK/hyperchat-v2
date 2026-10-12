@@ -97,7 +97,9 @@ refuses it unless `--accept-writable-source-role` is given; the importer's own s
 either way (tested). A role without the privilege is refused before anything is written. The dry run does not lock
 and keeps working with the read-only role. Which PostgreSQL version the legacy project runs, and whether such a grant
 can be made there, is **unverified** (rehearsal step 9). If it cannot, `--apply` cannot run: there is no fallback
-mode without the lock.
+mode without the lock. The source role must also bypass row-level security (`BYPASSRLS`): Supabase enables it on
+`auth.users` with no policies, and both D1 tools read with `row_security = off`, so a role it applies to is refused
+(dry run and plan) or raises under the lock, instead of silently seeing no rows (`database/README.md`).
 
 **Effect on legacy sign-ins (GoTrue writes).** While the lock is held, every write to `auth.users` waits; a sign-in
 updates `last_sign_in_at`, so sign-ins pause and then complete (reads, e.g. fetching the current user, do not wait).

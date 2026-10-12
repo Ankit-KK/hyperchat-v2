@@ -328,7 +328,8 @@ def lock_source(src: psycopg.Connection, expected_fingerprint: str, p: Plan) -> 
     Raises Refused (or a database error) before anything is written to the target."""
     src.execute(f"SET LOCAL lock_timeout = '{SOURCE_LOCK_TIMEOUT}'; "
                 f"SET LOCAL idle_in_transaction_session_timeout = '{SOURCE_LOCK_IDLE_LIMIT}'; "
-                f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
+                f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}; "
+                "SET LOCAL row_security = off")  # row-level security raises instead of hiding rows (check_row_security)
     try:
         src.execute("LOCK TABLE auth.users IN SHARE MODE")
     except psycopg.errors.LockNotAvailable:

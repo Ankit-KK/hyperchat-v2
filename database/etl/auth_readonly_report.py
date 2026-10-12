@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
+from psycopg import sql
 
 # Expected columns (pg_type.typname). Anything else: refuse to run.
 SOURCE_TABLE = ("auth", "users")
@@ -135,7 +136,8 @@ def check_session(conn: psycopg.Connection, table: tuple[str, str], columns: dic
 
 
 def check_columns(conn: psycopg.Connection, table: tuple[str, str], columns: dict[str, set[str]], label: str) -> None:
-    """Fail closed unless every expected column exists with an expected type and is readable by this role."""
+    """Fail closed unless every expected column exists with an expected type and is readable by this role, and no
+    row of the table is hidden from it by row-level security (see check_row_security)."""
     schema, name = table
     # pg_catalog, not information_schema: the latter hides columns the role cannot read.
     found = dict(conn.execute(
@@ -149,6 +151,22 @@ def check_columns(conn: psycopg.Connection, table: tuple[str, str], columns: dic
         if not conn.execute("SELECT has_column_privilege(%s, %s, 'SELECT')",
                             (f"{schema}.{name}", column)).fetchone()[0]:
             raise Refused(f"{label}: no SELECT privilege on {schema}.{name}.{column}")
+    check_row_security(conn, table, next(iter(columns)), label)
+
+
+def check_row_security(conn: psycopg.Connection, table: tuple[str, str], column: str, label: str) -> None:
+    """Row-level security filters rows without any error: Supabase enables it on auth.users with no policies, so a
+    role without BYPASSRLS reads zero rows and every count would silently be wrong. With row_security = off for the
+    rest of this transaction, PostgreSQL raises instead of filtering whenever a policy would apply to this role, for
+    any policy. It is not a privilege: it never shows a row the role could not read. The probe reads no rows and
+    selects only `column`, whose SELECT privilege check_columns has just verified (column-level grants are enough), so
+    its only possible refusal is row-level security."""
+    conn.execute("SET LOCAL row_security = off")
+    try:
+        conn.execute(sql.SQL("SELECT {} FROM {} LIMIT 0").format(sql.Identifier(column), sql.Identifier(*table)))
+    except psycopg.errors.InsufficientPrivilege:
+        raise Refused(f"{label}: row-level security on {'.'.join(table)} would hide rows from this role, so the "
+                      "counts would be wrong; use a role that bypasses it (BYPASSRLS)") from None
 
 
 def read_accounts(conn: psycopg.Connection, query: str) -> list[Account]:
