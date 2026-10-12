@@ -122,6 +122,15 @@ def test_duplicates_and_unsupported_formats_block():
             imp.apply(None, p)
 
 
+def test_a_plan_without_a_source_fingerprint_is_never_applied():
+    """apply() records the reviewed fingerprint in the import ledger; a hand-built plan without one is refused before
+    any connection is used (None here)."""
+    p = plan(_sources(), _targets())
+    assert p.updates and not p.blocked and p.fingerprint == ""
+    with pytest.raises(Refused, match="no source fingerprint"):
+        imp.apply(None, p)
+
+
 def test_cost_cap_matches_the_verifier_and_the_boundary_is_exact():
     assert bcrypt_format.MAX_BCRYPT_COST == 12
     assert imp.is_supported_bcrypt is bcrypt_format.is_supported_bcrypt  # one shared validator, no copy
@@ -174,7 +183,9 @@ def test_the_select_reads_no_metadata_and_the_update_touches_one_column():
         "email_confirmed_at IS", "")
     src = Path(imp.__file__).read_text(encoding="utf-8")
     assert src.count("UPDATE public.users SET") == 1 and "SET password_hash = %s WHERE" in src
-    for word in ("INSERT ", "DELETE ", "TRUNCATE ", "ALTER ", "CREATE ", "DROP ", "COPY ", "open(", "json", "csv",
+    # the only insert: one import-ledger row per imported account, in the same transaction (migration 0017)
+    assert src.count("INSERT ") == 1 and "INSERT INTO public.d1_hash_import_ledger (run_id, user_id, hash_sha256" in src
+    for word in ("DELETE ", "TRUNCATE ", "ALTER ", "CREATE ", "DROP ", "COPY ", "open(", "json", "csv",
                  "logging", "tempfile"):
         assert word not in src, word
 
@@ -182,6 +193,10 @@ def test_the_select_reads_no_metadata_and_the_update_touches_one_column():
 # ── PostgreSQL (throwaway fixture databases) ────────────────────────────────
 
 SRC_DB, TGT_DB = "hyperchat_import_src_fixture", "hyperchat_import_tgt_fixture"
+LEDGER_DDL = ("CREATE TABLE public.d1_hash_import_ledger (run_id uuid NOT NULL, user_id uuid NOT NULL REFERENCES "
+              "public.users(id) ON DELETE CASCADE, hash_sha256 text NOT NULL CHECK (hash_sha256 ~ '^[0-9a-f]{64}$'), "
+              "source_fingerprint text NOT NULL CHECK (source_fingerprint ~ '^[0-9a-f]{64}$'), imported_at "
+              "timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (run_id, user_id))")
 READER, WRITER, VIEWER = "import_src_reader", "import_tgt_writer", "import_tgt_viewer"
 db_only = pytest.mark.skipif(os.environ.get("HYPERCHAT_CI_DB_SETUP") != "1",
                              reason="needs the throwaway CI PostgreSQL (HYPERCHAT_CI_DB_SETUP=1)")
@@ -215,7 +230,7 @@ def _reset():
                       "WHEN 'past' THEN now() - interval '1 day' END, jsonb_build_object('email', 'meta' || %s))",
                       (IDS[k], e, pw, conf, dele, ban, e or ""))
     with _admin(TGT_DB) as c:
-        c.execute("TRUNCATE public.users")
+        c.execute("TRUNCATE public.d1_hash_import_ledger, public.users")
         for k, (lk, e, pw) in TARGET.items():
             c.execute("INSERT INTO public.users (id, email, password_hash, legacy_supabase_user_id, role, streamer_id) "
                       "VALUES (%s, %s, %s, %s, 'streamer', gen_random_uuid())",
@@ -249,9 +264,12 @@ def fixtures():
             c.execute("CREATE TABLE public.users (id uuid PRIMARY KEY, email citext NOT NULL UNIQUE, password_hash "
                       "text, legacy_supabase_user_id uuid UNIQUE, role text NOT NULL, streamer_id uuid, is_active "
                       "boolean NOT NULL DEFAULT true, email_verified_at timestamptz, password_changed_at timestamptz, "
-                      "username text)")
+                      "username text, last_login_at timestamptz)")
             c.execute(f"GRANT SELECT ON public.users TO {WRITER}, {VIEWER}")
             c.execute(f"GRANT UPDATE (password_hash) ON public.users TO {WRITER}")
+            c.execute(LEDGER_DDL)  # as migration 0017
+            c.execute(f"GRANT SELECT, INSERT ON public.d1_hash_import_ledger TO {WRITER}")
+            c.execute(f"GRANT SELECT ON public.d1_hash_import_ledger TO {VIEWER}")
         yield
     finally:
         with _admin() as c:
@@ -1376,3 +1394,232 @@ def test_measure_how_long_sign_in_writes_wait_during_a_134_account_import(loaded
           f"{hold * 1000:.0f} ms (lock + verification {(marks['verified'] - marks['lock_requested']) * 1000:.0f} ms); "
           f"longest sign-in write {worst * 1000:.0f} ms; {len(latencies)} sign-in writes, "
           f"{sum(1 for _, d in latencies if d > 0.05)} took over 50 ms")
+
+
+# ── recovery: the import ledger, an ambiguous COMMIT, and the full exit-4 recovery (review of #48) ──────────────────
+# Each run records what it wrote in public.d1_hash_import_ledger (migration 0017) in the same transaction. The operator
+# SQL in docs/operations/d1-auth-freeze/ (import_status.sql, rollback_import.sql) is executed here exactly as written.
+
+STATUS_SQL, ROLLBACK_SQL = FREEZE_DIR / "import_status.sql", FREEZE_DIR / "rollback_import.sql"
+
+
+def _operator_sql(path: Path, run_id: str) -> str:
+    """The file as psql would run it with -v run_id=<id> (the id is a UUID, checked before it is inlined)."""
+    return path.read_text(encoding="utf-8").replace(":'run_id'", f"'{uuid.UUID(run_id)}'")
+
+
+def _import_status(run_id: str) -> tuple[dict, list[str]]:
+    with psycopg.connect(dbname=TGT_DB, user=VIEWER, autocommit=True) as c, c.cursor() as cur:
+        cur.execute(_operator_sql(STATUS_SQL, run_id))
+        summary = dict(zip([d.name for d in cur.description], cur.fetchone()))
+        assert cur.nextset()
+        changed = [str(r[0]) for r in cur.fetchall()]
+    return summary, changed
+
+
+def _rollback(run_id: str) -> None:
+    with psycopg.connect(dbname=TGT_DB, user=WRITER, autocommit=True) as c:  # the importer's target role suffices
+        c.execute(_operator_sql(ROLLBACK_SQL, run_id))
+
+
+def _printed_run_id(out: str) -> str:
+    line = next(x for x in out.splitlines() if x.startswith("import_run_id"))
+    return str(uuid.UUID(line.split()[-1]))
+
+
+def _session_lost_after_the_pre_commit_check(monkeypatch, change_source: bool):
+    """The exit-4 window, as in the test above: the source session ends right after the pre-commit lock check.
+    Returns the real require_source_lock, to put back for a later, undisturbed run."""
+    seen: dict = {}
+    _capture_source_pid(monkeypatch, seen)
+    real = imp.require_source_lock
+
+    def check_then_kill(src):
+        real(src)
+        with _admin(SRC_DB) as c:
+            c.execute("SELECT pg_terminate_backend(%s)", (seen["pid"],))
+        _wait_until(lambda: _share_locks_on_source(seen["pid"]) == 0)
+        if change_source:
+            _run_bypass("update-replica")  # e1's source hash becomes HASHES["e2"]
+    monkeypatch.setattr(imp, "require_source_lock", check_then_kill)
+    return real
+
+
+@db_only
+def test_the_ledger_records_exactly_what_the_run_wrote(loaded):
+    run_id = "00000000-0000-0000-0000-00000000a001"
+    with _src() as s, _tgt() as t:
+        p = imp.read_plan(s, t, False)
+        assert imp.apply(t, p, run_id=run_id) == 4
+    with _admin(TGT_DB) as c:
+        rows = c.execute("SELECT user_id::text, hash_sha256, source_fingerprint FROM public.d1_hash_import_ledger "
+                         "WHERE run_id = %s", (run_id,)).fetchall()
+    digests = {uid: digest for uid, digest, _ in rows}
+    assert digests == {_tid(k): hashlib.sha256(SOURCE[k][1].encode()).hexdigest() for k in ELIGIBLE}
+    assert {r[2] for r in rows} == {p.fingerprint}
+    summary, changed = _import_status(run_id)
+    assert (summary["imported"], summary["still_imported_hash"], summary["changed_since_import"]) == (4, 4, 0)
+    assert summary["source_fingerprints"] == 1 and changed == []
+
+
+@db_only
+def test_apply_without_the_ledger_privilege_writes_nothing(loaded):
+    before = _rows()
+    with _admin(TGT_DB) as c:
+        c.execute(f"REVOKE INSERT ON public.d1_hash_import_ledger FROM {WRITER}")
+    try:
+        with _src() as s, _tgt() as t:
+            p = imp.read_plan(s, t, False)
+            with pytest.raises(Refused, match="d1_hash_import_ledger .migration 0017. is missing"):
+                imp.apply(t, p)
+    finally:
+        with _admin(TGT_DB) as c:
+            c.execute(f"GRANT INSERT ON public.d1_hash_import_ledger TO {WRITER}")
+    assert _rows() == before
+
+
+@db_only
+def test_a_lost_commit_acknowledgement_is_reported_as_unknown_never_as_nothing_written(loaded, monkeypatch, capsys,
+                                                                                       caplog):
+    """The server commits, then the connection drops before the client gets the answer (simulated: the real COMMIT
+    runs, then the target connection is closed and the error the client would see is raised). The operator must be
+    told the run MAY HAVE COMMITTED (exit 5), never that nothing was written, and the ledger must settle it."""
+    caplog.set_level(logging.DEBUG)
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    real_exit = psycopg.Transaction.__exit__
+
+    def commit_then_lose_the_answer(self, exc_type, exc, tb):
+        result = real_exit(self, exc_type, exc, tb)
+        if exc_type is None and self.connection.info.dbname == TGT_DB:
+            self.connection.close()
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        return result
+    monkeypatch.setattr(psycopg.Transaction, "__exit__", commit_then_lose_the_answer)
+    _cli(monkeypatch, [PHRASE])
+    code = imp.main(["--apply", "--expected-fingerprint", reviewed])
+    monkeypatch.setattr(psycopg.Transaction, "__exit__", real_exit)
+    out = capsys.readouterr()
+    assert code == 5
+    run_id = _printed_run_id(out.out)
+    assert "MAY HAVE COMMITTED" in out.err and run_id in out.err and "import_status.sql" in out.err
+    assert "nothing was written" not in out.err and "APPLIED" not in out.out
+    for secret in [*HASHES.values(), *(e for e, *_ in SOURCE.values() if e), "$2a$"]:
+        assert secret not in out.out + out.err + caplog.text
+    assert _imported_reviewed_hashes(_rows())  # it did commit
+    summary, _ = _import_status(run_id)
+    assert summary["imported"] == len(ELIGIBLE) == summary["still_imported_hash"]  # and the ledger says so
+    _assert_source_unlocked()
+
+
+@db_only
+def test_a_commit_the_server_rejects_is_a_confirmed_rollback(loaded, monkeypatch, capsys):
+    """Control for the test above: when the server answers the COMMIT with an error on a live connection, the
+    transaction was rolled back, so "nothing was written" is true and the exit code stays 1."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+    with _admin(TGT_DB) as c:
+        c.execute("CREATE FUNCTION public.reject_at_commit() RETURNS trigger LANGUAGE plpgsql AS "
+                  "$f$BEGIN RAISE EXCEPTION 'rejected at commit'; END;$f$")
+        c.execute("CREATE CONSTRAINT TRIGGER reject_at_commit AFTER UPDATE ON public.users DEFERRABLE INITIALLY "
+                  "DEFERRED FOR EACH ROW EXECUTE FUNCTION public.reject_at_commit()")
+    try:
+        _cli(monkeypatch, [PHRASE])
+        assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 1
+        out = capsys.readouterr()
+        assert "nothing was written by this run" in out.err and "MAY HAVE COMMITTED" not in out.err
+        assert _rows() == before
+        summary, _ = _import_status(_printed_run_id(out.out))
+        assert summary["imported"] == 0
+    finally:
+        with _admin(TGT_DB) as c:
+            c.execute("DROP TRIGGER IF EXISTS reject_at_commit ON public.users")
+            c.execute("DROP FUNCTION IF EXISTS public.reject_at_commit()")
+    _assert_source_unlocked()
+
+
+@db_only
+def test_exit_4_with_an_unchanged_source_keeps_the_import(loaded, monkeypatch, capsys):
+    """Exit 4, but nothing changed at the source: a fresh dry run shows the reviewed fingerprint and an active freeze,
+    so the import matches the source and is kept; the ledger shows every hash still in place."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    _cli(monkeypatch, [PHRASE])
+    _session_lost_after_the_pre_commit_check(monkeypatch, change_source=False)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 4
+    run_id = _printed_run_id(capsys.readouterr().out)
+    _cli(monkeypatch, [], role=VIEWER)
+    assert imp.main([]) == 0
+    fresh = capsys.readouterr().out
+    assert _printed_fingerprint(fresh) == reviewed and "source_freeze       active" in fresh
+    summary, changed = _import_status(run_id)
+    assert (summary["imported"], summary["still_imported_hash"], changed) == (len(ELIGIBLE), len(ELIGIBLE), [])
+    assert _imported_reviewed_hashes(_rows())
+
+
+@db_only
+def test_exit_4_recovery_rolls_back_only_this_run_and_a_retry_needs_a_fresh_review(loaded, monkeypatch, capsys):
+    """The full exit-4 recovery: the run committed, the source changed in the window (fingerprint mismatch), and one
+    imported account signed in on V2 before the mismatch was found (bcrypt upgraded to Argon2id). The rollback clears
+    only hashes still exactly as this run wrote them; the upgraded account, a pre-existing Argon2id hash and a bcrypt
+    hash this run did not write are untouched. A retry is refused with the old reviewed fingerprint and works only with
+    a freshly reviewed one, and never overwrites the upgraded account."""
+    other_bcrypt = _bcrypt("Synthetic-Other-7")
+    with _admin(TGT_DB) as c:  # a bcrypt hash this run will not write (c1 is excluded): not this run's to undo
+        c.execute("UPDATE public.users SET password_hash = %s WHERE id = %s", (other_bcrypt, _tid("c1")))
+    before = _rows()
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    _cli(monkeypatch, [PHRASE])
+    real_require = _session_lost_after_the_pre_commit_check(monkeypatch, change_source=True)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 4
+    monkeypatch.setattr(imp, "require_source_lock", real_require)  # the retry runs undisturbed
+    out = capsys.readouterr()
+    run_id = _printed_run_id(out.out)
+    assert "ALERT" in out.err and run_id in out.err and "rollback_import.sql" in out.err
+
+    # 1. The run committed, as the ledger shows.
+    summary, _ = _import_status(run_id)
+    assert summary["imported"] == len(ELIGIBLE) == summary["still_imported_hash"]
+
+    # 2. A fresh dry run: the fingerprint no longer matches the reviewed one, so this run must be rolled back.
+    _cli(monkeypatch, [], role=VIEWER)
+    assert imp.main([]) == 0
+    fresh = _printed_fingerprint(capsys.readouterr().out)
+    assert fresh != reviewed
+
+    # 3. Meanwhile e2 signed in on V2: its imported bcrypt hash was upgraded to Argon2id (what password_sign_in does;
+    #    it does not set password_changed_at). The ledger shows it as changed; the rollback must not touch it.
+    with _admin(TGT_DB) as c:
+        c.execute("UPDATE public.users SET password_hash = %s WHERE id = %s", (hash_password(PASSWORD), _tid("e2")))
+    summary, changed = _import_status(run_id)
+    assert (summary["still_imported_hash"], summary["changed_since_import"]) == (len(ELIGIBLE) - 1, 1)
+    assert changed == [_tid("e2")]
+
+    # 4. Roll back this run, twice (idempotent).
+    upgraded = _rows()[_tid("e2")][0]
+    _rollback(run_id)
+    _rollback(run_id)
+    after = _rows()
+    for k in ("e1", "e3", "e4"):
+        assert after[_tid(k)][0] is None  # e3 was '' before the import: both mean "no password"
+    assert after[_tid("e2")][0] == upgraded and upgraded.startswith("$argon2id$")
+    assert after[_tid("p1")][0] == "$argon2id$existing" and after[_tid("c1")][0] == other_bcrypt
+    for k in TARGET:  # every other column of every row, and every other row, is unchanged
+        assert after[_tid(k)][1:] == before[_tid(k)][1:]
+        if k not in ELIGIBLE:
+            assert after[_tid(k)][0] == before[_tid(k)][0]
+    summary, changed = _import_status(run_id)
+    assert (summary["imported"], summary["cleared"], changed) == (len(ELIGIBLE), len(ELIGIBLE) - 1, [_tid("e2")])
+
+    # 5. Retry: the stale reviewed fingerprint is refused; only a freshly reviewed one is accepted.
+    _cli(monkeypatch, [])
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2
+    assert "fingerprint differs" in capsys.readouterr().err
+    _cli(monkeypatch, [f"IMPORT 3 HASHES INTO {TGT_DB}"])
+    assert imp.main(["--apply", "--expected-fingerprint", fresh]) == 0
+    retry_run = _printed_run_id(capsys.readouterr().out)
+    final = _rows()
+    assert final[_tid("e1")][0] == HASHES["e2"]  # the source's current hash, not the stale one
+    assert final[_tid("e3")][0] == SOURCE["e3"][1] and final[_tid("e4")][0] == SOURCE["e4"][1]
+    assert final[_tid("e2")][0] == upgraded  # never overwritten
+    summary, _ = _import_status(retry_run)
+    assert summary["imported"] == 3 == summary["still_imported_hash"]
+    _assert_source_unlocked()

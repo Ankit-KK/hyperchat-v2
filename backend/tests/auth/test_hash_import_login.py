@@ -42,7 +42,9 @@ def test_imported_supabase_hash_signs_in_and_is_upgraded(app):
         p = imp.plan(source, imp.read_targets(conn))
         conn.rollback()
         assert p.counts["eligible"] == 1 and not p.blocked
-        assert imp.apply(conn, p) == 1
+        p.fingerprint = _digest("synthetic source snapshot")  # read_plan sets it from the real source
+        run_id = str(uuid.uuid4())
+        assert imp.apply(conn, p, run_id=run_id) == 1  # as hyperchat_app on the migrated schema (0017)
 
     assert _login(_new_client(app), email, "wrong-password").status_code == 401
     assert _login(_new_client(app), email).status_code == 200
@@ -50,6 +52,12 @@ def test_imported_supabase_hash_signs_in_and_is_upgraded(app):
         stored, verified = conn.execute("SELECT password_hash, email_verified_at FROM public.users WHERE id = %s",
                                         (uid,)).fetchone()
     assert stored.startswith("$argon2id$") and verified is None  # upgraded on sign-in; verification untouched
+    with _db() as conn:  # the ledger still tells this run's hash from the upgraded one: a rollback leaves it alone
+        recorded, now = conn.execute(
+            "SELECT l.hash_sha256, encode(sha256(convert_to(u.password_hash, 'UTF8')), 'hex') FROM "
+            "public.d1_hash_import_ledger l JOIN public.users u ON u.id = l.user_id WHERE l.run_id = %s",
+            (run_id,)).fetchone()
+    assert recorded == _digest(gotrue_hash) and now != recorded
     assert _login(_new_client(app), email).status_code == 200
 
 

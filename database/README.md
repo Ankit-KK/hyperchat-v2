@@ -7,7 +7,7 @@ The full table-by-table design, including how every legacy column was mapped, is
 
 ## Layout
 ```
-alembic.ini, migrations/   Alembic environment and revisions 0001-0016 (SQL-first, op.execute)
+alembic.ini, migrations/   Alembic environment and revisions 0001-0017 (SQL-first, op.execute)
 etl/rehearsal.py           load the legacy data (restored dump) into the new schema
 etl/mapping.py             value mapping rules (currencies, roles, slugs, OBS token hashing, ...)
 etl/reconcile.py           post-load reconciliation (counts, per-creator sums, invariants)
@@ -34,6 +34,7 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0014 | moderation bots: `jobs.kind` + `moderator_notify`, `moderation_actions` source `discord`, `moderator_notifications`, callback-table columns |
 | 0015 | bot audit: drops the UNIQUE `moderation_actions_unique_bot` index so a decision repeated after a reversal is recorded (no data change; downgrade does not rebuild it) |
 | 0016 | donor unban audit: nullable `banned_donors.unbanned_at`, `unbanned_by_label`, `unbanned_by_user_id` (FK `users`, ON DELETE SET NULL) |
+| 0017 | D1 import ledger `d1_hash_import_ledger` (run id, user id, SHA-256 of the imported hash, source fingerprint; written by the importer in the same transaction as the hashes); append-only for `hyperchat_app` (SELECT, INSERT), nothing for the worker, SELECT for `hyperchat_readonly` |
 
 ## Databases
 | Database | Cluster | Purpose |
@@ -173,8 +174,11 @@ yet rehearsed** against GoTrue; see that folder's README for the procedure and t
 **How `--apply` writes:** after the plan it asks you to type `IMPORT <n> HASHES INTO <database>`. Then, in **one
 transaction**, it locks the planned `users` rows (5 s lock timeout), re-checks each is unchanged (same legacy id,
 same email, still no hash) and updates each with `WHERE ... AND coalesce(password_hash, '') = ''`. Any difference,
-lock timeout or error rolls back **every** row. `--apply` into `hyperchat_dev` additionally needs
-`--allow-dev-target`; real hashes stay out of DEV unless the owner approves it separately.
+lock timeout or error rolls back **every** row. In the same transaction it records one row per imported account in
+`public.d1_hash_import_ledger` (migration 0017) under the `import_run_id` it prints before writing, so a run can be
+checked and undone exactly (`docs/operations/d1-auth-freeze/import_status.sql`, `rollback_import.sql`). `--apply` into
+`hyperchat_dev` additionally needs `--allow-dev-target`; real hashes stay out of DEV unless the owner approves it
+separately.
 
 **Prerequisites:** as for the read-only report (a read-only Supabase role with `BYPASSRLS`, now with `SELECT (id, email,
 encrypted_password, email_confirmed_at, deleted_at, banned_until)` on `auth.users`; row-level security that would
@@ -183,7 +187,8 @@ pooler host from an IPv4-only VPS; the code in a private directory such as `/roo
 `backend/app/auth/__init__.py` and `backend/app/auth/bcrypt_format.py`, which the importer loads; without them it
 refuses to start: `git archive <commit> database/etl backend/app/__init__.py backend/app/auth/__init__.py
 backend/app/auth/bcrypt_format.py`). The target role for
-`--apply` needs `UPDATE` on `public.users.password_hash` and must not be a superuser (default `hyperchat_app`).
+`--apply` needs `UPDATE` on `public.users.password_hash` and `INSERT` on `public.d1_hash_import_ledger` (migration 0017
+must be deployed first), and must not be a superuser (default `hyperchat_app`).
 
 **Run (as root on the VPS, in your own SSH terminal):**
 ```
@@ -193,18 +198,21 @@ cd /root/d1-import/database
 ```
 Exit codes: 0 done (dry run, nothing to do, or APPLIED printed with the source lock proven held through the commit), 2
 refused (nothing written; includes a source lock not granted in time), 3 confirmation not typed, 4 APPLIED but the
-source lock could not be proven held through the commit (alert; follow the abort rules), 1 error (no row was written
-unless APPLIED was printed), 130 cancelled.
+source lock could not be proven held through the commit (alert), 5 the target COMMIT got no reliable answer (the
+import MAY HAVE COMMITTED: check `import_status.sql` before anything else), 1 error before the COMMIT or a COMMIT the
+server rejected (rolled back; nothing written), 130 cancelled before writing. For every outcome after `--apply`,
+follow "Recovery after `--apply`" in `docs/operations/d1-auth-freeze/README.md`.
 
 **Cutover order:** (1) resolve account-specific identity conflicts and recovery paths; (2) schedule the maintenance window and temporarily freeze legacy password-change/reset writes while allowing ordinary legacy sign-ins; drain and verify all in-flight password mutations have completed; (3) take the final source snapshot/dump only after the drain, then run the ETL and fresh read-only reconciliation report; (4) run the importer dry run against that final snapshot and review every eligibility/exclusion count; (5) obtain separate explicit operator approval before `--apply` on the production database (prompted name, e.g. `hyperchat` on port 5432); (6) while legacy password mutations remain frozen and V2 authentication remains inactive, re-run the report/dry run, reconcile applied counts, and test migrated-account sign-in; (7) switch authentication only after all checks pass; (8) remove the temporary Supabase role and importer directory only after successful verification.
 
 If any source password mutation occurs after the snapshot, the snapshot is invalid and the report/dry run must be repeated. If cutover aborts before `--apply`, keep V2 authentication inactive and resume legacy mutations only after confirming legacy remains authoritative. If it aborts after `--apply`, do not re-run the importer or resume legacy mutations by default: target hashes are not overwritten by the importer. Keep V2 authentication inactive and follow a separately approved rollback/reconciliation plan before retrying.
 
-**Rollback:** V2 itself only ever writes Argon2id hashes and the ETL loads none, so imported hashes are exactly the
-bcrypt ones still stored. To undo the import (users who already signed in keep their upgraded Argon2id hash):
+**Rollback:** undo one run, identified by its `import_run_id`, never by hash format:
 ```
-BEGIN;
-SELECT count(*) FROM public.users WHERE password_hash LIKE '$2_$%';   -- compare with the applied count
-UPDATE public.users SET password_hash = NULL WHERE password_hash LIKE '$2_$%' AND legacy_supabase_user_id IS NOT NULL;
-COMMIT;
+psql -X -v ON_ERROR_STOP=1 -v run_id=<import_run_id> -f docs/operations/d1-auth-freeze/import_status.sql
+psql -X -v ON_ERROR_STOP=1 -v run_id=<import_run_id> -f docs/operations/d1-auth-freeze/rollback_import.sql
 ```
+It clears `password_hash` only where it is still exactly the hash that run wrote (the ledger's SHA-256). Accounts whose
+hash changed since, for example upgraded to Argon2id at a V2 sign-in (which does not set `password_changed_at`), are
+listed by `import_status.sql` and left untouched for an explicit decision. See "Recovery after `--apply`" in
+`docs/operations/d1-auth-freeze/README.md`.

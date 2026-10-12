@@ -2,7 +2,7 @@
 
 Source of truth for the design: the restored Supabase schema (`hyperchat_restore_test`, PostgreSQL 15,
 dump of 2026-10-04). Every change below was checked against that data (counts only) before it was made.
-Migrations: `database/migrations/versions/0001…0016` (the per-revision list is in `database/README.md`); data load: `database/etl/`.
+Migrations: `database/migrations/versions/0001…0017` (the per-revision list is in `database/README.md`); data load: `database/etl/`.
 
 ## Clusters and roles
 | Cluster | Port | Databases | Purpose |
