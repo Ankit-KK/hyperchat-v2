@@ -1,9 +1,11 @@
 # D1 auth freeze (legacy Supabase), for the production auth cutover
 
-**Status: PROPOSED, NOT REHEARSED, NOT PRODUCTION-READY.** The SQL here has been exercised only against plain
-PostgreSQL 17 test fixtures (`database/tests/test_auth_hash_import.py`). It has **not** been run against GoTrue or
-any Supabase project. Nothing in this folder may be run against the legacy production project until the rehearsal
-below has passed and the owner has approved it for the maintenance window.
+**Status: PROPOSED, REHEARSED LOCALLY ONLY, NOT PRODUCTION-READY.** The SQL is tested against plain PostgreSQL 17
+fixtures (`database/tests/test_auth_hash_import.py`) and was rehearsed against GoTrue on a **local, disposable**
+Supabase stack (GoTrue v2.197.0, PostgreSQL 17.11; results below and in
+[`rehearsal-2026-10-12-local.md`](rehearsal-2026-10-12-local.md)). It has **not** been run on any hosted Supabase
+project, and the hosted permission checks are still open. Nothing in this folder may be run against the legacy
+production project until those checks have passed and the owner has approved it for the maintenance window.
 
 ## Why
 The D1 importer reads the live Supabase `auth.users` (not a dump). Between the reviewed dry run and `--apply`, and
@@ -14,7 +16,7 @@ backend of ours in between), so only a database-level freeze can stop them (feas
 ## Files
 | File | What it does |
 |---|---|
-| `freeze.sql` | Installs `hyperchat_ops.d1_auth_freeze_guard()` and the trigger `hyperchat_d1_auth_freeze` (BEFORE INSERT OR UPDATE OR DELETE, FOR EACH ROW) on `auth.users`. One transaction, idempotent (`CREATE OR REPLACE`), `lock_timeout` 10 s. |
+| `freeze.sql` | Installs `hyperchat_ops.d1_auth_freeze_guard()` and the trigger `hyperchat_d1_auth_freeze` (BEFORE INSERT OR UPDATE OR DELETE, FOR EACH ROW) on `auth.users`. One transaction, idempotent (`CREATE OR REPLACE`), `lock_timeout` 10 s. A trigger already made ENABLE ALWAYS stays ALWAYS; if the running role cannot restore that (not the table owner), the whole script fails and changes nothing. |
 | `verify.sql` | Read-only: shows the trigger's enabled state, type, column list, WHEN, function and the function body's SHA-256. |
 | `unfreeze.sql` | Removes the trigger and the function. Idempotent. |
 
@@ -25,12 +27,18 @@ backend of ours in between), so only a database-level freeze can stop them (feas
   matches on or decides eligibility from (and that the source fingerprint covers).
 - **Allowed:** every other `UPDATE`, e.g. `last_sign_in_at` / `updated_at` written by a sign-in and the recovery-token
   columns written when someone requests a reset email (finishing that reset is then rejected). Sessions and refresh
-  tokens live in other tables.
+  tokens live in other tables, but the refresh-token grant also writes to `auth.users` (in the rehearsal it waited for
+  the source lock like a sign-in); it changes no frozen column and works while frozen.
 - **Account creation and deletion are frozen on purpose:** either one changes the reviewed import set (a deletion
   turns an eligible account into an orphan; a creation changes the fingerprint and could collide on email). Blocking
   them does not block sign-in for existing accounts. Expect GoTrue errors for sign-ups during the window.
-- **Errors:** the trigger raises `P0001` with a message starting `hyperchat_d1_freeze:`. GoTrue will most likely
-  return a generic server error to the browser (unverified; see rehearsal).
+- **Errors (rehearsed locally, GoTrue v2.197.0):** the trigger raises `P0001` with a message starting
+  `hyperchat_d1_freeze:`. GoTrue passes it through: API calls (sign-up, admin create, password change by the user, by
+  recovery session or by the admin API, admin email change, ban, delete) answer **HTTP 500** with JSON `code: P0001`
+  and `message: "hyperchat_d1_freeze: <reason> is paused for maintenance"`. The email-change confirmation link answers
+  **303** to the site URL with `error=server_error`, `error_code=unexpected_failure`,
+  `error_description=Error confirm email`. Users see a failure, not a maintenance page; a notice on the legacy pages
+  (procedure step 2) is the only friendlier message.
 
 ## Proof that the freeze is in place
 A trigger name proves nothing. The importer (`etl/auth_hash_import.py`, `freeze_problem`) accepts the freeze only if,
@@ -101,8 +109,10 @@ mode without the lock. The source role must also bypass row-level security (`BYP
 `auth.users` with no policies, and both D1 tools read with `row_security = off`, so a role it applies to is refused
 (dry run and plan) or raises under the lock, instead of silently seeing no rows (`database/README.md`).
 
-**Effect on legacy sign-ins (GoTrue writes).** While the lock is held, every write to `auth.users` waits; a sign-in
-updates `last_sign_in_at`, so sign-ins pause and then complete (reads, e.g. fetching the current user, do not wait).
+**Effect on legacy sign-ins and token refreshes (GoTrue writes).** While the lock is held, every write to
+`auth.users` waits; a sign-in updates `last_sign_in_at` and a refresh-token grant also writes the user row, so both
+pause and then complete (reads, e.g. fetching the current user, do not wait). Browsers refresh tokens in the
+background, so already signed-in users see the pause too, not only people signing in.
 Measured on the throwaway PostgreSQL 17.11 cluster with local connections, importing 134 synthetic accounts while a
 loop of sign-in style updates ran: lock requested to released 17, 17 and 22 ms in three runs; the longest sign-in
 update 17 to 24 ms; none over 50 ms. In production the importer talks to Supabase over the network: after the lock is
@@ -111,8 +121,13 @@ re-read the hashes, the lock check before and after the commit, the release), an
 VPS. Expect a pause of roughly 7 to 8 times the round-trip time plus local work (about 0.4 s at 50 ms, 1.2 s at
 150 ms). Worst cases: while the importer waits for the lock (at most 5 s), new sign-in writes queue behind its request;
 a stalled importer is cut off by the server after 20 s idle inside the locked transaction, which frees the lock and
-rolls the import back (or, in the last instant, exits 4). Whether GoTrue's own timeouts tolerate such a pause is
-**unverified** (rehearsal step 10).
+rolls the import back (or, in the last instant, exits 4). **Local rehearsal (GoTrue v2.197.0, one host):** with the
+lock held 3 s, a sign-in took 2.8 s and a refresh 2.7 s; held 10 s, 9.8 s and 9.7 s; all answered 200, each about
+10 ms after the release, with no GoTrue error or timeout; `GET /auth/v1/user` stayed at about 40 ms. A sign-in
+queued behind `freeze.sql` waiting on an open write took 8.6 s (10 s lock timeout), and one queued behind the
+importer's lock request 4.0 s (5 s timeout). An import of 3 accounts held the lock 8 to 10 ms, with concurrent
+sign-ins unaffected. Hosted timeouts (Kong, the pooler, the browser client) and the production round-trip time (step
+11) are **unverified**.
 
 A ban that expires on its own between the dry run and `--apply` flips `b1` to `b0`, changes the fingerprint and makes
 `--apply` refuse: re-run the report and the dry run.
@@ -156,16 +171,25 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
 
 ## Limitations (known)
 - **Privileged bypass cannot be prevented, only detected (within limits).** The table owner or a superuser (on
-  Supabase: the dashboard `postgres` role, the SQL editor, anyone with the database password, and the GoTrue service
-  role `supabase_auth_admin`) can drop or disable the trigger, `TRUNCATE auth.users` (row triggers don't fire), or,
-  unless the trigger is ENABLE ALWAYS, write with `session_replication_role = replica`. PostgreSQL gives no way to stop
-  a superuser outright. What the importer adds: changes made before the source lock is granted are detected; while the
+  Supabase: the GoTrue service role `supabase_auth_admin` owns `auth.users`) can drop or disable the trigger,
+  `TRUNCATE auth.users` (row triggers don't fire), or, unless the trigger is ENABLE ALWAYS, write with
+  `session_replication_role = replica`. The dashboard role `postgres` (the SQL editor, anyone with the database
+  password) is neither owner nor superuser, but in the local rehearsal it could do the same in practice: drop the
+  trigger (`unfreeze.sql` worked), `TRUNCATE` (it holds the privilege), replace the guard function (it owns it), and
+  **set `session_replication_role = replica` and update `email` past the `O` trigger** (verified in a rolled-back
+  transaction). Since it cannot make the trigger ALWAYS (next point), that bypass stays open to anyone with the
+  database password; hosted behaviour is unverified. PostgreSQL gives no way to stop a superuser outright. What the importer adds: changes made before the source lock is granted are detected; while the
   lock is held, data changes are prevented (they wait), except that ending the importer's source session frees the
   lock (then: rolled back, or exit 4 in the last instant); after the release only the freeze, the operator controls
   and step 10 remain.
 - **`ENABLE ALWAYS`** only closes the `session_replication_role = replica` path, and only for non-owners; it needs
-  ownership of `auth.users` to set (unverified on Supabase). It does not stop an owner or superuser from disabling
-  or dropping the trigger.
+  ownership of `auth.users` to set. In the local rehearsal the dashboard role `postgres` got `42501 must be owner of
+  table users`; only the owner `supabase_auth_admin` (not a login available on hosted projects) could set it. It does
+  not stop an owner or superuser from disabling or dropping the trigger. Re-running `freeze.sql` used to reset an
+  ALWAYS trigger to `O` silently (`CREATE OR REPLACE TRIGGER` does); the script now restores ALWAYS, or fails and
+  changes nothing when the running role cannot (tested). Treat the replica-mode bypass as an **open residual risk**
+  covered only by the operator controls, the source lock (it blocks replica-mode writes while held) and step 10,
+  unless an owner-level role on the hosted project can set ALWAYS and the owner decides to use it.
 - **The source lock is short but real:** it is taken only after the confirmation and released right after the target
   commit, but legacy sign-ins pause for its duration (see "Effect on legacy sign-ins" above), and it needs the
   lock privilege described above (on PostgreSQL before 17, a writable role).
@@ -175,13 +199,17 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
   a second person watches the import; the fingerprint is recorded at review, at `--apply` and at step 10;
   afterwards, check the Supabase logs for `ALTER TABLE` / `DROP TRIGGER` / `TRUNCATE` / `CREATE OR REPLACE FUNCTION`
   on `auth.users` or `hyperchat_ops` during the window.
-- **Unverified on Supabase:** whether the dashboard `postgres` role may create a trigger on `auth.users` today (the
-  legacy project has an older `AFTER INSERT` trigger there), and whether `ENABLE ALWAYS` is permitted (needs
-  ownership; `auth.users` is owned by `supabase_auth_admin`).
-- **Unverified GoTrue behaviour:** that sign-in and token refresh never change the frozen columns (if a sign-in rewrote
-  `encrypted_password`, that sign-in would fail while frozen), what users see on rejected requests, and how email
-  change confirmation and OAuth sign-ins behave.
-- **Lock queue:** while `freeze.sql` waits (at most 10 s), sign-ins that update `auth.users` wait behind it.
+- **Verified locally, unverified on hosted Supabase:** the dashboard `postgres` role created, re-created and removed
+  the trigger, could not set ENABLE ALWAYS, could set `session_replication_role`, and could not grant `MAINTAIN` on
+  `auth.users` or `USAGE` on schema `auth` to another role (the `GRANT` only warns `no privileges were granted`; it
+  could grant `BYPASSRLS`). The legacy project's PostgreSQL and GoTrue versions and its older `AFTER INSERT` trigger on
+  `auth.users` are unverified.
+- **GoTrue behaviour (local rehearsal, GoTrue v2.197.0):** password sign-in, refresh-token grants, `GET /user`,
+  metadata updates, reset-email requests and opening a recovery link work while frozen and change no frozen column;
+  every blocked path fails as described under "Errors". **Unverified:** OAuth sign-ins (a first-time OAuth user is an
+  `INSERT`, so it fails), and the legacy project's GoTrue version.
+- **Lock queue:** while `freeze.sql` waits (at most 10 s), sign-ins and token refreshes that update `auth.users` wait
+  behind it (a sign-in waited 8.6 s in the rehearsal).
 - **Scope:** only `auth.users` is frozen. Other GoTrue tables (identities, sessions) are not part of the import.
 
 ## Staging rehearsal (must pass before any production use)
@@ -221,8 +249,92 @@ before relying on the result.
     latency and any GoTrue error. Repeat with 10 s to see where GoTrue's own timeouts are.
 11. **Round trips:** from the host that will run the importer, time `SELECT 1` against the Supabase pooler
     (`\timing on` in psql, several runs) and estimate the sign-in pause as 7 to 8 times that plus local work.
-12. Optional, closer to production permissions: repeat steps 3–10 on a **new, empty** hosted Supabase project (no real
-    users) to check that the dashboard role can run `freeze.sql`, can grant the lock privilege, and whether
-    `ENABLE ALWAYS` is allowed.
+12. **Required before production use** (the local rehearsal showed Supabase-specific role behaviour that plain
+    PostgreSQL and catalog queries do not predict, e.g. `has_parameter_privilege` said `postgres` could not set
+    `session_replication_role`, yet it could): repeat the permission checks on a **new, empty** hosted Supabase project
+    (no real users) as the dashboard role: `freeze.sql` twice and `verify.sql`; `ENABLE ALWAYS`; a replica-mode
+    `UPDATE` in a rolled-back transaction; `unfreeze.sql` twice; the lock statement of step 9 as the intended source
+    role; whether that role has or can be given `BYPASSRLS`; and `relrowsecurity` on `auth.users`.
 13. `supabase stop --no-backup`. Record every result (status codes, error text, before/after md5, timings) in the PR
     or the D1 checklist row. Only then may the freeze and the lock be called rehearsed.
+
+## Rehearsal results (local, 2026-10-12)
+**Where:** a disposable local stack in a WSL2 distro on the owner's PC. It was torn down afterwards with
+`supabase stop --no-backup`.
+
+**Versions:**
+- Supabase CLI 2.120.0;
+- GoTrue `supabase/gotrue:v2.197.0`;
+- `supabase/postgres:17.11.0.004` (PostgreSQL 17.11);
+- Kong 2.8.1 and Mailpit v1.31.3.
+
+**Data:** synthetic `@example.com` accounts and random passwords only. Code at `3cf791b`, i.e. PR #46. Every case
+with status codes, sanitized GoTrue log lines and the frozen-field digest is in
+[`rehearsal-2026-10-12-local.md`](rehearsal-2026-10-12-local.md).
+
+| Area | Result |
+|---|---|
+| Install, verify, re-run, remove (steps 4–5, 8) | **Passed** as the dashboard role `postgres`. Details below. |
+| Drain and timeout (step 4) | **Passed.** Details below. |
+| While frozen (steps 6–7) | **Passed.** Details below. |
+| After unfreeze (step 8) | **Passed:** every blocked operation succeeded and changed the field. |
+| Lock privilege (step 9) | MAINTAIN is enough with `BEGIN READ ONLY`; a column-SELECT-only role gets `42501`. Details below. |
+| Importer under the lock (PR #46) | **Passed:** writes, `TRUNCATE` and trigger DDL waited; reads did not; failure paths behaved as documented. Details below. |
+| GoTrue during the lock (step 10) | **Passed.** See "Effect on legacy sign-ins and token refreshes". |
+
+**Install, verify, re-run, remove:**
+- `freeze.sql` committed in about 0.08 s and was idempotent.
+- `verify.sql` matched the pinned hash, and the importer reported the freeze active.
+- `unfreeze.sql` worked twice, and the importer then reported the trigger `missing`.
+
+**Drain and timeout:**
+- `freeze.sql` waited for an open password write and committed 7 ms after it.
+- Against an open write held longer than 10 s, it gave up at 10.06 s (`lock timeout`) and installed nothing.
+
+**While frozen:**
+- **Worked:** password sign-in, chained refresh-token grants, `GET /user`, a metadata update, a reset-email request
+  and opening a recovery link. All answered 200 or 303, and the frozen fields stayed unchanged.
+- **Rejected:** sign-up, admin create, password change (by the user, by recovery session, by the admin API), the
+  email-change confirmation, admin email change, ban, delete, and SQL `UPDATE` of every frozen column, `INSERT` and
+  `DELETE`. Each failed with `hyperchat_d1_freeze`, left the frozen-field digest unchanged, and logged the cause in
+  GoTrue.
+
+**Lock privilege:**
+- `postgres` already has MAINTAIN, plus BYPASSRLS.
+- A dedicated MAINTAIN role needed the owners to grant it.
+
+**Importer under the lock:**
+- A 3-account import held the lock 8–10 ms.
+- `UPDATE`, `INSERT`, `DELETE`, `TRUNCATE … CASCADE`, superuser replica-mode writes, `DISABLE TRIGGER`,
+  `DROP TRIGGER` and `CREATE OR REPLACE TRIGGER` all waited. `SELECT` and `GET /user` did not.
+- The lock timeout (5.00 s), a missing privilege, session loss before the pre-commit check (rolled back), session
+  loss right after it (committed, post-commit proof false, exit 4), and an importer stalled past the 20 s idle limit
+  (session ended at 20.0 s) all behaved as documented.
+
+**Findings, and where each went:**
+- **Row-level security hides `auth.users`.** A role without BYPASSRLS read 0 rows silently. → Fixed in #47 (F14):
+  both tools refuse; the source role needs BYPASSRLS.
+- **Re-running `freeze.sql` reset ENABLE ALWAYS to `O`.** → Fixed here: ALWAYS is kept, or the run fails and changes
+  nothing.
+- **`postgres` cannot set ALWAYS** but can write in replica mode past `O`. → Documented as an open residual risk
+  (Limitations).
+- **Token refresh also pauses under the lock and behind `freeze.sql`.** → Documented ("Effect on legacy sign-ins and
+  token refreshes").
+- **GoTrue answers rejected requests with HTTP 500** carrying the trigger message, or a 303 error redirect. →
+  Documented ("Errors").
+- **Email change completed on the first confirmation link** although `double_confirm_changes = true`. While frozen,
+  both links fail; this is a GoTrue behaviour note only.
+
+**Not covered:**
+- hosted permissions (step 12);
+- the legacy project's versions and its older trigger;
+- OAuth sign-ins;
+- the production round-trip time (step 11);
+- `main()` end to end against a TLS source.
+
+**Differences from hosted:**
+- raised local rate limits (`email_sent` 100, `sign_in_sign_ups` 1000);
+- no TLS;
+- local demo credentials;
+- the owner and superuser logins (`supabase_auth_admin`, `supabase_admin`) used for the documented elevated steps
+  (ENABLE ALWAYS, the dedicated role's grants, owner-side lock probes) do not exist for users of hosted projects.
