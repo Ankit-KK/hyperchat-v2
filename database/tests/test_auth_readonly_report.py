@@ -185,7 +185,7 @@ def test_a_summary_that_is_not_counts_only_is_never_printed(monkeypatch, capsys)
 # ── against PostgreSQL (throwaway fixture database) ─────────────────────────
 
 FIXTURE_DB = "hyperchat_authrec_fixture"
-READER, PARTIAL = "authrec_reader", "authrec_partial"
+READER, PARTIAL, COLUMNS_ONLY = "authrec_reader", "authrec_partial", "authrec_columns_only"
 db_only = pytest.mark.skipif(os.environ.get("HYPERCHAT_CI_DB_SETUP") != "1",
                              reason="needs the throwaway CI PostgreSQL (HYPERCHAT_CI_DB_SETUP=1)")
 
@@ -198,7 +198,7 @@ def _admin(dbname: str = "postgres") -> psycopg.Connection:
 def fixture_db():
     with _admin() as conn:
         conn.execute(f"DROP DATABASE IF EXISTS {FIXTURE_DB}")
-        for role in (READER, PARTIAL):
+        for role in (READER, PARTIAL, COLUMNS_ONLY):
             conn.execute(f"DROP ROLE IF EXISTS {role}")
             conn.execute(f"CREATE ROLE {role} LOGIN")
         conn.execute(f"CREATE DATABASE {FIXTURE_DB}")
@@ -217,14 +217,16 @@ def fixture_db():
                 conn.execute("INSERT INTO public.users (email, password_hash, legacy_supabase_user_id, "
                              "email_verified_at) VALUES (%s, CASE WHEN %s THEN 'synthetic' END, %s, "
                              "CASE WHEN %s THEN now() END)", (email, pw, IDS[k] if k else None, ver))
-            conn.execute(f"GRANT USAGE ON SCHEMA auth TO {READER}, {PARTIAL}")
+            conn.execute(f"GRANT USAGE ON SCHEMA auth TO {READER}, {PARTIAL}, {COLUMNS_ONLY}")
             conn.execute(f"GRANT SELECT ON auth.users, public.users TO {READER}")
             conn.execute(f"GRANT SELECT (id, email) ON auth.users TO {PARTIAL}")
+            # the role database/README.md documents: column-level grants on auth.users only, no table-level SELECT
+            conn.execute(f"GRANT SELECT (id, email, encrypted_password, confirmed_at) ON auth.users TO {COLUMNS_ONLY}")
         yield
     finally:
         with _admin() as conn:
             conn.execute(f"DROP DATABASE IF EXISTS {FIXTURE_DB} WITH (FORCE)")
-            for role in (READER, PARTIAL):
+            for role in (READER, PARTIAL, COLUMNS_ONLY):
                 conn.execute(f"DROP ROLE IF EXISTS {role}")
 
 
@@ -328,6 +330,47 @@ def test_row_security_that_hides_rows_is_refused_not_reported_as_zero(fixture_db
             conn.execute("ALTER TABLE public.users DISABLE ROW LEVEL SECURITY")
         with _admin() as conn:
             conn.execute(f"ALTER ROLE {READER} NOBYPASSRLS")
+
+
+@db_only
+def test_the_documented_column_grant_role_reads_every_row_and_is_refused_only_by_row_security(fixture_db):
+    """The source role database/README.md documents has column-level SELECT on auth.users only (no table-level SELECT).
+    The row-level security probe must work with exactly those grants: with RLS disabled, or with RLS enabled for a role
+    with BYPASSRLS, the report reads every row; with RLS applying to the role (no policy, or a policy hiding some rows)
+    it refuses. Review of #47 (Codex P1): the probe selects a column check_columns has verified."""
+    with _admin(FIXTURE_DB) as conn:
+        assert conn.execute("SELECT has_table_privilege(%s, 'auth.users', 'SELECT'), "
+                            "has_column_privilege(%s, 'auth.users', 'encrypted_password', 'SELECT')",
+                            (COLUMNS_ONLY, COLUMNS_ONLY)).fetchone() == (False, True)
+    before = _snapshot()
+    with _ro(COLUMNS_ONLY) as src, _ro(READER) as tgt:  # RLS disabled
+        assert rep.report(src, tgt) == EXPECTED
+    try:
+        with _admin(FIXTURE_DB) as conn:
+            conn.execute("ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY")  # as on Supabase: no policies
+        with _ro(COLUMNS_ONLY) as src, _ro(READER) as tgt:
+            with pytest.raises(Refused, match="^source: row-level security on auth.users would hide rows"):
+                rep.report(src, tgt)
+        with _admin(FIXTURE_DB) as conn:
+            conn.execute(f"CREATE POLICY authrec_test ON auth.users FOR SELECT TO {COLUMNS_ONLY} "
+                         "USING (email IS NOT NULL)")  # hides s4
+        with _ro(COLUMNS_ONLY) as conn:
+            assert conn.execute("SELECT count(id) FROM auth.users").fetchone()[0] == len(SOURCE) - 1
+            conn.rollback()
+        with _ro(COLUMNS_ONLY) as src, _ro(READER) as tgt:
+            with pytest.raises(Refused, match="^source: row-level security on auth.users would hide rows"):
+                rep.report(src, tgt)
+        with _admin() as conn:
+            conn.execute(f"ALTER ROLE {COLUMNS_ONLY} BYPASSRLS")
+        with _ro(COLUMNS_ONLY) as src, _ro(READER) as tgt:
+            assert rep.report(src, tgt) == EXPECTED
+    finally:
+        with _admin(FIXTURE_DB) as conn:
+            conn.execute("DROP POLICY IF EXISTS authrec_test ON auth.users")
+            conn.execute("ALTER TABLE auth.users DISABLE ROW LEVEL SECURITY")
+        with _admin() as conn:
+            conn.execute(f"ALTER ROLE {COLUMNS_ONLY} NOBYPASSRLS")
+    assert _snapshot() == before
 
 
 @db_only

@@ -901,6 +901,19 @@ def row_security(loaded):
 
 
 @db_only
+def test_the_column_grant_source_role_passes_the_row_security_probe(loaded):
+    """The importer's source role has column-level SELECT on auth.users only (database/README.md), as READER does in
+    every test of this section. With RLS disabled the probe accepts it and every row is planned (review of #47, Codex
+    P1: the probe selects a column check_columns has verified)."""
+    with _admin(SRC_DB) as c:
+        assert c.execute("SELECT has_table_privilege(%s, 'auth.users', 'SELECT'), has_column_privilege(%s, "
+                         "'auth.users', 'encrypted_password', 'SELECT')", (READER, READER)).fetchone() == (False, True)
+    with _src() as s, _tgt(VIEWER, read_only=True) as t:
+        p = imp.read_plan(s, t, False)
+    assert p.counts == EXPECTED and p.fingerprint == _reference_fingerprint(_fixture_rows())
+
+
+@db_only
 @pytest.mark.parametrize("policy, visible", [(None, 0), (f"id <> '{IDS['x9']}'", 13), ("true", 14)],
                          ids=["no-policy", "hides-x9", "shows-all"])
 def test_row_security_on_the_source_is_refused_not_planned(row_security, policy, visible):
