@@ -187,7 +187,7 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
   table users`; only the owner `supabase_auth_admin` (not a login available on hosted projects) could set it. It does
   not stop an owner or superuser from disabling or dropping the trigger. Re-running `freeze.sql` used to reset an
   ALWAYS trigger to `O` silently (`CREATE OR REPLACE TRIGGER` does); the script now restores ALWAYS, or fails and
-  changes nothing when the running role cannot (tested). Treat the replica-mode bypass as an **open residual risk**
+  changes nothing when the running role cannot (tested on plain PostgreSQL 17 and, as the dashboard role `postgres`, on the local Supabase image `supabase/postgres:17.11.0.004`; not yet on a hosted project). Treat the replica-mode bypass as an **open residual risk**
   covered only by the operator controls, the source lock (it blocks replica-mode writes while held) and step 10,
   unless an owner-level role on the hosted project can set ALWAYS and the owner decides to use it.
 - **The source lock is short but real:** it is taken only after the confirmation and released right after the target

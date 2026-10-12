@@ -4,7 +4,7 @@ Tracks every backend capability from the full backend audit (58 capabilities, 20
 complete. The frontend (plan phase 13) and the production cutover (phases 14–15) are out of scope here, except
 where a backend item exists only to make them possible.
 
-**Baseline (verified 2026-10-12):** `main` = `dab3d96` (security fixes #24-#32 and #36-#40, D1 tooling #33/#34, D1 policy and exclusion/cutoff decisions in #42-#44, D1 freeze safeguards and source lock #45/#46;
+**Baseline (verified 2026-10-12):** `main` = `2c4b58b` (security fixes #24-#32 and #36-#40, D1 tooling #33/#34, D1 policy and exclusion/cutoff decisions in #42-#44, D1 freeze safeguards and source lock #45/#46, D1 RLS fail-closed (F14) #47;
 migration head `0016`); DEV still runs `9042fb7fff40` at migration `0015` (bots disabled), so nothing merged since
 then is deployed; production runs `940137070657` at migration `0009`, untouched.
 

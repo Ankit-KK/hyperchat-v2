@@ -685,7 +685,7 @@ def test_a_role_that_cannot_restore_enable_always_changes_nothing(loaded):
             c.execute(f"DROP ROLE {FREEZER}")
 
 
-_GUARD ="EXECUTE FUNCTION hyperchat_ops.d1_auth_freeze_guard()"
+_GUARD = "EXECUTE FUNCTION hyperchat_ops.d1_auth_freeze_guard()"
 _ON = "ON auth.users FOR EACH ROW"
 
 
