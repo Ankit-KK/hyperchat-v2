@@ -22,6 +22,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P2**: fix before launch | **3** | F2 (merged in #29, `1c018a7`; not deployed), F3 (merged in #25, `dc4c7d8`; policy approved 2026-10-11; not deployed), F4 |
 | **P1** (found after the first round): sign-in hashing DoS | **1** | F9 (introduced by F2; merged in #30, `4a30786`; not deployed) |
 | **P3** (found after the first round) | **4** | F10 (reset links outlived a password change; merged in #31, `3b834d8`, not deployed), F11 (forgot-password timing; merged in #32, `9a33fe8`, not deployed), F12 (bcrypt cost unbounded at sign-in; merged in #34, `c53a8c9`, not deployed); F13 (safety guards written as `assert`; found in the delta review; merged in #40, `06b884b`, not deployed); **F12-R** (imported-bcrypt sign-in timing: accepted residual risk, not remediated) |
+| **P2** (found in the local GoTrue rehearsal) | **1** | F14 (row-level security silently filtered the D1 source; fixed in #47, not merged) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
 | Tracked owner decisions / approvals | 8 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 (open); D1 (policy approved 2026-10-12, execution pending); F12-R (accepted residual risk) |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
@@ -425,6 +426,44 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
   exits 1 (`failed: ValueError`) and the report's exits 1 (`failed: the report holds counts only`); the secret
   appears in no message or output.
 
+### F14 (P2, found in the local GoTrue rehearsal; fixed in #47, not merged): row-level security silently filtered the D1 source
+- **Evidence:**
+  - Supabase's PostgreSQL 17.11 image enables row-level security on `auth.users` (and every `auth.*` table) with
+    **no policies**. The legacy project is unverified.
+  - A source role without `BYPASSRLS` therefore read zero rows, with no error.
+  - The D1 report and importer checked columns and privileges but not row visibility.
+  - **Locally:** the report counted every V2 account as missing in Supabase. The importer's dry run planned
+    nothing and printed the fingerprint of an empty set.
+- **Impact:**
+  - **With Supabase's no-policy default:** a wrong reviewed dry run, but no wrong write. A plan with no updates
+    imports nothing, and under the lock the empty set's fingerprint would match only an equally filtered source.
+  - **With a policy that hides only some rows:** a wrong import. The excluded-account rules depend on seeing every
+    source row. In the fixture, hiding one Supabase account that shares a V2 account's email (another Supabase id)
+    made that V2 account eligible, and the old code planned its hash for import. The approved exclusion policy
+    forbids that import.
+- **Fix:**
+  - Both tools read with `SET LOCAL row_security = off` in every source transaction (plan, report, and the lock
+    transaction). PostgreSQL then raises instead of filtering whenever any policy would apply to the role: none,
+    some or all rows visible, and the owner under FORCE.
+  - The shared column check probes the table first (`SELECT ... LIMIT 0`, no rows read) and refuses with
+    `row-level security on auth.users would hide rows from this role` (exit 2). The target is checked the same way.
+  - Under the lock, a policy turned on after the plan raises `InsufficientPrivilege` (exit 1); nothing is written
+    and the lock is released.
+  - **Not a privilege:** verified on PostgreSQL 17.11, the setting never shows a restricted role a row. That role
+    gets the error instead. Roles that RLS doesn't apply to read every row: `BYPASSRLS`, superusers, and the owner
+    without FORCE.
+- **Operator change:** the source role needs `BYPASSRLS` (`database/README.md`).
+- **Tests:**
+  - **8 new PostgreSQL tests** (RLS on the fixture's `auth.users`; no policy, a policy hiding one row, a policy
+    showing all rows):
+    - the report refuses, and the target is checked too;
+    - the importer's plan refuses;
+    - the CLI dry run and `--apply` exit 2, with nothing written and nothing sensitive printed;
+    - a `BYPASSRLS` role gets the exact counts and the full fingerprint and imports;
+    - RLS turned on while the operator confirms: nothing written, lock released;
+    - target RLS refused before planning and before writing.
+  - **7 of the 8 fail against the previous code** (`dab3d96`). The one that passes is the positive control.
+
 ## Verified controls
 
 | Area | Control | Evidence |
@@ -555,6 +594,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 7. **F7**: after D4 and SEC-L2.
 8. **F13** (P3): **merged in #40** (`06b884b`; explicit checks instead of `assert`; not deployed).
 9. **F12-R** (P3 residual): **accepted by the owner 2026-10-11**, not remediated; no timing equalization. Re-evaluate before cutover, before the bcrypt migration is considered complete, and if the timing or upgrade flow changes.
+10. **F14** (P2): **fixed in #47** (not merged): the D1 tools read with `row_security = off` and refuse a source (or target) filtered by row-level security. Before any real dry run: merge it, and give the Supabase source role `BYPASSRLS`.
 
 ## Evidence: route inventory and test runs
 

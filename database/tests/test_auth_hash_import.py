@@ -810,6 +810,112 @@ def test_apply_with_the_freeze_and_the_reviewed_fingerprint_imports(loaded, monk
     assert all(_rows()[_tid(k)][0] == SOURCE[k][1] for k in ELIGIBLE)
 
 
+# ── row-level security (local GoTrue rehearsal finding) ─────────────────────
+# Supabase enables row-level security on auth.users with no policies. A source role without BYPASSRLS read no rows
+# and no error: the dry run planned nothing and printed the fingerprint of an empty set. A policy hiding only some rows
+# is worse: hiding x9 (x1's email under another Supabase id) made x1 look eligible, which the exclusion policy forbids.
+
+@pytest.fixture
+def row_security(loaded):
+    def enable(policy: str | None = None) -> None:
+        with _admin(SRC_DB) as c:
+            c.execute("ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY")
+            if policy:
+                c.execute(f"CREATE POLICY import_test ON auth.users FOR SELECT TO {READER} USING ({policy})")
+    yield enable
+    with _admin(SRC_DB) as c:
+        c.execute("DROP POLICY IF EXISTS import_test ON auth.users")
+        c.execute("ALTER TABLE auth.users DISABLE ROW LEVEL SECURITY")
+    with _admin(TGT_DB) as c:
+        c.execute("ALTER TABLE public.users DISABLE ROW LEVEL SECURITY")
+    with _admin() as c:
+        c.execute(f"ALTER ROLE {READER} NOBYPASSRLS")
+
+
+@db_only
+@pytest.mark.parametrize("policy, visible", [(None, 0), (f"id <> '{IDS['x9']}'", 13), ("true", 14)],
+                         ids=["no-policy", "hides-x9", "shows-all"])
+def test_row_security_on_the_source_is_refused_not_planned(row_security, policy, visible):
+    row_security(policy)
+    with _src() as s:  # without the guard: a filtered count, no error
+        assert s.execute("SELECT count(*) FROM auth.users").fetchone()[0] == visible
+        s.rollback()
+    before = _rows()
+    with _src() as s, _tgt(VIEWER, read_only=True) as t:
+        with pytest.raises(Refused, match="^source: row-level security on auth.users would hide rows"):
+            imp.read_plan(s, t, False)
+    assert _rows() == before
+
+
+@db_only
+def test_cli_refuses_a_source_hidden_by_row_security_and_prints_nothing_sensitive(row_security, monkeypatch, capsys,
+                                                                                  caplog):
+    caplog.set_level(logging.DEBUG)
+    _run_freeze_sql("freeze.sql")
+    reviewed = _fingerprint_now()
+    row_security()
+    before = _rows()
+    _cli(monkeypatch, [], role=VIEWER)
+    assert imp.main([]) == 2  # the dry run
+    _cli(monkeypatch, [])  # no answers: reaching the confirmation prompt would fail the run
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 2
+    assert _rows() == before
+    out = capsys.readouterr()
+    assert out.err.count("refused: source: row-level security on auth.users would hide rows") == 2
+    assert "source_fingerprint" not in out.out and "PLAN" not in out.out  # no counts or fingerprint of a filtered set
+    text = out.out + out.err + caplog.text
+    for secret in [*HASHES.values(), *IDS.values(), *(e for e, *_ in SOURCE.values() if e), "$2a$"]:
+        assert secret not in text
+    _assert_source_unlocked()
+
+
+@db_only
+def test_a_role_that_bypasses_row_security_plans_and_imports_every_row(row_security, monkeypatch, capsys):
+    row_security()
+    with _admin() as c:
+        c.execute(f"ALTER ROLE {READER} BYPASSRLS")
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    assert reviewed == _reference_fingerprint(_fixture_rows())  # every row, not a filtered set
+    with _src() as s, _tgt(VIEWER, read_only=True) as t:
+        assert imp.read_plan(s, t, False).counts == EXPECTED
+    _cli(monkeypatch, [PHRASE])
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 0
+    assert _imported_reviewed_hashes(_rows())
+    _assert_source_unlocked()
+
+
+@db_only
+def test_row_security_enabled_while_the_operator_confirms_writes_nothing(row_security, monkeypatch, capsys):
+    """Turned on after the plan (a privileged change during the prompt): the fresh transaction under the lock raises
+    instead of reading a filtered set; nothing is written and the lock is released."""
+    reviewed = _reviewed_and_frozen(monkeypatch, capsys)
+    before = _rows()
+
+    def enable_then_confirm(prompt=""):
+        row_security()
+        return PHRASE
+    _cli(monkeypatch, [])
+    monkeypatch.setattr("builtins.input", enable_then_confirm)
+    assert imp.main(["--apply", "--expected-fingerprint", reviewed]) == 1
+    assert "failed: InsufficientPrivilege (SQLSTATE 42501)" in capsys.readouterr().err
+    assert _rows() == before
+    _assert_source_unlocked()
+
+
+@db_only
+def test_row_security_on_the_target_is_refused_before_planning_and_before_writing(row_security):
+    with _src() as s, _tgt() as t:
+        p = imp.read_plan(s, t, False)
+        before = _rows()
+        with _admin(TGT_DB) as c:
+            c.execute("ALTER TABLE public.users ENABLE ROW LEVEL SECURITY")
+        with pytest.raises(Refused, match="^target: row-level security on public.users would hide rows"):
+            imp.apply(t, p)
+        with pytest.raises(Refused, match="^target: row-level security on public.users would hide rows"):
+            imp.read_plan(s, t, False)
+    assert _rows() == before
+
+
 # ── privileged bypass and the source lock (post-#45 audit) ──────────────────
 # A superuser (the fixture's admin role) can write with session_replication_role = replica, disable or drop the freeze
 # trigger, or TRUNCATE (no row trigger fires). These tests do that at the real boundaries of an --apply run and assert

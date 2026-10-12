@@ -84,6 +84,16 @@ digests computed by each server and kept in memory for the run only.
   superuser) unless `--accept-writable-source-role` is given; the transaction is read-only either way.
   Note: column `SELECT` on `encrypted_password` is what lets the server evaluate "is it set"; the role could
   therefore read hash values with other tools. Revoke or drop it after the run.
+- **Row-level security:** the role must not be subject to row-level security on `auth.users`. Supabase enables RLS
+  on `auth.users` with no policies (seen on the local Supabase image, PostgreSQL 17.11; the legacy project is
+  unverified), so a role without `BYPASSRLS` reads **zero rows, without any error**. Both D1 tools therefore run
+  their reads with `row_security = off`: PostgreSQL then raises instead of filtering, and the tool refuses
+  (`row-level security on auth.users would hide rows from this role`, exit 2) rather than report or plan a filtered
+  set. That setting grants nothing: it never shows a row the role could not read. Give the read-only role
+  `BYPASSRLS` (`ALTER ROLE ... BYPASSRLS`, which the local Supabase `postgres` role could run; unverified on hosted).
+  `BYPASSRLS` skips policies only; the role still reads nothing beyond its column grants. The owner's earlier run
+  counted 153 source accounts, so that role saw rows; whether a policy hid some of them cannot be told afterwards.
+  The fresh report at the cutover settles it.
 - The Supabase CA certificate (dashboard -> Database settings -> SSL configuration -> download) copied to the
   VPS, e.g. `/root/supabase-ca.crt` (mode 600). The connection uses `sslmode=verify-full` (certificate and
   host name); the tool refuses a missing file and a connection without TLS.
@@ -166,8 +176,9 @@ same email, still no hash) and updates each with `WHERE ... AND coalesce(passwor
 lock timeout or error rolls back **every** row. `--apply` into `hyperchat_dev` additionally needs
 `--allow-dev-target`; real hashes stay out of DEV unless the owner approves it separately.
 
-**Prerequisites:** as for the read-only report (a read-only Supabase role, now with `SELECT (id, email,
-encrypted_password, email_confirmed_at, deleted_at, banned_until)` on `auth.users`; the Supabase CA file; the session
+**Prerequisites:** as for the read-only report (a read-only Supabase role with `BYPASSRLS`, now with `SELECT (id, email,
+encrypted_password, email_confirmed_at, deleted_at, banned_until)` on `auth.users`; row-level security that would
+hide rows is refused in the plan and raises under the lock, so nothing is written; the Supabase CA file; the session
 pooler host from an IPv4-only VPS; the code in a private directory such as `/root/d1-import`, i.e. `database/etl` **plus** `backend/app/__init__.py`,
 `backend/app/auth/__init__.py` and `backend/app/auth/bcrypt_format.py`, which the importer loads; without them it
 refuses to start: `git archive <commit> database/etl backend/app/__init__.py backend/app/auth/__init__.py

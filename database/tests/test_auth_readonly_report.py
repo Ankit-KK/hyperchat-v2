@@ -286,6 +286,51 @@ def test_missing_privileges_or_schema_fail_closed(fixture_db):
 
 
 @db_only
+def test_row_security_that_hides_rows_is_refused_not_reported_as_zero(fixture_db):
+    """Supabase enables row-level security on auth.users with no policies: a role without BYPASSRLS reads no rows and
+    no error, so the report counted every V2 account as missing in Supabase. Any row-level security that applies to
+    the role (none, some or all rows visible) is now refused; a role it does not apply to reads every row."""
+    superuser = os.environ.get("PGUSER", "postgres")
+    with _admin(FIXTURE_DB) as conn:
+        conn.execute("ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY")
+    try:
+        before = _snapshot()
+        for policy, visible in ((None, 0), ("email IS NOT NULL", 6), ("true", 7)):
+            if policy:
+                with _admin(FIXTURE_DB) as conn:
+                    conn.execute("DROP POLICY IF EXISTS authrec_test ON auth.users")
+                    conn.execute(f"CREATE POLICY authrec_test ON auth.users FOR SELECT TO {READER} USING ({policy})")
+            with _ro(READER) as conn:  # without the guard: a filtered count, no error
+                assert conn.execute("SELECT count(*) FROM auth.users").fetchone()[0] == visible
+                conn.rollback()
+            with _ro(READER) as src, _ro(READER) as tgt:
+                with pytest.raises(Refused, match="^source: row-level security on auth.users would hide rows"):
+                    rep.report(src, tgt)
+        with _admin() as conn:
+            conn.execute(f"ALTER ROLE {READER} BYPASSRLS")
+        with _ro(READER) as src, _ro(READER) as tgt:
+            assert rep.report(src, tgt) == EXPECTED
+        with _ro(superuser) as src, _ro(READER) as tgt:  # a superuser bypasses it too (writable: accepted explicitly)
+            assert rep.report(src, tgt, accept_writable_source_role=True) == EXPECTED
+        with _admin(FIXTURE_DB) as conn:  # the target is checked the same way
+            conn.execute("ALTER TABLE auth.users DISABLE ROW LEVEL SECURITY")
+            conn.execute("ALTER TABLE public.users ENABLE ROW LEVEL SECURITY")
+        with _admin() as conn:
+            conn.execute(f"ALTER ROLE {READER} NOBYPASSRLS")
+        with _ro(READER) as src, _ro(READER) as tgt:
+            with pytest.raises(Refused, match="^target: row-level security on public.users would hide rows"):
+                rep.report(src, tgt)
+        assert _snapshot() == before  # nothing changed
+    finally:
+        with _admin(FIXTURE_DB) as conn:
+            conn.execute("DROP POLICY IF EXISTS authrec_test ON auth.users")
+            conn.execute("ALTER TABLE auth.users DISABLE ROW LEVEL SECURITY")
+            conn.execute("ALTER TABLE public.users DISABLE ROW LEVEL SECURITY")
+        with _admin() as conn:
+            conn.execute(f"ALTER ROLE {READER} NOBYPASSRLS")
+
+
+@db_only
 def test_tls_verification_failure_refuses_to_connect(fixture_db, tmp_path):
     """verify-full with a CA that did not sign the server certificate (or a server without TLS) never connects."""
     ca = tmp_path / "not-the-server-ca.pem"
