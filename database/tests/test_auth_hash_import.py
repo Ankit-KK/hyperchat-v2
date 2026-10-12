@@ -491,12 +491,18 @@ def test_there_is_no_export_option():
 FREEZE_DIR = Path(__file__).resolve().parents[2] / "docs" / "operations" / "d1-auth-freeze"
 
 
-def _run_freeze_sql(name: str, replace: tuple[str, str] | None = None) -> None:
+def _run_freeze_sql(name: str, replace: tuple[str, str] | None = None, role: str | None = None) -> None:
     sql = (FREEZE_DIR / name).read_text(encoding="utf-8")
     if replace:
         sql = sql.replace(*replace)
-    with _admin(SRC_DB) as c:
+    with (psycopg.connect(dbname=SRC_DB, user=role, autocommit=True) if role else _admin(SRC_DB)) as c:
         c.execute(sql)
+
+
+def _tgenabled() -> str | None:
+    with _admin(SRC_DB) as c:
+        row = c.execute("SELECT tgenabled::text FROM pg_trigger WHERE tgname = 'hyperchat_d1_auth_freeze'").fetchone()
+    return row and row[0]
 
 
 def _printed_fingerprint(out: str) -> str:
@@ -615,6 +621,68 @@ def test_freeze_check_requires_the_reviewed_trigger(loaded):
     with _admin(SRC_DB) as c:
         c.execute("ALTER TABLE auth.users ENABLE ALWAYS TRIGGER hyperchat_d1_auth_freeze")
     assert _freeze_state() is None  # 'A' counts as active
+
+
+@db_only
+def test_rerunning_the_freeze_keeps_enable_always(loaded):
+    """Rehearsal finding: CREATE OR REPLACE TRIGGER resets ENABLE ALWAYS to plain enabled, so a second freeze.sql run
+    silently reopened the replica-mode path. The script restores it; a disabled trigger is still re-armed."""
+    _run_freeze_sql("freeze.sql")
+    with _admin(SRC_DB) as c:
+        c.execute("ALTER TABLE auth.users ENABLE ALWAYS TRIGGER hyperchat_d1_auth_freeze")
+    _run_freeze_sql("freeze.sql")
+    assert _tgenabled() == "A" and _freeze_state() is None
+    base = _fingerprint_now()
+    with _admin(SRC_DB) as c:
+        c.execute("SET session_replication_role = replica")
+        with pytest.raises(psycopg.errors.RaiseException, match="hyperchat_d1_freeze"):
+            c.execute("UPDATE auth.users SET encrypted_password = %s WHERE id = %s", (HASHES["e2"], IDS["e1"]))
+    assert _fingerprint_now() == base
+    with _admin(SRC_DB) as c:
+        c.execute("ALTER TABLE auth.users DISABLE TRIGGER hyperchat_d1_auth_freeze")
+    _run_freeze_sql("freeze.sql")
+    assert _tgenabled() == "O" and _freeze_state() is None
+
+
+FREEZER = "import_src_freezer"
+
+
+@db_only
+def test_a_role_that_cannot_restore_enable_always_changes_nothing(loaded):
+    """Like Supabase's dashboard role in the rehearsal (TRIGGER on auth.users, not its owner): it can install the
+    freeze but not make it ALWAYS. If the owner did, the role's re-run fails and leaves the ALWAYS trigger and the
+    function exactly as they were: never a silent downgrade."""
+    _run_freeze_sql("unfreeze.sql")
+    with _admin(SRC_DB) as c:
+        c.execute("DROP SCHEMA IF EXISTS hyperchat_ops CASCADE")
+    with _admin() as c:
+        c.execute(f"DROP ROLE IF EXISTS {FREEZER}")
+        c.execute(f"CREATE ROLE {FREEZER} LOGIN")
+        c.execute(f"GRANT CREATE ON DATABASE {SRC_DB} TO {FREEZER}")
+    try:
+        with _admin(SRC_DB) as c:
+            c.execute(f"GRANT USAGE ON SCHEMA auth TO {FREEZER}")
+            c.execute(f"GRANT TRIGGER ON auth.users TO {FREEZER}")
+        _run_freeze_sql("freeze.sql", role=FREEZER)
+        _run_freeze_sql("freeze.sql", role=FREEZER)  # a plain re-run works for this role
+        assert _tgenabled() == "O" and _freeze_state() is None
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="must be owner"):
+            with psycopg.connect(dbname=SRC_DB, user=FREEZER, autocommit=True) as c:
+                c.execute("ALTER TABLE auth.users ENABLE ALWAYS TRIGGER hyperchat_d1_auth_freeze")
+        with _admin(SRC_DB) as c:  # the owner makes it ALWAYS
+            c.execute("ALTER TABLE auth.users ENABLE ALWAYS TRIGGER hyperchat_d1_auth_freeze")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="must be owner"):
+            _run_freeze_sql("freeze.sql", role=FREEZER)
+        assert _tgenabled() == "A" and _freeze_state() is None
+    finally:
+        _run_freeze_sql("unfreeze.sql")
+        with _admin(SRC_DB) as c:
+            c.execute("DROP SCHEMA IF EXISTS hyperchat_ops CASCADE")
+            c.execute(f"REVOKE ALL ON auth.users FROM {FREEZER}")
+            c.execute(f"REVOKE ALL ON SCHEMA auth FROM {FREEZER}")
+        with _admin() as c:
+            c.execute(f"REVOKE ALL ON DATABASE {SRC_DB} FROM {FREEZER}")
+            c.execute(f"DROP ROLE {FREEZER}")
 
 
 _GUARD = "EXECUTE FUNCTION hyperchat_ops.d1_auth_freeze_guard()"

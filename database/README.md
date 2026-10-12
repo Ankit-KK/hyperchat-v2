@@ -166,9 +166,10 @@ the confirmation the importer locks the source (`SHARE` on `auth.users`, at most
 fingerprint and every planned hash again under the lock, and keeps the lock until the target transaction has
 committed: no source row can change in between. The source role for `--apply` therefore needs `MAINTAIN` on
 `auth.users` (PostgreSQL 17+) or table update / delete / truncate (earlier; with `--accept-writable-source-role`).
-Legacy sign-ins pause while the lock is held. Remaining risks (a superuser ending the importer's session, changes
-after the release) and the operator controls are in that README. The freeze SQL is **proposed and not
-yet rehearsed** against GoTrue; see that folder's README for the procedure and the rehearsal.
+Legacy sign-ins and token refreshes pause while the lock is held. Remaining risks (a superuser ending the importer's
+session, the dashboard role's replica-mode bypass of a plain-enabled trigger, changes after the release) and the
+operator controls are in that README. The freeze SQL is **proposed and rehearsed against GoTrue on a local Supabase
+stack only** (2026-10-12); the hosted permission checks are still open (see that folder's README).
 
 **How `--apply` writes:** after the plan it asks you to type `IMPORT <n> HASHES INTO <database>`. Then, in **one
 transaction**, it locks the planned `users` rows (5 s lock timeout), re-checks each is unchanged (same legacy id,
