@@ -445,8 +445,10 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
   - Both tools read with `SET LOCAL row_security = off` in every source transaction (plan, report, and the lock
     transaction). PostgreSQL then raises instead of filtering whenever any policy would apply to the role: none,
     some or all rows visible, and the owner under FORCE.
-  - The shared column check probes the table first (`SELECT ... LIMIT 0`, no rows read) and refuses with
-    `row-level security on auth.users would hide rows from this role` (exit 2). The target is checked the same way.
+  - The shared column check then probes the table by selecting one column it has just verified as readable
+    (`SELECT id ... LIMIT 0`, no rows read; column-level grants are enough, as for the documented least-privilege
+    role) and refuses with `row-level security on auth.users would hide rows from this role` (exit 2). The target is
+    checked the same way.
   - Under the lock, a policy turned on after the plan raises `InsufficientPrivilege` (exit 1); nothing is written
     and the lock is released.
   - **Not a privilege:** verified on PostgreSQL 17.11, the setting never shows a restricted role a row. That role
@@ -454,15 +456,23 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
     without FORCE.
 - **Operator change:** the source role needs `BYPASSRLS` (`database/README.md`).
 - **Tests:**
-  - **8 new PostgreSQL tests** (RLS on the fixture's `auth.users`; no policy, a policy hiding one row, a policy
+  - **10 new PostgreSQL tests** (RLS on the fixture's `auth.users`; no policy, a policy hiding one row, a policy
     showing all rows):
+    - the documented column-grant-only source role (no table-level `SELECT`): every row read with RLS disabled or
+      with `BYPASSRLS`, and refused under no policy or a partial policy (report and importer);
     - the report refuses, and the target is checked too;
     - the importer's plan refuses;
     - the CLI dry run and `--apply` exit 2, with nothing written and nothing sensitive printed;
     - a `BYPASSRLS` role gets the exact counts and the full fingerprint and imports;
     - RLS turned on while the operator confirms: nothing written, lock released;
     - target RLS refused before planning and before writing.
-  - **7 of the 8 fail against the previous code** (`dab3d96`). The one that passes is the positive control.
+  - **8 of the 10 fail against the previous code** (`dab3d96`). The two that pass are positive controls.
+  - **Review of #47 (Codex P1):** the first version probed with a zero-column `SELECT FROM ... LIMIT 0`, said to
+    need table-level `SELECT`. On PostgreSQL 17.11 it did not: a query that references no column needs `SELECT` on
+    any one column, and the column-grant-only role passed. That was verified directly, and by these tests passing
+    against that version. The probe now selects a verified column anyway, so it depends on nothing but that grant.
+    A deliberately broken probe (`SELECT *`, which needs every column) makes the column-grant tests fail
+    (`permission denied for table users`), so they would catch the case the review describes.
 
 ## Verified controls
 

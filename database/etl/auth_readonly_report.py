@@ -151,18 +151,19 @@ def check_columns(conn: psycopg.Connection, table: tuple[str, str], columns: dic
         if not conn.execute("SELECT has_column_privilege(%s, %s, 'SELECT')",
                             (f"{schema}.{name}", column)).fetchone()[0]:
             raise Refused(f"{label}: no SELECT privilege on {schema}.{name}.{column}")
-    check_row_security(conn, table, label)
+    check_row_security(conn, table, next(iter(columns)), label)
 
 
-def check_row_security(conn: psycopg.Connection, table: tuple[str, str], label: str) -> None:
+def check_row_security(conn: psycopg.Connection, table: tuple[str, str], column: str, label: str) -> None:
     """Row-level security filters rows without any error: Supabase enables it on auth.users with no policies, so a
     role without BYPASSRLS reads zero rows and every count would silently be wrong. With row_security = off for the
     rest of this transaction, PostgreSQL raises instead of filtering whenever a policy would apply to this role, for
-    any policy. It is not a privilege: it never shows a row the role could not read. The probe reads no rows; the
-    column privileges were checked first, so its only possible refusal is row-level security."""
+    any policy. It is not a privilege: it never shows a row the role could not read. The probe reads no rows and
+    selects only `column`, whose SELECT privilege check_columns has just verified (column-level grants are enough), so
+    its only possible refusal is row-level security."""
     conn.execute("SET LOCAL row_security = off")
     try:
-        conn.execute(sql.SQL("SELECT FROM {} LIMIT 0").format(sql.Identifier(*table)))
+        conn.execute(sql.SQL("SELECT {} FROM {} LIMIT 0").format(sql.Identifier(column), sql.Identifier(*table)))
     except psycopg.errors.InsufficientPrivilege:
         raise Refused(f"{label}: row-level security on {'.'.join(table)} would hide rows from this role, so the "
                       "counts would be wrong; use a role that bypasses it (BYPASSRLS)") from None
