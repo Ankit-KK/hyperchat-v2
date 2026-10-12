@@ -358,7 +358,7 @@ with status codes, sanitized GoTrue log lines and the frozen-field digest is in
 **Findings, and where each went:**
 - **Row-level security hides `auth.users`.** A role without BYPASSRLS read 0 rows silently. → Fixed in #47 (F14):
   both tools refuse; the source role needs BYPASSRLS.
-- **Re-running `freeze.sql` reset ENABLE ALWAYS to `O`.** → Fixed here: ALWAYS is kept, or the run fails and changes
+- **Re-running `freeze.sql` reset ENABLE ALWAYS to `O`.** → Fixed in #48: ALWAYS is kept, or the run fails and changes
   nothing.
 - **`postgres` cannot set ALWAYS** but can write in replica mode past `O`. → Documented as an open residual risk
   (Limitations).
