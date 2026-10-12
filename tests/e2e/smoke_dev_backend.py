@@ -1,0 +1,746 @@
+"""End-to-end smoke suite for the DEPLOYED DEV backend: synthetic, self-cleaning, repeatable.
+
+Runs ON THE VPS, as root, from a checkout of this repository at the deployed commit (it needs peer access to the DEV
+database to seed and remove synthetic rows, systemctl and the logs):
+    /opt/hyperchat/current/venv/bin/python tests/e2e/smoke_dev_backend.py
+Environment (defaults = v2 development):
+    HYPERCHAT_SMOKE_API       https://api.quicktestspace.site
+    HYPERCHAT_SMOKE_DB        hyperchat_dev:5433          (refuses hyperchat and hyperchat_restore_test)
+    HYPERCHAT_SMOKE_ORIGIN    https://app.quicktestspace.site
+    HYPERCHAT_SMOKE_LOCAL     http://127.0.0.1:8000       the DEV API's local port (release / environment details)
+    HYPERCHAT_SMOKE_ENV_FILE  /etc/hyperchat/api.env      read only for the bots flag
+
+Safety: refuses to run unless the API reports environment "development", the database is not a production or
+restore database, the API is not api.hyperchat.space, and bots are disabled. It never changes configuration,
+never creates a Razorpay order, never writes to R2, never sends email and never calls a TTS or transcription
+provider; checks that would need any of that are reported as BLOCKED with the credential or approval they need.
+Approving a synthetic donation makes the worker publish realtime events to the DEV Pusher app (realtime is on in
+DEV); nothing else leaves the server. Every synthetic row is recognizable (users @authtest.invalid, creators
+"authtest-*", orders "authtest-*") and removed at the end, and the cleanup is verified. The login rate-limit counters
+the suite consumes (auth:* rows) are cleared, as smoke_auth.py does. Nothing secret is printed.
+Exit code: 0 = every runnable check passed (BLOCKED checks do not fail the run), 1 = a check failed, 2 = refused.
+"""
+
+import os
+import re
+import secrets
+import subprocess
+import sys
+import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+import httpx
+import psycopg
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
+from app.auth.passwords import hash_password  # noqa: E402
+from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
+from app.auth.tokens import sha256_hex  # noqa: E402
+
+API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
+LOCAL = os.environ.get("HYPERCHAT_SMOKE_LOCAL", "http://127.0.0.1:8000").rstrip("/")
+FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.site").rstrip("/")
+DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
+ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
+DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
+EXPECTED_HEAD = "0017"
+ORIGIN = {"origin": FRONT}
+DOMAIN = "@authtest.invalid"
+TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
+SOCKET = "1234.5678"
+STARTED = datetime.now(UTC)
+
+results: list[tuple[str, str, str, str]] = []  # (section, name, PASS|FAIL|BLOCKED, detail)
+secrets_seen: list[str] = []  # tokens and passwords that must never appear in a log
+
+
+def check(section: str, name: str, ok: bool, detail: str = "") -> bool:
+    results.append((section, name, "PASS" if ok else "FAIL", "" if ok else detail[:300]))
+    print(f"{'PASS' if ok else 'FAIL'}  [{section}] {name}" + ("" if ok else f"  -- {detail[:300]}"), flush=True)
+    return ok
+
+
+def blocked(section: str, name: str, why: str) -> None:
+    results.append((section, name, "BLOCKED", why))
+    print(f"BLOCKED [{section}] {name}  -- {why}", flush=True)
+
+
+def refuse(why: str) -> None:
+    print(f"REFUSED: {why}", file=sys.stderr)
+    sys.exit(2)
+
+
+def db() -> psycopg.Connection:
+    return psycopg.connect(DSN, autocommit=True)
+
+
+def as_postgres(sql: str) -> str:
+    out = subprocess.run(["runuser", "-u", "postgres", "--", "psql", "-X", "-At", "-p", DB_PORT, "-d", DB_NAME,
+                          "-c", sql], capture_output=True, text=True, cwd="/")
+    return (out.stdout or out.stderr).strip()
+
+
+def password() -> str:
+    pw = "Sm-" + secrets.token_urlsafe(18)
+    secrets_seen.append(pw)
+    return pw
+
+
+def make_user(name: str, pw: str | None, role: str = "streamer", streamer_id: str | None = None,
+              active: bool = True) -> str:
+    with db() as c:
+        return c.execute("INSERT INTO public.users (email, password_hash, role, streamer_id, is_active) "
+                         "VALUES (%s, %s, %s, %s, %s) RETURNING id::text",
+                         (f"{TAG}-{name}{DOMAIN}", hash_password(pw) if pw else None, role, streamer_id,
+                          active)).fetchone()[0]
+
+
+def email(name: str) -> str:
+    return f"{TAG}-{name}{DOMAIN}"
+
+
+def make_creator(suffix: str, owner: str | None) -> str:
+    with db() as c:
+        return c.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) VALUES (%s, %s, %s) "
+                         "RETURNING id::text", (TAG + suffix, "Smoke " + suffix.upper(), owner)).fetchone()[0]
+
+
+def make_donation(streamer_id: str, donor: str, amount: int, moderation: str = "pending",
+                  message: str | None = "Synthetic smoke message") -> str:
+    with db() as c:
+        return c.execute(
+            "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
+            "payment_status, moderation_status, message, message_visible) VALUES (%s, %s, %s, %s, 'INR', %s, "
+            "'success', %s, %s, true) RETURNING id::text",
+            (streamer_id, "authtest-" + secrets.token_hex(6), donor, amount, amount, moderation, message)).fetchone()[0]
+
+
+def reset_login_counters() -> None:
+    """The suite signs in many times from one IP (the VPS); clear the login counters it consumed (auth:login*)."""
+    with db() as c:
+        c.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:login%'")
+
+
+class Session:
+    """One signed-in browser: its own cookie jar, the CSRF header for writes."""
+
+    def __init__(self, who: str, pw: str):
+        self.client = httpx.Client(base_url=API, timeout=20)
+        r = self.client.post("/api/v1/auth/login", json={"email": email(who), "password": pw}, headers=ORIGIN)
+        self.status = r.status_code
+        self.csrf = r.json().get("csrf_token", "") if r.status_code == 200 else ""
+        self.headers = {**ORIGIN, "x-csrf-token": self.csrf}
+        token = self.client.cookies.get("__Host-hc_session")
+        secrets_seen.extend(t for t in (self.csrf, token) if t)
+
+    def get(self, path, **kw):
+        return self.client.get(path, **kw)
+
+    def write(self, method, path, **kw):
+        return self.client.request(method, path, headers={**self.headers, **kw.pop("headers", {})}, **kw)
+
+
+def wait_for(predicate, seconds: float = 60, step: float = 1.0):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(step)
+    return None
+
+
+# ── preconditions: DEV only, bots off ───────────────────────────────────────
+if DB_NAME in ("hyperchat", "hyperchat_restore_test"):
+    refuse("never against the production or restore database")
+if "api.hyperchat.space" in API:
+    refuse("never against the production API")
+try:
+    LOCAL_HEALTH = httpx.get(LOCAL + "/health", timeout=10).json()
+except (httpx.HTTPError, ValueError) as exc:
+    refuse(f"cannot read the local health endpoint ({type(exc).__name__})")
+if LOCAL_HEALTH.get("environment") != "development":
+    refuse(f"the API at {LOCAL} is not the development environment")
+env_text = Path(ENV_FILE).read_text() if Path(ENV_FILE).exists() else ""
+bots_flag = re.search(r"^HYPERCHAT_BOTS_ENABLED=(.*)$", env_text, re.M)
+if bots_flag and bots_flag.group(1).strip().lower() in ("1", "true", "yes", "on"):
+    refuse("bots are enabled on DEV; this suite only runs with bots disabled")
+with db() as c:
+    if c.execute("SELECT current_database()").fetchone()[0] != DB_NAME:
+        refuse("connected to an unexpected database")
+
+print(f"DEV backend smoke suite: run {TAG}, API {API}, release {LOCAL_HEALTH.get('release')}", flush=True)
+ids: dict[str, str] = {}
+sessions: list[Session] = []
+try:
+    # ── core / platform ─────────────────────────────────────────────────────
+    S = "core"
+    pub = httpx.get(API + "/health", timeout=15)
+    check(S, "public /health: status only (F5)", pub.status_code == 200
+          and pub.json() == {"status": "ok", "database": {"status": "ok"}}, pub.text)
+    release = Path("/opt/hyperchat/current/backend/RELEASE").read_text().strip() \
+        if Path("/opt/hyperchat/current/backend/RELEASE").exists() else ""
+    check(S, "local /health: release, environment, database", LOCAL_HEALTH.get("status") == "ok"
+          and LOCAL_HEALTH.get("release") == release and LOCAL_HEALTH.get("database", {}).get("status") == "ok",
+          str(LOCAL_HEALTH))
+    for unit in ("hyperchat-api", "hyperchat-worker"):
+        state = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True).stdout.strip()
+        check(S, f"{unit} active", state == "active", state)
+    head = as_postgres("SELECT version_num FROM alembic_version")
+    check(S, f"database at migration head {EXPECTED_HEAD}", head == EXPECTED_HEAD, head)
+    check(S, "bots disabled (HYPERCHAT_BOTS_ENABLED)", bool(bots_flag) and bots_flag.group(1).strip() == "false",
+          bots_flag.group(1) if bots_flag else "missing")
+    with db() as c:
+        privs = c.execute("SELECT has_table_privilege(r, 'public.d1_hash_import_ledger', p) FROM (VALUES "
+                          "('hyperchat_app','SELECT'),('hyperchat_app','INSERT'),('hyperchat_app','UPDATE'),"
+                          "('hyperchat_app','DELETE'),('hyperchat_app','TRUNCATE'),('hyperchat_worker','SELECT'),"
+                          "('hyperchat_worker','INSERT'),('hyperchat_readonly','SELECT'),"
+                          "('hyperchat_readonly','INSERT')) v(r, p)").fetchall()
+    check(S, "0017 ledger privileges: app SELECT+INSERT only, worker none, readonly SELECT only",
+          [p[0] for p in privs] == [True, True, False, False, False, False, False, True, False], str(privs))
+    with db() as c:
+        cols = {r[0] for r in c.execute("SELECT column_name FROM information_schema.columns WHERE table_schema = "
+                                        "'public' AND table_name = 'banned_donors'")}
+    check(S, "0016 ban-audit columns present", {"unbanned_at", "unbanned_by_label", "unbanned_by_user_id"} <= cols,
+          str(sorted(cols)))
+
+    # ── synthetic fixtures ──────────────────────────────────────────────────
+    reset_login_counters()
+    pw = {k: password() for k in ("owner_a", "owner_b", "linked", "plain", "admin", "throttle", "change",
+                                  "change_limit", "reset", "deact", "owner_c")}
+    ids["owner_a"] = make_user("owner_a", pw["owner_a"])
+    ids["owner_b"] = make_user("owner_b", pw["owner_b"])
+    ids["a"] = make_creator("a", ids["owner_a"])
+    ids["b"] = make_creator("b", ids["owner_b"])
+    slug_a, slug_b = TAG + "a", TAG + "b"
+    ids["linked"] = make_user("linked", pw["linked"], streamer_id=ids["a"])  # linked account = "moderator" access
+    ids["plain"] = make_user("plain", pw["plain"], role="user")
+    ids["admin"] = make_user("admin", pw["admin"], role="admin")
+    ids["deact"] = make_user("deact", pw["deact"], active=False)
+    for k in ("throttle", "change", "change_limit", "reset", "owner_c"):
+        ids[k] = make_user(k, pw[k])
+
+    # ── auth ────────────────────────────────────────────────────────────────
+    S = "auth"
+    owner_a = Session("owner_a", pw["owner_a"])
+    sessions.append(owner_a)
+    check(S, "login owner -> 200 with CSRF token", owner_a.status == 200 and len(owner_a.csrf) >= 32,
+          str(owner_a.status))
+    check(S, "session persists (GET /auth/session)", owner_a.get("/api/v1/auth/session").status_code == 200)
+    r = owner_a.client.patch(f"/api/v1/dashboard/streamers/{slug_a}/settings", json={"tts_enabled": False},
+                             headers=ORIGIN)
+    check(S, "write without CSRF token -> 403", r.status_code == 403, r.text)
+    r = httpx.post(API + "/api/v1/auth/login", json={"email": email("deact"), "password": pw["deact"]},
+                   headers=ORIGIN, timeout=15)
+    check(S, "deactivated account -> generic 401", r.status_code == 401 and r.json() == {"error": GENERIC}, r.text)
+
+    # account-at-IP throttle (F2): 5 failures, then even the right password is refused, generically
+    for _ in range(5):
+        httpx.post(API + "/api/v1/auth/login", json={"email": email("throttle"), "password": "wrong-pass-123"},
+                   headers=ORIGIN, timeout=15)
+    r = httpx.post(API + "/api/v1/auth/login", json={"email": email("throttle"), "password": pw["throttle"]},
+                   headers=ORIGIN, timeout=15)
+    check(S, "account throttle: 6th attempt with the right password -> generic 401 (F2)",
+          r.status_code == 401 and r.json() == {"error": GENERIC}, r.text)
+    reset_login_counters()
+    # IP throttle (F2/F9): 20 attempts from this IP, then a valid account is refused too
+    for i in range(20):
+        httpx.post(API + "/api/v1/auth/login", json={"email": f"{TAG}-nobody{i}{DOMAIN}", "password": "x"},
+                   headers=ORIGIN, timeout=15)
+    r = httpx.post(API + "/api/v1/auth/login", json={"email": email("throttle"), "password": pw["throttle"]},
+                   headers=ORIGIN, timeout=15)
+    check(S, "IP throttle: 21st attempt -> generic 401 (F2/F9)",
+          r.status_code == 401 and r.json() == {"error": GENERIC}, r.text)
+    reset_login_counters()
+    r = httpx.post(API + "/api/v1/auth/login", json={"email": email("throttle"), "password": pw["throttle"]},
+                   headers=ORIGIN, timeout=15)
+    check(S, "after the window is cleared the account signs in again", r.status_code == 200, r.text)
+
+    # password change: wrong current, success, other sessions revoked, current kept, old password dead (F3/F10)
+    ch1, ch2 = Session("change", pw["change"]), Session("change", pw["change"])
+    sessions += [ch1, ch2]
+    with db() as c:  # a reset link issued before the change must die with it (F10)
+        burned = secrets.token_urlsafe(32)
+        secrets_seen.append(burned)
+        c.execute("INSERT INTO public.password_reset_tokens (user_id, token_hash, expires_at) VALUES "
+                  "(%s, %s, now() + interval '30 minutes')", (ids["change"], sha256_hex(burned)))
+    r = ch1.write("POST", "/api/v1/auth/password/change", json={"current_password": "wrong-pass-123",
+                                                                "new_password": "Unused-Pass-4242"})
+    check(S, "password change with wrong current password -> 400", r.status_code == 400, r.text)
+    new_pw = password()
+    r = ch1.write("POST", "/api/v1/auth/password/change", json={"current_password": pw["change"],
+                                                                "new_password": new_pw})
+    check(S, "password change -> 2xx", r.is_success, r.text)
+    check(S, "the changing session stays signed in", ch1.get("/api/v1/auth/session").status_code == 200)
+    check(S, "other sessions are revoked by a password change", ch2.get("/api/v1/auth/session").status_code == 401)
+    reset_login_counters()
+    r = httpx.post(API + "/api/v1/auth/login", json={"email": email("change"), "password": pw["change"]},
+                   headers=ORIGIN, timeout=15)
+    check(S, "old password no longer signs in", r.status_code == 401, r.text)
+    r = httpx.post(API + "/api/v1/auth/password/reset", json={"token": burned, "new_password": "Attacker-Pass-42"},
+                   timeout=15)
+    check(S, "a reset link issued before a password change is dead (F10)", r.status_code == 400, r.text)
+
+    # password-change limit (F3): 5 verifications per user per hour, then 429 even for the right password
+    cl = Session("change_limit", pw["change_limit"])
+    sessions.append(cl)
+    for _ in range(5):
+        cl.write("POST", "/api/v1/auth/password/change", json={"current_password": "wrong-pass-123",
+                                                               "new_password": "Unused-Pass-4242"})
+    r = cl.write("POST", "/api/v1/auth/password/change", json={"current_password": pw["change_limit"],
+                                                               "new_password": "Unused-Pass-4243"})
+    check(S, "password-change limit: 6th attempt -> 429 (F3)", r.status_code == 429, r.text)
+
+    # reset lifecycle with email disabled: the link is issued here (as the mailer would), used once, sessions revoked
+    rs = Session("reset", pw["reset"])
+    sessions.append(rs)
+    link, expired = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    secrets_seen += [link, expired]
+    with db() as c:
+        c.execute("INSERT INTO public.password_reset_tokens (user_id, token_hash, expires_at) VALUES "
+                  "(%s, %s, now() + interval '30 minutes'), (%s, %s, now() - interval '1 minute')",
+                  (ids["reset"], sha256_hex(link), ids["reset"], sha256_hex(expired)))
+    r = httpx.post(API + "/api/v1/auth/password/forgot", json={"email": email("reset")}, timeout=15)
+    check(S, "forgot password with email disabled -> 202, nothing sent", r.status_code == 202, r.text)
+    r = httpx.post(API + "/api/v1/auth/password/reset", json={"token": expired, "new_password": "Reset-Pass-4242"},
+                   timeout=15)
+    check(S, "expired reset link -> 400", r.status_code == 400, r.text)
+    reset_pw = password()
+    r = httpx.post(API + "/api/v1/auth/password/reset", json={"token": link, "new_password": reset_pw}, timeout=15)
+    check(S, "reset with a valid link -> 2xx", r.is_success, r.text)
+    check(S, "a reset revokes every session", rs.get("/api/v1/auth/session").status_code == 401)
+    r = httpx.post(API + "/api/v1/auth/password/reset", json={"token": link, "new_password": "Again-Pass-4242"},
+                   timeout=15)
+    check(S, "a used reset link cannot be reused", r.status_code == 400, r.text)
+    reset_login_counters()
+    r = httpx.post(API + "/api/v1/auth/login", json={"email": email("reset"), "password": reset_pw},
+                   headers=ORIGIN, timeout=15)
+    check(S, "the new password signs in", r.status_code == 200, r.text)
+
+    # ── admin, invites, onboarding ──────────────────────────────────────────
+    S = "admin"
+    admin = Session("admin", pw["admin"])
+    sessions.append(admin)
+    check(S, "admin signs in", admin.status == 200, str(admin.status))
+    r = owner_a.get("/api/v1/admin/users")
+    check(S, "non-admin -> 403 on /admin/users", r.status_code == 403, r.text)
+    r = admin.get("/api/v1/admin/users", params={"limit": 5})
+    check(S, "admin lists users", r.status_code == 200 and "users" in r.json(), r.text)
+    r = admin.write("POST", "/api/v1/auth/invites", json={"email": email("invitee"), "role": "streamer"})
+    body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    leaked = [k for k, v in (body.get("invite", body) or {}).items() if isinstance(v, str) and "token=" in v]
+    check(S, "invite created with email disabled; no accept link returned (links off on DEV)",
+          r.status_code in (200, 201) and not leaked, r.text)
+    r = admin.get("/api/v1/admin/invites")
+    invites = [i for i in r.json().get("invites", []) if i.get("email") == email("invitee")]
+    check(S, "admin lists the invite", r.status_code == 200 and len(invites) == 1, r.text)
+    if invites:
+        r = admin.write("POST", f"/api/v1/admin/invites/{invites[0]['id']}/revoke")
+        check(S, "admin revokes the invite", r.is_success, r.text)
+    # accept flow, the link issued here as the mailer would
+    inv, inv_expired = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    secrets_seen += [inv, inv_expired]
+    with db() as c:
+        c.execute("INSERT INTO public.user_invites (email, role, token_hash, invited_by, expires_at) VALUES "
+                  "(%s, 'streamer', %s, %s, now() + interval '1 day'), "
+                  "(%s, 'streamer', %s, %s, now() - interval '1 minute')",
+                  (email("accepted"), sha256_hex(inv), ids["admin"], email("late"), sha256_hex(inv_expired),
+                   ids["admin"]))
+    accept_pw = password()
+    acc = httpx.Client(base_url=API, timeout=20)
+    r = acc.post("/api/v1/auth/invites/accept", json={"token": inv, "password": accept_pw}, headers=ORIGIN)
+    check(S, "invite accept -> signed in, account created",
+          r.is_success and acc.get("/api/v1/auth/session").status_code == 200, r.text)
+    acc.close()
+    r = httpx.post(API + "/api/v1/auth/invites/accept", json={"token": inv, "password": accept_pw}, headers=ORIGIN,
+                   timeout=15)
+    check(S, "an accepted invite cannot be reused", r.status_code in (400, 409), r.text)
+    r = httpx.post(API + "/api/v1/auth/invites/accept", json={"token": inv_expired, "password": accept_pw},
+                   headers=ORIGIN, timeout=15)
+    check(S, "expired invite -> 400", r.status_code == 400, r.text)
+
+    r = admin.write("POST", "/api/v1/admin/creators", json={"slug": TAG + "c", "name": "Smoke C",
+                                                             "razorpay_account": "primary"})
+    created = r.json().get("creator", {}) if r.is_success else {}
+    ids["c"] = created.get("id", "")
+    check(S, "admin onboards a creator (CRE-2)", r.status_code in (200, 201) and bool(ids["c"]), r.text)
+    r = admin.write("POST", "/api/v1/admin/creators", json={"slug": TAG + "c", "name": "Again",
+                                                             "razorpay_account": "primary"})
+    check(S, "duplicate creator slug -> 409", r.status_code == 409, r.text)
+    r = owner_a.write("POST", "/api/v1/admin/creators", json={"slug": TAG + "x", "name": "X",
+                                                               "razorpay_account": "primary"})
+    check(S, "non-admin cannot onboard a creator", r.status_code == 403, r.text)
+    if ids["c"]:
+        r = admin.write("POST", f"/api/v1/admin/creators/{ids['c']}/owner", json={"user_id": ids["owner_c"]})
+        check(S, "admin assigns the owner of an unclaimed creator", r.is_success, r.text)
+        r = admin.write("POST", f"/api/v1/admin/creators/{ids['c']}/owner", json={"user_id": ids["plain"]})
+        check(S, "a claimed creator cannot be re-assigned (D13 default)", r.status_code == 409, r.text)
+    # deactivation revokes sessions; reactivation restores access
+    victim = Session("plain", pw["plain"])
+    sessions.append(victim)
+    r = admin.write("PATCH", f"/api/v1/admin/users/{ids['plain']}", json={"is_active": False})
+    check(S, "admin deactivates a user", r.is_success, r.text)
+    check(S, "the deactivated user's session is revoked", victim.get("/api/v1/auth/session").status_code == 401)
+    r = admin.write("PATCH", f"/api/v1/admin/users/{ids['plain']}", json={"is_active": True})
+    check(S, "admin reactivates the user", r.is_success, r.text)
+    reset_login_counters()
+    plain = Session("plain", pw["plain"])
+    sessions.append(plain)
+    check(S, "the reactivated user signs in", plain.status == 200, str(plain.status))
+    r = admin.write("POST", f"/api/v1/admin/users/{ids['plain']}/sessions/revoke")
+    check(S, "admin revokes a user's sessions", r.is_success and plain.get("/api/v1/auth/session").status_code == 401,
+          r.text)
+    reset_login_counters()
+    plain = Session("plain", pw["plain"])
+    linked = Session("linked", pw["linked"])
+    owner_b = Session("owner_b", pw["owner_b"])
+    sessions += [plain, linked, owner_b]
+
+    # ── authorization ───────────────────────────────────────────────────────
+    S = "authz"
+    settings_a = f"/api/v1/dashboard/streamers/{slug_a}/settings"
+    for who, sess, want in (("owner", owner_a, 200), ("linked account", linked, 200), ("admin", admin, 200),
+                            ("other creator's owner", owner_b, 403), ("ordinary user", plain, 403)):
+        code = sess.get(settings_a).status_code
+        check(S, f"{who} -> {want} on creator A's dashboard", code == want if want == 200 else code in (403, 404),
+              str(code))
+    check(S, "anonymous -> 401 on the dashboard", httpx.get(API + settings_a, timeout=15).status_code == 401)
+    mine = owner_a.get("/api/v1/me/streamers").json()
+    check(S, "/me/streamers lists the owned creator", slug_a in str(mine), str(mine))
+    check(S, "/me/streamers of an ordinary user lists nothing",
+          slug_a not in str(plain.get("/api/v1/me/streamers").json()))
+    code = owner_b.get(f"/api/v1/streamers/{slug_a}/access").status_code
+    check(S, "cross-creator access check refused", code in (403, 404), str(code))
+    check(S, "linked account access check allowed", linked.get(f"/api/v1/streamers/{slug_a}/access").status_code == 200)
+
+    # ── creator dashboard ───────────────────────────────────────────────────
+    S = "dashboard"
+    r = owner_a.write("PATCH", settings_a, json={"moderation_mode": "manual", "brand_color": "#123456",
+                                                 "goal_is_active": True, "goal_name": "Smoke goal",
+                                                 "goal_target_amount": 1000,
+                                                 "goal_activated_at": (STARTED - timedelta(hours=1)).isoformat()})
+    check(S, "settings update (moderation, colour, goal)", r.is_success, r.text)
+    got = owner_a.get(settings_a).json()
+    check(S, "settings read back", str(got.get("brand_color", "")).lower() == "#123456"
+          and got.get("moderation_mode") == "manual", str(got)[:200])
+    r = owner_a.write("PATCH", settings_a, json={"brand_color": "red"})
+    check(S, "invalid settings value refused", r.status_code in (400, 422), r.text)
+    d_ok = make_donation(ids["a"], "Smoke Supporter", 500)
+    d_rej = make_donation(ids["a"], "Smoke Rejected", 50)
+    d_ban = make_donation(ids["a"], "Smoke Spammer", 20)
+    d_hide = make_donation(ids["a"], "Smoke Hidden", 30, moderation="auto_approved", message="hide me")
+    d_b = make_donation(ids["b"], "Other Creator Donor", 40)
+    base = f"/api/v1/dashboard/streamers/{slug_a}"
+    q = owner_a.get(base + "/moderation/queue").json()
+    check(S, "moderation queue lists the pending donations", all(d in str(q) for d in (d_ok, d_rej, d_ban)),
+          str(q)[:200])
+    r = owner_a.write("POST", f"{base}/donations/{d_ok}/moderation", json={"action": "approve"})
+    check(S, "approve", r.is_success, r.text)
+    r = owner_a.write("POST", f"{base}/donations/{d_rej}/moderation", json={"action": "reject"})
+    check(S, "reject", r.is_success, r.text)
+    r = linked.write("POST", f"{base}/donations/{d_hide}/moderation", json={"action": "hide_message"})
+    check(S, "hide message (linked account)", r.is_success, r.text)
+    r = linked.write("POST", f"{base}/donations/{d_hide}/moderation", json={"action": "unhide_message"})
+    check(S, "unhide message", r.is_success, r.text)
+    r = owner_b.write("POST", f"{base}/donations/{d_ok}/moderation", json={"action": "reject"})
+    check(S, "other creator's owner cannot moderate", r.status_code in (403, 404), r.text)
+    r = owner_a.write("POST", f"/api/v1/dashboard/streamers/{slug_a}/donations/{d_b}/moderation",
+                      json={"action": "approve"})
+    check(S, "a donation of another creator is not found here", r.status_code == 404, r.text)
+    r = owner_a.write("POST", f"{base}/donations/{d_ban}/moderation", json={"action": "ban_donor",
+                                                                            "reason": "smoke test"})
+    check(S, "ban donor", r.is_success, r.text)
+    bans = owner_a.get(base + "/moderation/banned-donors").json()
+    ban = next((b for b in bans.get("banned_donors", []) if b.get("donor_name") == "Smoke Spammer"), None)
+    check(S, "ban list shows the ban (DASH-4)", ban is not None and ban.get("is_active") is True, str(bans)[:200])
+    if ban:
+        r = owner_a.write("POST", f"{base}/moderation/banned-donors/{ban['ban_id']}/unban")
+        check(S, "unban by id", r.is_success, r.text)
+        with db() as c:
+            row = c.execute("SELECT is_active, unbanned_at IS NOT NULL, unbanned_by_label, unbanned_by_user_id::text "
+                            "FROM public.banned_donors WHERE id = %s", (ban["ban_id"],)).fetchone()
+        check(S, "0016: the unban is recorded on the ban row", row is not None and row[0] is False and row[1]
+              and row[2] and row[3] == ids["owner_a"], str(row))
+        r = owner_b.write("POST",
+                          f"/api/v1/dashboard/streamers/{slug_b}/moderation/banned-donors/{ban['ban_id']}/unban")
+        check(S, "another creator cannot unban it", r.status_code == 404, r.text)
+    r = owner_a.get(base + "/donations", params={"limit": 20})
+    check(S, "donation history", r.status_code == 200 and d_ok in r.text, r.text[:200])
+    r = owner_a.get(base + "/donations/stats")
+    check(S, "donation stats",
+          r.status_code == 200 and r.headers.get("content-type", "").startswith("application/json"), r.text[:200])
+    today = (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date().isoformat()  # export days are IST
+    r = owner_a.get(base + "/donations/export.csv")
+    check(S, "CSV export without a date range -> 400", r.status_code == 400, f"{r.status_code}")
+    r = owner_a.get(base + "/donations/export.csv", params={"from": today, "to": today})
+    check(S, "CSV export", r.status_code == 200 and "text/csv" in r.headers.get("content-type", "")
+          and "Smoke Supporter" in r.text, r.headers.get("content-type", ""))
+    r = owner_a.write("POST", f"{base}/moderators", json={"mod_name": "Smoke Mod", "telegram_user_id": "7000000001"})
+    added = r.json() if r.is_success else {}
+    mod_id = added.get("moderator_id") or added.get("moderator", {}).get("id") or added.get("id", "")
+    check(S, "add moderator", r.status_code in (200, 201) and bool(mod_id), r.text)
+    check(S, "list moderators", mod_id in owner_a.get(base + "/moderators").text)
+    if mod_id:
+        r = owner_a.write("PATCH", f"{base}/moderators/{mod_id}", json={"can_ban": True})
+        check(S, "edit moderator permissions (DASH-12)",
+              r.is_success and r.json().get("result") in ("applied", "unchanged"), r.text)
+        r = owner_a.write("PATCH", f"{base}/moderators/{mod_id}", json={"can_ban": True})
+        check(S, "same edit again -> unchanged", r.is_success and r.json().get("result") == "unchanged", r.text)
+        r = owner_b.write("PATCH", f"/api/v1/dashboard/streamers/{slug_b}/moderators/{mod_id}", json={"can_ban": False})
+        check(S, "another creator cannot edit it", r.status_code == 404, r.text)
+        r = owner_a.write("DELETE", f"{base}/moderators/{mod_id}")
+        check(S, "remove moderator", r.is_success, r.text)
+    r = owner_a.get("/api/v1/me/terms")
+    terms = r.json() if r.status_code == 200 else {}
+    check(S, "terms status", r.status_code == 200 and bool(terms.get("current_version")), r.text)
+    if terms.get("current_version"):
+        r = owner_a.write("POST", "/api/v1/me/terms/accept", json={"version": terms["current_version"]})
+        check(S, "terms accept", r.is_success and r.json().get("accepted") is True, r.text)
+    r = owner_b.get(f"/api/v1/dashboard/streamers/{slug_b}/soundboard")
+    check(S, "dashboard soundboard of a creator without it -> 403", r.status_code == 403, r.text[:200])
+    with db() as c:  # read-only soundboard checks; slot uploads would write R2 and stay BLOCKED
+        c.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (ids["a"],))
+    r = owner_a.get(base + "/soundboard")
+    check(S, "dashboard soundboard read", r.status_code == 200, r.text[:200])
+    r = owner_a.get(f"{base}/donations/{d_ok}/transcription")
+    check(S, f"transcription status on a text donation answers {r.status_code} without a provider call",
+          r.status_code in (200, 404, 409, 503), f"{r.status_code} {r.text[:150]}")
+
+    # ── jobs / worker: the approval is processed (providers disabled -> silence fallback) ──
+    S = "worker"
+    def _audio_url(did: str):
+        with db() as c:
+            return c.execute("SELECT tts_audio_url FROM public.donations WHERE id = %s", (did,)).fetchone()[0]
+    audio = wait_for(lambda: _audio_url(d_ok), 90)
+    check(S, "worker processed the approval: audio URL set (providers off -> silence)", bool(audio), str(audio))
+    with db() as c:
+        job = c.execute("SELECT status, result->>'outcome', result->>'reason' FROM public.jobs WHERE kind = "
+                        "'donation_audio' AND dedupe_key = %s ORDER BY created_at DESC LIMIT 1", (d_ok,)).fetchone()
+    check(S, "donation_audio job succeeded with the silent outcome", job is not None and job[0] == "succeeded"
+          and job[1] == "silent", str(job))
+
+    # ── realtime ────────────────────────────────────────────────────────────
+    S = "realtime"
+    r = httpx.get(API + "/api/v1/realtime/config", params={"streamer": slug_a}, timeout=15)
+    cfg = r.json() if r.status_code == 200 else {}
+    check(S, "public config (key, cluster, auth endpoint)", r.status_code == 200 and {"key", "cluster"} <= set(cfg),
+          r.text[:200])
+    form = {"socket_id": SOCKET, "channel_name": f"private-{slug_a}-dashboard"}
+    r = owner_a.client.post("/api/v1/realtime/pusher/auth", data=form, headers=owner_a.headers)
+    check(S, "dashboard channel auth for the owner", r.status_code == 200 and ":" in r.json().get("auth", ""), r.text)
+    r = owner_b.client.post("/api/v1/realtime/pusher/auth", data=form, headers=owner_b.headers)
+    check(S, "dashboard channel refused for another creator", r.status_code == 403, r.text)
+    r = owner_a.client.post("/api/v1/realtime/pusher/auth", data=form, headers=ORIGIN)
+    check(S, "dashboard channel auth needs CSRF", r.status_code == 403, r.text)
+    def _outbox_states(sid: str):
+        with db() as c:
+            rows = c.execute("SELECT status FROM public.realtime_outbox WHERE streamer_id = %s", (sid,)).fetchall()
+        states = {r[0] for r in rows}
+        return states if rows and states <= {"published", "skipped", "expired", "failed"} else None
+    states = wait_for(lambda: _outbox_states(ids["a"]), 60, 2)
+    check(S, "outbox events of the moderation actions were published by the worker (DEV Pusher)",
+          states is not None and "published" in states and "failed" not in states, str(states))
+
+    # ── OBS ─────────────────────────────────────────────────────────────────
+    S = "obs"
+    r = owner_a.write("POST", f"{base}/obs-tokens")
+    tok_body = r.json() if r.status_code == 201 else {}
+    media_url = tok_body.get("media_source_url", "")
+    obs_token = parse_qs(urlsplit(media_url).query).get("token", [""])[0]
+    secrets_seen.append(obs_token)
+    token_id = tok_body.get("token", {}).get("id", "")
+    check(S, "token created; shown once in the URLs; player URL keeps it in the #fragment",
+          r.status_code == 201 and bool(obs_token) and "#token=" in tok_body.get("player_url", ""), r.text[:120])
+    listing = owner_a.get(f"{base}/obs-tokens")
+    check(S, "token list never contains the token", listing.status_code == 200 and token_id in listing.text
+          and obs_token not in listing.text)
+    hdr = {"x-obs-token": obs_token}
+    check(S, "OBS session with the token",
+          httpx.get(API + "/api/v1/obs/session", headers=hdr, timeout=15).status_code == 200)
+    r = httpx.post(API + "/api/v1/obs/audio/claim", headers=hdr, timeout=15)
+    claim = r.json() if r.status_code == 200 else {}
+    check(S, "claim returns the approved donation's audio", r.status_code == 200 and claim.get("donation_id") == d_ok,
+          f"{r.status_code} {r.text[:150]}")
+    r = httpx.post(API + "/api/v1/obs/audio/claim", headers=hdr, timeout=15)
+    check(S, "queue empty afterwards -> 204", r.status_code == 204, str(r.status_code))
+    r = owner_a.write("POST", f"{base}/donations/{d_ok}/replay")
+    check(S, "replay", r.is_success, r.text)
+    r = httpx.get(API + "/api/v1/obs/audio/next", params={"token": obs_token}, timeout=15, follow_redirects=False)
+    check(S, "Media Source next -> 302 to the audio after a replay", r.status_code == 302
+          and r.headers.get("location") == audio, f"{r.status_code}")
+    r = httpx.get(API + "/api/v1/obs/audio/next", params={"token": obs_token}, timeout=15, follow_redirects=False)
+    check(S, "next with an empty queue -> 204", r.status_code == 204, str(r.status_code))
+    bad = httpx.get(API + "/api/v1/obs/session", headers={"x-obs-token": "obs_" + "0" * 64}, timeout=15)
+    check(S, "invalid token -> 401", bad.status_code == 401, str(bad.status_code))
+    form_alerts = {"socket_id": SOCKET, "channel_name": f"private-{slug_a}-alerts"}
+    r = httpx.post(API + "/api/v1/realtime/pusher/auth", data=form_alerts, headers=hdr, timeout=15)
+    check(S, "OBS token authorizes its own overlay channel", r.status_code == 200, r.text)
+    r = httpx.post(API + "/api/v1/realtime/pusher/auth", data=form, headers=hdr, timeout=15)
+    check(S, "OBS token never authorizes the dashboard channel", r.status_code == 403, r.text)
+    r = httpx.post(API + "/api/v1/realtime/pusher/auth",
+                   data={"socket_id": SOCKET, "channel_name": f"private-{slug_b}-alerts"}, headers=hdr, timeout=15)
+    check(S, "OBS token refused for another creator's channel", r.status_code == 403, r.text)
+    r = owner_a.client.post("/api/v1/realtime/pusher/auth", data=form_alerts, headers={**owner_a.headers, **hdr})
+    check(S, "session and OBS token together -> 400", r.status_code == 400, r.text)
+    player = httpx.get(API + "/obs/player", timeout=15)
+    check(S, "player page served with a Content-Security-Policy", player.status_code == 200
+          and "default-src 'none'" in player.headers.get("content-security-policy", ""))
+    r = owner_a.write("POST", f"{base}/obs-tokens")  # a second token: rotation schedules the first for revocation
+    second_body = r.json() if r.status_code == 201 else {}
+    second = parse_qs(urlsplit(second_body.get("media_source_url", "")).query).get("token", [""])[0]
+    secrets_seen.append(second)
+    second_id = second_body.get("token", {}).get("id", "")
+    if second_id:
+        with db() as c:
+            c.execute("UPDATE public.obs_tokens SET expires_at = now() - interval '1 minute' WHERE id = %s",
+                      (second_id,))
+        check(S, "expired token -> 401", httpx.get(API + "/api/v1/obs/session", headers={"x-obs-token": second},
+                                                   timeout=15).status_code == 401)
+    r = owner_a.write("DELETE", f"{base}/obs-tokens/{token_id}")
+    check(S, "revoke token", r.is_success, r.text)
+    check(S, "revoked token -> 401", httpx.get(API + "/api/v1/obs/session", headers=hdr, timeout=15).status_code == 401)
+    r = owner_b.write("DELETE", f"/api/v1/dashboard/streamers/{slug_b}/obs-tokens/{token_id}")
+    check(S, "another creator cannot revoke it", r.status_code == 404, r.text)
+
+    # ── public API ──────────────────────────────────────────────────────────
+    S = "public"
+    for path in ("", "/pricing", "/overlay-config", "/goal", "/leaderboard", "/soundboard"):
+        r = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}{path}", timeout=15)
+        check(S, f"GET /public/streamers/<slug>{path or ''}", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    goal = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}/goal", timeout=15).json()
+    check(S, "goal counts the approved donation", goal.get("active") is True and goal.get("progress_inr", 0) >= 500,
+          str(goal)[:200])
+    r = httpx.get(f"{API}/api/v1/public/streamers/{slug_b}/soundboard", timeout=15)
+    check(S, "public soundboard of a creator without it -> 404", r.status_code == 404, str(r.status_code))
+    check(S, "unknown creator -> 404",
+          httpx.get(f"{API}/api/v1/public/streamers/{TAG}zz", timeout=15).status_code == 404)
+    for path in ("/api/v1/public/hypersounds", "/api/v1/metrics/platform", "/api/v1/metrics/showcase"):
+        r = httpx.get(API + path, timeout=15)
+        check(S, f"GET {path}", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    signup = {"name": "Smoke Signup", "email": f"{TAG}-signup{DOMAIN}", "mobile_number": "+91 90000 00000"}
+    a = httpx.post(API + "/api/v1/public/signups", json=signup, headers=ORIGIN, timeout=15)
+    b = httpx.post(API + "/api/v1/public/signups", json=signup, headers=ORIGIN, timeout=15)
+    check(S, "signup form: repeated email gets the identical answer (D14)", a.status_code == b.status_code == 201
+          and a.json() == b.json(), f"{a.status_code} {b.status_code}")
+    r = httpx.post(API + "/api/v1/public/signups", json=signup, headers={"origin": "https://evil.invalid"}, timeout=15)
+    check(S, "signup form from a foreign origin -> 403", r.status_code == 403, r.text)
+    r = httpx.post(f"{API}/api/v1/public/streamers/{slug_a}/upload-grant", json={"kind": "voice"}, headers=ORIGIN,
+                   timeout=15)
+    grant = r.json() if r.status_code in (200, 201) else {}
+    check(S, "upload grant issued (no upload, no R2 write)", r.status_code in (200, 201) and bool(grant), r.text[:150])
+    secrets_seen.extend(v for v in grant.values() if isinstance(v, str) and len(v) > 20)
+    r = httpx.post(f"{API}/api/v1/public/streamers/{slug_a}/upload-grant", json={"kind": "voice"},
+                   headers={"origin": "https://evil.invalid"}, timeout=15)
+    check(S, "upload grant from a foreign origin -> 403", r.status_code == 403, r.text)
+
+    # ── payments without external calls ─────────────────────────────────────
+    S = "payments"
+    with db() as c:
+        order = c.execute("SELECT order_id FROM public.donations WHERE id = %s", (d_ok,)).fetchone()[0]
+    a = httpx.get(f"{API}/api/v1/public/donations/{order}/status", headers={"x-status-token": "0" * 43}, timeout=15)
+    b = httpx.get(f"{API}/api/v1/public/donations/authtest-nonexistent/status", headers={"x-status-token": "0" * 43},
+                  timeout=15)
+    check(S, "status: wrong token and unknown order give the same 404", a.status_code == b.status_code == 404
+          and a.json() == b.json(), f"{a.status_code} {b.status_code}")
+    r = httpx.post(f"{API}/api/v1/public/donations/{order}/confirm", headers={**ORIGIN, "x-status-token": "0" * 43},
+                   json={"razorpay_payment_id": "pay_authtest", "razorpay_order_id": order,
+                         "razorpay_signature": "0" * 64}, timeout=15)
+    check(S, "confirm with a wrong status token -> 4xx before any provider call", 400 <= r.status_code < 500,
+          f"{r.status_code} {r.text[:120]}")
+    r = httpx.post(API + "/api/v1/webhooks/razorpay", content=b'{"event":"payment.captured"}',
+                   headers={"x-razorpay-signature": "0" * 64, "content-type": "application/json"}, timeout=15)
+    check(S, "webhook with a bad signature refused", 400 <= r.status_code < 500, f"{r.status_code} {r.text[:120]}")
+
+    # ── bots: disabled ──────────────────────────────────────────────────────
+    S = "bots"
+    for hook in ("telegram", "discord"):
+        r = httpx.post(f"{API}/api/v1/webhooks/{hook}", json={}, timeout=15)
+        check(S, f"{hook} webhook answers 503 while bots are disabled", r.status_code == 503, f"{r.status_code}")
+    with db() as c:
+        sent = c.execute("SELECT count(*) FROM public.moderator_notifications WHERE streamer_id = ANY(%s::uuid[]) "
+                         "AND (status = 'sent' OR sent_at IS NOT NULL)", ([ids["a"], ids["b"]],)).fetchone()[0]
+    check(S, "no bot message was sent for the synthetic creators", sent == 0, str(sent))
+
+except Exception as exc:  # noqa: BLE001 - report, then always clean up
+    check("suite", "runs to completion", False, f"{type(exc).__name__}: {exc}")
+finally:
+    for s in sessions:
+        s.client.close()
+    # Let in-flight worker jobs of the synthetic donations finish before their rows go.
+    def _open_jobs():
+        with db() as c:
+            n = c.execute("SELECT count(*) FROM public.jobs j JOIN public.donations d ON d.id::text = j.dedupe_key "
+                          "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%' "
+                          "AND j.status IN ('queued', 'running')").fetchone()[0]
+        return n == 0
+    wait_for(_open_jobs, 60)
+    with db() as c:
+        c.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+        c.execute("DELETE FROM public.user_signups WHERE email LIKE %s", ("%" + DOMAIN,))
+        c.execute("DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
+                  "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')")
+        c.execute("DELETE FROM public.jobs WHERE dedupe_key IN (SELECT d.id::text FROM public.donations d "
+                  "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')")
+        c.execute("DELETE FROM public.donations WHERE streamer_id IN "
+                  "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%')")
+        c.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'")  # cascades its rows
+        c.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions, tokens
+        c.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%' OR endpoint LIKE 'admin:%%' "
+                  "OR endpoint LIKE 'signup:%%' OR endpoint LIKE 'upload:%%' OR endpoint LIKE 'obs:%%' "
+                  "OR endpoint LIKE 'realtime:%%' OR endpoint LIKE 'payment:%%' OR endpoint LIKE 'transcription:%%'")
+        left = c.execute("""
+            SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE %(d)s),
+                   (SELECT count(*) FROM public.sessions s JOIN public.users u ON u.id = s.user_id
+                     WHERE u.email::text LIKE %(d)s),
+                   (SELECT count(*) FROM public.password_reset_tokens),
+                   (SELECT count(*) FROM public.user_invites WHERE email::text LIKE %(d)s),
+                   (SELECT count(*) FROM public.user_signups WHERE email LIKE %(d)s),
+                   (SELECT count(*) FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'),
+                   (SELECT count(*) FROM public.donations WHERE order_id LIKE 'authtest-%%'),
+                   (SELECT count(*) FROM public.streamers_moderators WHERE mod_name = 'Smoke Mod'),
+                   (SELECT count(*) FROM public.banned_donors WHERE donor_name LIKE 'Smoke %%'),
+                   (SELECT count(*) FROM public.obs_tokens o LEFT JOIN public.streamers s ON s.id = o.streamer_id
+                     WHERE s.id IS NULL),
+                   (SELECT count(*) FROM public.jobs j LEFT JOIN public.donations d ON d.id::text = j.dedupe_key
+                     WHERE j.kind = 'donation_audio' AND d.id IS NULL AND j.created_at > %(t)s)
+        """, {"d": "%" + DOMAIN, "t": STARTED}).fetchone()
+    labels = ("users", "sessions", "reset tokens (all)", "invites", "signups", "creators", "donations", "moderators",
+              "bans", "orphan OBS tokens", "jobs")
+    print("cleanup left: " + ", ".join(f"{k}={v}" for k, v in zip(labels, left)), flush=True)
+    check("cleanup", "no synthetic row left", all(v == 0 for v in left), str(dict(zip(labels, left))))
+
+# ── logs: no token, CSRF value, OBS token, reset/invite link or password anywhere ──
+since = STARTED.strftime("%Y-%m-%d %H:%M:%S")
+journal = subprocess.run(["journalctl", "-u", "hyperchat-api", "-u", "hyperchat-worker", "--since", since,
+                          "--utc", "-o", "cat"], capture_output=True, text=True).stdout
+nginx = ""
+for path in ("/var/log/nginx/access.log", "/var/log/nginx/error.log"):
+    try:
+        nginx += Path(path).read_text(errors="replace")[-2_000_000:]
+    except OSError:
+        pass
+leaks = [s for s in secrets_seen if s and (s in journal or s in nginx)]
+check("logs", "no secret in the API/worker journal or the nginx logs (F1/F1-R)", not leaks, f"{len(leaks)} leaked")
+
+# ── checks this environment cannot run (credentials / approval) ─────────────
+for name, why in (
+        ("email delivery (reset, invites)", "Resend API key and DEV sender domain not configured (D8)"),
+        ("Google OAuth sign-in", "no DEV Google OAuth client (D8)"),
+        ("TTS generation (MiniMax / ElevenLabs), !sfx, !testmusic", "provider keys and budget not configured (D8)"),
+        ("voice transcription (Sarvam)", "Sarvam key not configured (D8)"),
+        ("Razorpay checkout / order creation", "creates Razorpay test-mode orders: needs owner approval"),
+        ("payment status poll / confirm with a real test payment (PAY-7)", "owner-run test-mode checkout"),
+        ("voice / media / soundboard uploads to R2 (PAY-11 smoke)", "writes R2 objects: needs owner approval"),
+        ("bots: Telegram / Discord messages", "bots stay disabled on DEV"),
+        ("hosted Supabase rehearsal (D1)", "production-readiness work; separate approval (G1-G6)")):
+    blocked("blocked", name, why)
+
+passed = sum(1 for r in results if r[2] == "PASS")
+failed = [r for r in results if r[2] == "FAIL"]
+blocked_n = sum(1 for r in results if r[2] == "BLOCKED")
+print(f"\n{passed} passed, {len(failed)} failed, {blocked_n} blocked (need credentials or approval)")
+for section, name, _, detail in failed:
+    print(f"  FAILED [{section}] {name}: {detail}")
+sys.exit(1 if failed else 0)
