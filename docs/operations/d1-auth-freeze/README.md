@@ -44,19 +44,73 @@ on the source database:
 Every failure prints why (`missing`, `not enabled ('D')`, `malformed`, `calls <other function>`, `body differs`) and
 stops `--apply` before anything is written. `verify.sql` shows the same facts to the operator.
 
-## Fingerprint and the time-of-check problem
+## Fingerprint, snapshots and what each check can see
 The dry run prints `source_fingerprint`: SHA-256, computed **inside PostgreSQL**, over every `auth.users` row in `id`
 order, serialized as `"<chars>:<value>|"` per field (`"-|"` for NULL) for `id`, exact `email`, the password hash
 (empty = none), then `d0|`/`d1|` (deleted) and `b0`/`b1` (banned now), one row per line, prefixed with
 `hyperchat-d1-source-v1`. No hash leaves the server to compute it. `email_confirmed_at` is only counted by the
 importer, so it is not part of it.
 
-`--apply` requires `--expected-fingerprint <the reviewed value>`. In the same run, the freeze check, the fingerprint
-and the hashes to import are all read in **one REPEATABLE READ snapshot** of the source, so a matching fingerprint
-proves that the hashes being written are exactly the reviewed set (a test commits a change between the fingerprint
-query and the hash read: the run still uses the snapshot's values). Changes after that snapshot cannot affect what is
-written; they would only be lost updates in legacy, which is what the freeze prevents. Keep the freeze on until users
-are switched to V2.
+`--apply` requires `--expected-fingerprint <the reviewed value>`. It then works with the source like this:
+
+1. **Plan snapshot** (REPEATABLE READ): freeze check, fingerprint and the hashes to import, all from one snapshot, so
+   the hashes are exactly the fingerprinted rows; a fingerprint that differs from the reviewed one is refused before
+   the confirmation prompt. This snapshot **cannot see anything committed after it began**: a later change, including
+   one made by someone bypassing the freeze, leaves its fingerprint and its hashes unchanged. Hence step 2.
+2. **Source lock** (after the operator has typed the confirmation): a fresh source transaction takes
+   `LOCK TABLE auth.users IN SHARE MODE` (waiting at most 5 s for writes already in progress), then, under the lock,
+   checks that the freeze is exactly the reviewed one, that the fingerprint equals the reviewed value, and that every
+   planned hash is still the current hash of an eligible account. Any failure: refused, nothing written. The snapshot
+   is taken after the lock is granted, so it is the current state.
+3. **Target transaction under the lock:** the target rows are locked, re-checked and written; just before the target
+   COMMIT the importer checks that its source transaction is still alive and still holds the lock (otherwise: rolled
+   back, nothing written); then the target commits **while the source lock is still held**.
+4. **Proof and release:** right after the commit, the importer checks once more that the same source transaction still
+   holds the lock. PostgreSQL keeps a table lock until its transaction ends and ends it on any error, so success proves
+   the lock was held without a break from step 2 until after the commit: no source row could change in between. Then
+   the lock is released. If that proof fails (the source session ended in the last instant), the run prints `ALERT`
+   and exits **4**. That is **detection, not prevention**: the import has already committed.
+
+While the lock is held, PostgreSQL makes every insert, update, delete and `TRUNCATE` on `auth.users` wait, including
+writes with `session_replication_role = replica`, and also enabling, disabling, dropping or replacing the trigger
+(verified on PostgreSQL 17.11). It does **not** stop a superuser from replacing the trigger's function or editing
+`pg_trigger` directly; neither can change account data while the lock is held, but either can weaken the freeze for
+the time after the release. Reads are not blocked.
+
+| Source change | When | Outcome |
+|---|---|---|
+| Any change to a fingerprinted field | before the dry run that was reviewed | part of the reviewed fingerprint |
+| Same | between that review and the start of the `--apply` run | **detected**: plan fingerprint differs, refused before the prompt |
+| Same, or the freeze dropped / disabled / changed | after the plan snapshot, before the source lock is granted (e.g. while the operator is at the prompt) | **detected** under the lock: refused, nothing written |
+| Any write to `auth.users`, `TRUNCATE`, trigger disable / drop / replace, replica-mode writes | while the source lock is held (verification until after the target commit) | **prevented**: it waits for the lock and lands only after the commit (tested for each) |
+| The source session ends (a privileged `pg_terminate_backend`, the 20 s idle limit, a network failure), then the source changes | before the pre-commit lock check | **detected**: the target rolls back, nothing written |
+| Same | in the instant after the pre-commit lock check, before the target COMMIT | **not prevented**; **detected** by the post-commit proof: exit 4, rollback needed |
+| A superuser replaces the trigger function or edits `pg_trigger` | while the lock is held | not prevented and not detected by this run; cannot change data until the release; caught by step 10 |
+| Any change | after the release, until users are switched to V2 | **prevented** only by the active freeze; a privileged bypass is detected only by comparing a later fresh dry run (procedure step 10) |
+| A privileged change that restores the identical values | any time | harmless to the import (same fingerprint) |
+| Non-fingerprinted columns (sign-in times, tokens, `email_confirmed_at`, ...) | any time | not checked, by design: they don't affect the import |
+
+**Who may take the lock.** The source role used for `--apply` needs `MAINTAIN` on `auth.users` (PostgreSQL 17 and
+later; it allows the lock without any write privilege) or, on earlier versions, table-level `UPDATE`, `DELETE` or
+`TRUNCATE` (column-level `UPDATE` is not enough). On earlier versions the role is therefore writable and the importer
+refuses it unless `--accept-writable-source-role` is given; the importer's own source transaction stays `READ ONLY`
+either way (tested). A role without the privilege is refused before anything is written. The dry run does not lock
+and keeps working with the read-only role. Which PostgreSQL version the legacy project runs, and whether such a grant
+can be made there, is **unverified** (rehearsal step 9). If it cannot, `--apply` cannot run: there is no fallback
+mode without the lock.
+
+**Effect on legacy sign-ins (GoTrue writes).** While the lock is held, every write to `auth.users` waits; a sign-in
+updates `last_sign_in_at`, so sign-ins pause and then complete (reads, e.g. fetching the current user, do not wait).
+Measured on the throwaway PostgreSQL 17.11 cluster with local connections, importing 134 synthetic accounts while a
+loop of sign-in style updates ran: lock requested to released 17, 17 and 22 ms in three runs; the longest sign-in
+update 17 to 24 ms; none over 50 ms. In production the importer talks to Supabase over the network: after the lock is
+granted it makes about seven more round trips to the source before releasing (freeze check, fingerprint, two to
+re-read the hashes, the lock check before and after the commit, the release), and the target writes are local to the
+VPS. Expect a pause of roughly 7 to 8 times the round-trip time plus local work (about 0.4 s at 50 ms, 1.2 s at
+150 ms). Worst cases: while the importer waits for the lock (at most 5 s), new sign-in writes queue behind its request;
+a stalled importer is cut off by the server after 20 s idle inside the locked transaction, which frees the lock and
+rolls the import back (or, in the last instant, exits 4). Whether GoTrue's own timeouts tolerate such a pause is
+**unverified** (rehearsal step 10).
 
 A ban that expires on its own between the dry run and `--apply` flips `b1` to `b0`, changes the fingerprint and makes
 `--apply` refuse: re-run the report and the dry run.
@@ -73,13 +127,25 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
 6. Fresh read-only report (`etl.auth_readonly_report`), then the importer dry run: it must print
    `source_freeze active`. Record `source_fingerprint`; review every exclusion count.
 7. Owner approval for production `--apply`.
-8. `python -m etl.auth_hash_import --apply --expected-fingerprint <recorded value>`, then the typed phrase.
+8. `python -m etl.auth_hash_import --apply --expected-fingerprint <recorded value>` with the lock-capable source role,
+   then the typed phrase. Exit 0 = committed with the source lock proven held through the commit; 2 = refused, nothing
+   written (e.g. the lock was not granted within 5 s: run it again); 4 = committed, but the lock could not be proven
+   held through the commit (abort rules).
 9. Reconciliation: dry run again: `eligible` 0, `target_already_has_password` up by the applied count,
    `source_fingerprint` unchanged, `source_freeze active`; then the read-only report.
-10. Keep the freeze on until users are switched to V2. Run `unfreeze.sql` only per the rules below.
+10. Immediately before switching users to V2, one more dry run: `source_fingerprint` must still equal the recorded
+    value and `source_freeze active`. This is the only check that catches a privileged bypass made after the
+    import committed. If it differs, do not switch: abort rules.
+11. Keep the freeze on until users are switched to V2. Run `unfreeze.sql` only per the rules below.
 
 ## Abort rules
 - **Before `--apply`:** nothing was written to V2. `unfreeze.sql`; legacy continues.
+- **Exit 4:** the import committed, but the source session ended at the last instant, so the source may have
+  changed. Keep V2 sign-in off and legacy frozen and run a fresh dry run at once: if `source_fingerprint` still equals
+  the recorded value and the freeze is active, the import matches the source; otherwise treat it as below.
+- **A later fingerprint mismatch (step 10, or after exit 4):** the source changed after the import committed. Keep V2
+  sign-in off and legacy frozen, undo the import with the rollback in `database/README.md`, find out who changed the
+  source and why, then start again from a fresh report and dry run.
 - **After `--apply`, before the switch:** keep the freeze. If legacy must be unfrozen, first undo the import in V2 with
   the rollback in `database/README.md` (clears the imported bcrypt hashes; accounts already upgraded to Argon2id keep
   theirs). The importer never overwrites a target hash, so a later re-import cannot repair hashes made stale by legacy
@@ -87,10 +153,26 @@ A ban that expires on its own between the dry run and `--apply` flips `b1` to `b
 - **After the switch:** legacy auth is retired; remove the freeze when Supabase is decommissioned.
 
 ## Limitations (known)
-- **Privileged bypass:** the table owner or a superuser can drop or disable the trigger, `TRUNCATE auth.users` (row
-  triggers don't fire) or, unless the trigger is ENABLE ALWAYS, write with `session_replication_role = replica`. The
-  checks prove the trigger is present and correct at that moment; they cannot prove nobody with those rights bypassed
-  it. The fingerprint comparison still catches any change to the fingerprinted fields between review and `--apply`.
+- **Privileged bypass cannot be prevented, only detected (within limits).** The table owner or a superuser (on
+  Supabase: the dashboard `postgres` role, the SQL editor, anyone with the database password, and the GoTrue service
+  role `supabase_auth_admin`) can drop or disable the trigger, `TRUNCATE auth.users` (row triggers don't fire), or,
+  unless the trigger is ENABLE ALWAYS, write with `session_replication_role = replica`. PostgreSQL gives no way to stop
+  a superuser outright. What the importer adds: changes made before the source lock is granted are detected; while the
+  lock is held, data changes are prevented (they wait), except that ending the importer's source session frees the
+  lock (then: rolled back, or exit 4 in the last instant); after the release only the freeze, the operator controls
+  and step 10 remain.
+- **`ENABLE ALWAYS`** only closes the `session_replication_role = replica` path, and only for non-owners; it needs
+  ownership of `auth.users` to set (unverified on Supabase). It does not stop an owner or superuser from disabling
+  or dropping the trigger.
+- **The source lock is short but real:** it is taken only after the confirmation and released right after the target
+  commit, but legacy sign-ins pause for its duration (see "Effect on legacy sign-ins" above), and it needs the
+  lock privilege described above (on PostgreSQL before 17, a writable role).
+- **Required operator controls for the window:** only the named operator holds the legacy database password, the
+  service-role key and dashboard access during the window (others' sessions ended, keys not shared); no other
+  migrations, SQL editor or dashboard user edits; nobody ends other sessions (`pg_terminate_backend`) during the run;
+  a second person watches the import; the fingerprint is recorded at review, at `--apply` and at step 10;
+  afterwards, check the Supabase logs for `ALTER TABLE` / `DROP TRIGGER` / `TRUNCATE` / `CREATE OR REPLACE FUNCTION`
+  on `auth.users` or `hyperchat_ops` during the window.
 - **Unverified on Supabase:** whether the dashboard `postgres` role may create a trigger on `auth.users` today (the
   legacy project has an older `AFTER INSERT` trigger there), and whether `ENABLE ALWAYS` is permitted (needs
   ownership; `auth.users` is owned by `supabase_auth_admin`).
@@ -129,7 +211,16 @@ before relying on the result.
      confirming it must fail) and `PUT /auth/v1/admin/users/<id> {"email": ...}`;
    - `POST /auth/v1/signup` and `DELETE /auth/v1/admin/users/<second user>`.
 8. `\i unfreeze.sql`, then repeat step 7: each must now succeed.
-9. Optional, closer to production permissions: repeat steps 3–8 on a **new, empty** hosted Supabase project (no real
-   users) to check that the dashboard role can run `freeze.sql` and whether `ENABLE ALWAYS` is allowed.
-10. `supabase stop --no-backup`. Record every result (status codes, error text, before/after md5) in the PR or the
-    D1 checklist row. Only then may the freeze be called rehearsed.
+9. **Lock privilege:** note `SHOW server_version`. As the role intended for `--apply` (MAINTAIN on PostgreSQL 17+,
+   table UPDATE before that): `BEGIN READ ONLY; SET LOCAL lock_timeout = '5s'; LOCK TABLE auth.users IN SHARE MODE;
+   ROLLBACK;` must succeed. Record how that role was granted the privilege and by whom.
+10. **GoTrue during the lock:** in psql, `BEGIN READ ONLY; LOCK TABLE auth.users IN SHARE MODE;`, hold it for 3 s,
+    and meanwhile sign in through the API: the sign-in must complete (not fail) once you `ROLLBACK`; record its
+    latency and any GoTrue error. Repeat with 10 s to see where GoTrue's own timeouts are.
+11. **Round trips:** from the host that will run the importer, time `SELECT 1` against the Supabase pooler
+    (`\timing on` in psql, several runs) and estimate the sign-in pause as 7 to 8 times that plus local work.
+12. Optional, closer to production permissions: repeat steps 3–10 on a **new, empty** hosted Supabase project (no real
+    users) to check that the dashboard role can run `freeze.sql`, can grant the lock privilege, and whether
+    `ENABLE ALWAYS` is allowed.
+13. `supabase stop --no-backup`. Record every result (status codes, error text, before/after md5, timings) in the PR
+    or the D1 checklist row. Only then may the freeze and the lock be called rehearsed.
