@@ -10,7 +10,16 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.integration import DOMAIN, FRONT, db, make_streamer, make_user, requires_db, signed_in
+from tests.integration import (
+    DOMAIN,
+    FRONT,
+    accept_soundboard_terms,
+    db,
+    make_streamer,
+    make_user,
+    requires_db,
+    signed_in,
+)
 
 pytestmark = requires_db
 P = "/api/v1/public/streamers"
@@ -19,12 +28,15 @@ E1_FIELDS = {"slug", "name", "brand_color", "brand_logo_url", "background_url", 
              "media_upload_enabled", "media_max_file_size_mb", "soundboard_enabled", "leaderboard_widget_enabled"}
 
 
-def streamer(slug: str, user_id: str | None = None, **cols) -> str:
+def streamer(slug: str, user_id: str | None = None, terms: bool = True, **cols) -> str:
+    """soundboard_enabled=True also records the owner's acceptance of the current terms (D3) unless terms=False."""
     sid = make_streamer(slug, user_id=user_id, name=cols.pop("name", "Auth Test"))
     if cols:
         sets = ", ".join(f"{k} = %({k})s" for k in cols)
         with db() as conn:
             conn.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", {**cols, "id": sid})
+    if cols.get("soundboard_enabled") and terms:
+        accept_soundboard_terms(sid)
     return sid
 
 

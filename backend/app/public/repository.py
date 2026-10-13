@@ -12,9 +12,13 @@ from datetime import datetime
 
 from psycopg.rows import dict_row
 
-_PUBLIC_STREAMER_COLS = """id::text AS id, streamer_slug, streamer_name, brand_color, brand_logo_url, background_url,
+from app.soundboard import terms
+
+# soundboard_enabled means the Custom Soundboard is USABLE (eligible AND current terms accepted, D3), not the raw flag.
+_PUBLIC_STREAMER_COLS = f"""id::text AS id, streamer_slug, streamer_name, brand_color, brand_logo_url, background_url,
     COALESCE(tts_enabled, true) AS tts_enabled, COALESCE(hyperemotes_enabled, true) AS hyperemotes_enabled,
-    COALESCE(media_upload_enabled, false) AS media_upload_enabled, media_max_file_size_mb, soundboard_enabled,
+    COALESCE(media_upload_enabled, false) AS media_upload_enabled, media_max_file_size_mb,
+    {terms.usable_sql("streamers")} AS soundboard_enabled,
     COALESCE(leaderboard_widget_enabled, true) AS leaderboard_widget_enabled, leaderboard_bg_enabled,
     alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id, overlay_adjust_mode,
     goal_name, goal_target_amount, goal_activated_at, COALESCE(goal_is_active, false) AS goal_is_active,

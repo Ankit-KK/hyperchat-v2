@@ -5,7 +5,12 @@ All soundboard routes live under `/api/v1/dashboard/streamers/{streamer}/soundbo
 **Access:**
 - **Who:** you must be signed in as the owner, a linked account or an admin. An unclaimed creator is admin-only.
 - **Writes:** also need the `x-csrf-token` header and a trusted `Origin`.
-- **Soundboard switch:** checked only after access (`403 {"error": "Soundboard not enabled"}`).
+- **Custom Soundboard gate (D3):** checked only after access, on every route below except `/terms` and
+  `/terms/accept`. Both are needed:
+  - eligibility, granted by an admin (`streamers.soundboard_enabled`): otherwise
+    `403 {"error": "Soundboard not enabled"}`;
+  - the owner's acceptance of the current terms version `soundboard-2026-10-13`, not revoked: otherwise
+    `403 {"error": "Accept the current Custom Soundboard terms first"}`. Older versions' acceptances never count.
 
 **Responses:**
 - Never cached (`Cache-Control: no-store`).
@@ -13,6 +18,8 @@ All soundboard routes live under `/api/v1/dashboard/streamers/{streamer}/soundbo
 
 | Method | Path | Body | Success |
 |---|---|---|---|
+| GET | `/terms` | none | `{current_version, eligible, accepted, accepted_at, revoked, usable, can_accept}` (owner, linked account or admin) |
+| POST | `/terms/accept` | `{version: "soundboard-2026-10-13"}` | the same status object; owner only (`403 "Only the creator's owner can accept these terms"`); any other version `409 "Terms version is not current"`; a revoked acceptance `409 "This acceptance was revoked by HyperChat"`; repeating it changes nothing |
 | GET | `` | none | `{active[], hidden[], revision, budget}` |
 | PATCH | `` | `{hide[{id}], update[{id, display_name}], reorder[{id, order_index}], unhide[{id, order_index}]}` | `{visible_count}` |
 | POST | `/restore-defaults` | none | `{restored: true}` |
@@ -28,6 +35,15 @@ All soundboard routes live under `/api/v1/dashboard/streamers/{streamer}/soundbo
 - A creator's row is merged with its platform sound.
 - `budget` is `{swaps_used, swaps_limit: 15, window_days: 7, next_budget_slot_frees_at, slot_cooldowns{position: ends_at}}`.
 - Object keys are never returned in the board.
+
+**Terms (D3):**
+- `accepted` means the current version was accepted (even if revoked since); `usable` is
+  `eligible AND accepted AND NOT revoked`; `can_accept` is true for the owner while the acceptance is not revoked.
+- Accepting does not need eligibility (a creator may accept before an admin grants access). It records the owner,
+  their email and User-Agent in `soundboard_tnc_acceptances`: one row per creator and version; older versions' rows are
+  never changed.
+- Eligibility is changed only by an admin: `PUT /api/v1/admin/creators/{id}/soundboard` `{enabled}` (CSRF; idempotent;
+  `{creator_id, soundboard_enabled, changed}`). Revoking an acceptance has no endpoint (HyperChat sets `revoked_at`).
 
 ## Rules
 - **The first GET seeds the creator's rows** from the platform set, as legacy `seed_streamer_soundboard` did.

@@ -81,6 +81,7 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 | `GET /api/v1/admin/invites`, `POST /api/v1/admin/invites/{id}/revoke` | list / revoke invites |
 | `POST /api/v1/admin/creators` | onboard a creator: validated unique slug (reserved site paths refused), name, an explicit **configured** Razorpay account (no default, D12), optional `brand_color` / `order_prefix`; legacy launch defaults; least-loaded configured Pusher group; unclaimed |
 | `POST /api/v1/admin/creators/{id}/owner` | make an active user the owner of an **unclaimed** creator (an unclaimed creator is admin-only); a claimed creator is 409 (no transfers) |
+| `PUT /api/v1/admin/creators/{id}/soundboard` | `{enabled: true\|false}`: grant / revoke Custom Soundboard **eligibility** (D3); idempotent (`changed`), security event `soundboard_eligibility_changed`; never accepts the terms for the owner and never deletes acceptances |
 
 An admin cannot change their own role or status, and at least one active admin who can sign in
 (password or Google identity) always remains.

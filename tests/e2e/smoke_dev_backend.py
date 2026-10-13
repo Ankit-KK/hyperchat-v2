@@ -500,10 +500,56 @@ try:
         check(S, "terms accept", r.is_success and r.json().get("accepted") is True, r.text)
     r = owner_b.get(f"/api/v1/dashboard/streamers/{slug_b}/soundboard")
     check(S, "dashboard soundboard of a creator without it -> 403", r.status_code == 403, r.text[:200])
-    with db() as c:  # read-only soundboard checks; slot uploads would write R2 and stay BLOCKED
-        c.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (ids["a"],))
-    r = owner_a.get(base + "/soundboard")
-    check(S, "dashboard soundboard read", r.status_code == 200, r.text[:200])
+    # Custom Soundboard terms gate (D3): read-only soundboard checks; slot uploads would write R2 and stay BLOCKED.
+    sb_terms = owner_a.get(base + "/soundboard/terms")
+    if sb_terms.status_code == 404:  # the deployed release predates D3
+        blocked(S, "Custom Soundboard terms gate (D3)", "not deployed on DEV yet; needs an approved DEV deploy")
+        with db() as c:
+            c.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (ids["a"],))
+        r = owner_a.get(base + "/soundboard")
+        check(S, "dashboard soundboard read (pre-D3 release)", r.status_code == 200, r.text[:200])
+    else:
+        SB_VERSION = "soundboard-2026-10-13"
+        st = sb_terms.json()
+        check(S, "D3 status before eligibility: not eligible, not accepted, owner may accept",
+              sb_terms.status_code == 200 and st.get("current_version") == SB_VERSION and st.get("eligible") is False
+              and st.get("accepted") is False and st.get("usable") is False and st.get("can_accept") is True, str(st))
+        sb_admin = f"/api/v1/admin/creators/{ids['a']}/soundboard"
+        r = admin.write("PUT", sb_admin, json={"enabled": True})
+        check(S, "D3 admin grants eligibility", r.status_code == 200 and r.json().get("changed") is True, r.text)
+        check(S, "D3 non-admin cannot grant eligibility",
+              owner_a.write("PUT", sb_admin, json={"enabled": True}).status_code == 403)
+        st = owner_a.get(base + "/soundboard/terms").json()
+        check(S, "D3 eligibility alone is not usable",
+              st.get("eligible") is True and st.get("usable") is False, str(st))
+        r = owner_a.get(base + "/soundboard")
+        check(S, "D3 soundboard refused until the terms are accepted", r.status_code == 403
+              and r.json().get("error") == "Accept the current Custom Soundboard terms first", r.text[:200])
+        r = linked.write("POST", base + "/soundboard/terms/accept", json={"version": SB_VERSION})
+        check(S, "D3 linked account cannot accept", r.status_code == 403, r.text)
+        r = owner_a.write("POST", base + "/soundboard/terms/accept", json={"version": "soundboard-2026-07-14"})
+        check(S, "D3 old version refused -> 409", r.status_code == 409, r.text)
+        r = owner_a.write("POST", base + "/soundboard/terms/accept", json={"version": SB_VERSION})
+        check(S, "D3 owner accepts the current version", r.status_code == 200 and r.json().get("usable") is True,
+              r.text)
+        r = owner_a.get(base + "/soundboard")
+        check(S, "D3 soundboard usable once eligible and accepted", r.status_code == 200, r.text[:200])
+        check(S, "D3 public soundboard served",
+              httpx.get(f"{API}/api/v1/public/streamers/{slug_a}/soundboard", timeout=15).status_code == 200)
+        r = admin.write("PUT", sb_admin, json={"enabled": False})
+        check(S, "D3 admin revokes eligibility", r.status_code == 200 and r.json().get("changed") is True, r.text)
+        r = owner_a.get(base + "/soundboard")
+        check(S, "D3 revoked eligibility blocks the soundboard again", r.status_code == 403
+              and r.json().get("error") == "Soundboard not enabled", r.text[:200])
+        check(S, "D3 public soundboard no longer served",
+              httpx.get(f"{API}/api/v1/public/streamers/{slug_a}/soundboard", timeout=15).status_code == 404)
+        with db() as c:
+            kept = c.execute("SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_id = %s "
+                             "AND terms_version = %s", (ids["a"], SB_VERSION)).fetchone()[0]
+        check(S, "D3 revoking eligibility keeps the acceptance", kept == 1, str(kept))
+        r = admin.write("PUT", sb_admin, json={"enabled": True})  # re-granted for the public checks below
+        check(S, "D3 re-granted eligibility restores access with the kept acceptance",
+              r.status_code == 200 and owner_a.get(base + "/soundboard").status_code == 200, r.text)
     r = owner_a.get(f"{base}/donations/{d_ok}/transcription")
     check(S, f"transcription status on a text donation answers {r.status_code} without a provider call",
           r.status_code in (200, 404, 409, 503), f"{r.status_code} {r.text[:150]}")
@@ -704,10 +750,11 @@ finally:
                    (SELECT count(*) FROM public.obs_tokens o LEFT JOIN public.streamers s ON s.id = o.streamer_id
                      WHERE s.id IS NULL),
                    (SELECT count(*) FROM public.jobs j LEFT JOIN public.donations d ON d.id::text = j.dedupe_key
-                     WHERE j.kind = 'donation_audio' AND d.id IS NULL AND j.created_at > %(t)s)
+                     WHERE j.kind = 'donation_audio' AND d.id IS NULL AND j.created_at > %(t)s),
+                   (SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_slug LIKE 'authtest-%%')
         """, {"d": "%" + DOMAIN, "t": STARTED}).fetchone()
     labels = ("users", "sessions", "reset tokens (all)", "invites", "signups", "creators", "donations", "moderators",
-              "bans", "orphan OBS tokens", "jobs")
+              "bans", "orphan OBS tokens", "jobs", "soundboard terms acceptances")
     print("cleanup left: " + ", ".join(f"{k}={v}" for k, v in zip(labels, left)), flush=True)
     check("cleanup", "no synthetic row left", all(v == 0 for v in left), str(dict(zip(labels, left))))
 
