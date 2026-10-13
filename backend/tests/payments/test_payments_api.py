@@ -19,7 +19,15 @@ from app.payments.service import PaymentService
 from app.public.service import PublicService
 from app.soundboard.library import HypersoundLibrary
 from app.storage.memory import InMemoryObjectStore, StoredObject
-from tests.payments.fakes import PAYER_CONTACT, PAYER_EMAIL, FakeRazorpay, razorpay_env, sign, webhook_body
+from tests.payments.fakes import (
+    OTHER_SECRET,
+    PAYER_CONTACT,
+    PAYER_EMAIL,
+    FakeRazorpay,
+    razorpay_env,
+    sign,
+    webhook_body,
+)
 
 P = "/api/v1/public/streamers"
 D = "/api/v1/public/donations"
@@ -44,7 +52,6 @@ class FakePublicRepo:
             "creator-a": dict(base, id="id-a", streamer_slug="creator-a"),
             "no-media": dict(base, id="id-n", streamer_slug="no-media", media_upload_enabled=False),
             "no-account": dict(base, id="id-x", streamer_slug="no-account"),
-            "second": dict(base, id="id-s", streamer_slug="second"),
             "pending-c": dict(base, id="id-p", streamer_slug="pending-c", status="pending"),
         }
         self.tiers = {"id-a": [(150, 10), (300, 20)]}
@@ -61,8 +68,7 @@ class FakePaymentRepo:
     def __init__(self) -> None:
         self.settings = {sid: {"order_prefix": f"{sid}_rp_", "razorpay_account": account, "health_status": None,
                                "health_on_hold": None, "health_checked_at": None}
-                         for sid, account in (("id-a", "primary"), ("id-n", "primary"), ("id-x", None),
-                                              ("id-s", "secondary"))}
+                         for sid, account in (("id-a", "primary"), ("id-n", "primary"), ("id-x", None))}
         self.health: list[tuple] = []
         self.donations: list[dict] = []
         self.rows: dict[str, dict] = {}
@@ -371,13 +377,11 @@ def test_successful_checkout(client, world):
     assert world.repo.health == [("id-a", "ok")]  # health row written once (it was missing)
 
 
-def test_secondary_account_and_shared_probe_cache(client, world):
-    assert checkout(client, slug="second").json()["razorpay_key_id"] == world.env[
-        "HYPERCHAT_RAZORPAY_SECONDARY_KEY_ID"]
-    assert checkout(client, slug="second").status_code == 201
-    assert checkout(client).status_code == 201
-    assert world.razorpay.count("probe") == 2  # once per account, cached
-    assert [o["account"] for o in world.razorpay.orders] == ["secondary", "secondary", "primary"]
+def test_one_account_and_shared_probe_cache(client, world):
+    assert checkout(client).json()["razorpay_key_id"] == world.env["HYPERCHAT_RAZORPAY_PRIMARY_KEY_ID"]
+    assert checkout(client).status_code == 201 and checkout(client, slug="no-media").status_code == 201
+    assert world.razorpay.count("probe") == 1  # once for the account, cached across creators
+    assert [o["account"] for o in world.razorpay.orders] == ["primary", "primary", "primary"]
 
 
 def test_creator_without_account_is_on_hold(client, world):
@@ -500,7 +504,7 @@ def test_confirm_signature_checked_before_anything_else(client, world):
     good = sign(world.secret("PRIMARY_KEY_SECRET"), f"{out['razorpay_order_id']}|{payment.id}".encode())
     flipped = good[:-1] + ("1" if good[-1] == "0" else "0")  # always a different signature
     for sig, pid in ((flipped, payment.id), ("zz" * 32, payment.id), (good, "pay_OTHER123"),
-                     (sign(world.secret("SECONDARY_KEY_SECRET"), f"{out['razorpay_order_id']}|{payment.id}".encode()),
+                     (sign(OTHER_SECRET, f"{out['razorpay_order_id']}|{payment.id}".encode()),
                       payment.id), (sign(world.secret("PRIMARY_WEBHOOK_SECRET"),
                                          f"{out['razorpay_order_id']}|{payment.id}".encode()), payment.id)):
         r = client.post(url, json={"razorpay_payment_id": pid, "razorpay_signature": sig}, headers=headers)
@@ -585,7 +589,7 @@ def test_webhook_needs_no_origin_and_signed_garbage_is_400(client, world):
 
 def test_webhook_other_events_are_acknowledged(client, world):
     raw = b'{"event": "refund.processed", "payload": {}}'
-    r = post_webhook(client, raw, world.secret("SECONDARY_WEBHOOK_SECRET"))
+    r = post_webhook(client, raw, world.secret("PRIMARY_WEBHOOK_SECRET"))
     assert (r.status_code, r.json()) == (200, {"status": "ignored"})
     assert world.repo.events == [("authtest-evt-1", "ignored", None)]
 
@@ -596,8 +600,8 @@ def test_webhook_unknown_order_and_wrong_account(client, world):
     assert post_webhook(client, raw, secret).json() == {"status": "unknown_order"}
     out = paid_order(client, world)  # a primary-account order...
     raw = webhook_body("payment.captured", out["razorpay_order_id"], "pay_TESTabc", 10000)
-    r = post_webhook(client, raw, world.secret("SECONDARY_WEBHOOK_SECRET"), event_id="authtest-evt-2")
-    assert (r.status_code, r.json()) == (200, {"status": "account_mismatch"})  # ...signed by the other account
+    r = post_webhook(client, raw, OTHER_SECRET, event_id="authtest-evt-2")
+    assert (r.status_code, r.json()) == (401, {"error": "Invalid signature"})  # ...signed by no account of ours
     assert world.repo.applied == [] and world.razorpay.count("fetch_payment") == 0
 
 

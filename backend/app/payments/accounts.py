@@ -1,7 +1,7 @@
-"""The configured Razorpay accounts ('primary', 'secondary') and their credential health.
+"""The configured Razorpay account(s) (D6: only 'primary'; test vs live is per environment) and their health.
 
 An account can take payments when its key id and key secret are set; it can receive webhooks when its
-webhook secret is set. Health is per account (creators share the two key sets), probed with a cheap
+webhook secret is set. Health is per account (every creator shares it), probed with a cheap
 authenticated read and cached for HEALTH_TTL_SECONDS. A network error is not cached (the next checkout
 probes again, as legacy re-probed network errors), so an outage lasts no longer than Razorpay's.
 """

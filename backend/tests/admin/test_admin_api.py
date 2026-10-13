@@ -252,7 +252,7 @@ def test_pusher_group_is_the_least_loaded_configured_group(app):
     ({"slug": "dashboard", "name": "N", "razorpay_account": "primary"}, 400, "reserved_slug"),
     ({"slug": "Privacy-Policy", "name": "N", "razorpay_account": "primary"}, 400, "reserved_slug"),
     ({"slug": "authtest-x", "name": "   ", "razorpay_account": "primary"}, 400, "bad_name"),
-    ({"slug": "authtest-x", "name": "N", "razorpay_account": "secondary"}, 400, "account_not_configured"),
+    ({"slug": "authtest-x", "name": "N", "razorpay_account": "secondary"}, 422, None),  # retired (D6)
     ({"slug": "authtest-x", "name": "N", "razorpay_account": "primary", "brand_color": "red"}, 400, "bad_brand_color"),
     ({"slug": "authtest-x", "name": "N", "razorpay_account": "primary", "order_prefix": "x_"}, 400,
      "bad_order_prefix"),
@@ -269,6 +269,16 @@ def test_onboarding_validation(app, body, code, reason):
     with db() as conn:
         assert conn.execute("SELECT count(*) FROM public.streamers WHERE streamer_slug IN ('authtest-x', 'ab', "
                             "'dashboard', 'privacy-policy')").fetchone()[0] == 0
+
+
+def test_onboarding_refuses_an_unconfigured_primary_account(app):
+    """D12: the account is explicit and must be configured here; nothing falls back to another account."""
+    headers = _onboarding(app, accounts=())
+    r = app.post(C, json={"slug": "authtest-x", "name": "N", "razorpay_account": "primary"}, headers=headers)
+    assert (r.status_code, r.json()) == (400, {"error": "That Razorpay account is not configured on this server"})
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.streamers "
+                            "WHERE streamer_slug = 'authtest-x'").fetchone()[0] == 0
 
 
 def test_onboarding_conflicts_and_access(app):

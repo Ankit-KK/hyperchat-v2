@@ -71,7 +71,11 @@ api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUC
    `0015` drops one UNIQUE index on `moderation_actions` (no row changes); the previous release works without it,
    and its downgrade deliberately does not rebuild it.
    `0016` adds three nullable columns to `banned_donors` (no table rewrite; its foreign key briefly locks `users`
-   against writes, bounded by `lock_timeout`); the previous release ignores them.)
+   against writes, bounded by `lock_timeout`); the previous release ignores them.
+   `0018` (D6) moves `secondary` creators to `primary` and narrows the two Razorpay account CHECK constraints; it
+   stops without changes if any donation was created on `secondary`. The previous release keeps working (it only
+   ever writes `primary`). From this release on, production refuses to start with `rzp_test_` Razorpay keys and
+   DEV with `rzp_live_` keys.)
 6. Nginx (required from Phase 4 on: the public read API's per-IP rate limit; repeat whenever
    `deploy/nginx/` changed). As root, with the files of the same `<commit>`:
    - back up what is installed: `/etc/nginx/sites-available/api.quicktestspace.site` and any existing

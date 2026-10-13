@@ -122,7 +122,7 @@ def test_0010_payments_round_trip_and_account_backfill(monkeypatch):
             conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, razorpay_key_ref, "
                          "razorpay_secret_ref) VALUES (%s, 'Migration Test', %s, %s)", (slug, key, secret))
     try:
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0010")  # 0018 later folds 'secondary' into 'primary' (D6)
         assert _payment_columns() == {
             "streamers.razorpay_account": ("text", "YES", "'primary'::text"),
             "donations.payment_account": ("text", "YES", None),
@@ -165,6 +165,65 @@ def test_0010_payments_round_trip_and_account_backfill(monkeypatch):
                                 "WHERE streamer_slug = 'migtest-new'").fetchone()[0] == "primary"
         finally:
             conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest-new'")
+
+
+MIG18 = ("migtest18-secondary", "migtest18-primary", "migtest18-null")
+
+
+def _accounts18() -> dict:
+    with _owner() as conn:
+        return dict(conn.execute("SELECT streamer_slug, razorpay_account FROM public.streamers "
+                                 "WHERE streamer_slug = ANY(%s)", (list(MIG18),)).fetchall())
+
+
+def _version() -> str:
+    with _owner() as conn:
+        return conn.execute("SELECT version_num FROM public.alembic_version").fetchone()[0]
+
+
+def test_0018_retires_secondary(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0017")
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = ANY(%s)", (list(MIG18),))
+            for slug, account in zip(MIG18, ("secondary", "primary", None)):
+                sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, razorpay_account) "
+                                   "VALUES (%s, 'Migration 18', %s) RETURNING id", (slug, account)).fetchone()[0]
+            legacy = conn.execute(  # a legacy order of the NULL creator: no account recorded
+                "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, amount_inr, payment_status) "
+                "VALUES (%s, 'migtest18-legacy', 'D', 10, 10, 'success') RETURNING id", (sid,)).fetchone()[0]
+        command.upgrade(cfg, "0018")
+        assert _accounts18() == {"migtest18-secondary": "primary", "migtest18-primary": "primary",
+                                 "migtest18-null": None}
+        with _owner() as conn:
+            assert conn.execute("SELECT payment_account FROM public.donations WHERE id = %s",
+                                (legacy,)).fetchone()[0] is None
+            for statement in ("UPDATE public.streamers SET razorpay_account = 'secondary' WHERE streamer_slug = %s",
+                              "UPDATE public.donations SET payment_account = 'secondary' WHERE order_id = %s"):
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    conn.execute(statement, ("migtest18-primary" if "streamers" in statement else "migtest18-legacy",))
+            conn.execute("UPDATE public.donations SET payment_account = 'primary' WHERE id = %s", (legacy,))
+            conn.execute("UPDATE public.donations SET payment_account = NULL WHERE id = %s", (legacy,))
+        command.downgrade(cfg, "0017")  # widens again; remaps nothing back
+        assert _accounts18()["migtest18-secondary"] == "primary"
+        with _owner() as conn:
+            conn.execute("UPDATE public.donations SET payment_account = 'secondary' WHERE id = %s", (legacy,))
+            conn.execute("UPDATE public.streamers SET razorpay_account = 'secondary' "
+                         "WHERE streamer_slug = 'migtest18-secondary'")
+        with pytest.raises(Exception, match="created on the secondary Razorpay account"):
+            command.upgrade(cfg, "0018")  # an order on 'secondary' needs manual review: nothing changes
+        assert _version() == "0017" and _accounts18()["migtest18-secondary"] == "secondary"
+        with _owner() as conn:
+            assert conn.execute("SELECT payment_account FROM public.donations WHERE id = %s",
+                                (legacy,)).fetchone()[0] == "secondary"
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.donations WHERE order_id = 'migtest18-legacy'")
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = ANY(%s)", (list(MIG18),))
+        command.upgrade(cfg, "head")
 
 
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):

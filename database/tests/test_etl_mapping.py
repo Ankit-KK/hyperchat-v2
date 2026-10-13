@@ -53,7 +53,7 @@ def test_user_role_folds_admin_emails_case_insensitively():
 
 @pytest.mark.parametrize("key, secret, expected", [
     ("razorpay-keyid", "razorpay-keysecret", "primary"),
-    ("razorpay-keyid(test)", "razorpay-keysecret(test)", "secondary"),
+    ("razorpay-keyid(test)", "razorpay-keysecret(test)", "primary"),  # D6: test-mode keys, not a 2nd account
     ("razorpay-keyid", "razorpay-keysecret(test)", None),  # mixed pair: no account
     (None, None, None),
     ("razorpay-keyid", None, None),
@@ -67,3 +67,13 @@ def test_slug_from_table():
     assert slug_from_table("gaming_with_latifa_donations") == "gaming_with_latifa"
     with pytest.raises(ValueError):
         slug_from_table("streamers")
+
+
+def test_both_legacy_key_pairs_are_the_one_account_and_orders_get_none():
+    """D6: the "(test)" pair held test-mode keys, an environment concern, not a second account. Legacy orders never
+    recorded an account, so the loader writes none (donations.payment_account stays NULL)."""
+    from etl.mapping import RAZORPAY_ACCOUNTS
+    from etl.rehearsal import DONATION_COLUMNS
+
+    assert set(RAZORPAY_ACCOUNTS.values()) == {"primary"} and len(RAZORPAY_ACCOUNTS) == 2
+    assert "payment_account" not in DONATION_COLUMNS and "provider_payment_id" not in DONATION_COLUMNS
