@@ -187,6 +187,10 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
     checks). The first admin is created by you **[YOU]**:
     `cd /opt/hyperchat-prod/current/backend && ../venv/bin/python -m app.cli --env-file /etc/hyperchat-prod/api.env bootstrap-admin --email <admin email>`.
     Authenticated checks against production need an account you choose **[APPROVAL]**.
+    Payments (after the live Razorpay keys are set **[APPROVAL]**): `cd /opt/hyperchat-prod/current/backend &&
+    ../venv/bin/python -m app.cli --env-file /etc/hyperchat-prod/api.env payment-health` must print `mode=live
+    status=ok` and exit 0 before any donor checkout (D7: one read-only probe, no order). On DEV the same command
+    must print `mode=test`.
 
 Production rollback (no step is automatic):
 - application: `ln -sfn /opt/hyperchat-prod/releases/<previous> /opt/hyperchat-prod/current && systemctl restart hyperchat-prod-api`;
