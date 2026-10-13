@@ -2,6 +2,7 @@
 
     python -m app.cli --env-file /etc/hyperchat/api.env bootstrap-admin --email you@example.com
     python -m app.cli --env-file /etc/hyperchat/api.env cleanup [--dry-run]
+    python -m app.cli --env-file /etc/hyperchat/api.env payment-health
 
 bootstrap-admin creates the first admin account (or activates a password-less one) and refuses to run
 while any active admin can already sign in. The password is read without echo (or from stdin with
@@ -39,6 +40,8 @@ from app.core.config import Settings
 from app.core.logging import configure_logging
 from app.jobs.queue import enqueue
 from app.maintenance import run_cleanup
+from app.payments.accounts import AccountHealth, PaymentAccounts, health_report
+from app.payments.razorpay import RazorpayClient
 from app.security.audit import security_event
 from app.soundboard import seed
 from app.storage.r2 import StorageError, build_object_store
@@ -190,6 +193,14 @@ async def seed_platform_soundboard(settings: Settings, dry_run: bool, store=None
     return 0
 
 
+async def payment_health(settings: Settings) -> int:
+    """D7: one credential probe of the Razorpay account (GET /payments?count=1: no order, no payment), for cutover
+    and key-rotation checks over SSH. Prints names and states only. Exit 0 when usable, 1 otherwise."""
+    report = await health_report(PaymentAccounts.from_settings(settings), AccountHealth(RazorpayClient()))
+    print(" ".join(f"{k}={v}" for k, v in report.items()))
+    return 0 if report["status"] == "ok" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--env-file", help="read HYPERCHAT_* settings from this file (e.g. /etc/hyperchat/api.env)")
@@ -209,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--expect-application-id", required=True)
     sb = sub.add_parser("seed-platform-soundboard", help="fill the empty platform soundboard from the R2 library")
     sb.add_argument("--dry-run", action="store_true", help="only list what would be inserted")
+    sub.add_parser("payment-health", help="check the Razorpay credentials, no order created (exit 1 if unusable)")
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
@@ -219,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(set_telegram_webhook(settings, args.url, args.expect_bot))
     if args.command == "bots-set-discord-endpoint":
         return asyncio.run(set_discord_endpoint(settings, args.url, args.expect_application_id))
+    if args.command == "payment-health":
+        return asyncio.run(payment_health(settings))
     if not settings.db_enabled:
         print("Database is disabled by configuration.", file=sys.stderr)
         return 2

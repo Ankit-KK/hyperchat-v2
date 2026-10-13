@@ -5,12 +5,14 @@ Invites are still created with POST /api/v1/auth/invites (with streamer_id to gi
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
 from app.admin.service import AdminService
 from app.auth.dependencies import CurrentUser, require_admin
 from app.auth.service import AuthError
+from app.payments.accounts import health_report
+from app.security.audit import security_event
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -88,6 +90,19 @@ async def set_creator_soundboard(streamer_id: str, body: SoundboardEligibility, 
                                  current: CurrentUser = Depends(require_admin)) -> dict:
     """Custom Soundboard eligibility only (D3); the owner must still accept the current terms."""
     return await admin_service(request).set_soundboard_eligibility(current.user, streamer_id, body.enabled)
+
+
+@router.get("/payments/health")
+async def payment_health(request: Request, response: Response, current: CurrentUser = Depends(require_admin)) -> dict:
+    """D7: is the Razorpay account usable? The same cached probe as checkout (no order, no payment); names and
+    states only, never a key, secret or Razorpay response."""
+    payments = getattr(request.app.state, "payments", None)
+    if payments is None:
+        raise AuthError(503, "Payments are not configured", "payments_not_configured")
+    report = await health_report(payments.accounts, payments.health)
+    security_event("payment_health_checked", level=20, user_id=current.user.id, reason=report["status"])
+    response.headers["Cache-Control"] = "no-store"
+    return report
 
 
 @router.get("/invites")

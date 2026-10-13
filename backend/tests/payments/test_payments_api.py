@@ -398,11 +398,14 @@ def test_unconfigured_account_is_on_hold(client, world):
     assert world.repo.health == [("id-a", "missing_key")]
 
 
-@pytest.mark.parametrize("probe", ["invalid_key", "network_error"])
-def test_failing_credentials_put_checkout_on_hold(client, world, probe):
+@pytest.mark.parametrize("probe, status, error", [
+    ("invalid_key", 503, "Payments for this creator are on hold"),
+    ("network_error", 502, "Payment provider unavailable. Please try again."),  # transient, not a hold (D7)
+])
+def test_failing_credentials_put_checkout_on_hold(client, world, probe, status, error):
     world.razorpay.probe_result = probe
     r = checkout(client)
-    assert (r.status_code, r.json()) == (503, {"error": "Payments for this creator are on hold"})
+    assert (r.status_code, r.json()) == (status, {"error": error})
     assert world.repo.health == [("id-a", probe)] and world.razorpay.count("create_order") == 0
     world.razorpay.probe_result = "ok"
     r = checkout(client)

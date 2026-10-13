@@ -44,6 +44,7 @@ from app.storage.r2 import ObjectStore, StorageError
 log = logging.getLogger("hyperchat.payments")
 
 ON_HOLD = "Payments for this creator are on hold"
+UNAVAILABLE = "Payment provider unavailable. Please try again."
 NOT_FOUND = "Order not found"
 RATE_RULES = {  # per client IP: (bucket, limit, window seconds)
     "checkout": ("payment:checkout", 10, 60),
@@ -119,7 +120,7 @@ class PaymentService:
                 raise ApiError(503, ON_HOLD, "payments_on_hold") from None
             if exc.reason == "rejected":
                 raise rules.bad_request("This amount or currency cannot be paid", "razorpay_rejected") from None
-            raise ApiError(502, "Payment provider unavailable. Please try again.", "razorpay_unavailable") from None
+            raise ApiError(502, UNAVAILABLE, "razorpay_unavailable") from None
         token, token_hash = rules.new_status_token()
         await self.repo.create_donation({
             "streamer_id": creator["id"], "order_id": order_id, "provider_order_id": order.id,
@@ -165,7 +166,8 @@ class PaymentService:
         return {"voice_message_url": url}
 
     async def _checkout_account(self, creator: dict, settings: dict) -> RazorpayAccount:
-        """The creator's account if its credentials work (cached per account), else ON_HOLD. The result is
+        """The creator's account if its credentials work (cached per account), else ON_HOLD (missing or refused
+        keys) or UNAVAILABLE (Razorpay unreachable: transient, re-probed next time). The result is
         written to the creator's streamer_payment_health row when it changed or is older than the cache."""
         account = self.accounts.for_payments(settings["razorpay_account"])
         status = "missing_key" if account is None else await self.health.status(account)
@@ -173,6 +175,9 @@ class PaymentService:
         stale = checked is None or datetime.now(UTC) - checked > timedelta(seconds=HEALTH_TTL_SECONDS)
         if stale or settings["health_status"] != status or settings["health_on_hold"] != (status != "ok"):
             await self.repo.record_health(creator["id"], status)
+        if status == "network_error":  # transient: the same answer as an unreachable order creation, not a hold
+            security_event("payment_unavailable", reason=status, streamer_slug=creator["streamer_slug"])
+            raise ApiError(502, UNAVAILABLE, "razorpay_unavailable")
         if status != "ok":
             security_event("payment_on_hold", reason=status, streamer_slug=creator["streamer_slug"])
             raise ApiError(503, ON_HOLD, "payments_on_hold")

@@ -8,6 +8,7 @@ probes again, as legacy re-probed network errors), so an outage lasts no longer 
 
 import asyncio
 import time
+from datetime import UTC, datetime
 
 from pydantic import SecretStr
 
@@ -54,6 +55,10 @@ class AccountHealth:
         self.client, self._clock = client, clock
         self._cache: dict[str, tuple[float, str]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._checked_at: dict[str, datetime] = {}  # when the current answer was learned (wall clock)
+
+    def checked_at(self, name: str) -> datetime | None:
+        return self._checked_at.get(name)
 
     def forget(self, name: str) -> None:
         self._cache.pop(name, None)
@@ -61,6 +66,7 @@ class AccountHealth:
     def mark(self, name: str, status: str) -> None:
         """Record a status learned elsewhere (e.g. Razorpay refused the keys while creating an order)."""
         self._cache[name] = (self._clock() + HEALTH_TTL_SECONDS, status)
+        self._checked_at[name] = datetime.now(UTC)
 
     async def status(self, account: RazorpayAccount) -> str:
         hit = self._cache.get(account.name)
@@ -73,4 +79,24 @@ class AccountHealth:
             status = await self.client.probe(account)
             if status != "network_error":
                 self.mark(account.name, status)
+            else:
+                self._checked_at[account.name] = datetime.now(UTC)
             return status
+
+
+def key_mode(key_id: str) -> str:
+    """Razorpay key mode from the key id prefix; the id itself is never shown."""
+    return "test" if key_id.startswith("rzp_test_") else "live" if key_id.startswith("rzp_live_") else "unknown"
+
+
+async def health_report(accounts: PaymentAccounts, health: AccountHealth, name: str = "primary") -> dict:
+    """D7 manual check (admin endpoint and `app.cli payment-health`): the account's credential health through the
+    same cached probe checkout uses (GET /payments?count=1: no order, no payment). Names and states only."""
+    account = accounts.for_payments(name)
+    if account is None:
+        return {"account": name, "configured": False, "mode": "unknown", "status": "missing_key",
+                "checked_at": datetime.now(UTC).isoformat()}
+    status = await health.status(account)
+    checked = health.checked_at(name) or datetime.now(UTC)
+    return {"account": name, "configured": True, "mode": key_mode(account.key_id), "status": status,
+            "checked_at": checked.isoformat()}

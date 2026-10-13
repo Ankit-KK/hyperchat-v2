@@ -777,6 +777,22 @@ try:
         check(S, "D6 no Razorpay order was created during this run", orders_after == orders_before == 0,
               f"{orders_before} -> {orders_after}")
 
+    # ── payment health (D7): manual check only; the probe itself is never run by the smoke ──
+    S = "payment-health"
+    anon = httpx.get(API + "/api/v1/admin/payments/health", timeout=15)
+    if anon.status_code == 404:  # the deployed release predates D7
+        blocked(S, "Admin/manual payment-health check (D7)", "not deployed on DEV yet; needs an approved DEV deploy")
+    else:
+        check(S, "D7 health endpoint needs a session -> 401", anon.status_code == 401, str(anon.status_code))
+        r = owner_a.get("/api/v1/admin/payments/health")
+        check(S, "D7 health endpoint refused for a non-admin -> 403", r.status_code == 403, str(r.status_code))
+        cli_help = subprocess.run(["/opt/hyperchat/current/venv/bin/python", "-m", "app.cli", "--help"],
+                                  capture_output=True, text=True, cwd="/opt/hyperchat/current/backend")
+        check(S, "D7 CLI command payment-health is installed (help only, no probe)",
+              cli_help.returncode == 0 and "payment-health" in cli_help.stdout, cli_help.stderr[-200:])
+        blocked(S, "D7 admin health result and CLI probe",
+                "BLOCKED_BY_APPROVAL: both call Razorpay (GET /payments?count=1, test mode on DEV)")
+
     # ── bots: disabled ──────────────────────────────────────────────────────
     S = "bots"
     for hook in ("telegram", "discord"):

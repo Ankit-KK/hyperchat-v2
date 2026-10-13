@@ -42,6 +42,8 @@ Checks, in order:
 9. **Payment account**:
    - The creator's account (`streamers.razorpay_account`) must be configured.
    - Its credentials must be healthy: checked with Razorpay, cached 2 minutes per account. Network errors are not cached.
+     Missing or refused keys answer 503 `Payments for this creator are on hold`; an unreachable Razorpay answers
+     502 `Payment provider unavailable. Please try again.` (transient, D7), as a failed order creation does.
    - The result is written to `streamer_payment_health` when it changes, at most once per 2 minutes.
 10. **Razorpay order**:
     - A Razorpay order is created for `amount × 100` subunits, receipt = our order id. It is never retried.
@@ -133,6 +135,21 @@ completed and credited at most once.
 - **Account mapping**: `streamers.razorpay_account` is `primary` or NULL (no payment account: on hold). Migration 0010 filled it from the legacy secret-name columns; since 0018 both legacy pairs (`razorpay-keyid`/`razorpay-keysecret` and the `(test)` pair, which held test-mode keys) are `primary`, anything else is NULL. Legacy orders keep `donations.payment_account` NULL (legacy never recorded one; the creator's account applies); V2 orders record the account they were created on.
 - **Mode guards (startup, both ways)**: the API refuses to start with an `rzp_live_` key id unless `HYPERCHAT_APP_ENV=production`, and with an `rzp_test_` key id when it is `production`. The error names the variable, never the value.
 - **Startup log**: account names only.
+
+## Payment health (D7: admin/manual check, no scheduled polling)
+- **Runtime protection stays at checkout** (above): every checkout uses the account's cached probe, so broken keys put
+  payments on hold before any order exists, and Razorpay is asked at most once per 2 minutes per API process
+  (outages are re-probed).
+- **Manual verification** for cutover, key rotation and debugging, through the same cached probe
+  (`GET /v1/payments?count=1`: authenticated, read-only, no order, no payment; same in test and live mode):
+  - `GET /api/v1/admin/payments/health` (admin session): `{"account": "primary", "configured": true, "mode": "test",
+    "status": "ok", "checked_at": "<ISO time of that answer>"}`. `mode` comes from the key id prefix (`test`, `live`,
+    `unknown`); `status` is `ok`, `invalid_key`, `missing_key` or `network_error`. Never a key id, secret or Razorpay
+    response; non-admins get 403, anonymous 401. Within the 2-minute cache it answers without calling Razorpay.
+  - `python -m app.cli --env-file <api.env> payment-health`: one probe, prints the same fields as `key=value`, exit 0
+    only when `status=ok` (1 otherwise).
+- **No cron or timer** polls Razorpay: nothing would act on the result. Reconsider when an alert channel exists.
+- `streamer_payment_health` (per creator, legacy shape) is still written by checkout and is not read for decisions.
 
 ## Logging
 Logs carry reason codes, our order ids, Razorpay order/payment ids and account names. They never carry key

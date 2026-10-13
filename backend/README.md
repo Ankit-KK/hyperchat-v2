@@ -25,7 +25,7 @@ app/security/          non-browser callers: HMAC-signed requests, nonces, upload
                        CORS, security logging
 app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit windows, invites
 app/cli.py             operator commands: bootstrap-admin, cleanup, enqueue-donation-audio, bot webhook
-                       setup, seed-platform-soundboard
+                       setup, seed-platform-soundboard, payment-health
 app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*,
                        /api/v1/public/streamers/*, /api/v1/public/signups, /api/v1/metrics/*,
                        /api/v1/dashboard/streamers/*,
@@ -82,6 +82,7 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 | `POST /api/v1/admin/creators` | onboard a creator: validated unique slug (reserved site paths refused), name, an explicit **configured** Razorpay account (no default, D12), optional `brand_color` / `order_prefix`; legacy launch defaults; least-loaded configured Pusher group; unclaimed |
 | `POST /api/v1/admin/creators/{id}/owner` | make an active user the owner of an **unclaimed** creator (an unclaimed creator is admin-only); a claimed creator is 409 (no transfers) |
 | `PUT /api/v1/admin/creators/{id}/soundboard` | `{enabled: true\|false}`: grant / revoke Custom Soundboard **eligibility** (D3); idempotent (`changed`), security event `soundboard_eligibility_changed`; never accepts the terms for the owner and never deletes acceptances |
+| `GET /api/v1/admin/payments/health` | D7 manual check of the Razorpay account through the same cached probe checkout uses (no order, no payment): `{account, configured, mode: test\|live\|unknown, status: ok\|invalid_key\|missing_key\|network_error, checked_at}`; never a key, secret or Razorpay response; `no-store`; audited (`payment_health_checked`) |
 
 An admin cannot change their own role or status, and at least one active admin who can sign in
 (password or Google identity) always remains.
@@ -113,6 +114,9 @@ cd /opt/hyperchat/current/backend
 ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env cleanup --dry-run
 # Fill an EMPTY platform soundboard from the R2 hypersound library (no-op once any slot exists):
 ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env seed-platform-soundboard --dry-run
+# Razorpay credentials usable? One probe (GET /payments?count=1: no order, no payment); prints account, configured,
+# mode (test|live), status (ok|invalid_key|missing_key|network_error), checked_at; exit 0 only when status=ok (D7):
+../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env payment-health
 ```
 
 ## Tests
