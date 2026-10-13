@@ -232,7 +232,7 @@ OBS tokens, order ids (`order_id`, `provider_order_id`), `status_token_hash`, `u
 ## Deferred (not in Phase 5)
 OBS tokens and replay (Phase 10), soundboard (Phase 6), Pusher broadcasts and the live feed (Phase 9),
 TTS/music/SFX on approval (Phase 8), Telegram/Discord moderation and notifications (Phase 11), payouts
-(Phase 12), Sarvam transcription (D14). The ban list, unban by id (D-R8/D-M6) and moderator permission
+(out of scope for V2, checklist D2), Sarvam transcription (D14). The ban list, unban by id (D-R8/D-M6) and moderator permission
 editing (D-M7) were deferred too and have since been added in the backend completion phase (above).
 
 ## Schema
