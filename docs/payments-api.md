@@ -128,9 +128,10 @@ waits on the lock and then rolls back as `duplicate`, and a racing confirm or po
 completed and credited at most once.
 
 ## Configuration (`/etc/hyperchat/api.env`, names only; see `deploy/api.env.example`)
-`HYPERCHAT_RAZORPAY_{PRIMARY,SECONDARY}_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`.
-- **Account mapping**: `streamers.razorpay_account` maps each creator to an account. Migration 0010 filled it from the legacy secret-name columns: `razorpay-keyid`/`razorpay-keysecret` → `primary`, the `(test)` pair → `secondary`, anything else → none (on hold).
-- **Live-key guard**: the API refuses to start with an `rzp_live_` key id unless `HYPERCHAT_APP_ENV=production`.
+`HYPERCHAT_RAZORPAY_PRIMARY_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`.
+- **One account, `primary` (D6)**: test vs live is the environment's job. **DEV: Razorpay test-mode keys. Production: live keys.** The `secondary` account was retired (migration 0018); a leftover `HYPERCHAT_RAZORPAY_SECONDARY_*` variable configures nothing.
+- **Account mapping**: `streamers.razorpay_account` is `primary` or NULL (no payment account: on hold). Migration 0010 filled it from the legacy secret-name columns; since 0018 both legacy pairs (`razorpay-keyid`/`razorpay-keysecret` and the `(test)` pair, which held test-mode keys) are `primary`, anything else is NULL. Legacy orders keep `donations.payment_account` NULL (legacy never recorded one; the creator's account applies); V2 orders record the account they were created on.
+- **Mode guards (startup, both ways)**: the API refuses to start with an `rzp_live_` key id unless `HYPERCHAT_APP_ENV=production`, and with an `rzp_test_` key id when it is `production`. The error names the variable, never the value.
 - **Startup log**: account names only.
 
 ## Logging

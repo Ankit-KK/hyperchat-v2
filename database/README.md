@@ -35,6 +35,7 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 | 0015 | bot audit: drops the UNIQUE `moderation_actions_unique_bot` index so a decision repeated after a reversal is recorded (no data change; downgrade does not rebuild it) |
 | 0016 | donor unban audit: nullable `banned_donors.unbanned_at`, `unbanned_by_label`, `unbanned_by_user_id` (FK `users`, ON DELETE SET NULL) |
 | 0017 | D1 import ledger `d1_hash_import_ledger` (run id, user id, SHA-256 of the imported hash, source fingerprint; written by the importer in the same transaction as the hashes); append-only for `hyperchat_app` (SELECT, INSERT), nothing for the worker, SELECT for `hyperchat_readonly` |
+| 0018 | D6: retires the `secondary` Razorpay account: `streamers.razorpay_account` `secondary` → `primary`, both account CHECK constraints narrowed to `primary` (NULL still allowed: legacy orders); stops without changes if any donation was created on `secondary` (manual review); downgrade widens the constraints and remaps nothing |
 
 ## Databases
 | Database | Cluster | Purpose |

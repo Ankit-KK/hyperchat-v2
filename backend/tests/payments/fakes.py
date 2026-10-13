@@ -12,12 +12,13 @@ from app.payments.razorpay import Order, Payment, RazorpayError
 
 PAYER_EMAIL = "payer.secret@example.invalid"  # payer details inside webhook payloads: must never be logged
 PAYER_CONTACT = "+919999012345"
+OTHER_SECRET = "TEST-ONLY-not-a-configured-razorpay-secret"  # signs as no account of ours
 
 
 def razorpay_env() -> dict[str, str]:
-    """Random TEST-ONLY Razorpay settings (env var name -> value) for both accounts."""
+    """Random TEST-ONLY Razorpay settings (env var name -> value) for the one account (D6: primary)."""
     values = {}
-    for account in ("PRIMARY", "SECONDARY"):
+    for account in ("PRIMARY",):
         values[f"HYPERCHAT_RAZORPAY_{account}_KEY_ID"] = f"rzp_test_TESTONLY{account[0]}{secrets.token_hex(4)}"
         values[f"HYPERCHAT_RAZORPAY_{account}_KEY_SECRET"] = f"TEST-ONLY-ks-{secrets.token_hex(12)}"
         values[f"HYPERCHAT_RAZORPAY_{account}_WEBHOOK_SECRET"] = f"TEST-ONLY-wh-{secrets.token_hex(12)}"

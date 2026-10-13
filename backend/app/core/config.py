@@ -20,7 +20,7 @@ from app.core.origins import OriginError, is_development_origin, normalize_origi
 _RELEASE_FILE = Path(__file__).resolve().parents[2] / "RELEASE"
 _R2_ACCOUNT = re.compile(r"^[A-Za-z0-9]{1,64}$")  # becomes part of a host name: no dots, slashes or ports
 _R2_BUCKET = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
-RAZORPAY_ACCOUNTS = ("primary", "secondary")  # values of streamers.razorpay_account
+RAZORPAY_ACCOUNTS = ("primary",)  # values of streamers.razorpay_account (D6: secondary retired)
 PUSHER_GROUPS = (1, 2, 3, 4)  # configurable Pusher apps (streamers.pusher_group 5..10 use group 1)
 _PUSHER_APP_ID = re.compile(r"^[0-9]{1,20}$")
 _PUSHER_KEY = re.compile(r"^[A-Za-z0-9]{1,64}$")
@@ -110,16 +110,13 @@ class Settings(BaseSettings):
     # S3 API endpoint; default https://<account_id>.r2.cloudflarestorage.com
     r2_endpoint: str | None = None
 
-    # ── Razorpay (app.payments): up to two accounts; each creator uses the one named in
-    #    streamers.razorpay_account. Checkout for an account is "on hold" until its key id and key secret
-    #    are set; its webhooks are refused (401) until its webhook secret is set. Live keys (rzp_live_)
-    #    are refused outside production: DEV uses Razorpay test mode only. ─────────────────────────
+    # ── Razorpay (app.payments): one account, 'primary' (D6); test vs live is the environment's job.
+    #    Checkout is "on hold" until its key id and key secret are set; webhooks are refused (401) until its
+    #    webhook secret is set. Startup refuses live keys (rzp_live_) outside production and test keys
+    #    (rzp_test_) in production, so a test key can never take real donations and DEV can never charge. ──
     razorpay_primary_key_id: SecretStr | None = None
     razorpay_primary_key_secret: SecretStr | None = None
     razorpay_primary_webhook_secret: SecretStr | None = None
-    razorpay_secondary_key_id: SecretStr | None = None
-    razorpay_secondary_key_secret: SecretStr | None = None
-    razorpay_secondary_webhook_secret: SecretStr | None = None
 
     # ── Background jobs and audio (Phase 8: app.jobs, app.audio). Paid providers are only ever called by
     #    the worker, and only when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true AND the provider's key is set;
@@ -303,7 +300,7 @@ class Settings(BaseSettings):
         return bool(_secret_value(self.upload_grant_secret))
 
     def razorpay_credentials(self, account: str) -> tuple[str, str, str]:
-        """(key id, key secret, webhook secret) of 'primary' or 'secondary'; "" for unset values."""
+        """(key id, key secret, webhook secret) of an account in RAZORPAY_ACCOUNTS; "" for unset values."""
         if account not in RAZORPAY_ACCOUNTS:
             raise ValueError("unknown Razorpay account")
         return (_secret_value(getattr(self, f"razorpay_{account}_key_id")),
@@ -311,12 +308,16 @@ class Settings(BaseSettings):
                 _secret_value(getattr(self, f"razorpay_{account}_webhook_secret")))
 
     @model_validator(mode="after")
-    def _refuse_live_razorpay_keys_outside_production(self) -> "Settings":
-        if self.app_env != "production":
-            live = [f"HYPERCHAT_RAZORPAY_{a.upper()}_KEY_ID" for a in RAZORPAY_ACCOUNTS
-                    if self.razorpay_credentials(a)[0].startswith("rzp_live_")]
-            if live:  # variable names only, never the values
-                raise ValueError(f"Refusing to start: live Razorpay keys outside production: {live}")
+    def _refuse_razorpay_keys_of_the_wrong_mode(self) -> "Settings":
+        """Live keys only in production, test keys never in production (D6). Variable names only, never values."""
+        production = self.app_env == "production"
+        wrong = "rzp_test_" if production else "rzp_live_"
+        found = [f"HYPERCHAT_RAZORPAY_{a.upper()}_KEY_ID" for a in RAZORPAY_ACCOUNTS
+                 if self.razorpay_credentials(a)[0].startswith(wrong)]
+        if found and production:
+            raise ValueError(f"Refusing to start: test Razorpay keys in production: {found}")
+        if found:
+            raise ValueError(f"Refusing to start: live Razorpay keys outside production: {found}")
         return self
 
     @model_validator(mode="after")

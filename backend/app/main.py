@@ -138,7 +138,7 @@ async def lifespan(app: FastAPI):
     log.info("uploads", extra={"upload_grants_configured": settings.upload_grants_configured,
                                "r2_configured": settings.r2_configured,
                                "r2_missing_or_invalid": settings.r2_config_problems()})
-    # Account names (primary/secondary) only, never key ids or secrets.
+    # Account names only, never key ids or secrets.
     log.info("payments", extra={"razorpay_accounts": payment_accounts.summary()})
     log.info("audio", extra={"providers_enabled": settings.audio_providers_enabled,
                              "providers": settings.audio_provider_names()})

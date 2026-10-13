@@ -26,7 +26,7 @@ class CreatorCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")  # never user_id, status or other columns: those are not settable here
     slug: StrictStr = Field(max_length=64)
     name: StrictStr = Field(max_length=200)
-    razorpay_account: Literal["primary", "secondary"]  # required: no default account for new creators (D12)
+    razorpay_account: Literal["primary"]  # required and explicit (D12); D6 retired "secondary"
     brand_color: StrictStr | None = Field(default=None, max_length=7)
     order_prefix: StrictStr | None = Field(default=None, max_length=14)
 

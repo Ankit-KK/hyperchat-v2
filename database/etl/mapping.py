@@ -7,10 +7,12 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 DONATION_TABLE_SUFFIX = "_donations"
 # Legacy streamers."razorpay-keyid"/"razorpay-keysecret" held the NAMES of secrets; only these two pairs exist.
-# Same mapping as migration 0010; any other pair has no payment account (checkout on hold).
+# Both are the one V2 account (D6, migration 0018): the "(test)" pair held Razorpay TEST-MODE keys, which is an
+# environment concern in V2 (DEV = test keys, production = live keys), not a second merchant account. Any other
+# pair has no payment account (checkout on hold). Orders never get an account from this: legacy recorded none.
 RAZORPAY_ACCOUNTS = {
     ("razorpay-keyid", "razorpay-keysecret"): "primary",
-    ("razorpay-keyid(test)", "razorpay-keysecret(test)"): "secondary",
+    ("razorpay-keyid(test)", "razorpay-keysecret(test)"): "primary",
 }
 
 

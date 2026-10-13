@@ -10,7 +10,7 @@ from decimal import Decimal
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.core.config import Settings
+from app.core.config import RAZORPAY_ACCOUNTS, Settings
 from app.core.errors import ApiError
 from app.payments import rules
 from app.payments.accounts import HEALTH_TTL_SECONDS, AccountHealth, PaymentAccounts
@@ -299,27 +299,61 @@ def test_payment_mismatch(payment, expected):
                                   currency="INR") == expected
 
 
-# ── configuration: live keys never outside production ───────────────────────
+# ── configuration: test vs live by environment (D6) ─────────────────────────
 
 def settings(**env):
     return Settings(_env_file=None, **env)
 
 
+PROD = {"app_env": "production", "db_label": "PRODUCTION", "frontend_url": "https://hyperchat.space"}
+
+
 @pytest.mark.parametrize("app_env", ["development", "test"])
-@pytest.mark.parametrize("field", ["razorpay_primary_key_id", "razorpay_secondary_key_id"])
-def test_live_keys_refused_outside_production(app_env, field):
+def test_live_keys_refused_outside_production(app_env):
     with pytest.raises(ValidationError) as exc:
-        settings(app_env=app_env, **{field: "rzp_live_TESTONLYxxxx"})
+        settings(app_env=app_env, razorpay_primary_key_id="rzp_live_TESTONLYxxxx")
     text = str(exc.value)
     assert "live Razorpay keys outside production" in text and "rzp_live_TESTONLY" not in text
-    assert f"HYPERCHAT_{field.upper()}" in text
+    assert "HYPERCHAT_RAZORPAY_PRIMARY_KEY_ID" in text
+
+
+def test_test_keys_refused_in_production():
+    with pytest.raises(ValidationError) as exc:
+        settings(**PROD, razorpay_primary_key_id="rzp_test_TESTONLYxxxx", razorpay_primary_key_secret="TEST-ONLY-ks")
+    text = str(exc.value)
+    assert "test Razorpay keys in production" in text and "HYPERCHAT_RAZORPAY_PRIMARY_KEY_ID" in text
+    assert "rzp_test_TESTONLY" not in text and "TEST-ONLY-ks" not in text
+
+
+@pytest.mark.parametrize("app_env, key, allowed", [
+    ("development", "rzp_test_TESTONLY", True), ("development", "rzp_live_TESTONLY", False),
+    ("test", "rzp_test_TESTONLY", True), ("test", "rzp_live_TESTONLY", False),
+    ("production", "rzp_test_TESTONLY", False), ("production", "rzp_live_TESTONLY", True),
+])
+def test_razorpay_mode_matrix(app_env, key, allowed):
+    env = PROD if app_env == "production" else {"app_env": app_env}
+    if allowed:
+        assert settings(**env, razorpay_primary_key_id=key).razorpay_credentials("primary")[0] == key
+    else:
+        with pytest.raises(ValidationError):
+            settings(**env, razorpay_primary_key_id=key)
+
+
+def test_only_the_primary_account_exists():
+    assert RAZORPAY_ACCOUNTS == ("primary",)
+    s = settings(razorpay_primary_key_id="rzp_test_TESTONLY")
+    for retired in ("secondary", "tertiary"):
+        with pytest.raises(ValueError):
+            s.razorpay_credentials(retired)
+    # A leftover HYPERCHAT_RAZORPAY_SECONDARY_* variable configures nothing (unknown settings are ignored).
+    old = settings(razorpay_secondary_key_id="rzp_test_TESTONLY2", razorpay_secondary_key_secret="TEST-ONLY-ks2")
+    assert PaymentAccounts.from_settings(old).summary() == {"payments": [], "webhooks": []}
 
 
 def test_test_keys_accepted_and_live_keys_allowed_in_production():
     assert settings(app_env="development", razorpay_primary_key_id="rzp_test_TESTONLY").razorpay_credentials(
         "primary")[0] == "rzp_test_TESTONLY"
-    prod = settings(app_env="production", db_label="PRODUCTION", frontend_url="https://hyperchat.space",
-                    razorpay_primary_key_id="rzp_live_TESTONLY")
+    prod = settings(**PROD, razorpay_primary_key_id="rzp_live_TESTONLY")
     assert prod.razorpay_credentials("primary")[0] == "rzp_live_TESTONLY"
     with pytest.raises(ValueError):
         prod.razorpay_credentials("tertiary")
@@ -327,14 +361,16 @@ def test_test_keys_accepted_and_live_keys_allowed_in_production():
 
 def test_accounts_from_settings_and_redaction():
     s = settings(razorpay_primary_key_id=" rzp_test_P ", razorpay_primary_key_secret="TEST-ONLY-ks",
-                 razorpay_primary_webhook_secret="TEST-ONLY-wh", razorpay_secondary_webhook_secret="TEST-ONLY-wh2")
+                 razorpay_primary_webhook_secret="TEST-ONLY-wh")
     accounts = PaymentAccounts.from_settings(s)
     primary = accounts.for_payments("primary")
     assert primary.key_id == "rzp_test_P" and primary.key_secret.get_secret_value() == "TEST-ONLY-ks"
-    assert accounts.for_payments("secondary") is None  # webhook secret only: cannot create or fetch payments
+    assert accounts.for_payments("secondary") is None  # retired (D6)
     assert accounts.for_payments(None) is None and accounts.for_payments("tertiary") is None
-    assert accounts.webhook_secrets() == [("primary", "TEST-ONLY-wh"), ("secondary", "TEST-ONLY-wh2")]
-    assert accounts.summary() == {"payments": ["primary"], "webhooks": ["primary", "secondary"]}
+    assert accounts.webhook_secrets() == [("primary", "TEST-ONLY-wh")]
+    assert accounts.summary() == {"payments": ["primary"], "webhooks": ["primary"]}
+    webhook_only = PaymentAccounts.from_settings(settings(razorpay_primary_webhook_secret="TEST-ONLY-wh"))
+    assert webhook_only.for_payments("primary") is None  # webhook secret only: cannot create or fetch payments
     assert "TEST-ONLY" not in repr(primary) and "rzp_test" not in repr(primary)
     assert PaymentAccounts.from_settings(settings()).summary() == {"payments": [], "webhooks": []}
 

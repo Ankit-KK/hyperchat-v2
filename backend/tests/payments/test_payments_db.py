@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 
 import httpx
+import psycopg
 import pytest
 
 from app.cli import connection_factory
@@ -19,7 +20,15 @@ from app.payments.accounts import AccountHealth
 from app.soundboard.library import HypersoundLibrary
 from app.storage.memory import InMemoryObjectStore, StoredObject
 from tests.integration import ORIGIN, creator_state, db, make_donation, make_streamer, requires_db, update_streamer
-from tests.payments.fakes import PAYER_CONTACT, PAYER_EMAIL, FakeRazorpay, razorpay_env, sign, webhook_body
+from tests.payments.fakes import (
+    OTHER_SECRET,
+    PAYER_CONTACT,
+    PAYER_EMAIL,
+    FakeRazorpay,
+    razorpay_env,
+    sign,
+    webhook_body,
+)
 
 pytestmark = requires_db
 P = "/api/v1/public/streamers"
@@ -147,18 +156,25 @@ def test_creator_without_account_is_on_hold_and_recorded(client):
     assert client.fake.calls == []
 
 
-def test_secondary_account_orders_and_webhooks(client):
+def test_secondary_is_retired_and_foreign_webhooks_are_refused(client):
+    """D6: one account. The database refuses 'secondary'; a webhook signed by any other secret is refused and the
+    order stays pending; the order records the primary account it was created on."""
     sid = make_streamer("authtest-pay-sec")
-    update_streamer(sid, razorpay_account="secondary")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        update_streamer(sid, razorpay_account="secondary")
     out = checkout(client, "authtest-pay-sec")
-    assert out["razorpay_key_id"] == secret(client, "SECONDARY_KEY_ID")
+    assert out["razorpay_key_id"] == secret(client, "PRIMARY_KEY_ID")
     payment = client.fake.captured(out["razorpay_order_id"], 10000)
-    r = webhook(client, "payment.captured", out, payment.id, event_id="authtest-sec-1", account="PRIMARY")
-    assert r.json() == {"status": "account_mismatch"} and donation(out["order_id"])["payment_status"] == "pending"
-    r = webhook(client, "payment.captured", out, payment.id, event_id="authtest-sec-2", account="SECONDARY")
-    assert r.json() == {"status": "completed"}
-    assert client.fake.calls[-1] == ("fetch_payment", "secondary", payment.id)
-    assert [e[2:4] for e in events("authtest-sec-")] == [("primary", "account_mismatch"), ("secondary", "completed")]
+    raw = webhook_body("payment.captured", out["razorpay_order_id"], payment.id, 10000, "INR", "captured")
+    r = client.post(W, content=raw, headers={"x-razorpay-signature": sign(OTHER_SECRET, raw),
+                                             "x-razorpay-event-id": "authtest-sec-1",
+                                             "content-type": "application/json"})
+    assert r.status_code == 401 and donation(out["order_id"])["payment_status"] == "pending"
+    assert webhook(client, "payment.captured", out, payment.id, event_id="authtest-sec-2").json() == {
+        "status": "completed"}
+    assert client.fake.calls[-1] == ("fetch_payment", "primary", payment.id)
+    assert donation(out["order_id"])["payment_account"] == "primary"
+    assert [e[2:4] for e in events("authtest-sec-")] == [("primary", "completed")]
 
 
 # ── webhook transitions and idempotency ─────────────────────────────────────

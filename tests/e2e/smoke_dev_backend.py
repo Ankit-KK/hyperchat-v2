@@ -45,7 +45,7 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-EXPECTED_HEAD = "0017"
+KNOWN_HEADS = ("0017", "0018")  # 0018 (D6) once deployed; the D6 section reports BLOCKED before that
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
@@ -189,7 +189,7 @@ try:
         state = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True).stdout.strip()
         check(S, f"{unit} active", state == "active", state)
     head = as_postgres("SELECT version_num FROM alembic_version")
-    check(S, f"database at migration head {EXPECTED_HEAD}", head == EXPECTED_HEAD, head)
+    check(S, f"database at a known migration head ({head})", head in KNOWN_HEADS, head)
     check(S, "bots disabled (HYPERCHAT_BOTS_ENABLED)", bool(bots_flag) and bots_flag.group(1).strip() == "false",
           bots_flag.group(1) if bots_flag else "missing")
     with db() as c:
@@ -745,6 +745,37 @@ try:
               and users == 0, str(rows))
         r = httpx.post(check_url, json={"channel_name": slug_a}, headers=good, timeout=15)
         check(S, "D4 revoked key -> 401", r.status_code == 401, r.text)
+
+    # ── payments account model (D6): one 'primary' account; no Razorpay call, no order ──
+    S = "payments-account"
+    if head != "0018":  # the deployed release predates D6
+        blocked(S, "Razorpay secondary retired (D6)", "not deployed on DEV yet; needs an approved DEV deploy")
+    else:
+        with db() as c:
+            orders_before = c.execute("SELECT count(*) FROM public.donations WHERE provider_order_id IS NOT NULL "
+                                      "AND created_at >= %s", (STARTED,)).fetchone()[0]
+            ankit = c.execute("SELECT razorpay_account FROM public.streamers WHERE streamer_slug = 'ankit'").fetchone()
+            defs = dict(c.execute("SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname IN "
+                                  "('streamers_razorpay_account_check', 'donations_payment_account_check')").fetchall())
+            accounts = c.execute("SELECT DISTINCT razorpay_account FROM public.streamers "
+                                 "WHERE razorpay_account IS NOT NULL").fetchall()
+        check(S, "D6 both account constraints allow only 'primary'", len(defs) == 2
+              and all("'primary'" in d and "secondary" not in d for d in defs.values()), str(defs))
+        check(S, "D6 no creator is on another account", accounts == [("primary",)], str(accounts))
+        check(S, "D6 the ankit testing page is on primary (DEV primary = test mode)",
+              ankit is not None and ankit[0] == "primary", str(ankit))
+        r = admin.write("POST", "/api/v1/admin/creators", json={"slug": TAG + "d6", "name": "Smoke D6",
+                                                                "razorpay_account": "secondary"})
+        check(S, "D6 onboarding refuses 'secondary' -> 422", r.status_code == 422, r.text[:200])
+        r = admin.write("POST", "/api/v1/admin/creators", json={"slug": TAG + "d6", "name": "Smoke D6",
+                                                                "razorpay_account": "primary"})
+        check(S, "D6 onboarding with the configured primary account -> 201", r.status_code == 201
+              and r.json().get("creator", {}).get("razorpay_account") == "primary", r.text[:200])
+        with db() as c:
+            orders_after = c.execute("SELECT count(*) FROM public.donations WHERE provider_order_id IS NOT NULL "
+                                     "AND created_at >= %s", (STARTED,)).fetchone()[0]
+        check(S, "D6 no Razorpay order was created during this run", orders_after == orders_before == 0,
+              f"{orders_before} -> {orders_after}")
 
     # ── bots: disabled ──────────────────────────────────────────────────────
     S = "bots"
