@@ -78,6 +78,20 @@ def update_streamer(streamer_id: str, **cols) -> None:
         conn.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", {**cols, "id": streamer_id})
 
 
+def accept_soundboard_terms(streamer_id: str, user_id: str | None = None, version: str | None = None,
+                            revoked: bool = False) -> None:
+    """Record a Custom Soundboard terms acceptance (D3) as the owner's dashboard acceptance would; defaults: the
+    creator's owner (or a new synthetic user for an unclaimed creator) and the current version."""
+    from app.soundboard import terms
+    with db() as conn:
+        if user_id is None:
+            owner = conn.execute("SELECT user_id::text FROM public.streamers WHERE id = %s", (streamer_id,)).fetchone()[0]
+            user_id = owner or make_user(f"sbterms-{secrets.token_hex(4)}{DOMAIN}")
+        conn.execute("INSERT INTO public.soundboard_tnc_acceptances (streamer_slug, streamer_id, user_id, "
+                     "terms_version, revoked_at) SELECT streamer_slug, id, %s, %s, CASE WHEN %s THEN now() END "
+                     "FROM public.streamers WHERE id = %s", (user_id, version or terms.VERSION, revoked, streamer_id))
+
+
 def owned_creator(client, slug: str, email: str = "owner" + DOMAIN, **cols) -> tuple[str, dict]:
     """A creator owned by a new user who is then signed in on `client`: (streamer id, CSRF headers)."""
     sid = make_streamer(slug, user_id=make_user(email))

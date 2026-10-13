@@ -136,3 +136,19 @@ class Hypersound(_Model):
 
 class Hypersounds(_Model):
     sounds: list[Hypersound]
+
+
+# ── Custom Soundboard terms (D3) ────────────────────────────────────────────────
+
+class TermsAccept(_Model):  # must name the current version: the client cannot pick another
+    version: Annotated[StrictStr, Field(max_length=40)]
+
+
+class TermsStatus(_Model):
+    current_version: str
+    eligible: bool                   # granted by an admin
+    accepted: bool                   # the owner accepted current_version (even if revoked since)
+    accepted_at: datetime | None
+    revoked: bool                    # that acceptance was revoked
+    usable: bool                     # eligible AND accepted AND not revoked: the soundboard routes work
+    can_accept: bool                 # the signed-in user is the owner and the acceptance is not revoked

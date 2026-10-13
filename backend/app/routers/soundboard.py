@@ -2,8 +2,9 @@
 and the public hypersound library: GET /api/v1/public/hypersounds.
 
 Soundboard routes depend on require_streamer_access (signed in; owner, linked account or admin; an
-unclaimed creator is admin-only); writes also pass require_user's Origin + CSRF check. The soundboard
-switch is checked only after that. Responses are never cached (dashboard no-store middleware).
+unclaimed creator is admin-only); writes also pass require_user's Origin + CSRF check. The Custom Soundboard
+gate (D3: eligible AND the owner accepted the current terms) is checked only after that, on every route except
+GET /terms and POST /terms/accept (owner only). Responses are never cached (dashboard no-store middleware).
 """
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -23,6 +24,8 @@ from app.soundboard.models import (
     SoundboardChanges,
     SoundRequest,
     Swapped,
+    TermsAccept,
+    TermsStatus,
     UploadRequest,
     UploadTicket,
 )
@@ -42,6 +45,17 @@ def _service(request: Request) -> SoundboardService:
 @soundboard_router.get("", response_model=Board)
 async def read_board(request: Request, access: StreamerAccess = Depends(require_streamer_access)) -> Board:
     return await _service(request).board(access)
+
+
+@soundboard_router.get("/terms", response_model=TermsStatus)
+async def terms_status(request: Request, access: StreamerAccess = Depends(require_streamer_access)) -> TermsStatus:
+    return await _service(request).terms_status(access)
+
+
+@soundboard_router.post("/terms/accept", response_model=TermsStatus)
+async def accept_terms(body: TermsAccept, request: Request,
+                       access: StreamerAccess = Depends(require_streamer_access)) -> TermsStatus:
+    return await _service(request).accept_terms(access, body.version, request.headers.get("user-agent"))
 
 
 @soundboard_router.patch("", response_model=ChangesApplied)

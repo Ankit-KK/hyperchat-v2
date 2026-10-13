@@ -1,5 +1,6 @@
 """Creator soundboard use-cases (Phase 6). Every route already passed require_streamer_access (signed in;
-owner, linked account or admin; Origin + CSRF on writes); the soundboard switch is checked after that.
+owner, linked account or admin; Origin + CSRF on writes); the Custom Soundboard gate (D3, terms.py) is checked
+after that.
 
 Uploads: POST /uploads returns a presigned PUT (300 s, signed host + content-type + content-length) for a
 server-generated key soundboards/<slug>/<uuid>.<ext>. Create, swap and replace then take that key and
@@ -20,9 +21,9 @@ from datetime import UTC, datetime
 
 from app.authz.dependencies import StreamerAccess
 from app.core.errors import ApiError
-from app.dashboard.validation import parse_uuid
+from app.dashboard.validation import USER_AGENT_MAX, parse_uuid
 from app.security.audit import security_event
-from app.soundboard import rules
+from app.soundboard import rules, terms
 from app.soundboard.audio import Mp3Error, parse_mp3
 from app.soundboard.models import (
     Board,
@@ -35,6 +36,7 @@ from app.soundboard.models import (
     SoundboardChanges,
     SoundRequest,
     Swapped,
+    TermsStatus,
     UploadTicket,
 )
 from app.soundboard.repository import (
@@ -112,8 +114,37 @@ class SoundboardService:
         self.repo, self.store, self.limiter = repo, store, limiter
 
     async def _enabled(self, access: StreamerAccess) -> None:
-        if not await self.repo.enabled(access.streamer.id):
+        """D3 gate for every Custom Soundboard route: eligible AND the current terms accepted, not revoked."""
+        state = await self.repo.terms_state(access.streamer.id)
+        if not state or not state["enabled"]:
             raise ApiError(403, "Soundboard not enabled", "soundboard_disabled")
+        if state["accepted_at"] is None or state["revoked_at"] is not None:
+            raise ApiError(403, "Accept the current Custom Soundboard terms first", "soundboard_terms_required")
+
+    # ── terms (D3): status for anyone with access; acceptance by the owner only ──
+    async def terms_status(self, access: StreamerAccess) -> TermsStatus:
+        state = await self.repo.terms_state(access.streamer.id) or {"enabled": False, "accepted_at": None,
+                                                                      "revoked_at": None}
+        accepted, revoked = state["accepted_at"] is not None, state["revoked_at"] is not None
+        is_owner = access.streamer.user_id == access.current.user.id  # an admin owner counts; "via" says admin
+        return TermsStatus(current_version=terms.VERSION, eligible=bool(state["enabled"]), accepted=accepted,
+                           accepted_at=state["accepted_at"], revoked=revoked,
+                           usable=bool(state["enabled"]) and accepted and not revoked,
+                           can_accept=is_owner and not revoked)
+
+    async def accept_terms(self, access: StreamerAccess, version: str, user_agent: str | None) -> TermsStatus:
+        if access.streamer.user_id != access.current.user.id:  # never a linked account or an admin for the owner
+            self._event("soundboard_terms_rejected", access, "not_owner", logging.WARNING)
+            raise ApiError(403, "Only the creator's owner can accept these terms", "soundboard_terms_owner_only")
+        if version != terms.VERSION:  # exactly the server's version, nothing normalised
+            raise ApiError(409, "Terms version is not current", "terms_version_mismatch")
+        state = await self.repo.terms_state(access.streamer.id)
+        if state and state["revoked_at"] is not None:  # a revoked acceptance is HyperChat's call, not re-acceptable
+            raise ApiError(409, "This acceptance was revoked by HyperChat", "soundboard_terms_revoked")
+        agent = (user_agent or "")[:USER_AGENT_MAX] or None
+        if await self.repo.accept_terms(access.streamer.id, access.current.user.id, agent):
+            self._event("soundboard_terms_accepted", access, terms.VERSION)
+        return await self.terms_status(access)
 
     def _store(self) -> ObjectStore:
         if self.store is None:

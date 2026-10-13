@@ -6,4 +6,5 @@
   repository.py  SQL: the legacy soundboard RPCs as transactions under a per-creator lock
   service.py     use-cases: board, edits, restore, presigned uploads, create/swap/replace/delete
   models.py      request/response models
+  terms.py       Custom Soundboard terms version and the eligible-AND-accepted rule (D3)
 """

@@ -102,6 +102,19 @@ class AdminService:
                        streamer_id=streamer_id)
         return {"creator": {**row, "created_at": iso(row["created_at"])}}
 
+    async def set_soundboard_eligibility(self, admin: User, streamer_id: str, enabled: bool) -> dict:
+        """Grant / revoke Custom Soundboard eligibility (D3). Idempotent. Never accepts terms for the owner and never
+        deletes acceptance history: usable access also needs the owner's acceptance of the current version."""
+        streamer_id = _uuid_or_404(streamer_id, "Creator")
+        previous = await self.repo.set_soundboard_eligibility(streamer_id, enabled)
+        if previous is None:
+            raise AuthError(404, "Creator not found", "creator_not_found")
+        changed = previous != enabled
+        if changed:
+            security_event("soundboard_eligibility_changed", level=20, user_id=admin.id, streamer_id=streamer_id,
+                           reason="granted" if enabled else "revoked")
+        return {"creator_id": streamer_id, "soundboard_enabled": enabled, "changed": changed}
+
     async def list_users(self, *, query: str | None, role: str | None, active: bool | None,
                          limit: int, offset: int) -> dict:
         if role is not None and role not in ROLES:

@@ -9,7 +9,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.storage.memory import InMemoryObjectStore, StoredObject
-from tests.integration import ORIGIN, csrf_headers, db, make_streamer, make_user, new_browser, owned_creator, requires_db
+from tests.integration import (
+    ORIGIN,
+    accept_soundboard_terms,
+    csrf_headers,
+    db,
+    make_streamer,
+    make_user,
+    new_browser,
+    owned_creator,
+    requires_db,
+)
 from tests.soundboard import mp3_builder as m
 from tests.uploads.test_media import GIF, JPEG, MP4, PNG
 
@@ -49,7 +59,11 @@ def platform(n: int = 3, locked: tuple = (), plain: tuple = ()) -> list[str]:
 
 
 def creator(app, slug: str, enabled: bool = True) -> tuple[str, dict]:
-    return owned_creator(app, slug, email=f"{slug}{next(_n)}@authtest.invalid", soundboard_enabled=enabled)
+    """A signed-in owner's creator; enabled = eligible AND the owner accepted the current terms (D3)."""
+    sid, h = owned_creator(app, slug, email=f"{slug}{next(_n)}@authtest.invalid", soundboard_enabled=enabled)
+    if enabled:
+        accept_soundboard_terms(sid)
+    return sid, h
 
 
 def browser(app, role: str = "streamer", **user) -> tuple:
@@ -68,6 +82,7 @@ def other_creator(app, slug: str) -> tuple:
     sid = make_streamer(slug, user_id=uid)
     with db() as conn:
         conn.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (sid,))
+    accept_soundboard_terms(sid)
     return b, h
 
 
@@ -148,10 +163,13 @@ def test_every_route_needs_a_signed_in_user_with_access(sb):
         assert (r.status_code, r.json()) == (403, {"error": "Forbidden"}), (method, path)
     assert board(sb, "authtest-sb-acl", linked)["active"] and board(sb, "authtest-sb-acl", admin)["active"]
     assert call(linked, "POST", "authtest-sb-acl", "/restore-defaults", None, lh).status_code == 200
-    make_streamer("authtest-sb-unclaimed")
+    unclaimed = make_streamer("authtest-sb-unclaimed")
     with db() as conn:
         conn.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE streamer_slug = 'authtest-sb-unclaimed'")
     assert call(linked, "GET", "authtest-sb-unclaimed", "", None).status_code == 403
+    r = call(admin, "GET", "authtest-sb-unclaimed", "", None)  # no owner, so nobody has accepted the terms (D3)
+    assert (r.status_code, r.json()["error"]) == (403, "Accept the current Custom Soundboard terms first")
+    accept_soundboard_terms(unclaimed)
     assert board(sb, "authtest-sb-unclaimed", admin)["active"]
     assert sb.get(f"{S}/authtest-sb-nobody/soundboard").status_code == 404
 

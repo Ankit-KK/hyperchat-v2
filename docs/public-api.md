@@ -17,7 +17,8 @@ browser-origin allowlist; requests without an `Origin` header (OBS browser sourc
 
 Errors: `404 {"error": "Streamer not found"}` for unknown, malformed, `pending` and `rejected` slugs
 (identical, so the endpoints cannot be used to discover creators); `404 {"error": "Soundboard not
-enabled"}`; `400 {"error": "Unsupported currency"}`; `429 {"error": "Too many requests"}` from Nginx.
+enabled"}` (the Custom Soundboard is served only while the creator is eligible **and** its owner accepted the
+current terms, D3; the profile's `soundboard_enabled` means exactly that); `400 {"error": "Unsupported currency"}`; `429 {"error": "Too many requests"}` from Nginx.
 
 Rate limiting: Nginx, per client IP, 10 requests/s with bursts of 20 on `/api/v1/public/` and
 `/api/v1/metrics/` (`deploy/nginx/snippets/`); verified by `tests/e2e/nginx_ratelimit_check.sh`.

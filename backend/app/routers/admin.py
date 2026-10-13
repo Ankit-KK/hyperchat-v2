@@ -6,7 +6,7 @@ Invites are still created with POST /api/v1/auth/invites (with streamer_id to gi
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
 from app.admin.service import AdminService
 from app.auth.dependencies import CurrentUser, require_admin
@@ -29,6 +29,11 @@ class CreatorCreate(BaseModel):
     razorpay_account: Literal["primary", "secondary"]  # required: no default account for new creators (D12)
     brand_color: StrictStr | None = Field(default=None, max_length=7)
     order_prefix: StrictStr | None = Field(default=None, max_length=14)
+
+
+class SoundboardEligibility(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
 
 
 class OwnerAssign(BaseModel):
@@ -76,6 +81,13 @@ async def create_creator(body: CreatorCreate, request: Request, current: Current
 async def assign_creator_owner(streamer_id: str, body: OwnerAssign, request: Request,
                                current: CurrentUser = Depends(require_admin)) -> dict:
     return await admin_service(request).assign_creator_owner(current.user, streamer_id, body.user_id)
+
+
+@router.put("/creators/{streamer_id}/soundboard")
+async def set_creator_soundboard(streamer_id: str, body: SoundboardEligibility, request: Request,
+                                 current: CurrentUser = Depends(require_admin)) -> dict:
+    """Custom Soundboard eligibility only (D3); the owner must still accept the current terms."""
+    return await admin_service(request).set_soundboard_eligibility(current.user, streamer_id, body.enabled)
 
 
 @router.get("/invites")

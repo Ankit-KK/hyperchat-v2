@@ -1,13 +1,16 @@
 # Custom Soundboard terms (D3)
 
-Owner decision, 2026-10-13: **keep the Custom Soundboard terms gate.** A creator must be eligible (granted by an admin)
-**and** have accepted the current version of these terms before using the Custom Soundboard. Backend work: checklist
-DASH-11.
+Owner decisions, 2026-10-13: **keep the Custom Soundboard terms gate.** Implemented as checklist DASH-11
+(`backend/app/soundboard/terms.py`; API in [`soundboard-api.md`](soundboard-api.md)).
 
-**Version string: not assigned yet.** Legacy creators accepted `soundboard-2026-07-14` (the legacy frontend's
-`SOUNDBOARD_TERMS_VERSION`; the table default `soundboard-2026-07-13` is older). The text below is reworded from the
-legacy text. The owner decides whether it is a new version (every creator must accept again) or the same terms
-(`soundboard-2026-07-14` stays current).
+- **Current version: `soundboard-2026-10-13`** (owned by the server; the accept request must name it exactly).
+- **Rule:** a creator may use the Custom Soundboard only when (1) it is eligible (an admin granted it), (2) its
+  **owner** accepted `soundboard-2026-10-13`, and (3) that acceptance is not revoked. Eligibility and acceptance are
+  separate controls: granting eligibility never accepts, revoking it never deletes acceptances.
+- **Who accepts:** the creator owner only. Linked/moderator accounts cannot, and an admin cannot on the owner's behalf.
+- **Older acceptances do not count.** Legacy creators accepted `soundboard-2026-07-14` (the table default
+  `soundboard-2026-07-13` is older); those rows are kept as history, and every currently enabled creator must accept
+  `soundboard-2026-10-13` before the Custom Soundboard works again.
 
 ---
 
