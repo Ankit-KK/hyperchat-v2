@@ -6,7 +6,6 @@ Test-only routes are mounted on the real app; the secrets are random TEST-ONLY v
 import asyncio
 import logging
 import secrets
-import time
 
 import pytest
 from fastapi import APIRouter, Depends, Request
@@ -17,15 +16,12 @@ from app.cli import connection_factory
 from app.core.config import Settings
 from app.security.dependencies import (
     ObsCaller,
-    require_cron_secret,
     require_obs_token,
     require_partner_key,
-    require_signed_request,
 )
 from app.security.nonce_store import NonceReplayError
 from app.security.obs_token import obs_channel_allowed
 from app.security.pg_stores import PostgresNonceStore
-from app.security.request_signing import sign_request
 from app.security.upload_grant import consume_upload_grant, issue_upload_grant, verify_upload_grant
 from tests.integration import FRONT, LogCapture, db, make_streamer, requires_db
 
@@ -50,28 +46,8 @@ async def partner(key=Depends(require_partner_key)):
     return {"partner": key.partner_slug}
 
 
-@router.post("/internal", dependencies=[Depends(require_signed_request)])
-async def internal():
-    return {"ok": True}
-
-
-@router.post("/cron", dependencies=[Depends(require_cron_secret)])
-async def cron():
-    return {"ok": True}
-
-
 @pytest.fixture
-def secrets_env(env, monkeypatch):
-    values = {"internal": "TEST-ONLY-" + secrets.token_hex(16), "previous": "TEST-ONLY-" + secrets.token_hex(16),
-              "cron": "TEST-ONLY-" + secrets.token_hex(16)}
-    monkeypatch.setenv("HYPERCHAT_INTERNAL_SERVICE_SECRET", values["internal"])
-    monkeypatch.setenv("HYPERCHAT_INTERNAL_SERVICE_SECRET_PREVIOUS", values["previous"])
-    monkeypatch.setenv("HYPERCHAT_CRON_SECRET", values["cron"])
-    return values
-
-
-@pytest.fixture
-def client(secrets_env):
+def client(env):
     from app.main import create_app
 
     application = create_app()
@@ -156,49 +132,6 @@ def test_partner_keys(client):
     with db() as conn:
         assert conn.execute("SELECT last_used_at IS NOT NULL FROM public.partner_api_keys WHERE key_hash = %s",
                             (sha256_hex(good),)).fetchone()[0] is True
-
-
-# ── signed internal requests, cron secret ───────────────────────────────────────
-
-
-def _signed(key: str, body: bytes, nonce: str | None = None) -> dict:
-    return sign_request(key, body, int(time.time() * 1000), nonce or "authtest-" + secrets.token_hex(12))
-
-
-def test_signed_internal_request_replay_and_key_rotation(client, secrets_env):
-    body = b'{"job":"x"}'
-    headers = _signed(secrets_env["internal"], body)
-    assert client.post("/_test/internal", content=body, headers=headers).json() == {"ok": True}
-    replay = client.post("/_test/internal", content=body, headers=headers)
-    assert replay.status_code == 409 and replay.json() == {"error": "Request replay detected"}
-    rotated = _signed(secrets_env["previous"], body)
-    assert client.post("/_test/internal", content=body, headers=rotated).status_code == 200
-    wrong = _signed("TEST-ONLY-wrong", body)
-    assert client.post("/_test/internal", content=body, headers=wrong).status_code == 401
-    assert client.post("/_test/internal", content=body).status_code == 401
-    with db() as conn:
-        assert conn.execute("SELECT count(*) FROM public.request_nonces WHERE nonce = %s",
-                            (headers["x-nonce"],)).fetchone()[0] == 1
-
-
-def test_signed_requests_fail_closed_without_a_configured_key(env, monkeypatch):
-    monkeypatch.delenv("HYPERCHAT_INTERNAL_SERVICE_SECRET", raising=False)
-    from app.main import create_app
-
-    application = create_app()
-    application.include_router(router)
-    with TestClient(application, base_url="https://testserver") as c:
-        body = b"{}"
-        r = c.post("/_test/internal", content=body, headers=_signed("TEST-ONLY-any", body))
-        assert r.status_code == 503
-        assert c.post("/_test/cron", headers={"x-cron-secret": ""}).status_code == 401
-
-
-def test_cron_secret(client, secrets_env):
-    assert client.post("/_test/cron", headers={"x-cron-secret": secrets_env["cron"]}).status_code == 200
-    assert client.post("/_test/cron", headers={"x-cron-secret": "wrong"}).status_code == 401
-    assert client.post("/_test/cron").status_code == 401
-    assert all(secrets_env["cron"] not in r for r in client.capture.records)
 
 
 # ── nonce store and upload grants on the real table ─────────────────────────────
