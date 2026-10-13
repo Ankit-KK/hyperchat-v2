@@ -68,8 +68,8 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
   or be linked to it (`users.streamer_id`). Creator-scoped routes use
   `Depends(require_streamer_access)` with a `{streamer}` path parameter (UUID or slug).
 - Non-browser callers use `app.security.dependencies`: `require_obs_token` (hashed OBS tokens,
-  frontend Origin or none), `require_partner_key`, `require_signed_request` (HMAC + single-use
-  nonce, previous key accepted during rotation), `require_cron_secret`.
+  frontend Origin or none) and `require_partner_key` (ClipWave partner API, x-api-key; see
+  `docs/partner-api.md`).
 
 | Endpoint | Purpose |
 |---|---|

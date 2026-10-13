@@ -699,6 +699,53 @@ try:
                    headers={"x-razorpay-signature": "0" * 64, "content-type": "application/json"}, timeout=15)
     check(S, "webhook with a bad signature refused", 400 <= r.status_code < 500, f"{r.status_code} {r.text[:120]}")
 
+    # ── partner API (D4, ClipWave): a synthetic DEV-only key; the real ClipWave keys are never read ──
+    S = "partner"
+    PARTNER = TAG + "-partner"  # "authtest-..." so the cleanup removes it, its signups and its rate-limit rows
+    probe = httpx.post(API + "/api/v1/partner/streamers/check", json={"channel_name": slug_a}, timeout=15)
+    if probe.status_code == 404:  # the deployed release predates D4
+        blocked(S, "ClipWave partner API (D4)", "not deployed on DEV yet; needs an approved DEV deploy")
+    else:
+        pkey = f"hc_{PARTNER}_{secrets.token_hex(32)}"
+        secrets_seen.append(pkey)
+        with db() as c:
+            c.execute("INSERT INTO public.partner_api_keys (partner_slug, key_hash, key_prefix) VALUES (%s, %s, %s)",
+                      (PARTNER, sha256_hex(pkey), pkey[:12]))
+        good = {"x-api-key": pkey}
+        check_url, signup_url = API + "/api/v1/partner/streamers/check", API + "/api/v1/partner/signups"
+        check(S, "D4 missing API key -> 401", probe.status_code == 401
+              and probe.json() == {"error": "Invalid or missing API key"}, probe.text)
+        r = httpx.post(check_url, json={"channel_name": slug_a}, headers={"x-api-key": "hc_x_" + "0" * 64}, timeout=15)
+        check(S, "D4 unknown API key -> 401", r.status_code == 401, r.text)
+        r = httpx.post(check_url, json={"channel_name": slug_a.upper()}, headers=good, timeout=15)
+        check(S, "D4 creator check: existing synthetic creator -> exists, nothing else",
+              r.status_code == 200 and r.json() == {"success": True, "exists": True,
+                                                    "message": "This creator is already registered on HyperChat."},
+              r.text)
+        r = httpx.post(check_url, json={"channel_name": TAG + "zz-missing"}, headers=good, timeout=15)
+        check(S, "D4 creator check: missing creator -> not exists", r.status_code == 200
+              and r.json().get("exists") is False, r.text)
+        signup = {"channel_name": "Smoke Partner Creator", "mobile_number": "9000000000",
+                  "youtube_channel": "https://youtube.com/@smoke-partner", "email": f"{TAG}-partner{DOMAIN}"}
+        r = httpx.post(signup_url, json={**signup, "partner_slug": "clipwave"}, headers=good, timeout=15)
+        check(S, "D4 partner_slug cannot be supplied (spoofing refused)", r.status_code == 400
+              and "partner_slug" in r.json().get("fields", {}), r.text)
+        r = httpx.post(signup_url, json=signup, headers={**good, "user-agent": "hyperchat-smoke"}, timeout=15)
+        check(S, "D4 signup recorded -> 201", r.status_code == 201 and r.json().get("success") is True, r.text)
+        r = httpx.post(signup_url, json={**signup, "email": signup["email"].upper()}, headers=good, timeout=15)
+        check(S, "D4 duplicate signup -> 200 duplicate", r.status_code == 200 and r.json().get("duplicate") is True,
+              r.text)
+        with db() as c:
+            rows = c.execute("SELECT partner_slug, count(*) FROM public.partner_signups WHERE email = %s "
+                             "GROUP BY partner_slug", (signup["email"],)).fetchall()
+            users = c.execute("SELECT count(*) FROM public.users WHERE email::text = %s",
+                              (signup["email"],)).fetchone()[0]
+            c.execute("UPDATE public.partner_api_keys SET revoked = true WHERE key_hash = %s", (sha256_hex(pkey),))
+        check(S, "D4 one signup stored under the key's partner; no user created", rows == [(PARTNER, 1)]
+              and users == 0, str(rows))
+        r = httpx.post(check_url, json={"channel_name": slug_a}, headers=good, timeout=15)
+        check(S, "D4 revoked key -> 401", r.status_code == 401, r.text)
+
     # ── bots: disabled ──────────────────────────────────────────────────────
     S = "bots"
     for hook in ("telegram", "discord"):
@@ -733,6 +780,9 @@ finally:
                   "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%')")
         c.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'")  # cascades its rows
         c.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions, tokens
+        c.execute("DELETE FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'")
+        c.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'")
+        c.execute("DELETE FROM public.rate_limits WHERE ip_address LIKE 'partner:authtest-%%'")
         c.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%' OR endpoint LIKE 'admin:%%' "
                   "OR endpoint LIKE 'signup:%%' OR endpoint LIKE 'upload:%%' OR endpoint LIKE 'obs:%%' "
                   "OR endpoint LIKE 'realtime:%%' OR endpoint LIKE 'payment:%%' OR endpoint LIKE 'transcription:%%'")
@@ -751,10 +801,14 @@ finally:
                      WHERE s.id IS NULL),
                    (SELECT count(*) FROM public.jobs j LEFT JOIN public.donations d ON d.id::text = j.dedupe_key
                      WHERE j.kind = 'donation_audio' AND d.id IS NULL AND j.created_at > %(t)s),
-                   (SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_slug LIKE 'authtest-%%')
+                   (SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_slug LIKE 'authtest-%%'),
+                   (SELECT count(*) FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'),
+                   (SELECT count(*) FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'
+                     OR email LIKE %(d)s)
         """, {"d": "%" + DOMAIN, "t": STARTED}).fetchone()
     labels = ("users", "sessions", "reset tokens (all)", "invites", "signups", "creators", "donations", "moderators",
-              "bans", "orphan OBS tokens", "jobs", "soundboard terms acceptances")
+              "bans", "orphan OBS tokens", "jobs", "soundboard terms acceptances",
+              "partner keys", "partner signups")
     print("cleanup left: " + ", ".join(f"{k}={v}" for k, v in zip(labels, left)), flush=True)
     check("cleanup", "no synthetic row left", all(v == 0 for v in left), str(dict(zip(labels, left))))
 

@@ -1,5 +1,5 @@
-"""Server-to-server security building blocks: HMAC signing, nonces, upload grants, OBS tokens,
-shared secrets / partner keys, CORS and log hygiene. All secrets here are TEST-ONLY values."""
+"""Server-to-server security building blocks: nonces, upload grants, OBS tokens,
+partner keys, CORS and log hygiene. All secrets here are TEST-ONLY values."""
 
 import json
 import logging
@@ -21,8 +21,7 @@ from app.security.obs_token import (
     obs_channel_allowed,
     validate_obs_token,
 )
-from app.security.request_signing import sign_request, verify_hmac_request
-from app.security.shared_secret import ERR_PARTNER_KEY, PartnerKey, verify_partner_api_key, verify_shared_secret
+from app.security.shared_secret import ERR_PARTNER_KEY, PartnerKey, verify_partner_api_key
 from app.security.upload_grant import (
     UploadGrantNotConfigured,
     consume_upload_grant,
@@ -30,63 +29,8 @@ from app.security.upload_grant import (
     verify_upload_grant,
 )
 
-KEY = "TEST-ONLY-hmac-key"
 GRANT_SECRET = "TEST-ONLY-grant-secret"
-BODY = b'{"event":"x"}'
 NOW = 1_800_000_000_000
-
-
-# ── HMAC server-to-server signing ───────────────────────────────────────────────
-
-
-@pytest.mark.anyio
-async def test_signed_request_accepted_once_then_replay_rejected():
-    store = InMemoryNonceStore()
-    headers = sign_request(KEY, BODY, NOW, "n" * 32)
-    assert (await verify_hmac_request(headers, BODY, [KEY], store, now_ms=NOW)).ok
-    replay = await verify_hmac_request(headers, BODY, [KEY], store, now_ms=NOW)
-    assert (replay.ok, replay.status, replay.reason) == (False, 409, "replay")
-
-
-@pytest.mark.anyio
-async def test_key_rotation_accepts_any_configured_key():
-    headers = sign_request("TEST-ONLY-old-key", BODY, NOW, "r" * 32)
-    assert (await verify_hmac_request(headers, BODY, [KEY, "TEST-ONLY-old-key"], InMemoryNonceStore(), now_ms=NOW)).ok
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("mutate, reason", [
-    (lambda h: h.pop("x-signature"), "missing_signature"),
-    (lambda h: h.pop("x-nonce"), "missing_signature"),
-    (lambda h: h.update({"x-timestamp": "12ab"}), "invalid_timestamp"),
-    (lambda h: h.update({"x-timestamp": str(NOW - 5 * 60 * 1000 - 1)}), "timestamp_skew"),
-    (lambda h: h.update({"x-nonce": "short"}), "invalid_nonce"),
-    (lambda h: h.update({"x-signature": "0" * 64}), "bad_signature"),
-])
-async def test_bad_signatures_rejected(mutate, reason):
-    headers = sign_request(KEY, BODY, NOW, "m" * 32)
-    mutate(headers)
-    result = await verify_hmac_request(headers, BODY, [KEY], InMemoryNonceStore(), now_ms=NOW)
-    assert (result.ok, result.status, result.reason) == (False, 401, reason)
-
-
-@pytest.mark.anyio
-async def test_tampered_body_and_wrong_key_rejected():
-    headers = sign_request(KEY, BODY, NOW, "t" * 32)
-    assert (await verify_hmac_request(headers, b'{"event":"y"}', [KEY], InMemoryNonceStore(), now_ms=NOW)).reason \
-        == "bad_signature"
-    assert (await verify_hmac_request(headers, BODY, ["TEST-ONLY-other"], InMemoryNonceStore(), now_ms=NOW)).reason \
-        == "bad_signature"
-
-
-@pytest.mark.anyio
-async def test_unconfigured_key_and_store_failure_fail_closed():
-    headers = sign_request(KEY, BODY, NOW, "u" * 32)
-    assert (await verify_hmac_request(headers, BODY, [], InMemoryNonceStore(), now_ms=NOW)).status == 503
-    store = InMemoryNonceStore()
-    store.fail_with = RuntimeError("db down")
-    result = await verify_hmac_request(headers, BODY, [KEY], store, now_ms=NOW)
-    assert (result.ok, result.status) == (False, 500)
 
 
 # ── upload grants ───────────────────────────────────────────────────────────────
@@ -187,13 +131,6 @@ async def test_obs_channel_scope_default_and_override():
 
 
 # ── shared secrets / partner keys ───────────────────────────────────────────────
-
-
-def test_shared_secret_fails_closed():
-    assert verify_shared_secret("TEST-ONLY-s3cret", "TEST-ONLY-s3cret")
-    assert not verify_shared_secret("wrong", "TEST-ONLY-s3cret")
-    assert not verify_shared_secret(None, "TEST-ONLY-s3cret")
-    assert not verify_shared_secret("", "") and not verify_shared_secret("anything", None)
 
 
 class FakePartnerKeys:

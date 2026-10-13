@@ -148,6 +148,8 @@ def cleanup_synthetic_rows() -> None:
                      (SLUG_PREFIX + "%", "hypersounds/" + SLUG_PREFIX + "%"))
         conn.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions
         conn.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
+        conn.execute("DELETE FROM public.partner_signups WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
+        conn.execute("DELETE FROM public.rate_limits WHERE ip_address LIKE %s", ("partner:" + SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.request_nonces WHERE nonce LIKE %s OR nonce LIKE %s",
                      (SLUG_PREFIX + "%", "upload:" + SLUG_PREFIX + "%"))
         conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%' OR endpoint LIKE 'admin:%' "

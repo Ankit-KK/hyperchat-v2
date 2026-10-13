@@ -1,9 +1,7 @@
 """FastAPI dependencies for non-browser callers.
 
   require_obs_token       OBS overlays: token (header x-obs-token or ?token=), frontend Origin or none
-  require_partner_key     partners: x-api-key
-  require_signed_request  internal services / workers: HMAC signature + single-use nonce
-  require_cron_secret     scheduled jobs: x-cron-secret
+  require_partner_key     partners (ClipWave, D4): x-api-key
 Every rejection is a SecurityError -> {"error": ...} with a secret-free security event.
 """
 
@@ -22,8 +20,7 @@ from app.security.obs_token import (
     own_origin,
     validate_obs_token,
 )
-from app.security.request_signing import verify_hmac_request
-from app.security.shared_secret import PartnerKey, PartnerKeyStore, verify_partner_api_key, verify_shared_secret
+from app.security.shared_secret import PartnerKey, PartnerKeyStore, verify_partner_api_key
 
 
 class SecurityError(Exception):
@@ -60,10 +57,6 @@ def _stores(request: Request) -> SecurityStores:
     return stores
 
 
-def _secret(value) -> str | None:
-    return value.get_secret_value() if value is not None else None
-
-
 async def require_obs_token(request: Request) -> ObsCaller:
     if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.browser_origins,
                                  own_origin(request.headers.get("host"))):
@@ -81,16 +74,3 @@ async def require_partner_key(request: Request) -> PartnerKey:
         raise SecurityError(401, result.error, "bad_partner_key")
     return result.partner
 
-
-async def require_signed_request(request: Request) -> None:
-    settings = request.app.state.settings
-    keys = [k for k in (_secret(settings.internal_service_secret),
-                        _secret(settings.internal_service_secret_previous)) if k]
-    result = await verify_hmac_request(request.headers, await request.body(), keys, _stores(request).nonces)
-    if not result.ok:
-        raise SecurityError(result.status, result.error or "Invalid request signature", result.reason)
-
-
-async def require_cron_secret(request: Request) -> None:
-    if not verify_shared_secret(request.headers.get("x-cron-secret"), _secret(request.app.state.settings.cron_secret)):
-        raise SecurityError(401, "Unauthorized", "bad_cron_secret")

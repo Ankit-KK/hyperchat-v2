@@ -1,20 +1,11 @@
-"""Shared secrets and partner API keys (server-to-server; never used for browsers).
-
-* Internal services / cron jobs present a shared secret header; it is compared in constant time
-  and an unconfigured secret never authorizes (fail closed).
-* Partner API: x-api-key, looked up by SHA-256 in partner_api_keys and rejected when revoked.
-"""
+"""Partner API keys (server-to-server; never used for browsers): x-api-key, looked up by its SHA-256 in
+partner_api_keys and rejected when revoked. Keys are 256-bit random values, so an unsalted SHA-256 is enough and the
+equality lookup on the hash leaks nothing useful about the key."""
 
 from dataclasses import dataclass
 from typing import Protocol
 
-from app.security.crypto import sha256_hex, timing_safe_equal
-
-
-def verify_shared_secret(presented: str | None, expected: str | None) -> bool:
-    if not expected:
-        return False
-    return timing_safe_equal(presented or "", expected)
+from app.security.crypto import sha256_hex
 
 
 @dataclass(frozen=True)
