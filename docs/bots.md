@@ -96,6 +96,6 @@ Both refuse if the configured token belongs to another bot or application, so th
 - editing moderator permissions and self-service linking
 - Discord slash commands; Telegram groups
 - updating every recipient's message after an action
-- payout and admin notifications
+- admin notifications (payouts are out of scope for V2, checklist D2)
 - a dashboard setting for the Discord channel
 - the Discord invite endpoint
