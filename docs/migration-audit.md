@@ -286,7 +286,7 @@ sanitize, hypeLines, musicCommand, sfxCommand.
 | Logout | auth.signOut | POST /auth/logout (+ logout-all) | logout action | sessions |
 | Password reset | resetPasswordForEmail, updateUser | /auth/password/forgot + /reset, Resend | forgot + reset pages | password_reset_tokens |
 | Invite-only accounts | manual Supabase dashboard + SQL | admin invite + accept flow | admin users page, accept page | auth_users, streamers.user_id |
-| Admin email change | admin-update-email | PATCH /admin/users/{id} | admin UI | auth_users |
+| Admin email change | admin-update-email | PUT /admin/users/{id}/email (D11) | admin UI | users |
 | Terms gate | terms-acceptance + RPCs | /dashboard/.../terms | gate component | terms_acceptances + RPCs |
 | Creator picker | get-user-streamers | GET /me/streamers | dashboard home | streamers, auth_users |
 | Creator settings | get-streamer-for-owner, update-streamer-settings | GET/PATCH /dashboard/streamers/{slug}/settings | settings forms | streamers |

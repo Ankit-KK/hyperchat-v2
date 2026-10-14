@@ -77,6 +77,7 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 | `GET /api/v1/streamers/{streamer}/access` | may the user open this creator's dashboard (`admin` / `owner` / `linked`) |
 | `GET /api/v1/admin/users` | search users (`q`, `role`, `active`, paging); never returns hashes |
 | `PATCH /api/v1/admin/users/{id}` | change `role`, `is_active`, `streamer_id`; revokes that user's sessions |
+| `PUT /api/v1/admin/users/{id}/email` | D11 admin recovery / correction of a user's email (not self-service): stored lowercase and **unverified**; revokes every session, burns open reset links and removes linked Google identities, atomically; `{user, changed, sessions_revoked, reset_tokens_burned, identities_removed}`; same address (any case) = `changed: false`, nothing touched; 403 own email, 409 address in use / pending invite / last sign-in admin; sends no email; audited (`user_email_changed`, never an address) |
 | `POST /api/v1/admin/users/{id}/sessions/revoke` | sign a user out everywhere |
 | `GET /api/v1/admin/invites`, `POST /api/v1/admin/invites/{id}/revoke` | list / revoke invites |
 | `POST /api/v1/admin/creators` | onboard a creator: validated unique slug (reserved site paths refused), name, an explicit **configured** Razorpay account (no default, D12), optional `brand_color` / `order_prefix`; legacy launch defaults; least-loaded configured Pusher group; unclaimed |

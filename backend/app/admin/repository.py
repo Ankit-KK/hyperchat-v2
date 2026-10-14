@@ -197,6 +197,45 @@ class AdminRepository:
             revoked = await self._revoke_sessions(cur, user_id)  # users -> reset tokens -> sessions (lock order)
             return await self._fetch_user(cur, user_id), changed, revoked
 
+    async def change_email(self, user_id: str, email: str) -> tuple[str, dict | None, dict]:
+        """D11: correct a user's email (admin recovery). One transaction under the user-row lock: the new address
+        becomes unverified, open reset links are burned, linked Google identities are removed (they may belong to the
+        old address's holder; the rightful owner re-links by verified email) and every session is revoked. Nothing is
+        written unless all of it is. `email` is already normalized. Returns ("ok" | "unchanged" | "not_found" |
+        "email_taken" | "invite_pending", the user, the counts). Raises LastAdminError when removing the identities
+        would leave no active admin who can sign in. The unique constraint decides races for one address. Lock order
+        as update_user: users -> reset tokens / identities -> sessions."""
+        try:
+            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT u.role, u.is_active, u.password_hash IS NOT NULL AS has_password, "
+                                  "u.email = %s AS same FROM public.users u WHERE u.id = %s FOR UPDATE",
+                                  (email, user_id))
+                current = await cur.fetchone()
+                if current is None:
+                    return "not_found", None, {}
+                if current["same"]:  # citext: equal ignoring case
+                    return "unchanged", await self._fetch_user(cur, user_id), {}
+                await cur.execute("SELECT 1 FROM public.user_invites WHERE email = %s AND accepted_at IS NULL "
+                                  "AND revoked_at IS NULL AND expires_at > now()", (email,))
+                if await cur.fetchone():  # accepting it would upsert onto this account by email
+                    return "invite_pending", None, {}
+                await cur.execute("SELECT count(*) AS n FROM public.user_identities WHERE user_id = %s", (user_id,))
+                identities = (await cur.fetchone())["n"]
+                if (identities and current["role"] == "admin" and current["is_active"]
+                        and not current["has_password"]):  # Google was this admin's only way in
+                    await cur.execute(_SIGN_IN_ADMINS)
+                    if not [r for r in await cur.fetchall() if r["id"] != user_id]:
+                        raise LastAdminError()
+                await cur.execute("UPDATE public.users SET email = %s, email_verified_at = NULL WHERE id = %s",
+                                  (email, user_id))
+                burned = await burn_reset_tokens(cur, user_id)
+                await cur.execute("DELETE FROM public.user_identities WHERE user_id = %s", (user_id,))
+                revoked = await self._revoke_sessions(cur, user_id)
+                return "ok", await self._fetch_user(cur, user_id), {
+                    "sessions_revoked": revoked, "reset_tokens_burned": burned, "identities_removed": identities}
+        except pg_errors.UniqueViolation:
+            return "email_taken", None, {}
+
     async def revoke_sessions(self, user_id: str) -> int:
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             return await self._revoke_sessions(cur, user_id)
