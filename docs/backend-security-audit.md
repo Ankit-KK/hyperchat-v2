@@ -25,7 +25,7 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P2** (found in the local GoTrue rehearsal) | **1** | F14 (row-level security silently filtered the D1 source; merged in #47, `2c4b58b`; not deployed) |
 | **P2** (found in the review of #48) | **1** | F15 (D1 import recovery could mislead the operator; merged in #49, `2c3efc7`; not deployed) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
-| Tracked owner decisions / approvals | 8 | D9, D14, D15, D4 / SEC-L1, SEC-L2, PAY-11 (open); D1 (policy approved 2026-10-12, execution pending); F12-R (accepted residual risk) |
+| Tracked owner decisions / approvals | 8 | D9, D14, D15, D4 / SEC-L1, SEC-L2 (open), PAY-11 (verified on DEV 2026-10-14); D1 (policy approved 2026-10-12, execution pending); F12-R (accepted residual risk) |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
 
 No route lacks authentication where it needs it, no cross-creator access path was found, and payment completion
@@ -616,7 +616,7 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 | D14 | Repeated signup email: identical answer (current) or legacy message | recommendation: keep; awaiting owner |
 | D15 | Legacy Media Source URLs on `*.supabase.co` | recommendation in `docs/obs-cutover.md`; awaiting owner |
 | SEC-L2 | `RazorpayClient.fetch_order` (unused) | delete or keep; awaiting owner |
-| PAY-11 | Stale smoke assertions | needs approval for a live DEV smoke run |
+| PAY-11 | Stale smoke assertions | verified on DEV 2026-10-14 (Phase 6 29/29, Phase 7 30/30) |
 | D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | awaiting owner |
 | D9 | Media access model | awaiting owner |
 | D1 | Migrated-user credentials | **policy approved 2026-10-12**: import eligible Supabase bcrypt hashes at the production cutover with the existing importer and its safeguards; no real hashes in DEV without separate approval; excluded users recover by reset or Google only where configured and live-verified; legacy confirmation fields not mapped to `email_verified_at`. Policy only: no import, data access, external service, deployment or cutover authorized. Exclusion policy and password-change cutoff procedure approved 2026-10-12 (policy only); account-specific conflict resolution and the scheduled maintenance time remain pending. Actual cutover still requires separate explicit approval |
