@@ -31,10 +31,11 @@ _USER_COLS = ("id::text, email::text, username, role, streamer_id::text, is_acti
               "failed_login_attempts, locked_until")
 
 
-async def burn_reset_tokens(cur, user_id: str) -> None:
-    """Invalidate every open password-reset link of the user (inside the caller's transaction)."""
+async def burn_reset_tokens(cur, user_id: str) -> int:
+    """Invalidate every open password-reset link of the user (inside the caller's transaction); returns how many."""
     await cur.execute("UPDATE public.password_reset_tokens SET used_at = now() WHERE user_id = %s AND used_at IS NULL",
                       (user_id,))
+    return cur.rowcount
 
 
 async def revoke_sessions(cur, user_id: str, except_session_id: str | None = None) -> int:

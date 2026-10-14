@@ -793,6 +793,70 @@ try:
         blocked(S, "D7 admin health result and CLI probe",
                 "BLOCKED_BY_APPROVAL: both call Razorpay (GET /payments?count=1, test mode on DEV)")
 
+    # ── admin email correction (D11): synthetic users only, no email sent ───
+    S = "admin-email"
+    anon = httpx.put(f"{API}/api/v1/admin/users/{ids['plain']}/email", json={"email": email("d11x")},
+                     headers=ORIGIN, timeout=15)
+    if anon.status_code in (404, 405):  # the deployed release predates D11
+        blocked(S, "Admin email correction (D11)", "not deployed on DEV yet; needs an approved DEV deploy")
+    else:
+        check(S, "D11 needs a session -> 401", anon.status_code == 401, str(anon.status_code))
+        d11_pw = password()
+        ids["d11"] = make_user("d11old", d11_pw)
+        make_user("d11taken", None)
+        old_reset = secrets.token_urlsafe(32)
+        secrets_seen.append(old_reset)
+        with db() as c:  # verified email, an open reset link, a linked Google identity, a pending invite elsewhere
+            c.execute("UPDATE public.users SET email_verified_at = now() WHERE id = %s", (ids["d11"],))
+            c.execute("INSERT INTO public.password_reset_tokens (user_id, token_hash, expires_at) VALUES "
+                      "(%s, %s, now() + interval '30 minutes')", (ids["d11"], sha256_hex(old_reset)))
+            c.execute("INSERT INTO public.user_identities (user_id, provider, provider_subject) "
+                      "VALUES (%s, 'google', %s)", (ids["d11"], TAG + "-sub"))
+            c.execute("INSERT INTO public.user_invites (email, token_hash, expires_at) VALUES "
+                      "(%s, %s, now() + interval '1 day')", (email("d11inv"), sha256_hex(secrets.token_urlsafe(32))))
+        d11 = Session("d11old", d11_pw)
+        sessions.append(d11)
+        url = f"/api/v1/admin/users/{ids['d11']}/email"
+        r = owner_a.write("PUT", url, json={"email": email("d11new")})
+        check(S, "D11 non-admin -> 403", r.status_code == 403, r.text[:200])
+        r = admin.write("PUT", f"/api/v1/admin/users/{ids['admin']}/email", json={"email": email("d11self")})
+        check(S, "D11 admin changing their own email -> 403", r.status_code == 403, r.text[:200])
+        r = admin.write("PUT", url, json={"email": email("d11taken").upper()})
+        check(S, "D11 address of another account (any case) -> 409", r.status_code == 409, r.text[:200])
+        r = admin.write("PUT", url, json={"email": email("d11inv")})
+        check(S, "D11 address with a pending invite -> 409", r.status_code == 409, r.text[:200])
+        r = admin.write("PUT", url, json={"email": email("d11new"), "role": "admin"})
+        check(S, "D11 unknown body field -> 422", r.status_code == 422, r.text[:200])
+        check(S, "D11 refusals changed nothing (old session still valid)",
+              d11.get("/api/v1/auth/session").status_code == 200)
+        r = admin.write("PUT", url, json={"email": "  " + email("d11new").upper() + " "})
+        body = r.json() if r.status_code == 200 else {}
+        check(S, "D11 change -> 200 with counts (1 session, 1 reset link, 1 Google link)",
+              body.get("changed") is True and body.get("user", {}).get("email") == email("d11new")
+              and (body.get("sessions_revoked"), body.get("reset_tokens_burned"), body.get("identities_removed"))
+              == (1, 1, 1), r.text[:300])
+        with db() as c:
+            row = c.execute("SELECT email::text, email_verified_at IS NULL, (SELECT count(*) FROM "
+                            "public.user_identities WHERE user_id = %s) FROM public.users WHERE id = %s",
+                            (ids["d11"], ids["d11"])).fetchone()
+        check(S, "D11 stored lowercase, unverified, Google link removed", row == (email("d11new"), True, 0), str(row))
+        check(S, "D11 the old session is revoked", d11.get("/api/v1/auth/session").status_code == 401)
+        r = httpx.post(API + "/api/v1/auth/password/reset", json={"token": old_reset, "new_password": "Taken-Pass-42"},
+                       timeout=15)
+        check(S, "D11 the old reset link is dead", r.status_code == 400, r.text[:200])
+        reset_login_counters()
+        r = httpx.post(API + "/api/v1/auth/login", json={"email": email("d11old"), "password": d11_pw},
+                       headers=ORIGIN, timeout=15)
+        check(S, "D11 the old email no longer signs in", r.status_code == 401, r.text[:200])
+        d11_new = Session("d11new", d11_pw)
+        sessions.append(d11_new)
+        check(S, "D11 the new email signs in with the unchanged password", d11_new.status == 200, str(d11_new.status))
+        r = admin.write("PUT", url, json={"email": email("d11new").upper()})
+        check(S, "D11 same address ignoring case -> 200 changed:false, nothing revoked",
+              r.status_code == 200 and r.json().get("changed") is False and r.json().get("sessions_revoked") == 0
+              and d11_new.get("/api/v1/auth/session").status_code == 200, r.text[:200])
+        reset_login_counters()
+
     # ── bots: disabled ──────────────────────────────────────────────────────
     S = "bots"
     for hook in ("telegram", "discord"):

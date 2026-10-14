@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
 from app.admin.service import AdminService
-from app.auth.dependencies import CurrentUser, require_admin
+from app.auth.dependencies import CurrentUser, client_ip, require_admin
 from app.auth.service import AuthError
 from app.payments.accounts import health_report
 from app.security.audit import security_event
@@ -36,6 +36,11 @@ class CreatorCreate(BaseModel):
 class SoundboardEligibility(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: StrictBool
+
+
+class EmailChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: StrictStr = Field(max_length=320)  # at most 254 once trimmed (the service checks)
 
 
 class OwnerAssign(BaseModel):
@@ -67,6 +72,13 @@ async def update_user(user_id: str, body: UserPatch, request: Request,
     if ("role" in changes and changes["role"] is None) or ("is_active" in changes and changes["is_active"] is None):
         raise AuthError(400, "role and is_active cannot be null", "null_field")
     return await admin_service(request).update_user(current.user, user_id, changes)
+
+
+@router.put("/users/{user_id}/email")
+async def change_user_email(user_id: str, body: EmailChange, request: Request,
+                            current: CurrentUser = Depends(require_admin)) -> dict:
+    """D11: correct a user's email (admin recovery). Revokes sessions, burns reset links, removes Google links."""
+    return await admin_service(request).change_email(current.user, user_id, body.email, client_ip(request))
 
 
 @router.post("/users/{user_id}/sessions/revoke")

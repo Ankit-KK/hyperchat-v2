@@ -23,6 +23,7 @@ RESERVED_SLUGS = frozenset({
 })
 ORDER_PREFIX = re.compile(r"[a-z0-9]{1,10}_rp_")  # legacy shape ("sx_rp_"); our order ids stay <= 40 characters
 CREATOR_NAME_MAX = 100
+EMAIL = re.compile(r"[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+")  # one "@", no whitespace or control characters
 
 
 def _uuid_or_404(value: str, what: str) -> str:
@@ -148,6 +149,31 @@ class AdminService:
             security_event("user_updated", level=20, user_id=admin.id, target_user_id=user_id,
                            reason=",".join(changed), count=revoked)
         return {"user": public_admin_user(row), "changed": changed, "sessions_revoked": revoked}
+
+    async def change_email(self, admin: User, user_id: str, email: str, ip: str | None) -> dict:
+        """D11: admin recovery / correction of a user's email (not self-service). Sends no email (D8)."""
+        user_id = _uuid_or_404(user_id, "User")
+        email = email.strip().lower()
+        if len(email) > 254 or not EMAIL.fullmatch(email):
+            raise AuthError(400, "A valid email is required", "bad_email")
+        if user_id == admin.id:
+            raise AuthError(403, "You cannot change your own email", "self_change")
+        try:
+            result, row, counts = await self.repo.change_email(user_id, email)
+        except LastAdminError:
+            raise AuthError(409, "At least one active admin must remain", "last_admin") from None
+        if result == "not_found":
+            raise AuthError(404, "User not found", "user_not_found")
+        if result == "email_taken":
+            raise AuthError(409, "Another account already uses this email", "email_taken")
+        if result == "invite_pending":
+            raise AuthError(409, "A pending invite exists for this email", "invite_pending")
+        changed = result == "ok"
+        if changed:  # ids and counts only, never either address (audit.py)
+            security_event("user_email_changed", level=20, user_id=admin.id, target_user_id=user_id,
+                           count=counts["sessions_revoked"], client_ip=ip)
+        return {"user": public_admin_user(row), "changed": changed, "sessions_revoked": 0, "reset_tokens_burned": 0,
+                "identities_removed": 0, **counts}
 
     async def revoke_sessions(self, admin: User, user_id: str) -> dict:
         user_id = _uuid_or_404(user_id, "User")
