@@ -9,6 +9,17 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PublicContact(_Model):  # D5: the allow-list of public contact fields (from HYPERCHAT_PUBLIC_* settings)
+    name: str | None
+    email: str | None
+    phones: list[str]
+    discord_url: str | None
+
+
+class PublicConfig(_Model):
+    contact: PublicContact
+
+
 class PublicStreamer(_Model):  # E1
     slug: str
     name: str

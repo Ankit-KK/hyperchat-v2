@@ -214,7 +214,7 @@ W = webhook, J = job/internal, CLI = admin script, X = drop.
 | get-current-audio | Pop next audio (claim_next_audio), Pusher event, 302 to R2 | OBS media source | OBS token | E (streamers must update URL) |
 | get-dashboard-donations | Donation list/stats/export | dashboard | SESSION+OWN | E |
 | get-dashboard-stats-looteriya-gaming | Legacy stats (likely broken) | none | raw auth_sessions token | X |
-| get-discord-link | Discord invite URL | signup dialog | none | E (config) |
+| get-discord-link | Discord invite URL | signup dialog | none | E (config): `GET /api/v1/public/config` (D5) |
 | get-goal-progress | Goal progress | overlay + dashboard | optional SESSION+OWN | E |
 | get-leaderboard-data | Top donors / latest feed | overlay | optional OBS token | E |
 | get-moderation-queue | Banned donors + queue | dashboard | SESSION+OWN | E |
@@ -254,7 +254,7 @@ W = webhook, J = job/internal, CLI = admin script, X = drop.
 | soundboard-confirm-upload | HEAD R2 object, validate, write slot | dashboard | SESSION+OWN | E |
 | soundboard-tnc | Soundboard T&C status/accept | dashboard | SESSION+OWN | E |
 | soundboard-upload-url | Presigned R2 PUT (300 s) | dashboard | SESSION+OWN | E |
-| submit-contact | Contact form (table missing) | none | rate limit | X (or rebuild with a table) |
+| submit-contact | Contact form (table missing) | none | rate limit | X: retired (D5); static contact details in `GET /api/v1/public/config` |
 | submit-payout-account | Bank/UPI/PAN, AES-GCM encrypted | dashboard | Origin+CSRF+HMAC+SESSION+OWN | E |
 | telegram-webhook | Bot commands + buttons → moderation | Telegram | none | W (add secret token) |
 | terms-acceptance | Terms gate | dashboard | SESSION(+ADMIN) | E |
@@ -314,7 +314,7 @@ sanitize, hypeLines, musicCommand, sfxCommand.
 | Pusher private auth | pusher-auth, get-pusher-config | /realtime/pusher/auth + config | pusher-js authEndpoint | obs_tokens, streamers |
 | Platform / showcase metrics | get-*-metrics RPCs | /metrics/* | landing page | metric RPCs |
 | Signup interest | browser insert into user_signups | POST /public/signups | signup dialog | user_signups |
-| Discord invite | get-discord-link | config endpoint | signup dialog | — |
+| Discord invite | get-discord-link | GET /public/config (D5) | signup dialog | — |
 | Partner API | partner-signup, partner-check-streamer | /partner/* | — | partner_api_keys, partner_signups |
 | Partner key admin | generate-partner-key | /admin/partners | admin UI | partner_api_keys |
 | Rate limiting | check_rate_limit_v2 / server RPCs | same RPCs or middleware | — | rate_limits |

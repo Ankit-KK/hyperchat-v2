@@ -28,7 +28,8 @@ app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit w
 app/cli.py             operator commands: bootstrap-admin, cleanup, enqueue-donation-audio, bot webhook
                        setup, seed-platform-soundboard, payment-health
 app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*,
-                       /api/v1/public/streamers/*, /api/v1/public/signups, /api/v1/metrics/*,
+                       /api/v1/public/streamers/*, /api/v1/public/signups, /api/v1/public/config (D5),
+                       /api/v1/metrics/*,
                        /api/v1/dashboard/streamers/*,
                        /api/v1/me/terms
 tests/                 unit tests + end-to-end tests against a scratch database
