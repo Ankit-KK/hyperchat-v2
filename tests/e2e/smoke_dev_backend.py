@@ -50,7 +50,7 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-KNOWN_HEADS = ("0017", "0018", "0019")  # 0018 = D6, 0019 = D13 (owner-specific soundboard terms)
+KNOWN_HEADS = ("0017", "0018", "0019", "0020")  # 0018 = D6, 0019 = D13, 0020 = creator lifecycle (KYC PR1)
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
@@ -81,6 +81,14 @@ def db() -> psycopg.Connection:
     return psycopg.connect(DSN, autocommit=True)
 
 
+def fixture_db() -> psycopg.Connection:
+    """Synthetic creators and historical donations are written as the migrator (like the legacy import): the runtime
+    role cannot create legacy-track creators and its only donation insert is checkout (migration 0020)."""
+    conn = psycopg.connect(DSN.replace("user=hyperchat_app", "user=hyperchat_migrator"), autocommit=True)
+    conn.execute("SET ROLE hyperchat_owner")
+    return conn
+
+
 def as_postgres(sql: str) -> str:
     out = subprocess.run(["runuser", "-u", "postgres", "--", "psql", "-X", "-At", "-p", DB_PORT, "-d", DB_NAME,
                           "-c", sql], capture_output=True, text=True, cwd="/")
@@ -107,14 +115,16 @@ def email(name: str) -> str:
 
 
 def make_creator(suffix: str, owner: str | None) -> str:
-    with db() as c:
-        return c.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) VALUES (%s, %s, %s) "
-                         "RETURNING id::text", (TAG + suffix, "Smoke " + suffix.upper(), owner)).fetchone()[0]
+    """An active legacy-track creator, as existing creators are after migration 0020."""
+    with fixture_db() as c:
+        return c.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id, status, kyc_track, "
+                         "kyc_baseline_owner_id) VALUES (%s, %s, %s, 'active', 'legacy', %s) RETURNING id::text",
+                         (TAG + suffix, "Smoke " + suffix.upper(), owner, owner)).fetchone()[0]
 
 
 def make_donation(streamer_id: str, donor: str, amount: int, moderation: str = "pending",
                   message: str | None = "Synthetic smoke message") -> str:
-    with db() as c:
+    with fixture_db() as c:
         return c.execute(
             "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
             "payment_status, moderation_status, message, message_visible) VALUES (%s, %s, %s, %s, 'INR', %s, "
@@ -382,6 +392,23 @@ try:
         check(S, "admin assigns the owner of an unclaimed creator", r.is_success, r.text)
         r = admin.write("POST", f"/api/v1/admin/creators/{ids['c']}/owner", json={"user_id": ids["plain"]})
         check(S, "a claimed creator cannot be re-assigned (D13 default)", r.status_code == 409, r.text)
+    # ── creator lifecycle (KYC PR1, migration 0020): synthetic creators only ──
+    S2 = "creator-lifecycle"
+    if ids["c"] and admin.write("POST", f"/api/v1/admin/creators/{ids['c']}/activate", json={}).status_code == 404:
+        blocked(S2, "Creator lifecycle (KYC PR1)", "not deployed on DEV yet")
+    elif ids["c"]:
+        check(S2, "a new creator is pending and hidden like an unknown one", created.get("status") == "pending"
+              and httpx.get(f"{API}/api/v1/public/streamers/{TAG}c", timeout=15).status_code == 404)
+        r = admin.write("POST", f"/api/v1/admin/creators/{ids['c']}/activate", json={"expected_status": "pending"})
+        check(S2, "activation is refused until the owner's KYC exists (409)", r.status_code == 409, r.text)
+        life = make_creator("life", ids["owner_c"])
+        r = admin.write("POST", f"/api/v1/admin/creators/{life}/suspend", json={"expected_status": "active",
+                                                                                "reason": "smoke"})
+        check(S2, "suspend an existing creator (audited)", r.is_success and r.json()["creator"]["status"] == "suspended")
+        check(S2, "a suspended creator is hidden like an unknown one",
+              httpx.get(f"{API}/api/v1/public/streamers/{TAG}life", timeout=15).status_code == 404)
+        r = admin.write("POST", f"/api/v1/admin/creators/{life}/reactivate", json={"expected_status": "suspended"})
+        check(S2, "reactivate it (eligible again)", r.is_success and r.json()["donation_block"] is None, r.text)
     # deactivation revokes sessions; reactivation restores access
     victim = Session("plain", pw["plain"])
     sessions.append(victim)

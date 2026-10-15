@@ -30,7 +30,7 @@ just before the file is stored. Request a new grant for every upload attempt.
 | 404 | unknown, pending, rejected or malformed creator slug (identical body) |
 | 422 | body missing/invalid |
 | 429 | rate limit |
-| 503 | uploads not configured (grant secret or R2 missing) |
+| 503 | uploads not configured (grant secret or R2 missing); `Donations are temporarily unavailable` (the creator may not accept new donations, migration 0020) |
 
 ## 2. Uploads
 The request body is the raw file; `Content-Type` is the file's type; the grant goes in `x-upload-grant`.

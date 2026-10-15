@@ -20,6 +20,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import psycopg
+
 from app.core.errors import ApiError
 from app.payments import rules
 from app.payments.accounts import HEALTH_TTL_SECONDS, AccountHealth, PaymentAccounts
@@ -36,7 +38,7 @@ from app.payments.razorpay import (
 )
 from app.payments.repository import PaymentRepository, WebhookEvent
 from app.public import pricing
-from app.public.service import PublicService
+from app.public.service import PublicService, donations_unavailable
 from app.security.audit import security_event
 from app.soundboard.library import HypersoundLibrary
 from app.storage.r2 import ObjectStore, StorageError
@@ -46,6 +48,7 @@ log = logging.getLogger("hyperchat.payments")
 ON_HOLD = "Payments for this creator are on hold"
 UNAVAILABLE = "Payment provider unavailable. Please try again."
 NOT_FOUND = "Order not found"
+INELIGIBLE = "HC001"  # SQLSTATE of the donations insert trigger (migration 0020): creator not eligible
 RATE_RULES = {  # per client IP: (bucket, limit, window seconds)
     "checkout": ("payment:checkout", 10, 60),
     "status": ("payment:status", 60, 60),
@@ -85,7 +88,7 @@ class PaymentService:
 
     # ── POST /api/v1/public/streamers/{slug}/donations ──────────────────────
     async def checkout(self, slug: str, body: CheckoutRequest) -> dict:
-        creator = await self.public.active_creator(slug)
+        creator = await self.public.donation_creator(slug)
         try:
             currency = pricing.normalize_currency(body.currency)
         except pricing.UnsupportedCurrency:
@@ -122,12 +125,19 @@ class PaymentService:
                 raise rules.bad_request("This amount or currency cannot be paid", "razorpay_rejected") from None
             raise ApiError(502, UNAVAILABLE, "razorpay_unavailable") from None
         token, token_hash = rules.new_status_token()
-        await self.repo.create_donation({
-            "streamer_id": creator["id"], "order_id": order_id, "provider_order_id": order.id,
-            "payment_account": account.name, "donor_name": name, "amount": amount, "currency": currency,
-            "amount_inr": amount_inr, "message": message, "voice_message_url": attachment.get("voice_message_url"),
-            "hypersound_url": attachment.get("hypersound_url"), "media_url": attachment.get("media_url"),
-            "media_type": attachment.get("media_type"), "status_token_hash": token_hash})
+        try:
+            await self.repo.create_donation({
+                "streamer_id": creator["id"], "order_id": order_id, "provider_order_id": order.id,
+                "payment_account": account.name, "donor_name": name, "amount": amount, "currency": currency,
+                "amount_inr": amount_inr, "message": message, "voice_message_url": attachment.get("voice_message_url"),
+                "hypersound_url": attachment.get("hypersound_url"), "media_url": attachment.get("media_url"),
+                "media_type": attachment.get("media_type"), "status_token_hash": token_hash})
+        except psycopg.Error as exc:
+            if exc.sqlstate != INELIGIBLE:
+                raise
+            # Became ineligible after the check above (status change, owner transfer): the unpaid order expires.
+            security_event("payment_rejected", reason="creator_ineligible", streamer_slug=creator["streamer_slug"])
+            raise donations_unavailable() from None
         return {"order_id": order_id, "razorpay_order_id": order.id, "razorpay_key_id": account.key_id,
                 "amount": float(amount), "amount_subunits": order.amount, "currency": currency,
                 "status_token": token}

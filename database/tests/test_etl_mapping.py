@@ -1,4 +1,6 @@
+import contextlib
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,3 +138,20 @@ def test_loader_rewrites_only_media_url_columns_and_counts():
     assert loader.media("visits", ("voice_message_url",), [(f"{LEGACY[0]}/{VOICE}",)]) == [(f"{LEGACY[0]}/{VOICE}",)]
     plain = Loader(None, None)
     assert plain.media("donations", DONATION_COLUMNS, [tuple(row)]) == [tuple(row)]  # no rewrite configured
+
+
+def test_loader_puts_every_legacy_creator_on_the_legacy_kyc_track():
+    """Migration 0020: legacy has no kyc_track / kyc_baseline_owner_id. The import writes 'legacy' and the creator's
+    imported owner as the baseline (so an existing creator keeps accepting donations), and keeps its own status."""
+    from etl.rehearsal import Loader
+
+    queries: list[str] = []
+    loader = Loader(None, None)
+    loader.fetch = lambda query, params=None: queries.append(query) or []
+    loader.columns = lambda conn, table: ["id", "streamer_slug", "status", "user_id", "kyc_track",
+                                          "kyc_baseline_owner_id"]
+    loader.copy = lambda table, columns, rows: 0
+    loader.tgt = SimpleNamespace(cursor=lambda: contextlib.nullcontext(SimpleNamespace(execute=lambda *a: None)))
+    loader.load_users_and_streamers()
+    assert queries[-1] == ('SELECT "id", "streamer_slug", "status", "user_id", \'legacy\', "user_id" '
+                           'FROM public.streamers')

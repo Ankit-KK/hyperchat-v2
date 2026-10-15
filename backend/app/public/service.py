@@ -27,6 +27,10 @@ def not_found() -> ApiError:
     return ApiError(404, "Streamer not found", "streamer_not_found")
 
 
+def donations_unavailable() -> ApiError:  # generic on purpose: never says why (KYC, owner change, ...)
+    return ApiError(503, "Donations are temporarily unavailable", "donations_unavailable")
+
+
 PLATFORM_METRICS_TTL = 300
 SHOWCASE_METRICS_TTL = 60
 
@@ -70,6 +74,17 @@ class PublicService:
     async def active_creator(self, slug: str) -> dict:
         """Active creator row (internal; id and settings stay server-side) or the D3 404."""
         return await self._streamer(slug)
+
+    async def donation_creator(self, slug: str) -> dict:
+        """An active creator that may accept NEW donations and donor uploads (checkout, upload grants, uploads), else
+        the D3 404 (no longer active) or a generic 503. Payment readiness is checked separately, at checkout."""
+        s = await self._streamer(slug)
+        block = await self.repo.donation_block(s["id"])
+        if block in ("not_found", "not_active"):  # changed since the lookup: look exactly like an unknown creator
+            raise not_found()
+        if block is not None:
+            raise donations_unavailable()
+        return s
 
     async def profile(self, slug: str) -> PublicStreamer:
         s = await self._streamer(slug)

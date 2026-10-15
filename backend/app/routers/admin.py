@@ -49,6 +49,12 @@ class EmailChange(BaseModel):
     email: StrictStr = Field(max_length=320)  # at most 254 once trimmed (the service checks)
 
 
+class CreatorStatusChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_status: Literal["pending", "active", "suspended"]  # compare-and-set: a stale request changes nothing
+    reason: StrictStr | None = Field(default=None, max_length=500)
+
+
 class OwnerAssign(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_id: StrictStr = Field(max_length=64)
@@ -109,6 +115,32 @@ async def transfer_creator_owner(streamer_id: str, body: OwnerTransfer, request:
     """D13: move a claimed creator to another active user; the previous owner is unlinked and signed out."""
     return await admin_service(request).transfer_creator_owner(current.user, streamer_id, body.user_id,
                                                                body.expected_owner_id, client_ip(request))
+
+
+async def _status(action: str, streamer_id: str, body: CreatorStatusChange, request: Request, current: CurrentUser):
+    return await admin_service(request).change_creator_status(current.user, streamer_id, action, body.expected_status,
+                                                              body.reason, client_ip(request))
+
+
+@router.post("/creators/{streamer_id}/activate")
+async def activate_creator(streamer_id: str, body: CreatorStatusChange, request: Request,
+                           current: CurrentUser = Depends(require_admin)) -> dict:
+    """pending -> active. Never automatic: approval, invites and KYC alone do not activate a creator."""
+    return await _status("activate", streamer_id, body, request, current)
+
+
+@router.post("/creators/{streamer_id}/suspend")
+async def suspend_creator(streamer_id: str, body: CreatorStatusChange, request: Request,
+                          current: CurrentUser = Depends(require_admin)) -> dict:
+    """active -> suspended: hidden like an unknown creator and refuses new donations; nothing else changes."""
+    return await _status("suspend", streamer_id, body, request, current)
+
+
+@router.post("/creators/{streamer_id}/reactivate")
+async def reactivate_creator(streamer_id: str, body: CreatorStatusChange, request: Request,
+                             current: CurrentUser = Depends(require_admin)) -> dict:
+    """suspended -> active, only if the creator could accept donations again (else 409 with the reason)."""
+    return await _status("reactivate", streamer_id, body, request, current)
 
 
 @router.put("/creators/{streamer_id}/soundboard")
