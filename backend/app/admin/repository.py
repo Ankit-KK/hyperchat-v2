@@ -66,6 +66,34 @@ class _Refused(Exception):
     """Rolls a status change back (raised inside the transaction) with the reason code."""
 
 
+async def insert_creator(cur, fields: dict, pusher_groups: tuple[int, ...]) -> dict:
+    """Insert a new, unclaimed creator with the legacy launch defaults on the caller's cursor (so an application
+    approval creates it in the same transaction). The Pusher group is the least-loaded configured group (legacy rule;
+    ties -> the lowest), 1 when none is configured. Raises CreatorConflict when the slug or the order prefix is taken
+    (the unique constraints decide, so two concurrent creations of one slug can never both succeed)."""
+    row = {**LAUNCH_DEFAULTS, **fields}
+    row["message_char_tiers"] = Jsonb(row["message_char_tiers"])
+    group = 1
+    if pusher_groups:
+        await cur.execute("""
+            SELECT g FROM unnest(%s::int[]) AS g
+            ORDER BY (SELECT count(*) FROM public.streamers s WHERE s.pusher_group = g), g LIMIT 1
+        """, (list(pusher_groups),))
+        group = (await cur.fetchone())["g"]
+    row["pusher_group"] = group
+    try:
+        await cur.execute(f"INSERT INTO public.streamers ({', '.join(row)}) VALUES "
+                          f"({', '.join(f'%({c})s' for c in row)}) RETURNING {_CREATOR_COLS}", row)
+    except pg_errors.UniqueViolation as exc:
+        name = exc.diag.constraint_name or ""
+        if "order_prefix" in name:
+            raise CreatorConflict("order_prefix") from None
+        if "slug" in name:
+            raise CreatorConflict("slug") from None
+        raise
+    return await cur.fetchone()
+
+
 class BootstrapRefused(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -82,33 +110,9 @@ class AdminRepository:
 
     # ── creators ───────────────────────────────────────────────────────────
     async def create_creator(self, fields: dict, pusher_groups: tuple[int, ...]) -> dict:
-        """Insert a new, unclaimed creator with the legacy launch defaults, in one transaction. The Pusher group is
-        the least-loaded configured group (legacy rule; ties -> the lowest), 1 when none is configured. Raises
-        CreatorConflict when the slug or the order prefix is taken (the unique constraints decide, so two
-        concurrent creations of one slug can never both succeed)."""
-        row = {**LAUNCH_DEFAULTS, **fields}
-        row["message_char_tiers"] = Jsonb(row["message_char_tiers"])
-        try:
-            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-                group = 1
-                if pusher_groups:
-                    await cur.execute("""
-                        SELECT g FROM unnest(%s::int[]) AS g
-                        ORDER BY (SELECT count(*) FROM public.streamers s WHERE s.pusher_group = g), g LIMIT 1
-                    """, (list(pusher_groups),))
-                    group = (await cur.fetchone())["g"]
-                row["pusher_group"] = group
-                cols = ", ".join(row)
-                await cur.execute(f"INSERT INTO public.streamers ({cols}) VALUES "
-                                  f"({', '.join(f'%({c})s' for c in row)}) RETURNING {_CREATOR_COLS}", row)
-                return await cur.fetchone()
-        except pg_errors.UniqueViolation as exc:
-            name = exc.diag.constraint_name or ""
-            if "order_prefix" in name:
-                raise CreatorConflict("order_prefix") from None
-            if "slug" in name:
-                raise CreatorConflict("slug") from None
-            raise
+        """Insert a new, unclaimed creator with the legacy launch defaults, in one transaction (insert_creator)."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            return await insert_creator(cur, fields, pusher_groups)
 
     async def assign_owner(self, streamer_id: str, user_id: str) -> tuple[str, dict | None]:
         """Make an existing, active user the owner of an UNCLAIMED creator (streamers.user_id, which the access

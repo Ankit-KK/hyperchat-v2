@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.admin.applications import ApplicationRepository, ApplicationService
 from app.admin.repository import AdminRepository
 from app.admin.service import AdminService
 from app.auth.repository import AuthRepository
@@ -88,6 +89,8 @@ async def lifespan(app: FastAPI):
         app.state.admin = AdminService(AdminRepository(app.state.db.connection),
                                        payment_accounts=frozenset(payment_accounts.summary()["payments"]),
                                        pusher_groups=tuple(settings.pusher_groups_configured))
+        app.state.applications = ApplicationService(ApplicationRepository(app.state.db.connection),
+                                                    admin=app.state.admin, auth=app.state.auth)
         conn = app.state.db.connection
         app.state.public = PublicService(PublicRepository(conn))
         app.state.signups = SignupRepository(conn)

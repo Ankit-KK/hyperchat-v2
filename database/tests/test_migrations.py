@@ -25,7 +25,7 @@ EXPECTED_TABLES = {
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
-    "d1_hash_import_ledger", "creator_status_events",
+    "d1_hash_import_ledger", "creator_status_events", "application_events",
 }
 
 
@@ -333,6 +333,54 @@ def test_0020_creator_lifecycle_keeps_every_existing_creator(monkeypatch):
             conn.execute("DELETE FROM public.donations WHERE order_id = 'migtest20-d'")
             conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (MIG20,))
             conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest20-%%'")
+        command.upgrade(cfg, "head")
+
+
+def test_0021_creator_applications_keep_existing_signups(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0020")
+    cleanup = "DELETE FROM public.user_signups WHERE email LIKE 'migtest21-%%'"
+    try:
+        with _owner() as conn:
+            conn.execute(cleanup)
+            conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) "
+                         "VALUES ('Old', 'migtest21-old@x.invalid', '12345678')")
+            before = conn.execute("SELECT id, name, email, mobile_number, created_at FROM public.user_signups "
+                                  "WHERE email LIKE 'migtest21-%%'").fetchall()
+        command.upgrade(cfg, "0021")
+        with _owner() as conn:
+            assert conn.execute("SELECT id, name, email, mobile_number, created_at FROM public.user_signups "
+                                "WHERE email LIKE 'migtest21-%%'").fetchall() == before  # nothing rewritten
+            assert conn.execute("SELECT review_status, streamer_id, invite_id FROM public.user_signups "
+                                "WHERE email = 'migtest21-old@x.invalid'").fetchone() == ("legacy_unreviewed", None,
+                                                                                         None)
+            new = conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES "
+                               "('New', 'migtest21-new@x.invalid', '12345678') RETURNING id, review_status").fetchone()
+            assert new[1] == "submitted"
+            delete_rules = dict(conn.execute(
+                "SELECT conrelid::regclass::text, confdeltype FROM pg_constraint WHERE contype = 'f' AND confrelid = "
+                "'public.user_signups'::regclass AND conrelid IN ('public.user_invites'::regclass, "
+                "'public.application_events'::regclass)").fetchall())
+            assert delete_rules == {"user_invites": "r", "application_events": "r"}  # RESTRICT: no silent loss
+            with pytest.raises(psycopg.errors.CheckViolation):  # approved needs its creator
+                conn.execute("UPDATE public.user_signups SET review_status = 'approved' WHERE id = %s", (new[0],))
+            conn.execute("UPDATE public.user_signups SET review_status = 'rejected', rejection_reason = 'x' "
+                         "WHERE id = %s", (new[0],))
+        with pytest.raises(Exception, match="reviewed application"):
+            command.downgrade(cfg, "0020")  # never drops a review decision
+        assert _version() == "0021"
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest21-new@x.invalid'")
+        command.downgrade(cfg, "0020")
+        assert _version() == "0020"
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*) FROM public.user_signups WHERE email = 'migtest21-old@x.invalid'"
+                                ).fetchone()[0] == 1
+    finally:
+        with _owner() as conn:
+            conn.execute(cleanup)
         command.upgrade(cfg, "head")
 
 

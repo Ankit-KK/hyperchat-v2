@@ -83,6 +83,8 @@ and the signup interest form below. V2's `contact_submissions` table (migration 
 
 ## Signup interest form (backend completion G3)
 
+Since KYC PR2 (migration 0021) each new signup is a creator **application** (`review_status = 'submitted'`, set by the server; the request cannot set any review field). Admins review it (`/api/v1/admin/applications`); the form itself is unchanged: it never creates an account, and a repeated email gets the identical answer.
+
 `POST /api/v1/public/signups` replaces the legacy signup dialog's direct browser insert into `user_signups`.
 No cookies; the request must come from a trusted frontend `Origin` (403 otherwise, checked before the body),
 and each IP may submit 5 times per hour (`rate_limits`, bucket `signup:create`; 429 after that).

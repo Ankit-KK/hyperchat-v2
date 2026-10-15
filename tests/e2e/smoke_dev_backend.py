@@ -50,7 +50,7 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-KNOWN_HEADS = ("0017", "0018", "0019", "0020")  # 0018 = D6, 0019 = D13, 0020 = creator lifecycle (KYC PR1)
+KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021")  # 0018 D6, 0019 D13, 0020/0021 KYC PR1/PR2
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
@@ -745,6 +745,31 @@ try:
           and a.json() == b.json(), f"{a.status_code} {b.status_code}")
     r = httpx.post(API + "/api/v1/public/signups", json=signup, headers={"origin": "https://evil.invalid"}, timeout=15)
     check(S, "signup form from a foreign origin -> 403", r.status_code == 403, r.text)
+    # ── creator applications (KYC PR2, migration 0021): the synthetic signup above, synthetic creator only ──
+    S3 = "applications"
+    if admin.get("/api/v1/admin/applications").status_code == 404:
+        blocked(S3, "Creator applications (KYC PR2)", "not deployed on DEV yet")
+    else:
+        with db() as c:
+            app_id = c.execute("SELECT id::text FROM public.user_signups WHERE email = %s",
+                               (f"{TAG}-signup{DOMAIN}",)).fetchone()[0]
+        check(S3, "the signup form created a submitted application (no account)",
+              admin.get(f"/api/v1/admin/applications/{app_id}").json()["application"]["review_status"] == "submitted")
+        check(S3, "anonymous / non-admin cannot read applications",
+              httpx.get(API + "/api/v1/admin/applications", timeout=15).status_code == 401
+              and owner_a.get("/api/v1/admin/applications").status_code == 403)
+        r = admin.write("POST", f"/api/v1/admin/applications/{app_id}/approve",
+                        json={"slug": TAG + "app", "name": "Smoke App", "razorpay_account": "primary"})
+        created_app = r.json().get("creator", {}) if r.is_success else {}
+        check(S3, "approval creates a PENDING creator (never active), hidden publicly",
+              created_app.get("status") == "pending"
+              and httpx.get(f"{API}/api/v1/public/streamers/{TAG}app", timeout=15).status_code == 404, r.text[:200])
+        r = admin.write("POST", f"/api/v1/admin/applications/{app_id}/approve",
+                        json={"slug": TAG + "app2", "name": "Again", "razorpay_account": "primary"})
+        check(S3, "a repeat approval is 409 and creates nothing", r.status_code == 409, r.text[:200])
+        r = admin.write("POST", f"/api/v1/admin/applications/{app_id}/notes", json={"note": "smoke note"})
+        check(S3, "internal note recorded in the history", r.is_success
+              and [e["action"] for e in r.json()["events"]] == ["approve", "note"], r.text[:200])
     r = httpx.post(f"{API}/api/v1/public/streamers/{slug_a}/upload-grant", json={"kind": "voice"}, headers=ORIGIN,
                    timeout=15)
     grant = r.json() if r.status_code in (200, 201) else {}
@@ -1155,6 +1180,9 @@ finally:
     wait_for(_open_jobs, 60)
     with db() as c:
         c.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+        with fixture_db() as owner:  # review history is append-only for the runtime roles (migration 0021)
+            owner.execute("DELETE FROM public.application_events WHERE signup_id IN "
+                          "(SELECT id FROM public.user_signups WHERE email LIKE %s)", ("%" + DOMAIN,))
         c.execute("DELETE FROM public.user_signups WHERE email LIKE %s", ("%" + DOMAIN,))
         c.execute("DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
                   "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')")
