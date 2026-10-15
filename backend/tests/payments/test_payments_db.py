@@ -19,7 +19,16 @@ from app.maintenance import cleanup
 from app.payments.accounts import AccountHealth
 from app.soundboard.library import HypersoundLibrary
 from app.storage.memory import InMemoryObjectStore, StoredObject
-from tests.integration import ORIGIN, creator_state, db, make_donation, make_streamer, requires_db, update_streamer
+from tests.integration import (
+    ORIGIN,
+    creator_state,
+    db,
+    make_donation,
+    make_streamer,
+    make_user,
+    requires_db,
+    update_streamer,
+)
 from tests.payments.fakes import (
     OTHER_SECRET,
     PAYER_CONTACT,
@@ -133,6 +142,25 @@ def test_checkout_writes_donation_order_lookup_token_hash_and_health(client):
         rate = conn.execute("SELECT request_count FROM public.rate_limits WHERE ip_address = 'ip:testclient' "
                             "AND endpoint = 'payment:checkout'").fetchone()
     assert health == ("ok", False, None) and rate == (1,)
+
+
+def test_the_trigger_refuses_a_creator_that_became_ineligible_after_the_check(client):
+    """Migration 0020: the API check passed (stubbed here), but the creator's owner had changed: the donations insert
+    trigger refuses under the creator row lock. No donation, no order_lookup row; a generic 503."""
+    sid = make_streamer("authtest-pay-race", user_id=make_user("pay-race-a@authtest.invalid"))
+    update_streamer(sid, user_id=make_user("pay-race-b@authtest.invalid"))  # an unverified new owner
+
+    async def stale_check(streamer_id):
+        return None
+
+    client.app_state.payments.public.repo.donation_block = stale_check
+    r = client.post(f"{P}/authtest-pay-race/donations", json={"name": "Ravi", "amount": 100}, headers=ORIGIN)
+    assert (r.status_code, r.json()) == (503, {"error": "Donations are temporarily unavailable"})
+    assert len(client.fake.orders) == 1  # the order was created; it is never paid and expires
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.donations WHERE streamer_id = %s", (sid,)).fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM public.order_lookup WHERE razorpay_order_id = %s",
+                            (client.fake.orders[0]["id"],)).fetchone() == (0,)
 
 
 def test_razorpay_order_failure_writes_no_donation(client):

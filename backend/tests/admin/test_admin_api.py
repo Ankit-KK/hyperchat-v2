@@ -207,11 +207,11 @@ def test_admin_onboards_a_creator_with_the_legacy_launch_defaults(app):
     created = r.json()["creator"]
     assert {k: created[k] for k in ("slug", "name", "status", "razorpay_account", "pusher_group", "order_prefix",
                                     "brand_color", "moderation_mode", "claimed")} == {
-        "slug": "authtest-new_one", "name": "New One", "status": "active", "razorpay_account": "primary",
+        "slug": "authtest-new_one", "name": "New One", "status": "pending", "razorpay_account": "primary",
         "pusher_group": 1, "order_prefix": "atn_rp_", "brand_color": "#ff6b35", "moderation_mode": "auto_approve",
         "claimed": False}
     assert _creator("authtest-new_one") == {
-        "streamer_name": "New One", "user_id": None, "status": "active", "moderation_mode": "auto_approve",
+        "streamer_name": "New One", "user_id": None, "status": "pending", "moderation_mode": "auto_approve",
         "tts_enabled": True, "telegram_moderation_enabled": False, "discord_moderation_enabled": False,
         "leaderboard_widget_enabled": True, "hyperemotes_enabled": True, "media_upload_enabled": True,
         "media_moderation_enabled": False, "min_text_amount_inr": 40, "min_tts_amount_inr": 40,
@@ -221,8 +221,8 @@ def test_admin_onboards_a_creator_with_the_legacy_launch_defaults(app):
                                {"min_amount": 500, "max_chars": 500}],
         "goal_is_active": False, "custom_page_path": "/authtest-new_one", "razorpay_account": "primary",
         "pusher_group": 1, "order_prefix": "atn_rp_", "brand_color": "#ff6b35"}
-    # usable at once: the public donation page reads it; only admins can manage it until someone is linked
-    assert app.get("/api/v1/public/streamers/authtest-new_one").status_code == 200
+    # pending (owner decision 2026-10-15): not public until an admin activates it; only admins manage it until linked
+    assert app.get("/api/v1/public/streamers/authtest-new_one").status_code == 404
     assert app.get("/api/v1/dashboard/streamers/authtest-new_one/settings").status_code == 200  # the admin
     creator_user = new_browser(app)
     signed_in(creator_user, "creator" + DOMAIN)

@@ -9,6 +9,7 @@ import re
 from collections import Counter
 from decimal import Decimal
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,7 +55,11 @@ class FakePublicRepo:
             "no-account": dict(base, id="id-x", streamer_slug="no-account"),
             "pending-c": dict(base, id="id-p", streamer_slug="pending-c", status="pending"),
         }
+        self.blocks: dict[str, str] = {}
         self.tiers = {"id-a": [(150, 10), (300, 20)]}
+
+    async def donation_block(self, streamer_id):
+        return self.blocks.get(streamer_id)  # the real rule: public.creator_donation_block (migration 0020)
 
     async def active_streamer(self, slug):
         row = self.rows.get(slug)
@@ -241,6 +246,28 @@ def test_unknown_fields_rejected(client, world, extra):
 def test_unknown_or_inactive_creator(client, slug):
     r = checkout(client, slug=slug)
     assert (r.status_code, r.json()) == (404, {"error": "Streamer not found"})
+
+
+def test_a_creator_that_cannot_accept_donations_gets_no_order(client, world):
+    """Migration 0020: public.creator_donation_block (e.g. an unverified new owner); a generic 503, never why."""
+    world.public_repo.blocks["id-a"] = "kyc_required"
+    r = checkout(client)
+    assert (r.status_code, r.json()) == (503, {"error": "Donations are temporarily unavailable"})
+    assert world.razorpay.calls == [] and world.repo.donations == []
+
+
+def test_ineligible_at_insert_time_writes_no_donation(client, world):
+    """Became ineligible between the check and the insert: the trigger's refusal is the same generic 503."""
+    class Ineligible(psycopg.Error):
+        sqlstate = "HC001"
+
+    async def refuse(row):
+        raise Ineligible("creator not eligible for new donations: kyc_required")
+
+    world.repo.create_donation = refuse
+    r = checkout(client)
+    assert (r.status_code, r.json()) == (503, {"error": "Donations are temporarily unavailable"})
+    assert len(world.razorpay.orders) == 1 and world.repo.donations == []  # the unpaid order simply expires
 
 
 # ── checkout: validation ────────────────────────────────────────────────────

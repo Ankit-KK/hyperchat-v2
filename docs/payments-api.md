@@ -65,7 +65,7 @@ stored, and there is no `upload_token` (D5: uploads use Phase 6 grants).
 | 422 | malformed body, unknown fields |
 | 429 | rate limit |
 | 502 | Razorpay or R2 unavailable |
-| 503 | `Payments for this creator are on hold` (no account, missing or refused credentials, Razorpay unreachable); uploads/library not configured |
+| 503 | `Payments for this creator are on hold` (no account, missing or refused credentials, Razorpay unreachable); `Donations are temporarily unavailable` (the creator may not accept new donations: migration 0020, e.g. an unverified new owner; never says why); uploads/library not configured |
 
 ## 2. Status: `GET /api/v1/public/donations/{order_id}/status`
 Header `X-Status-Token: <token from checkout>`. The token is only read from this header, never from the URL.

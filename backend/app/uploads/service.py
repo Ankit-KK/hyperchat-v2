@@ -81,7 +81,8 @@ class PublicCreators:
         self.public = public
 
     async def active(self, slug: str) -> Creator:
-        row = await self.public.active_creator(slug)
+        """A creator that may accept new donations (else 404 / 503): no upload for one that cannot be paid."""
+        row = await self.public.donation_creator(slug)
         return Creator(row["id"], row["streamer_slug"], bool(row["media_upload_enabled"]),
                        row["media_max_file_size_mb"])
 

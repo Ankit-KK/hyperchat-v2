@@ -49,7 +49,11 @@ class FakePublicRepo:
             "pending-c": dict(id="id-p", streamer_slug="pending-c", status="pending", media_upload_enabled=True,
                               media_max_file_size_mb=None),
         }
+        self.blocks: dict[str, str] = {}
         self.tiers = {"id-a": [(150, 15), (300, 30)]}  # creator-a: longest tier 30 s; others: fallback (15 s)
+
+    async def donation_block(self, streamer_id):
+        return self.blocks.get(streamer_id)  # the real rule: public.creator_donation_block (migration 0020)
 
     async def active_streamer(self, slug):
         row = self.rows.get(slug)
@@ -163,6 +167,17 @@ def test_grant_body_validated(client, body):
 def test_grant_unknown_inactive_or_malformed_creator_is_one_404(client, slug):
     r = client.post(f"{P}/{slug}/upload-grant", json={"kind": "voice"}, headers=ORIGIN)
     assert (r.status_code, r.json()) == (404, {"error": "Streamer not found"})
+
+
+def test_a_creator_that_cannot_accept_donations_gets_no_grant_and_no_upload(client, world):
+    """Migration 0020: uploads only for a creator that may accept new donations; a generic 503, never why."""
+    grant = get_grant(client)  # issued while the creator could accept donations
+    world.repo.blocks["id-a"] = "kyc_required"
+    r = client.post(f"{P}/creator-a/upload-grant", json={"kind": "voice"}, headers=ORIGIN)
+    assert (r.status_code, r.json()) == (503, {"error": "Donations are temporarily unavailable"})
+    r = upload(client, "voice", REAL_VOICE, "audio/webm", grant)
+    assert (r.status_code, r.json()) == (503, {"error": "Donations are temporarily unavailable"})
+    assert not world.store.objects
 
 
 @pytest.mark.parametrize("slug", ["no-media", "zero-media"])

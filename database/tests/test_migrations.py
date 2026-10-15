@@ -25,7 +25,7 @@ EXPECTED_TABLES = {
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
-    "d1_hash_import_ledger",
+    "d1_hash_import_ledger", "creator_status_events",
 }
 
 
@@ -269,6 +269,70 @@ def test_0019_owner_specific_soundboard_terms(monkeypatch):
         with _owner() as conn:
             conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest19'")  # cascades acceptances
             conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest19-%%'")
+        command.upgrade(cfg, "head")
+
+
+MIG20 = "migtest20-%"
+
+
+def _mig20_rows() -> list[tuple]:
+    with _owner() as conn:
+        return conn.execute("SELECT streamer_slug, status, user_id, updated_at FROM public.streamers "
+                            "WHERE streamer_slug LIKE %s ORDER BY streamer_slug", (MIG20,)).fetchall()
+
+
+def test_0020_creator_lifecycle_keeps_every_existing_creator(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0019")
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.donations WHERE order_id = 'migtest20-d'")
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (MIG20,))
+            conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest20-%%'")
+            owner = conn.execute("INSERT INTO public.users (email) VALUES ('migtest20-o@x.invalid') RETURNING id"
+                                 ).fetchone()[0]
+            owned = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) "
+                                 "VALUES ('migtest20-a', 'A', %s) RETURNING id", (owner,)).fetchone()[0]
+            conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('migtest20-b', 'B')")
+            conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status) "
+                         "VALUES ('migtest20-p', 'P', 'pending')")
+            conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                         "amount_inr, payment_status) VALUES (%s, 'migtest20-d', 'D', 5, 'INR', 5, 'success')",
+                         (owned,))
+        before = _mig20_rows()
+        command.upgrade(cfg, "0020")
+        assert _mig20_rows() == before  # no status, owner or updated_at changed
+        with _owner() as conn:
+            assert conn.execute("SELECT streamer_slug, kyc_track, kyc_baseline_owner_id, "
+                                "public.creator_donation_block(id) FROM public.streamers "
+                                "WHERE streamer_slug LIKE %s ORDER BY streamer_slug", (MIG20,)).fetchall() == [
+                ("migtest20-a", "legacy", owner, None),          # existing owned creator: still accepts donations
+                ("migtest20-b", "legacy", None, None),           # existing unowned creator: unchanged
+                ("migtest20-p", "legacy", None, "not_active")]   # existing pending creator: still not public
+            new = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) "
+                               "VALUES ('migtest20-n', 'N') RETURNING status, kyc_track").fetchone()
+            assert new == ("pending", "standard")
+            assert conn.execute("SELECT count(*) FROM public.donations WHERE order_id = 'migtest20-d'"
+                                ).fetchone()[0] == 1
+            conn.execute("UPDATE public.streamers SET status = 'suspended' WHERE streamer_slug = 'migtest20-b'")
+        with pytest.raises(Exception, match="suspended creator"):
+            command.downgrade(cfg, "0019")  # never drops a status it cannot represent
+        assert _version() == "0020"
+        with _owner() as conn:
+            conn.execute("UPDATE public.streamers SET status = 'active' WHERE streamer_slug = 'migtest20-b'")
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest20-n'")
+        command.downgrade(cfg, "0019")
+        assert _version() == "0019"
+        with _owner() as conn:
+            assert conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name) "
+                                "VALUES ('migtest20-n', 'N') RETURNING status").fetchone()[0] == "active"
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.donations WHERE order_id = 'migtest20-d'")
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (MIG20,))
+            conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest20-%%'")
         command.upgrade(cfg, "head")
 
 

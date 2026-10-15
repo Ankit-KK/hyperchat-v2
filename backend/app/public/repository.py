@@ -40,6 +40,11 @@ class PublicRepository:
                                "WHERE streamer_slug = %s AND status = 'active'", (slug,))
         return rows[0] if rows else None
 
+    async def donation_block(self, streamer_id: str) -> str | None:
+        """public.creator_donation_block: None when the creator may accept a NEW donation, else the reason code. The
+        donations insert trigger runs the same function again, so no path can skip it."""
+        return (await self._all("SELECT public.creator_donation_block(%s) AS block", (streamer_id,)))[0]["block"]
+
     async def voice_tiers(self, streamer_id: str) -> tuple[list[tuple], list[tuple]]:
         own = await self._all("SELECT min_amount_inr, max_duration_seconds FROM public.streamer_voice_tiers "
                               "WHERE streamer_id = %s AND is_active ORDER BY min_amount_inr", (streamer_id,))

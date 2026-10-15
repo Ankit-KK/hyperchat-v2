@@ -628,6 +628,10 @@ settings are never anonymous; tokenless legacy goal-overlay URLs keep working):
 The public `{slug}-goal` channel already skipped non-active creators (renderer); now covered for `pending` and
 `rejected`. Platform metrics stay public (owner decision).
 
+## Creator lifecycle and donation eligibility (KYC PR1, migration 0020)
+
+New creators start `pending` (column default too) and only an admin activates them; activation needs the owner's approved KYC, which does not exist yet, so it is refused (fail closed). `public.creator_donation_block(streamer_id)` (migration 0020) is the one rule for NEW donations and donor uploads: the creator is `active` and, until KYC exists, on the legacy track with its baseline owner still its owner; checkout, upload grants and uploads call it (a generic `503 {"error": "Donations are temporarily unavailable"}`, never the reason) and a `donations` insert trigger repeats it under a share lock on the creator row for every runtime-role insert, so no path can skip it. Payment readiness stays the existing checkout check (it may call Razorpay). Existing orders, their status / confirm / webhook completion and historical donations are never checked. The runtime roles cannot set `kyc_track` / `kyc_baseline_owner_id` (trigger) or edit the status audit (privileges). Owner decision 2026-10-15: an unverified new owner never accepts new donations, also before the rollout. No permanent KYC exemption exists: `legacy` only means "not yet enrolled"; the KYC PRs add verification, the audited rollout and expiring grants.
+
 ## Tracked decisions and approvals (unchanged by this audit)
 
 | ID | Item | State |

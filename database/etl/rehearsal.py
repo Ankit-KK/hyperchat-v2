@@ -153,8 +153,10 @@ class Loader:
             sql.SQL('WHEN "razorpay-keyid" = {} AND "razorpay-keysecret" = {} THEN {}').format(
                 sql.Literal(key), sql.Literal(secret), sql.Literal(name))
             for (key, secret), name in RAZORPAY_ACCOUNTS.items())).as_string(self.src)
+        # Legacy creators keep their own status; every one is on the legacy KYC track, with its imported owner as
+        # the baseline owner (migration 0020: the runtime roles can never set these two columns).
         src_expr = [{"razorpay_key_ref": '"razorpay-keyid"', "razorpay_secret_ref": '"razorpay-keysecret"',
-                     "razorpay_account": account}
+                     "razorpay_account": account, "kyc_track": "'legacy'", "kyc_baseline_owner_id": '"user_id"'}
                     .get(c, sql.Identifier(c).as_string(self.src)) for c in tgt_cols]
         streamers = self.media("streamers", tgt_cols,
                                self.fetch(f"SELECT {', '.join(src_expr)} FROM public.streamers"))

@@ -65,11 +65,25 @@ def make_user(email: str, password: str | None = PASSWORD, role: str = "streamer
             "VALUES (%s, %s, %s, %s, %s) RETURNING id::text", (email, h, role, streamer_id, is_active)).fetchone()[0]
 
 
+# Existing creators (migration 0020) are active and on the legacy KYC track with their owner as the baseline owner;
+# the runtime roles may not create such rows, so fixtures write them as the migrator, like the legacy import does.
+FIXTURE_ROLE = "hyperchat_migrator"
+
+
+def fixture_db() -> psycopg.Connection:
+    conn = db(FIXTURE_ROLE)
+    conn.execute("SET ROLE hyperchat_owner")  # as migrations and the legacy import do
+    return conn
+
+
 def make_streamer(slug: str, user_id: str | None = None, name: str = "Auth Test") -> str:
+    """An active creator as existing creators are after migration 0020 (eligible for donations while its owner is
+    unchanged). Use the admin API to create a new (pending, standard-track) creator."""
     assert slug.startswith(SLUG_PREFIX)
-    with db() as conn:
-        return conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) VALUES (%s, %s, %s) "
-                            "RETURNING id::text", (slug, name, user_id)).fetchone()[0]
+    with fixture_db() as conn:
+        return conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id, status, kyc_track, "
+                            "kyc_baseline_owner_id) VALUES (%s, %s, %s, 'active', 'legacy', %s) RETURNING id::text",
+                            (slug, name, user_id, user_id)).fetchone()[0]
 
 
 def update_streamer(streamer_id: str, **cols) -> None:
@@ -109,8 +123,9 @@ def owned_creator(client, slug: str, email: str = "owner" + DOMAIN, **cols) -> t
 def make_donation(streamer_id: str, amount_inr=100, *, payment: str = "success", moderation: str = "pending",
                   name: str = "Donor", message: str | None = None, at: datetime | None = None,
                   currency: str = "INR", amount=None, visible: bool = True) -> str:
-    """Insert a synthetic donation (order_id "authtest-...") and return its id."""
-    with db() as conn:
+    """Insert a synthetic HISTORICAL donation (order_id "authtest-...") and return its id. Written as the migrator: the
+    runtime role's only donation insert is checkout, which the eligibility trigger (migration 0020) guards."""
+    with fixture_db() as conn:
         return conn.execute(
             "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
             "payment_status, moderation_status, message, message_visible, created_at) "

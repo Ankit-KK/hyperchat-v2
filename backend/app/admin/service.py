@@ -101,7 +101,9 @@ class AdminService:
             raise AuthError(400, "Unknown or inactive user", "bad_user")
         security_event("creator_owner_assigned", level=20, user_id=admin.id, target_user_id=user_id,
                        streamer_id=streamer_id)
-        return {"creator": {**row, "created_at": iso(row["created_at"])}}
+        # A new owner is unverified: the creator stops accepting new donations until their KYC (owner decision).
+        return {"creator": {**row, "created_at": iso(row["created_at"])},
+                "donation_block": await self.repo.donation_block(streamer_id)}
 
     async def transfer_creator_owner(self, admin: User, streamer_id: str, user_id: str, expected_owner_id: str,
                                      ip: str | None) -> dict:
@@ -130,7 +132,35 @@ class AdminService:
                            count=counts["sessions_revoked"], client_ip=ip)
         return {"creator": {**row, "created_at": iso(row["created_at"])}, "changed": changed,
                 "previous_owner_id": None, "sessions_revoked": 0, "old_owner_unlinked": False, "active_obs_tokens": None,
-                **counts}
+                **counts, "donation_block": await self.repo.donation_block(streamer_id)}
+
+    async def change_creator_status(self, admin: User, streamer_id: str, action: str, expected_status: str,
+                                    reason: str | None, ip: str | None) -> dict:
+        """Admin-only creator lifecycle (owner decision 2026-10-15): activate (pending -> active: claimed, a configured
+        payment account and the owner's approved KYC), suspend (active -> suspended: hidden, no new donations; the
+        dashboard, OBS tokens and history stay) and reactivate (suspended -> active: only if the creator could accept
+        donations again). The reason text is kept in the audit table, never in logs."""
+        streamer_id = _uuid_or_404(streamer_id, "Creator")
+        reason = " ".join((reason or "").split()) or None
+        if action == "suspend" and reason is None:
+            raise AuthError(400, "A reason is required to suspend a creator", "reason_required")
+        result, row = await self.repo.change_status(streamer_id, action, expected_status, admin.id, reason,
+                                                    self.payment_accounts)
+        refusals = {
+            "not_found": (404, "Creator not found"),
+            "status_changed": (409, "The creator's status is not expected_status"),
+            "bad_transition": (409, f"Cannot {action} a creator whose status is {expected_status}"),
+            "unclaimed": (409, "The creator has no owner yet"),
+            "account_not_configured": (409, "The creator's Razorpay account is not configured on this server"),
+            "kyc_required": (409, "The creator's owner has no approved identity verification (KYC)"),
+        }
+        if result != "ok":
+            status, message = refusals.get(result, (409, "The creator could not accept donations"))
+            raise AuthError(status, message, result if result in refusals else f"creator_{result}")
+        security_event("creator_status_changed", level=20, user_id=admin.id, streamer_id=streamer_id,
+                       reason=action, status=row["status"], client_ip=ip)
+        return {"creator": {**row, "created_at": iso(row["created_at"])},
+                "donation_block": await self.repo.donation_block(streamer_id)}
 
     async def set_soundboard_eligibility(self, admin: User, streamer_id: str, enabled: bool) -> dict:
         """Grant / revoke Custom Soundboard eligibility (D3). Idempotent. Never accepts terms for the owner and never

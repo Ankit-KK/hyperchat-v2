@@ -15,6 +15,7 @@ from tests.integration import (
     FRONT,
     accept_soundboard_terms,
     db,
+    fixture_db,
     make_streamer,
     make_user,
     requires_db,
@@ -50,7 +51,7 @@ def streamer(slug: str, user_id: str | None = None, terms: bool = True, **cols) 
 
 def donation(sid: str, amount_inr, *, payment="success", moderation="auto_approved", at=None, currency="INR",
              amount=None, name="Donor", message=None) -> None:
-    with db() as conn:
+    with fixture_db() as conn:
         conn.execute(
             "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
             "payment_status, moderation_status, message, created_at) "

@@ -44,7 +44,7 @@ class CreatorConflict(Exception):
 # with every launch default"). Written explicitly: some column defaults differ (e.g. telegram_moderation_enabled
 # defaults to true in the schema, false at launch).
 LAUNCH_DEFAULTS = {
-    "status": "active", "moderation_mode": "auto_approve", "tts_enabled": True,
+    "status": "pending", "moderation_mode": "auto_approve", "tts_enabled": True,
     "telegram_moderation_enabled": False, "discord_moderation_enabled": False, "leaderboard_widget_enabled": True,
     "hyperemotes_enabled": True, "media_upload_enabled": True, "media_moderation_enabled": False,
     "min_text_amount_inr": 40, "min_tts_amount_inr": 40, "min_voice_amount_inr": 150,
@@ -55,6 +55,15 @@ LAUNCH_DEFAULTS = {
 }
 _CREATOR_COLS = """id::text, streamer_slug AS slug, streamer_name AS name, status, razorpay_account, pusher_group,
     order_prefix, brand_color, moderation_mode, user_id IS NOT NULL AS claimed, created_at"""
+
+
+# Admin creator status actions: (from status, to status). Anything else is refused; nothing is ever skipped.
+STATUS_ACTIONS = {"activate": ("pending", "active"), "suspend": ("active", "suspended"),
+                  "reactivate": ("suspended", "active")}
+
+
+class _Refused(Exception):
+    """Rolls a status change back (raised inside the transaction) with the reason code."""
 
 
 class BootstrapRefused(Exception):
@@ -163,6 +172,53 @@ class AdminRepository:
             obs = (await cur.fetchone())["n"]
             return "ok", row, {"previous_owner_id": owner, "sessions_revoked": revoked, "old_owner_unlinked": unlinked,
                                "active_obs_tokens": obs}
+
+    async def donation_block(self, streamer_id: str) -> str | None:
+        """public.creator_donation_block (migration 0020): None when the creator may accept new donations."""
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT public.creator_donation_block(%s)", (streamer_id,))
+            return (await cur.fetchone())[0]
+
+    async def change_status(self, streamer_id: str, action: str, expected_status: str, actor_id: str,
+                            reason: str | None, accounts) -> tuple[str, dict | None]:
+        """activate / suspend / reactivate, with an audit row, in one transaction on the locked creator row (so a
+        concurrent checkout's share lock waits for it). Compare-and-set: refused unless the status is still
+        `expected_status`. Returns ("ok" | "not_found" | "status_changed" | "bad_transition" | "unclaimed" |
+        "account_not_configured" | "kyc_required" | a donation block code, the creator)."""
+        source, target = STATUS_ACTIONS[action]
+        try:
+            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT status, user_id, razorpay_account FROM public.streamers WHERE id = %s "
+                                  "FOR NO KEY UPDATE", (streamer_id,))
+                current = await cur.fetchone()
+                if current is None:
+                    return "not_found", None
+                if current["status"] != expected_status:
+                    return "status_changed", None
+                if current["status"] != source:
+                    return "bad_transition", None
+                if action == "activate":
+                    if current["user_id"] is None:
+                        return "unclaimed", None
+                    if current["razorpay_account"] not in accounts:
+                        return "account_not_configured", None
+                    # shortcut: no KYC verification exists yet, so no creator can be activated; the KYC PRs replace
+                    # this with "the current owner's Didit verification is approved" (owner decision 2026-10-15).
+                    return "kyc_required", None
+                await cur.execute(f"UPDATE public.streamers SET status = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
+                                  (target, streamer_id))
+                row = await cur.fetchone()
+                if action == "reactivate":  # back only if it could accept donations again: the same rule as checkout
+                    await cur.execute("SELECT public.creator_donation_block(%s) AS block", (streamer_id,))
+                    block = (await cur.fetchone())["block"]
+                    if block is not None:
+                        raise _Refused(block)
+                await cur.execute("INSERT INTO public.creator_status_events (streamer_id, action, from_status, "
+                                  "to_status, actor_user_id, reason) VALUES (%s, %s, %s, %s, %s, %s)",
+                                  (streamer_id, action, source, target, actor_id, reason))
+                return "ok", row
+        except _Refused as exc:
+            return str(exc), None
 
     async def set_soundboard_eligibility(self, streamer_id: str, enabled: bool) -> bool | None:
         """streamers.soundboard_enabled (D3 eligibility only: terms acceptances are never created or removed here).
