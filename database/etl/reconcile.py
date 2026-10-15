@@ -21,7 +21,8 @@ def _donation_union(src: psycopg.Connection, select_list: str) -> str:
         for t in sorted(tables))
 
 
-def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, target_db: str) -> tuple[bool, str]:
+def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, target_db: str, *,
+              legacy_media_bases: tuple[str, ...] = (), media_rewritten: dict | None = None) -> tuple[bool, str]:
     checks: list[tuple[str, bool, str]] = []
 
     def check(name: str, ok: bool, detail: str = "") -> None:
@@ -115,6 +116,19 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
     disabled = _all(tgt, "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
                          "WHERE c.relnamespace = 'public'::regnamespace AND NOT t.tgisinternal AND t.tgenabled <> 'O'")[0][0]
     check("target: all user triggers re-enabled", disabled == 0, f"disabled={disabled}")
+
+    # 8. Media URLs (D9): after a rewrite no loaded media URL may still use a legacy base.
+    if legacy_media_bases:
+        from etl.mapping import MEDIA_URL_COLUMNS
+        left = 0
+        for table, columns in MEDIA_URL_COLUMNS.items():
+            for column in columns:
+                for base in legacy_media_bases:
+                    left += _all(tgt, sql.SQL("SELECT count(*) FROM {} WHERE starts_with({}, {})").format(
+                        sql.Identifier("public", table), sql.Identifier(column),
+                        sql.Literal(base + "/")).as_string(tgt))[0][0]
+        check("media URLs: none left on a legacy base", left == 0,
+              f"left={left} rewritten={media_rewritten or {}}")
 
     ok = all(c[1] for c in checks)
     lines = [f"ETL REHEARSAL RECONCILIATION  target={target_db}  result={'PASS' if ok else 'FAIL'}", ""]

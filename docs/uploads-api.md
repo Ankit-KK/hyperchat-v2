@@ -73,5 +73,16 @@ not burn the grant.
 `HYPERCHAT_UPLOAD_GRANT_SECRET`, `HYPERCHAT_R2_ACCOUNT_ID`, `HYPERCHAT_R2_ACCESS_KEY_ID`,
 `HYPERCHAT_R2_SECRET_ACCESS_KEY`, `HYPERCHAT_R2_BUCKET`, `HYPERCHAT_R2_PUBLIC_BASE_URL`, optional
 `HYPERCHAT_R2_ENDPOINT`. Missing or invalid values never stop the API: uploads answer 503 and the startup
-log lists the offending variable names. The R2 client (boto3) writes only keys matching the patterns above
-and never reads, lists or deletes in this phase.
+log lists the offending variable names. The R2 client (boto3) writes only keys matching the patterns above.
+
+## Access and retention (owner decision D9, 2026-10-15)
+- **Public, unguessable URLs** (no signed GET, no private bucket, no proxy): the key's uuid4 carries 122 random
+  bits and the bucket is never publicly listable. Anyone holding a URL can fetch the object while it exists.
+- **Abandoned uploads are deleted after 24 hours.** The daily `python -m app.cli cleanup` lists only
+  `voice-messages/` and `donation-media/` and deletes an object only when its key matches the upload pattern,
+  both its LastModified and the time in its key are more than 24 hours old, and no donation's
+  `voice_message_url` or `media_url` ends in that key (on any host). A failed listing or reference query deletes
+  nothing. Use an upload within minutes (the grant lives 10); a checkout naming an upload older than 24 hours
+  may find it gone.
+- **Donation media is kept** once a donation references it (paid or not), for replay and history.
+- **Production** serves objects from a configured custom domain (`HYPERCHAT_R2_PUBLIC_BASE_URL`), never `r2.dev`.
