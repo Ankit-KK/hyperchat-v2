@@ -47,6 +47,8 @@ RULES: dict[str, tuple[str, str]] = {
     # (legacy kept 90 days).
     "jobs": ("public.jobs", "status IN ('succeeded', 'failed') AND completed_at < now() - interval '30 days'"),
     "tts_moderation_audit": ("public.tts_moderation_audit", "created_at < now() - interval '90 days'"),
+    # KYC PR3: Didit webhook receipts (dedupe only; a replay older than 5 minutes is refused anyway).
+    "kyc_webhook_events": ("public.kyc_webhook_events", "received_at < now() - interval '90 days'"),
     # Phase 7: the Razorpay order -> donation index (legacy cron cleanup-order-lookup: daily, 30 days). A webhook
     # for an older order still resolves through donations.provider_order_id (PaymentRepository.by_provider_order).
     "order_lookup": ("public.order_lookup", "created_at < now() - interval '30 days'"),

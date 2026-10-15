@@ -25,7 +25,8 @@ EXPECTED_TABLES = {
     "discord_callback_mapping", "tts_moderation_audit", "streamer_donator_totals", "request_nonces",
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
-    "d1_hash_import_ledger", "creator_status_events", "application_events",
+    "d1_hash_import_ledger", "creator_status_events", "application_events", "kyc_sessions", "kyc_webhook_events",
+    "kyc_events",
 }
 
 
@@ -381,6 +382,54 @@ def test_0021_creator_applications_keep_existing_signups(monkeypatch):
     finally:
         with _owner() as conn:
             conn.execute(cleanup)
+        command.upgrade(cfg, "head")
+
+
+def test_0022_kyc_core_changes_nothing_existing_and_guards_its_history(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0021")
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest22-%%'")
+            uid = conn.execute("INSERT INTO public.users (email) VALUES ('migtest22-u@x.invalid') RETURNING id"
+                               ).fetchone()[0]
+            users_before = conn.execute("SELECT count(*), md5(string_agg(to_jsonb(u)::text, ',' ORDER BY id)) "
+                                        "FROM public.users u").fetchone()
+        command.upgrade(cfg, "0022")
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*), md5(string_agg(to_jsonb(u)::text, ',' ORDER BY id)) "
+                                "FROM public.users u").fetchone() == users_before
+            assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox')", (uid,)).fetchone()[0] is False
+            sid = conn.execute("INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, "
+                               "environment) VALUES (%s, %s, gen_random_uuid(), gen_random_uuid(), 'sandbox') "
+                               "RETURNING session_id", (uid, str(uid))).fetchone()[0]
+            assert conn.execute("SELECT public.kyc_record_provider_status(%s, 'Approved', now(), '{}'::jsonb, "
+                                "'webhook', NULL)", (sid,)).fetchone()[0] == "applied"
+            assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox'), public.user_kyc_approved(%s, 'live')",
+                                (uid, uid)).fetchone() == (True, False)  # a sandbox approval never counts live
+            assert conn.execute("SELECT public.kyc_record_provider_status(%s, 'In Progress', now() - interval '1 h', "
+                                "NULL, 'webhook', NULL)", (sid,)).fetchone()[0] == "stale"
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute("SELECT public.kyc_record_provider_status(%s, 'Bogus', now(), NULL, 'webhook', NULL)",
+                             (sid,))
+        with pytest.raises(Exception, match="KYC session"):
+            command.downgrade(cfg, "0021")  # never drops verification history
+        assert _version() == "0022"
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.kyc_events WHERE user_id = %s", (uid,))
+            conn.execute("DELETE FROM public.kyc_sessions WHERE user_id = %s", (uid,))
+        command.downgrade(cfg, "0021")
+        assert _version() == "0021"
+    finally:
+        with _owner() as conn:
+            if "kyc_sessions" in _tables():
+                conn.execute("DELETE FROM public.kyc_events WHERE user_id IN (SELECT id FROM public.users "
+                             "WHERE email::text LIKE 'migtest22-%%')")
+                conn.execute("DELETE FROM public.kyc_sessions WHERE user_id IN (SELECT id FROM public.users "
+                             "WHERE email::text LIKE 'migtest22-%%')")
+            conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest22-%%'")
         command.upgrade(cfg, "head")
 
 

@@ -628,6 +628,10 @@ settings are never anonymous; tokenless legacy goal-overlay URLs keep working):
 The public `{slug}-goal` channel already skipped non-active creators (renderer); now covered for `pending` and
 `rejected`. Platform metrics stay public (owner decision).
 
+## Owner identity verification (KYC PR3, migration 0022)
+
+Didit is the only source of a verification. Webhooks are authenticated by `X-Signature-V2` (HMAC-SHA256 over the canonical JSON of the whole body, constant-time), a fresh signed body timestamp AND a fresh `X-Timestamp` (300 s), this environment's application, `event_id` dedupe, and the session's own user and workflow; an approval needs its matching decision; status writes keep provider order (no stale downgrade, later revocation / expiry wins). The API's database role cannot write outcomes directly (SECURITY DEFINER function only). Nothing identifying is stored or logged; no endpoint approves anyone. See `docs/kyc.md`.
+
 ## Creator applications (KYC PR2, migration 0021)
 
 Admin-only review of the public signup form; the form's public contract (Origin, rate limit, identical answer, no account) is unchanged and every review field is server-controlled. Approval creates a pending creator in the same locked transaction (no duplicates under concurrency). Application invitations are bound to the application, its creator and the applicant's email; acceptance claims the creator only while unclaimed (row lock, `user_id IS NULL`), never transfers, never takes over an existing account (explicit admin linkage instead) and never activates. Resends revoke the previous link; tokens are stored hashed and never logged or kept in the history. Lock order stays invite -> creator -> users. Database-enforced: an application invite keeps its application binding (foreign key RESTRICT + immutable `signup_id`), and the review history is append-only for the runtime roles and cannot be erased by deleting its application (RESTRICT); only the schema owner (synthetic test cleanup) removes both.
