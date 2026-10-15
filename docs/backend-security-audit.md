@@ -25,8 +25,10 @@ it. A passing test alone does not make a control secure: tests only cover the ca
 | **P2** (found in the local GoTrue rehearsal) | **1** | F14 (row-level security silently filtered the D1 source; merged in #47, `2c4b58b`; not deployed) |
 | **P2** (found in the review of #48) | **1** | F15 (D1 import recovery could mislead the operator; merged in #49, `2c3efc7`; not deployed) |
 | **P3**: hardening | **3** | F5, F6 (merged in #28, `ca76614`; not deployed), F7 |
-| Tracked owner decisions / approvals | 8 | D9 (resolved 2026-10-15), D14, D15, D4 / SEC-L1, SEC-L2 (open), PAY-11 (verified on DEV 2026-10-14); D1 (policy approved 2026-10-12, execution pending); F12-R (accepted residual risk) |
+| Tracked owner decisions / approvals | 8 | D9 (resolved 2026-10-15), D14 (resolved 2026-10-15), D15 (cutover), D4 / SEC-L1 (resolved 2026-10-13), SEC-L2 (open, P3 cleanup), PAY-11 (verified on DEV 2026-10-14); D1 (policy approved 2026-10-12, execution pending); F12-R (accepted residual risk) |
 | Dependency scan / static analysis (2026-10-10) | 0 vulnerabilities; 1 P3 | F8 (literal bidi characters; merged in #27, `0c6f03b`; nothing to deploy beyond the next release); all other Bandit results are false positives or informational |
+
+**Status 2026-10-15:** every P0/P1/P2 finding is fixed on `main` and deployed on DEV (`dbaa74c66d88`); "not deployed" below refers to production, which receives them with the cutover deploy. F4 is a frontend requirement. No open P0/P1/P2 backend blocker.
 
 No route lacks authentication where it needs it, no cross-creator access path was found, and payment completion
 cannot be forged without a provider secret. The open items are logging hygiene, abuse resistance and hardening.
@@ -534,7 +536,7 @@ D1 tooling) was re-checked with the audit's method. Nothing is deployed: DEV sti
 | Realtime | Pusher auth: session (+CSRF) for the dashboard channel only, OBS token for overlay channels in scope; per-IP and per-credential limits | `realtime/auth.py`; realtime tests |
 | Bots | Telegram secret header (constant-time); Discord Ed25519 signature with a timestamp window; each update processed once; outside production only allow-listed creators and recipients | `bots/`; bots tests; DEV bots (Phase 11) |
 | Output encoding | Bot messages escaped for HTML / Markdown; CSV export neutralises formula injection | `bots/format.py`, `dashboard/csv_export.py` |
-| Signups | Trusted `Origin`, 5 per IP per hour, strict field rules, identical answer for repeated emails (D14 pending) | `routers/signups.py`; signup tests |
+| Signups | Trusted `Origin`, 5 per IP per hour, strict field rules, identical answer for repeated emails (D14, resolved 2026-10-15) | `routers/signups.py`; signup tests |
 | CORS | Credentials only for the configured origins, echoed exactly | `security/cors.py` |
 | Configuration | Refuses: live Razorpay keys outside production, a TEST/DEV database label in production, development origins or `SameSite=None` in production. API docs off. Env files `0640 root:<service group>` (checked) | `core/config.py`; VPS check |
 | Database | Runtime roles connect over local peer auth only; DML grants, no DDL; migrations run as a separate role | `deploy/postgres/pg_hba.conf`, migration 0007 |
@@ -613,12 +615,12 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
 
 | ID | Item | State |
 |---|---|---|
-| D14 | Repeated signup email: identical answer (current) or legacy message | recommendation: keep; awaiting owner |
-| D15 | Legacy Media Source URLs on `*.supabase.co` | recommendation in `docs/obs-cutover.md`; awaiting owner |
-| SEC-L2 | `RazorpayClient.fetch_order` (unused) | delete or keep; awaiting owner |
+| D14 | Repeated signup email: identical answer (current) or legacy message | **RESOLVED by the owner on 2026-10-15: KEEP IDENTICAL RESPONSE**: a repeated email (any letter case) gets the same `201` as a new signup, nothing is inserted or changed, no duplicate indicator; prevents email / account enumeration; existing code and tests satisfy it, no code change |
+| D15 | Legacy Media Source URLs on `*.supabase.co` | recommendation in `docs/obs-cutover.md`; awaiting owner (cutover choice, not backend product work) |
+| SEC-L2 | `RazorpayClient.fetch_order` (unused) | delete or keep; awaiting owner (P3 internal cleanup, no API effect; not a blocker) |
 | PAY-11 | Stale smoke assertions | verified on DEV 2026-10-14 (Phase 6 29/29, Phase 7 30/30) |
-| D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | awaiting owner |
-| D5 | Discord link and contact form | **resolved 2026-10-15**: contact form retired (no submission API); static contact details and the Discord invite are intentionally public settings (`HYPERCHAT_PUBLIC_*`), validated at startup and served only through `GET /api/v1/public/config` with a fixed field allow-list |
+| D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | **resolved 2026-10-13** (keep ClipWave); SEC-L1 layer removed, verified on DEV |
+| D5 | Discord link and contact form | **resolved 2026-10-15**, **verified on DEV** 2026-10-15: contact form retired (no submission API); static contact details and the Discord invite are intentionally public settings (`HYPERCHAT_PUBLIC_*`), validated at startup and served only through `GET /api/v1/public/config` with a fixed field allow-list |
 | D9 | Media access model | **resolved 2026-10-15**, PLAT-11 **verified on DEV** 2026-10-15: keep public unguessable media; abandoned uploads deleted after 24 hours; production on a configured custom media domain; legacy URL prefixes rewritten by the ETL |
 | D1 | Migrated-user credentials | **policy approved 2026-10-12**: import eligible Supabase bcrypt hashes at the production cutover with the existing importer and its safeguards; no real hashes in DEV without separate approval; excluded users recover by reset or Google only where configured and live-verified; legacy confirmation fields not mapped to `email_verified_at`. Policy only: no import, data access, external service, deployment or cutover authorized. Exclusion policy and password-change cutoff procedure approved 2026-10-12 (policy only); account-specific conflict resolution and the scheduled maintenance time remain pending. Actual cutover still requires separate explicit approval |
 | F12-R | Sign-in timing difference for imported bcrypt hashes during the migration | **accepted by the owner 2026-10-11**; accepted residual risk, not remediated; re-evaluate before cutover, before the bcrypt migration is considered complete, and if the timing or upgrade flow changes |

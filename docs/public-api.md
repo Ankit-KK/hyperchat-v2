@@ -81,7 +81,8 @@ bodies answer 422.
 
 Response: `201 {"status": "received"}` with `Cache-Control: no-store`, **also for an email that already signed
 up** (in any letter case): nothing is stored or overwritten, and the answer does not reveal whether the address
-was known (legacy said "This email is already registered"; decision D14 in
-[`backend-completion-checklist.md`](backend-completion-checklist.md)). A database failure answers
+was known (legacy said "This email is already registered"). **Owner decision D14 (2026-10-15): keep this
+identical response**, which prevents email / account enumeration; the frontend shows the same generic success
+message in both cases ([`backend-completion-checklist.md`](backend-completion-checklist.md)). A database failure answers
 `503 {"error": "Signups are unavailable right now. Please try again later."}`. No email is sent; the security
 log records rejections and failures by reason and IP, never the submitted values.
