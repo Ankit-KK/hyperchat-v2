@@ -1,9 +1,12 @@
 """KYC PR3 (migration 0022) through the real app on the scratch database: owner session API with a fake Didit (no
-real call), signed webhooks (signature, freshness, replay, identity, ordering, concurrency), the approval rule,
-ownership, admin views / refresh, database roles, and that nothing else changes (no activation, no eligibility
-change). Synthetic rows only."""
+real call), signed webhooks verified by the database (signature, freshness, replay, identity, ordering,
+concurrency), the approval rule, ownership, admin views / refresh (never approves; ordered by when Didit was asked),
+the trust boundary of the API's database role (it can never forge an approval), and that nothing else changes (no
+activation, no eligibility change). Synthetic rows only."""
 
 import asyncio
+import hashlib
+import hmac
 import json
 import threading
 import time
@@ -65,16 +68,37 @@ class FakeDidit:
         return self.decisions[session_id]
 
 
+def configure(environment="sandbox") -> None:
+    """What the operator does with etl/kyc_provider_config.py: the database's Didit application and webhook secret."""
+    with fixture_db() as conn:
+        conn.execute("INSERT INTO public.kyc_provider_config (environment, workflow_id, application_id, webhook_secret) "
+                     "VALUES (%s, %s, %s, %s) ON CONFLICT (singleton) DO UPDATE SET environment = EXCLUDED.environment, "
+                     "workflow_id = EXCLUDED.workflow_id, application_id = EXCLUDED.application_id, "
+                     "webhook_secret = EXCLUDED.webhook_secret", (environment, WF, APP_ID, SECRET))
+
+
+def unconfigure() -> None:
+    with fixture_db() as conn:
+        conn.execute("DELETE FROM public.kyc_provider_config")
+
+
 @pytest.fixture
 def kyc(app):
-    """The app's KYC service, configured for a sandbox application with a fake Didit."""
+    """The app's KYC service, configured for a sandbox application with a fake Didit; the database holds the
+    webhook secret (the API's settings have none)."""
     settings = app.app_state.settings.model_copy(update={
-        "didit_api_key": SecretStr("test-key"), "didit_webhook_secret": SecretStr(SECRET), "didit_workflow_id": WF,
-        "didit_environment": "sandbox", "didit_application_id": APP_ID})
+        "didit_api_key": SecretStr("test-key"), "didit_workflow_id": WF, "didit_environment": "sandbox"})
     fake = FakeDidit()
     app.app_state.kyc = KycService(app.app_state.kyc.repo, settings, client=fake, limiter=app.app_state.auth.repo)
     app.fake = fake
-    return app
+    configure()
+    yield app
+    unconfigure()
+
+
+def sign(body: dict, secret: str = SECRET) -> str:
+    """Didit's X-Signature-V2, computed independently of the server (which verifies it in the database)."""
+    return hmac.new(secret.encode(), didit.canonical(body), hashlib.sha256).hexdigest()
 
 
 def owner(client, name: str, slug: str | None = None) -> tuple[dict, str]:
@@ -86,19 +110,40 @@ def owner(client, name: str, slug: str | None = None) -> tuple[dict, str]:
     return headers, uid
 
 
-def hook(app, *, session_id, vendor, status, created_at, event_id=None, decision=None, secret=SECRET, ts=None,
-         x_ts=None, sign=True, **extra):
-    now = int(time.time())
+def envelope(*, session_id, vendor, status, created_at, event_id=None, decision=None, ts=None, **extra) -> dict:
     body = {"event_id": event_id or f"authtest-ev-{uuid.uuid4().hex[:12]}", "webhook_type": "status.updated",
-            "timestamp": now if ts is None else ts, "created_at": created_at, "application_id": APP_ID,
+            "timestamp": int(time.time()) if ts is None else ts, "created_at": created_at, "application_id": APP_ID,
             "environment": "sandbox", "session_id": session_id, "status": status, "workflow_id": WF,
-            "workflow_version": 1, "vendor_data": vendor, "metadata": None, **extra}
+            "workflow_version": 1, "vendor_data": vendor,
+            "metadata": {"note": "Ravi शर्मा 🎉 é", "score": 99.0, "ratio": 0.5}, **extra}  # canonical-form cases
     if decision is not None:
         body["decision"] = decision
-    headers = {"content-type": "application/json", "x-timestamp": str(now if x_ts is None else x_ts)}
-    if sign:
-        headers["x-signature-v2"] = didit.sign(body, secret)
+    return body
+
+
+def hook(app, *, secret=SECRET, x_ts=None, sign_it=True, signature=None, **kw):
+    body = envelope(**kw)
+    headers = {"content-type": "application/json", "x-timestamp": str(int(time.time()) if x_ts is None else x_ts)}
+    if sign_it:
+        headers["x-signature-v2"] = signature or sign(body, secret)
     return app.post(HOOK, content=json.dumps(body), headers=headers)
+
+
+def deliver(conn, **kw) -> str:
+    """A signed delivery straight to the database function, on the caller's connection (and transaction)."""
+    body = envelope(**kw)
+    return conn.execute("SELECT public.kyc_receive_webhook(%s, %s, %s)",
+                        (didit.canonical(body).decode(), sign(body), str(body["timestamp"]))).fetchone()[0]
+
+
+def wait_for_a_lock_waiter() -> None:
+    with db() as conn:
+        for _ in range(200):
+            if conn.execute("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)"
+                            ).fetchone()[0]:
+                return
+            time.sleep(0.05)
+    raise AssertionError("the second writer never waited for the first one")
 
 
 def approved_decision(sid: str) -> dict:
@@ -168,6 +213,7 @@ def test_rate_limited_per_user(kyc):
 
 
 def test_unconfigured_kyc_is_unavailable_and_nothing_else_breaks(app):
+    unconfigure()
     headers, _ = owner(app, "kyc-off")
     r = app.post(f"{ME}/session", headers=headers)
     assert (r.status_code, r.json()["error"]) == (503, "Identity verification is unavailable right now. Please try "
@@ -226,14 +272,16 @@ def test_signature_freshness_and_application_are_enforced(kyc):
     sid = start(kyc, headers)["session_id"]
     now = int(time.time())
     common = {"session_id": sid, "vendor": uid, "status": "Declined", "created_at": now}
-    for kw, code in (({"sign": False}, 401), ({"secret": "wrong-secret"}, 401), ({"ts": now - 301}, 401),
-                     ({"x_ts": now - 301}, 401), ({"ts": "1774970000"}, 401), ({"environment": "live"}, 403),
+    for kw, code in (({"sign_it": False}, 401), ({"secret": "wrong-secret-0123456789"}, 401),
+                     ({"signature": "0" * 64}, 401), ({"signature": "not hex"}, 401), ({"ts": now - 301}, 401),
+                     ({"x_ts": now - 301}, 401), ({"x_ts": "soon"}, 401), ({"ts": "1774970000"}, 401),
+                     ({"ts": now + 301}, 401), ({"environment": "live"}, 403),
                      ({"application_id": "00000000-0000-4000-8000-000000000000"}, 403)):
         assert hook(kyc, **common, **kw).status_code == code, kw
     tampered = {"event_id": "authtest-ev-t", "webhook_type": "status.updated", "timestamp": now, "created_at": now,
                 "application_id": APP_ID, "environment": "sandbox", "session_id": sid, "status": "Declined",
                 "workflow_id": WF, "vendor_data": uid}
-    signature = didit.sign(tampered, SECRET)
+    signature = sign(tampered)
     tampered["status"] = "Approved"
     r = kyc.post(HOOK, content=json.dumps(tampered), headers={"content-type": "application/json",
                                                                "x-timestamp": str(now), "x-signature-v2": signature})
@@ -244,6 +292,18 @@ def test_signature_freshness_and_application_are_enforced(kyc):
     with db() as conn:
         assert conn.execute("SELECT count(*) FROM public.kyc_webhook_events WHERE session_id = %s",
                             (sid,)).fetchone()[0] == 0  # unauthenticated deliveries are not even recorded
+    good = envelope(**common)
+    r = kyc.post(HOOK, content=json.dumps(good, indent=1), headers={  # other spacing, upper-case hex: still Didit's
+        "content-type": "application/json", "x-timestamp": str(now), "x-signature-v2": sign(good).upper()})
+    assert r.json() == {"status": "applied"} and session_row(sid)[0] == "Declined"
+
+
+@pytest.mark.parametrize("key", [b"k", b"whsec_" + b"x" * 58, b"\xaa" * 131])
+def test_the_database_hmac_is_rfc2104_hmac_sha256(key):
+    message = '{"name":"Ravi शर्मा 🎉","score":99}'.encode()
+    with fixture_db() as conn:
+        assert conn.execute("SELECT encode(public.kyc_hmac_sha256(%s, %s), 'hex')", (key, message)).fetchone()[0] == \
+            hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
 def test_duplicates_and_replays_are_applied_once(kyc):
@@ -349,7 +409,7 @@ def test_an_early_webhook_is_applied_when_the_session_is_stored(kyc):
     assert session_row(future)[0] == "In Progress"  # applied; the other user's event was not
     with db() as conn:
         assert sorted(r[0] for r in conn.execute("SELECT outcome FROM public.kyc_webhook_events WHERE session_id = %s",
-                                                 (future,))) == ["matched_later", "unmatched"]
+                                                 (future,))) == ["identity_mismatch", "matched_later"]  # none left
 
 
 def test_concurrent_deliveries_keep_the_newest_provider_state(kyc):
@@ -387,7 +447,7 @@ def test_verification_belongs_to_the_user_and_never_moves_with_a_creator(kyc):
 
 # ── admin ───────────────────────────────────────────────────────────────────────
 
-def test_admin_view_refresh_and_no_manual_approval(kyc):
+def test_admin_view_refresh_never_approves_and_no_manual_approval(kyc):
     headers, uid = owner(kyc, "kyc-adm")
     sid = start(kyc, headers)["session_id"]
     boss = new_browser(kyc)
@@ -399,37 +459,156 @@ def test_admin_view_refresh_and_no_manual_approval(kyc):
         "check_statuses", "approved_at", "created_at", "updated_at"}
     kyc.fake.decisions[sid] = approved_decision(sid)
     r = boss.post(f"/api/v1/admin/users/{uid}/kyc/refresh", headers=bh)
-    assert r.status_code == 200 and r.json()["approved"] is True and approved(uid)
-    assert [e["action"] for e in r.json()["events"]] == ["session_created", "admin_refresh"]
+    assert r.status_code == 200 and r.json()["refresh"] == "approval_needs_webhook"  # unsigned: never approves
+    assert r.json()["approved"] is False and not approved(uid) and session_row(sid)[0] == "Not Started"
     assert "DOC-SECRET-77" not in r.text
+    kyc.fake.decisions[sid] = {"session_id": sid, "status": "In Review", "id_verifications": [{"status": "In Review"}]}
+    r = boss.post(f"/api/v1/admin/users/{uid}/kyc/refresh", headers=bh)
+    assert r.json()["refresh"] == "applied" and r.json()["state"] == "in_review"
+    assert [e["action"] for e in r.json()["events"]] == ["session_created", "admin_refresh"]
     for method, path in (("patch", f"/api/v1/admin/users/{uid}/kyc"), ("put", f"/api/v1/admin/users/{uid}/kyc"),
                          ("post", f"/api/v1/admin/users/{uid}/kyc")):
         assert getattr(boss, method)(path, headers=bh, json={"approved": True}).status_code in (404, 405)
 
 
-# ── database roles ──────────────────────────────────────────────────────────────
+def test_a_stale_refresh_never_overrides_a_newer_webhook_or_restores_approval(kyc):
+    headers, uid = owner(kyc, "kyc-refresh-order")
+    sid = start(kyc, headers)["session_id"]
+    boss = new_browser(kyc)
+    bh = signed_in(boss, "kyc-boss2" + DOMAIN, role="admin")
+    refresh = lambda: boss.post(f"/api/v1/admin/users/{uid}/kyc/refresh", headers=bh).json()  # noqa: E731
+    t = int(time.time())
+    assert hook(kyc, session_id=sid, vendor=uid, status="Approved", created_at=t - 30,
+                decision=approved_decision(sid)).json()["status"] == "applied" and approved(uid)
+    assert hook(kyc, session_id=sid, vendor=uid, status="Declined", created_at=t - 20).json()["status"] == "applied"
+    assert not approved(uid)
+    kyc.fake.decisions[sid] = approved_decision(sid)  # a delayed answer that still shows the old approval
+    assert refresh()["refresh"] == "approval_needs_webhook" and not approved(uid)
 
-def test_the_runtime_role_cannot_write_outcomes_directly(kyc):
+    async def newer_change_while_asking(session_id):
+        """Didit is asked, then its state changes (Kyc Expired) and that webhook lands before the refresh writes;
+        the refresh still reports the older state it was given. The change lies strictly between asking and
+        writing, so only the asking time orders it correctly."""
+        time.sleep(1.1)
+        with db() as conn:
+            assert deliver(conn, session_id=sid, vendor=uid, status="Kyc Expired",
+                           created_at=int(time.time())) == "applied"
+        time.sleep(1.1)
+        return {"session_id": sid, "status": "In Review"}
+
+    kyc.fake.decision = newer_change_while_asking
+    assert refresh()["refresh"] == "stale" and session_row(sid)[0] == "Kyc Expired"  # dated when Didit was asked
+    assert hook(kyc, session_id=sid, vendor=uid, status="Approved", created_at=int(time.time()) + 30,
+                decision=approved_decision(sid)).json()["status"] == "applied"
+    assert approved(uid)  # a valid, later, signed re-approval still applies
+
+
+# ── early webhooks racing their session (both orders forced with an open transaction) ──
+
+def test_a_webhook_racing_its_uncommitted_session_is_applied(kyc):
+    _, uid = owner(kyc, "kyc-race-s")
+    sid, result = str(uuid.uuid4()), {}
+    with db() as conn:
+        with conn.transaction():
+            assert conn.execute("SELECT public.kyc_create_session(%s, %s, %s, 1, 'sandbox')",
+                                (uid, sid, WF)).fetchone()[0] == "ok"
+            th = threading.Thread(target=lambda: result.update(r=hook(
+                kyc, session_id=sid, vendor=uid, status="In Review", created_at=int(time.time())).json()))
+            th.start()
+            wait_for_a_lock_waiter()  # the webhook waits for the session's transaction instead of missing it
+            assert th.is_alive()
+        th.join(20)
+    assert result["r"] == {"status": "applied"} and session_row(sid)[0] == "In Review"
+    with db() as conn:
+        assert [r[0] for r in conn.execute("SELECT outcome FROM public.kyc_webhook_events WHERE session_id = %s",
+                                           (sid,))] == ["applied"]
+
+
+def test_a_session_racing_its_uncommitted_early_webhook_applies_it(kyc, env):
+    _, uid = owner(kyc, "kyc-race-w")
+    sid, result = str(uuid.uuid4()), {}
+
+    def store():
+        from app.cli import connection_factory
+        from app.core.config import Settings
+        created = CreatedSession(sid, "https://verify.didit.me/s/x", "Not Started", 1)
+        result["row"] = asyncio.run(KycRepository(connection_factory(Settings())).record_session(uid, created, WF,
+                                                                                               "sandbox"))
+
+    with db() as conn:
+        with conn.transaction():
+            assert deliver(conn, session_id=sid, vendor=uid, status="In Review",
+                           created_at=int(time.time())) == "unmatched"
+            th = threading.Thread(target=store)
+            th.start()
+            wait_for_a_lock_waiter()  # the session waits for the webhook's transaction, then sees its receipt
+            assert th.is_alive()
+        th.join(20)
+    assert result["row"]["provider_status"] == "In Review" and session_row(sid)[0] == "In Review"
+    with db() as conn:
+        assert [r[0] for r in conn.execute("SELECT outcome FROM public.kyc_webhook_events WHERE session_id = %s",
+                                           (sid,))] == ["matched_later"]
+
+
+# ── the API's database role: it can never forge or erase a verification ──────
+
+def test_the_runtime_role_cannot_forge_an_approval_or_erase_history(kyc):
     headers, uid = owner(kyc, "kyc-role")
     sid = start(kyc, headers)["session_id"]
-    with db() as conn:
+    t = int(time.time())
+    with db() as conn:  # hyperchat_app, as the API connects
         for sql, args in (
                 ("UPDATE public.kyc_sessions SET provider_status = 'Approved' WHERE session_id = %s", (sid,)),
                 ("DELETE FROM public.kyc_sessions WHERE session_id = %s", (sid,)),
-                ("INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, environment, "
-                 "provider_status) VALUES (%s, %s, gen_random_uuid(), %s, 'sandbox', 'Approved')", (uid, uid, WF)),
+                ("INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, environment) "
+                 "VALUES (%s, %s, gen_random_uuid(), %s, 'sandbox')", (uid, uid, WF)),
+                ("SELECT public.kyc_record_provider_status(%s, 'Approved', now(), NULL, 'webhook', NULL)", (sid,)),
+                ("INSERT INTO public.kyc_events (user_id, session_id, action, to_status, source) "
+                 "VALUES (%s, %s, 'status_changed', 'Approved', 'webhook')", (uid, sid)),
                 ("UPDATE public.kyc_events SET to_status = 'Approved' WHERE user_id = %s", (uid,)),
                 ("DELETE FROM public.kyc_events WHERE user_id = %s", (uid,)),
-                ("UPDATE public.kyc_webhook_events SET session_id = NULL WHERE session_id = %s", (sid,))):
+                ("INSERT INTO public.kyc_webhook_events (event_id, webhook_type, session_id, vendor_data, workflow_id, "
+                 "provider_status, provider_updated_at, environment, outcome) VALUES ('authtest-forged', "
+                 "'status.updated', %s, %s, %s, 'Approved', now(), 'sandbox', 'unmatched')", (sid, uid, WF)),
+                ("UPDATE public.kyc_webhook_events SET outcome = 'unmatched' WHERE session_id = %s", (sid,)),
+                ("DELETE FROM public.kyc_webhook_events WHERE session_id = %s", (sid,)),
+                ("SELECT webhook_secret FROM public.kyc_provider_config", ()),
+                ("UPDATE public.kyc_provider_config SET webhook_secret = 'attacker-chosen-secret'", ()),
+                ("SELECT public.kyc_hmac_sha256('\\x00', '\\x00')", ())):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(sql, args)
-        with pytest.raises(psycopg.errors.CheckViolation):  # vendor_data must be the user
-            conn.execute("INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, environment) "
-                         "VALUES (%s, 'someone', gen_random_uuid(), %s, 'sandbox')", (uid, WF))
+        # The functions it may call cannot be talked into an approval either.
+        forged = envelope(session_id=sid, vendor=uid, status="Approved", created_at=t, decision=approved_decision(sid))
+        text = didit.canonical(forged).decode()
+        for signature in (sign(forged, "attacker-guess-0123456789"), "0" * 64, None,
+                          sign({**forged, "status": "Declined"})):  # a genuine-looking signature of another body
+            assert conn.execute("SELECT public.kyc_receive_webhook(%s, %s, %s)",
+                                (text, signature, str(t))).fetchone()[0] == "bad_signature"
+        assert conn.execute("SELECT public.kyc_apply_refresh(%s, 'Approved', '{}'::jsonb, clock_timestamp(), NULL)",
+                            (sid,)).fetchone()[0] == "approval_needs_webhook"
+        with pytest.raises(psycopg.errors.CheckViolation):  # nor post-date a refresh to outrank later webhooks
+            conn.execute("SELECT public.kyc_apply_refresh(%s, 'Declined', '{}'::jsonb, "
+                         "clock_timestamp() + interval '1 hour', NULL)", (sid,))
+        for workflow, environment in ((str(uuid.uuid4()), "sandbox"), (WF, "live")):  # a weaker workflow / other env
+            assert conn.execute("SELECT public.kyc_create_session(%s, gen_random_uuid(), %s, 1, %s)",
+                                (uid, workflow, environment)).fetchone()[0] == "wrong_configuration"
+        with pytest.raises(psycopg.errors.FeatureNotSupported), conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            conn.execute("SELECT public.kyc_create_session(%s, gen_random_uuid(), %s, 1, 'sandbox')", (uid, WF))
         with pytest.raises(psycopg.errors.ForeignKeyViolation):  # KYC history keeps its user
             conn.execute("DELETE FROM public.users WHERE id = %s", (uid,))
-    assert not approved(uid)
-    with fixture_db() as conn:  # the schema owner can (synthetic cleanup)
+    assert not approved(uid) and session_row(sid)[0] == "Not Started"
+    # The genuine path still works, and a captured delivery replayed through the function is a duplicate.
+    genuine = envelope(session_id=sid, vendor=uid, status="Approved", created_at=t, decision=approved_decision(sid))
+    args = (didit.canonical(genuine).decode(), sign(genuine), str(t))
+    with db() as conn:
+        assert conn.execute("SELECT public.kyc_receive_webhook(%s, %s, %s)", args).fetchone()[0] == "applied"
+        assert conn.execute("SELECT public.kyc_receive_webhook(%s, %s, %s)", args).fetchone()[0] == "duplicate"
+    assert approved(uid)
+    with fixture_db() as conn:  # the schema owner can (synthetic cleanup); the vendor rule holds for it too
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, environment) "
+                         "VALUES (%s, 'someone', gen_random_uuid(), %s, 'sandbox')", (uid, WF))
         assert conn.execute("SELECT count(*) FROM public.kyc_sessions WHERE user_id = %s", (uid,)).fetchone()[0] == 1
 
 

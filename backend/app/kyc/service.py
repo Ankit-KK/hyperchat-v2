@@ -5,16 +5,18 @@ person keeps it for every creator they own. Only a creator's current owner may s
 moderator or a user without an owned creator may not). This PR only records verification; it never activates a
 creator and does not change donation eligibility (PR4 wires user_kyc_approved into activation and enforcement).
 
-Status writes go through public.kyc_record_provider_status (the only writer; the API's database role cannot UPDATE
-kyc_sessions): provider order is kept by the provider's own update time, so a delayed old event never overwrites a
-newer one, while a later expiry or decline always replaces an approval. Approved is accepted only from a signed
-webhook that carries the matching decision, or from Didit's decision endpoint (admin refresh).
+The API's database role only reads the KYC tables; every write is a SECURITY DEFINER function (migration 0022):
+* webhooks: public.kyc_receive_webhook verifies X-Signature-V2 in the database, with a secret this process never
+  holds, and applies only what the signed body says. It is the only way to become approved.
+* sessions: public.kyc_create_session (the configured workflow / environment only; applies early webhooks).
+* admin refresh: public.kyc_apply_refresh records Didit's decision endpoint, which is not signed, so it can never
+  approve; it is dated when Didit was asked, so a slow refresh never outranks a newer webhook.
+Provider order is kept by the provider's own update time: a delayed old event never overwrites a newer one, while a
+later expiry or decline always replaces an approval.
 """
 
 import asyncio
 import json
-import time
-from datetime import UTC, datetime
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -22,25 +24,21 @@ from psycopg.types.json import Jsonb
 from app.auth.repository import User
 from app.core.config import Settings
 from app.core.errors import ApiError
-from app.kyc.didit import (
-    STATUSES,
-    CreatedSession,
-    DiditClient,
-    DiditError,
-    as_uuid,
-    check_statuses,
-    fresh,
-    signature_valid,
-)
+from app.kyc.didit import CreatedSession, DiditClient, DiditError, as_uuid, canonical, check_statuses
 from app.security.audit import security_event
 
 RATE_START = ("kyc:session", 5, 3600)       # per user
 RATE_REFRESH = ("kyc:refresh", 30, 3600)    # per admin
-HANDLED_TYPES = ("status.updated", "data.updated")
 STATE = {"Not Started": "in_progress", "In Progress": "in_progress", "Resubmitted": "in_progress",
          "Awaiting User": "in_progress", "In Review": "in_review", "Declined": "declined", "Kyc Expired": "expired",
          "Expired": "not_completed", "Abandoned": "not_completed", "Approved": "approved"}
 UNAVAILABLE = "Identity verification is unavailable right now. Please try again later."
+# kyc_receive_webhook refusals -> (HTTP status, message, log code). Didit retries 5xx and 404 only.
+REFUSED = {"not_configured": (503, UNAVAILABLE, "kyc_not_configured"),
+           "bad_signature": (401, "Invalid signature", "kyc_webhook_bad_signature"),
+           "stale_timestamp": (401, "Stale or missing timestamp", "kyc_webhook_stale"),
+           "malformed": (400, "Malformed payload", "kyc_webhook_malformed"),
+           "wrong_application": (403, "Not this environment's Didit application", "kyc_webhook_wrong_application")}
 _SESSION_COLS = """session_id::text, workflow_id::text, workflow_version, environment, provider_status,
     provider_updated_at, check_statuses, approved_at, created_at, updated_at"""
 
@@ -88,76 +86,31 @@ class KycRepository:
             return (await cur.fetchone())[0]
 
     async def record_session(self, user_id: str, created: CreatedSession, workflow_id: str, environment: str) -> dict:
-        """Store a session Didit returned (idempotent: a session already stored is kept), then apply any signed
-        webhook for it that arrived before this row existed (an early webhook), oldest first."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("""
-                INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, workflow_version,
-                                                 environment)
-                VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (session_id) DO NOTHING RETURNING id
-            """, (user_id, user_id, created.session_id, workflow_id, created.workflow_version, environment))
-            if await cur.fetchone() is not None:
-                await cur.execute("INSERT INTO public.kyc_events (user_id, session_id, action, to_status, source, "
-                                  "actor_user_id) VALUES (%s, %s, 'session_created', 'Not Started', "
-                                  "'session_create', %s)", (user_id, created.session_id, user_id))
-            await cur.execute(f"SELECT user_id::text, {_SESSION_COLS} FROM public.kyc_sessions WHERE session_id = %s",
-                              (created.session_id,))
-            row = await cur.fetchone()
-            if row["user_id"] != user_id:
-                raise DiditError("session_owner_mismatch")  # never: vendor_data is this user; refuse to hand it out
-            await cur.execute("""
-                SELECT id, provider_status, provider_updated_at, vendor_data FROM public.kyc_webhook_events
-                WHERE session_id = %s AND outcome = 'unmatched' ORDER BY provider_updated_at, received_at FOR UPDATE
-            """, (created.session_id,))
-            for early in await cur.fetchall():
-                if early["vendor_data"] != user_id:
-                    continue  # signed for another user: never applied
-                await cur.execute("SELECT public.kyc_record_provider_status(%s, %s, %s, NULL, 'webhook', NULL)",
-                                  (created.session_id, early["provider_status"], early["provider_updated_at"]))
-                await cur.execute("UPDATE public.kyc_webhook_events SET outcome = 'matched_later' WHERE id = %s",
-                                  (early["id"],))
+        """Store a session Didit returned (idempotent) and apply the signed webhooks that arrived before it."""
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT public.kyc_create_session(%s, %s, %s, %s, %s) AS r",
+                              (user_id, created.session_id, workflow_id, created.workflow_version, environment))
+            result = (await cur.fetchone())["r"]
+            if result != "ok":
+                raise DiditError(f"session_{result}")  # never handed out: not this user's, or not this configuration
             await cur.execute(f"SELECT {_SESSION_COLS} FROM public.kyc_sessions WHERE session_id = %s",
                               (created.session_id,))
             return await cur.fetchone()
 
-    async def record_webhook(self, event: dict) -> str:
-        """Dedupe on event_id, then (unless the outcome is already decided) apply it to its owner-bound session, all
-        in one transaction. 'duplicate' when this event id was already received."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("""
-                INSERT INTO public.kyc_webhook_events (event_id, webhook_type, session_id, vendor_data, provider_status,
-                                                       provider_updated_at, environment, outcome)
-                VALUES (%(event_id)s, %(webhook_type)s, %(session_id)s, %(vendor_data)s, %(status)s, %(provider_at)s,
-                        %(environment)s, %(outcome)s)
-                ON CONFLICT (event_id) DO NOTHING RETURNING id
-            """, event)
-            row = await cur.fetchone()
-            if row is None:
-                return "duplicate"
-            if event["outcome"] != "pending":
-                return event["outcome"]
-            # No lock needed: a session's identity columns never change (the runtime role cannot UPDATE the table);
-            # kyc_record_provider_status locks the row for the status change itself.
-            await cur.execute("SELECT user_id::text, workflow_id::text, environment FROM public.kyc_sessions "
-                              "WHERE session_id = %s", (event["session_id"],))
-            session = await cur.fetchone()
-            if session is None:
-                outcome = "unmatched"  # an early webhook: applied when the session row is stored
-            elif (session["user_id"] != event["vendor_data"] or session["workflow_id"] != event["workflow_id"]
-                  or session["environment"] != event["environment"]):
-                outcome = "identity_mismatch"
-            else:
-                await cur.execute("SELECT public.kyc_record_provider_status(%s, %s, %s, %s, 'webhook', NULL) AS r",
-                                  (event["session_id"], event["status"], event["provider_at"],
-                                   Jsonb(event["checks"]) if event["checks"] is not None else None))
-                outcome = "stale" if (await cur.fetchone())["r"] == "stale" else "applied"
-            await cur.execute("UPDATE public.kyc_webhook_events SET outcome = %s WHERE id = %s", (outcome, row["id"]))
-            return outcome
+    async def receive_webhook(self, canonical_body: str, signature: str | None, x_timestamp: str | None) -> str:
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT public.kyc_receive_webhook(%s, %s, %s)", (canonical_body, signature, x_timestamp))
+            return (await cur.fetchone())[0]
 
-    async def refresh(self, session_id: str, status: str, checks: dict, actor_id: str) -> str:
-        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
-            await cur.execute("SELECT public.kyc_record_provider_status(%s, %s, now(), %s, 'admin_refresh', %s)",
-                              (session_id, status, Jsonb(checks), actor_id))
+    async def clock(self):
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT clock_timestamp()")
+            return (await cur.fetchone())[0]
+
+    async def refresh(self, session_id: str, status: str, checks: dict, observed_at, actor_id: str) -> str:
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT public.kyc_apply_refresh(%s, %s, %s, %s, %s)",
+                              (session_id, status, Jsonb(checks), observed_at, actor_id))
             return (await cur.fetchone())[0]
 
 
@@ -221,53 +174,20 @@ class KycService:
 
     # ── webhook ───────────────────────────────────────────────────────────
     async def webhook(self, raw: bytes, signature: str | None, x_timestamp: str | None, ip: str | None) -> dict:
-        self._available()
+        """Canonicalize the body (what Didit signed) and hand it to the database, which verifies and applies it."""
         try:
             body = json.loads(raw)
-        except (ValueError, UnicodeDecodeError):
-            raise ApiError(400, "Malformed payload", "kyc_webhook_malformed") from None
-        if not isinstance(body, dict):
+            text = canonical(body).decode("utf-8") if isinstance(body, dict) else None
+        except (ValueError, UnicodeError, RecursionError):
+            text = None
+        if text is None:
             raise ApiError(400, "Malformed payload", "kyc_webhook_malformed")
-        secret = self.settings.didit_webhook_secret.get_secret_value().strip()
-        if not signature_valid(body, signature, secret):
-            security_event("kyc_webhook_rejected", reason="bad_signature" if signature else "no_signature",
-                           client_ip=ip)
-            raise ApiError(401, "Invalid signature", "kyc_webhook_bad_signature")
-        now = time.time()
-        header_ts = int(x_timestamp) if x_timestamp and x_timestamp.isascii() and x_timestamp.isdigit() else None
-        if not fresh(body.get("timestamp"), now) or not fresh(header_ts, now):
-            security_event("kyc_webhook_rejected", reason="stale_or_missing_timestamp", client_ip=ip)
-            raise ApiError(401, "Stale or missing timestamp", "kyc_webhook_stale")
-        event_id = body.get("event_id")
-        if not isinstance(event_id, str) or not 1 <= len(event_id) <= 128:
-            raise ApiError(400, "Malformed payload", "kyc_webhook_malformed")
-        if body.get("environment") != self.environment or (
-                self.settings.didit_application_id
-                and as_uuid(body.get("application_id")) != as_uuid(self.settings.didit_application_id)):
-            security_event("kyc_webhook_rejected", reason="wrong_application_or_environment", client_ip=ip)
-            raise ApiError(403, "Not this environment's Didit application", "kyc_webhook_wrong_application")
-
-        status, created_at = body.get("status"), body.get("created_at")
-        decision = body.get("decision") if isinstance(body.get("decision"), dict) else None
-        event = {"event_id": event_id, "webhook_type": str(body.get("webhook_type"))[:64],
-                 "session_id": as_uuid(body.get("session_id")), "vendor_data": as_uuid(body.get("vendor_data")),
-                 "workflow_id": as_uuid(body.get("workflow_id")), "environment": self.environment,
-                 "status": status if status in STATUSES else None, "checks": None, "outcome": "pending",
-                 "provider_at": datetime.fromtimestamp(created_at, UTC) if fresh_int(created_at) else None}
-        if event["webhook_type"] not in HANDLED_TYPES:
-            event["outcome"] = "ignored"
-        elif event["status"] is None:
-            event["outcome"] = "unknown_status"  # never applied, never approves
-        elif event["session_id"] is None or event["provider_at"] is None:
-            event["outcome"] = "incomplete"
-        elif event["vendor_data"] is None or event["workflow_id"] != as_uuid(self.settings.didit_workflow_id):
-            event["outcome"] = "identity_mismatch"
-        elif status == "Approved" and not (decision and as_uuid(decision.get("session_id")) == event["session_id"]
-                                           and decision.get("status") == "Approved"):
-            event["outcome"] = "incomplete"  # an approval must carry its matching decision
-        else:
-            event["checks"] = check_statuses(decision) if decision else None
-        outcome = await self.repo.record_webhook(event)
+        outcome = await self.repo.receive_webhook(text, signature, x_timestamp)
+        if outcome in REFUSED:
+            code, message, reason = REFUSED[outcome]
+            if outcome != "not_configured":
+                security_event("kyc_webhook_rejected", reason=outcome, client_ip=ip)
+            raise ApiError(code, message, reason)
         if outcome in ("identity_mismatch", "unknown_status", "incomplete"):
             security_event("kyc_webhook_not_applied", reason=outcome, client_ip=ip)
         return {"status": outcome}
@@ -282,14 +202,15 @@ class KycService:
 
     async def admin_refresh(self, admin: User, user_id: str, ip: str | None) -> dict:
         """Reconcile the user's newest session with Didit's decision endpoint (two attempts at most; no polling).
-        This is the recovery for a webhook that never arrived; it can record any Didit status, Approved included,
-        but only what Didit itself reports."""
+        The recovery for a webhook that never arrived. The response is not signed, so it never approves: an Approved
+        answer is reported as 'approval_needs_webhook' (Didit's own signed webhook, or its retry, approves)."""
         self._available()
         await self._limit(f"admin:{admin.id}", RATE_REFRESH)
         sessions = [s for s in await self.repo.sessions(user_id) if s["environment"] == self.environment]
         if not sessions:
             raise ApiError(404, "This user has no verification session", "kyc_no_session")
         session_id = sessions[0]["session_id"]
+        asked_at = await self.repo.clock()  # the refresh describes this moment, however long the call takes
         for attempt in (1, 2):
             try:
                 decision = await self.client.decision(session_id)
@@ -299,11 +220,8 @@ class KycService:
                     security_event("kyc_refresh_failed", reason=exc.reason, user_id=admin.id, client_ip=ip)
                     raise ApiError(503, UNAVAILABLE, "kyc_provider_unavailable") from None
                 await asyncio.sleep(1)
-        result = await self.repo.refresh(session_id, decision["status"], check_statuses(decision), admin.id)
+        result = await self.repo.refresh(session_id, decision["status"], check_statuses(decision), asked_at,
+                                         admin.id)
         security_event("kyc_refreshed", level=20, user_id=admin.id, target_user_id=user_id, reason=result,
                        client_ip=ip)
-        return await self.admin_view(user_id)
-
-
-def fresh_int(value) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+        return {**await self.admin_view(user_id), "refresh": result}

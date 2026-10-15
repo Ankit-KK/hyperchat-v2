@@ -47,8 +47,6 @@ RULES: dict[str, tuple[str, str]] = {
     # (legacy kept 90 days).
     "jobs": ("public.jobs", "status IN ('succeeded', 'failed') AND completed_at < now() - interval '30 days'"),
     "tts_moderation_audit": ("public.tts_moderation_audit", "created_at < now() - interval '90 days'"),
-    # KYC PR3: Didit webhook receipts (dedupe only; a replay older than 5 minutes is refused anyway).
-    "kyc_webhook_events": ("public.kyc_webhook_events", "received_at < now() - interval '90 days'"),
     # Phase 7: the Razorpay order -> donation index (legacy cron cleanup-order-lookup: daily, 30 days). A webhook
     # for an older order still resolves through donations.provider_order_id (PaymentRepository.by_provider_order).
     "order_lookup": ("public.order_lookup", "created_at < now() - interval '30 days'"),
@@ -74,6 +72,9 @@ async def cleanup(connection_factory, *, dry_run: bool) -> dict[str, int]:
             else:
                 await cur.execute(f"DELETE FROM {table} WHERE {condition}")
                 counts[name] = cur.rowcount
+        # KYC PR3: Didit webhook receipts after 90 days, through the database (the API's role cannot DELETE them).
+        await cur.execute("SELECT public.kyc_purge_webhook_receipts(%s)", (dry_run,))
+        counts["kyc_webhook_events"] = (await cur.fetchone())[0]
     return counts
 
 

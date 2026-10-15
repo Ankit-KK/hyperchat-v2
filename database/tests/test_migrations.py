@@ -4,6 +4,7 @@ Enabled when HYPERCHAT_TEST_MIGRATION_DSN points at a scratch database, e.g.
   postgresql+psycopg://hyperchat_migrator@/hyperchat_migtest?host=/var/run/postgresql&port=5432
 """
 
+import io
 import os
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
+
+from etl import kyc_provider_config
 
 DSN = os.environ.get("HYPERCHAT_TEST_MIGRATION_DSN", "")
 pytestmark = pytest.mark.skipif(not DSN, reason="HYPERCHAT_TEST_MIGRATION_DSN not set")
@@ -26,7 +29,7 @@ EXPECTED_TABLES = {
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
     "d1_hash_import_ledger", "creator_status_events", "application_events", "kyc_sessions", "kyc_webhook_events",
-    "kyc_events",
+    "kyc_events", "kyc_provider_config",
 }
 
 
@@ -385,6 +388,9 @@ def test_0021_creator_applications_keep_existing_signups(monkeypatch):
         command.upgrade(cfg, "head")
 
 
+WF22 = "6ff16570-fe12-4212-9647-b12b8898cc09"
+
+
 def test_0022_kyc_core_changes_nothing_existing_and_guards_its_history(monkeypatch):
     monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
     cfg = _cfg()
@@ -414,6 +420,33 @@ def test_0022_kyc_core_changes_nothing_existing_and_guards_its_history(monkeypat
             with pytest.raises(psycopg.errors.CheckViolation):
                 conn.execute("SELECT public.kyc_record_provider_status(%s, 'Bogus', now(), NULL, 'webhook', NULL)",
                              (sid,))
+            # The trust boundary: no runtime role reads the webhook secret or calls the internal writers.
+            for role in ("hyperchat_app", "hyperchat_worker", "hyperchat_readonly"):
+                assert conn.execute("SELECT has_table_privilege(%s, 'public.kyc_provider_config', 'SELECT')",
+                                    (role,)).fetchone()[0] is False, role
+            for function, allowed in (("kyc_record_provider_status(uuid, text, timestamptz, jsonb, text, uuid)", False),
+                                      ("kyc_hmac_sha256(bytea, bytea)", False),
+                                      ("kyc_receive_webhook(text, text, text)", True),
+                                      ("kyc_apply_refresh(uuid, text, jsonb, timestamptz, uuid)", True),
+                                      ("kyc_create_session(uuid, uuid, uuid, integer, text)", True)):
+                assert conn.execute("SELECT has_function_privilege('hyperchat_app', %s, 'EXECUTE')",
+                                    ("public." + function,)).fetchone()[0] is allowed, function
+                assert conn.execute("SELECT has_function_privilege('hyperchat_worker', %s, 'EXECUTE')",
+                                    ("public." + function,)).fetchone()[0] is False, function
+            for table, privilege in (("kyc_sessions", "INSERT"), ("kyc_sessions", "UPDATE"), ("kyc_events", "INSERT"),
+                                     ("kyc_webhook_events", "INSERT"), ("kyc_webhook_events", "DELETE"),
+                                     ("kyc_webhook_events", "UPDATE")):
+                assert conn.execute("SELECT has_table_privilege('hyperchat_app', %s, %s)",
+                                    ("public." + table, privilege)).fetchone()[0] is False, (table, privilege)
+        # The operator's tool stores the webhook secret (read from stdin, never argv).
+        monkeypatch.setattr("sys.stdin", io.StringIO("short\n"))
+        assert kyc_provider_config.main(["--environment", "sandbox", "--workflow-id", WF22, "--secret-stdin"]) == 2
+        monkeypatch.setattr("sys.stdin", io.StringIO("  whsec_migtest_0123456789  \n"))
+        assert kyc_provider_config.main(["--environment", "sandbox", "--workflow-id", WF22, "--secret-stdin"]) == 0
+        with _owner() as conn:
+            assert conn.execute("SELECT environment, workflow_id::text, application_id, webhook_secret "
+                                "FROM public.kyc_provider_config").fetchall() == [
+                ("sandbox", WF22, None, "whsec_migtest_0123456789")]
         with pytest.raises(Exception, match="KYC session"):
             command.downgrade(cfg, "0021")  # never drops verification history
         assert _version() == "0022"

@@ -138,20 +138,19 @@ class Settings(BaseSettings):
     razorpay_primary_key_secret: SecretStr | None = None
     razorpay_primary_webhook_secret: SecretStr | None = None
 
-    # ── Didit identity verification (KYC PR3, app.kyc). Creator OWNERS verify their identity; KYC is unavailable
-    #    (503) until the API key, webhook secret and workflow id are set. DEV uses a Didit SANDBOX application,
-    #    production a LIVE one (refused otherwise, below), so a sandbox result can never count in production.
+    # ── Didit identity verification (KYC PR3, app.kyc). Creator OWNERS verify their identity; starting one is
+    #    unavailable (503) until the API key and workflow id are set. The webhook secret is NOT here: it lives only in
+    #    the database (public.kyc_provider_config, unreadable by the API's role), which verifies every webhook itself.
+    #    DEV uses a Didit SANDBOX application, production a LIVE one (refused otherwise, below), so a sandbox result
+    #    can never count in production.
     didit_api_key: SecretStr | None = None
-    didit_webhook_secret: SecretStr | None = None
-    didit_workflow_id: str | None = None   # not secret; the "Free KYC" workflow of this environment's application
-    didit_application_id: str | None = None  # when set, webhooks from any other Didit application are refused
+    didit_workflow_id: str | None = None   # not secret; must equal the workflow in kyc_provider_config
     didit_environment: Literal["sandbox", "live"] | None = None
     didit_api_base: str = "https://verification.didit.me"
 
     @property
     def didit_configured(self) -> bool:
-        return bool(_secret_value(self.didit_api_key) and _secret_value(self.didit_webhook_secret)
-                    and _uuid(self.didit_workflow_id) and self.didit_environment)
+        return bool(_secret_value(self.didit_api_key) and _uuid(self.didit_workflow_id) and self.didit_environment)
 
     @model_validator(mode="after")
     def _refuse_the_wrong_didit_environment(self) -> "Settings":
@@ -160,8 +159,6 @@ class Settings(BaseSettings):
             raise ValueError(f"Refusing to start: HYPERCHAT_DIDIT_ENVIRONMENT must be {expected!r} here")
         if self.didit_workflow_id and not _uuid(self.didit_workflow_id):
             raise ValueError("Refusing to start: HYPERCHAT_DIDIT_WORKFLOW_ID must be a UUID")
-        if self.didit_application_id and not _uuid(self.didit_application_id):
-            raise ValueError("Refusing to start: HYPERCHAT_DIDIT_APPLICATION_ID must be a UUID")
         if _https_url(self.didit_api_base, allow_path=False) != self.didit_api_base.rstrip("/"):
             raise ValueError("Refusing to start: HYPERCHAT_DIDIT_API_BASE must be an https origin")
         return self

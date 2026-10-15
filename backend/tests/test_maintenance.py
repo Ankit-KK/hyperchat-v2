@@ -6,7 +6,7 @@ import json
 from app.cli import connection_factory, main
 from app.core.config import Settings
 from app.maintenance import cleanup
-from tests.integration import DOMAIN, db, make_streamer, make_user, requires_db
+from tests.integration import DOMAIN, db, fixture_db, make_streamer, make_user, requires_db
 
 pytestmark = requires_db
 
@@ -98,7 +98,8 @@ def _seed() -> dict[str, list[str]]:
         for order, days in (("order_authtestOld", 31), ("order_authtestNew", 29)):
             conn.execute("INSERT INTO public.order_lookup (razorpay_order_id, order_id, donation_id, created_at) "
                          "VALUES (%s, %s, %s, now() - make_interval(days => %s))", (order, order, did, days))
-        # KYC PR3: Didit webhook receipts (dedupe only) after 90 days.
+    # KYC PR3: Didit webhook receipts after 90 days (only the database writes them; the API's role cannot).
+    with fixture_db() as conn:
         for event_id, days in (("authtest-kyc-old", 91), ("authtest-kyc-new", 89)):
             conn.execute("INSERT INTO public.kyc_webhook_events (event_id, webhook_type, outcome, received_at) "
                          "VALUES (%s, 'status.updated', 'applied', now() - make_interval(days => %s))", (event_id, days))

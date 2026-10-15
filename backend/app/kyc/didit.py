@@ -1,4 +1,4 @@
-"""Didit v3 (https://docs.didit.me): session API client and webhook signature verification (KYC PR3).
+"""Didit v3 (https://docs.didit.me): session API client and the webhook canonical form (KYC PR3).
 
 Sessions: POST {base}/v3/session/ with x-api-key; body {workflow_id, vendor_data, callback}. Didit returns the
 unfinished session of the same vendor_data instead of a new one, so a retry after a lost response (or a failed local
@@ -6,14 +6,11 @@ write) gets the same session back. Decision: GET {base}/v3/session/{id}/decision
 
 Webhooks (docs.didit.me/integration/webhooks): X-Signature-V2 = hex HMAC-SHA256(secret, canonical JSON of the WHOLE
 body), canonical = whole-valued floats as integers (recursively), keys sorted, arrays in order, compact separators,
-Unicode kept (ensure_ascii=False). X-Signature (raw bytes) and the deprecated X-Signature-Simple (envelope only) are
-never used. Freshness: the docs check the X-Timestamp header (abs(now - X-Timestamp) <= 300 s); that header is not
-signed, so the signed body `timestamp` (refreshed on every retry) is the authority and must be fresh too; both are
-required. Equality of the two is not documented, so it is not required (each must be within the window).
+Unicode kept (ensure_ascii=False). The API only canonicalizes; the DATABASE verifies the signature
+(public.kyc_receive_webhook, migration 0022) with a secret the API never holds. X-Signature (raw bytes) and the
+deprecated X-Signature-Simple (envelope only) are never used.
 """
 
-import hashlib
-import hmac
 import json
 import re
 import uuid
@@ -22,11 +19,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
-FRESHNESS_SECONDS = 300
 STATUSES = frozenset({"Not Started", "In Progress", "Awaiting User", "In Review", "Approved", "Declined", "Resubmitted",
                       "Abandoned", "Expired", "Kyc Expired"})
 CHECKS = ("id_verifications", "liveness_checks", "face_matches", "aml_screenings")  # statuses only are kept
-_HEX = re.compile(r"^[0-9a-f]{64}$")
 _URL_HOST = re.compile(r"^([a-z0-9-]+\.)*didit\.me$")
 
 
@@ -50,19 +45,6 @@ def _shorten(value):
 
 def canonical(body: dict) -> bytes:
     return json.dumps(_shorten(body), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-
-def sign(body: dict, secret: str) -> str:
-    return hmac.new(secret.encode("utf-8"), canonical(body), hashlib.sha256).hexdigest()
-
-
-def signature_valid(body: dict, presented: str | None, secret: str) -> bool:
-    presented = (presented or "").strip().lower()
-    return bool(_HEX.match(presented)) and hmac.compare_digest(presented, sign(body, secret))
-
-
-def fresh(value, now: float) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and abs(now - value) <= FRESHNESS_SECONDS
 
 
 def as_uuid(value) -> str | None:
