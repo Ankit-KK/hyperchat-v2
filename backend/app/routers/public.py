@@ -1,4 +1,5 @@
-"""Public read API (Phase 4): /api/v1/public/streamers/{slug}/... and /api/v1/metrics/*.
+"""Public read API (Phase 4): /api/v1/public/streamers/{slug}/... and /api/v1/metrics/*; D5: GET /api/v1/public/config
+(static contact details and the Discord invite, from settings; there is no contact-form submission API).
 
 No authentication, no cookies, GET only. Each route declares its response model (fixed field set) and a
 Cache-Control header. Per-IP rate limiting is done by Nginx (deploy/nginx/snippets/hyperchat-public-*).
@@ -11,6 +12,8 @@ from app.public.models import (
     Goal,
     Leaderboard,
     OverlayConfig,
+    PublicConfig,
+    PublicContact,
     PlatformMetrics,
     Pricing,
     PublicStreamer,
@@ -21,9 +24,10 @@ from app.public.service import PublicService
 
 streamers_router = APIRouter(prefix="/api/v1/public/streamers", tags=["public"])
 metrics_router = APIRouter(prefix="/api/v1/metrics", tags=["public"])
+config_router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
 CACHE_SECONDS = {"profile": 60, "pricing": 60, "overlay": 30, "soundboard": 60, "leaderboard": 10, "goal": 10,
-                 "platform": 300, "showcase": 60}
+                 "platform": 300, "showcase": 60, "config": 300}
 
 
 def _service(request: Request) -> PublicService:
@@ -92,3 +96,13 @@ async def showcase_metrics(request: Request, response: Response) -> ShowcaseMetr
     result = await _service(request).showcase_metrics()
     _cache(response, "showcase")
     return result
+
+
+@config_router.get("/config", response_model=PublicConfig)
+async def public_config(request: Request, response: Response) -> PublicConfig:
+    """D5: values validated at startup; no database, no session."""
+    s = request.app.state.settings
+    _cache(response, "config")
+    return PublicConfig(contact=PublicContact(
+        name=s.public_contact_name or None, email=s.public_contact_email or None,
+        phones=[p for p in s.public_contact_phones.split(",") if p], discord_url=s.public_discord_url or None))

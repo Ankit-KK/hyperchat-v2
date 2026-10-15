@@ -8,7 +8,7 @@ Environment (defaults = v2 development):
     HYPERCHAT_SMOKE_DB        hyperchat_dev:5433          (refuses hyperchat and hyperchat_restore_test)
     HYPERCHAT_SMOKE_ORIGIN    https://app.quicktestspace.site
     HYPERCHAT_SMOKE_LOCAL     http://127.0.0.1:8000       the DEV API's local port (release / environment details)
-    HYPERCHAT_SMOKE_ENV_FILE  /etc/hyperchat/api.env      read only for the bots flag
+    HYPERCHAT_SMOKE_ENV_FILE  /etc/hyperchat/api.env      read only (bots flag, public contact values, R2)
 
 Safety: refuses to run unless the API reports environment "development", the database is not a production or
 restore database, the API is not api.hyperchat.space, and bots are disabled. It never changes configuration,
@@ -19,7 +19,7 @@ DEV); nothing else leaves the server. Every synthetic row is recognizable (users
 "authtest-*", orders "authtest-*") and removed at the end, and the cleanup is verified. The login rate-limit counters
 the suite consumes (auth:* rows) are cleared, as smoke_auth.py does. Nothing secret is printed.
 Feature sections (payments-account D6, payment-health D7, admin-email D11, owner-transfer D13, upload-cleanup D9,
-...) report BLOCKED while the deployed release predates them. upload-cleanup also writes and deletes a few synthetic
+public-config D5, ...) report BLOCKED while the deployed release predates them. upload-cleanup also writes and deletes a few synthetic
 objects in the DEV R2 bucket, so it runs only with HYPERCHAT_SMOKE_R2=1 (an explicit approval) and otherwise reports
 BLOCKED; it runs the deployed cleanup on this run's keys only, with the clock moved 25 hours ahead. The owner-transfer section moves a synthetic creator between two synthetic
 users only; no real creator or account is touched.
@@ -1030,6 +1030,37 @@ try:
             check(S, "D9 referenced and too-new uploads kept", present[referenced] and present[too_new], str(present))
             check(S, "D9 soundboard object never touched", board_kept)
             check(S, "D9 synthetic objects removed afterwards", left == [], str(len(left)))
+
+    # ── public contact config (D5): anonymous read of the HYPERCHAT_PUBLIC_* values; nothing written ──
+    S = "public-config"
+    r = httpx.get(API + "/api/v1/public/config", timeout=15)
+    if r.status_code == 404:
+        blocked(S, "Public contact config (D5)", "not deployed on DEV yet; needs an approved DEV deploy")
+    else:
+        from pydantic import SecretStr
+
+        from app.core.config import Settings
+
+        cfg = Settings(_env_file=ENV_FILE)
+        body = r.json() if r.status_code == 200 else {}
+        contact = body.get("contact") if isinstance(body, dict) else None
+        check(S, "D5 GET /api/v1/public/config anonymously -> 200, cacheable, no cookie",
+              r.status_code == 200 and r.headers.get("cache-control") == "public, max-age=300"
+              and "set-cookie" not in r.headers, f"{r.status_code} {r.headers.get('cache-control')}")
+        check(S, "D5 only the allow-listed fields", set(body) == {"contact"} and isinstance(contact, dict)
+              and set(contact) == {"name", "email", "phones", "discord_url"}, str(sorted(body))[:120])
+        expected = {"name": cfg.public_contact_name or None, "email": cfg.public_contact_email or None,
+                    "phones": [x for x in cfg.public_contact_phones.split(",") if x],
+                    "discord_url": cfg.public_discord_url or None}
+        check(S, "D5 values match the DEV configuration (null / [] when unset)", contact == expected,
+              "configured: " + (", ".join(k for k, v in expected.items() if v) or "none"))
+        secret_values = [v.get_secret_value() for v in (getattr(cfg, f) for f in type(cfg).model_fields)
+                         if isinstance(v, SecretStr) and len(v.get_secret_value()) >= 8]
+        check(S, "D5 no configured secret in the response", not [v for v in secret_values if v in r.text])
+        check(S, "D5 read-only: POST -> 405",
+              httpx.post(API + "/api/v1/public/config", json={}, headers=ORIGIN, timeout=15).status_code == 405)
+        check(S, "D5 no contact-form submission route", httpx.post(API + "/api/v1/public/contact", json={},
+                                                                  headers=ORIGIN, timeout=15).status_code == 404)
 
     # ── bots: disabled ──────────────────────────────────────────────────────
     S = "bots"

@@ -32,7 +32,7 @@ Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):
 | `streamer_donator_totals` | same | `streamer_slug` → `streamer_id` FK |
 | slug-keyed soundboard tables, `api_keys` | same | FK on `streamer_slug` (ON UPDATE CASCADE) |
 | other 20 tables | same | structure copied; FKs to `users` instead of `auth_users` / `auth.users` |
-| — | `contact_submissions` | new (the contact form wrote to a table that never existed) |
+| — | `contact_submissions` | created by 0005 for the legacy contact form (whose table never existed in the legacy database); **unused** (dropping it would be a separate schema migration): the contact form is retired (D5, 2026-10-15) and no code reads or writes it |
 | `profiles`, `auth_migration_control` | — | Supabase artifacts, not migrated |
 
 ## `donations` mapping

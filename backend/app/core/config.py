@@ -5,6 +5,7 @@ Every value comes from environment variables prefixed with ``HYPERCHAT_`` (on th
 """
 
 import re
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -25,6 +26,11 @@ PUSHER_GROUPS = (1, 2, 3, 4)  # configurable Pusher apps (streamers.pusher_group
 _PUSHER_APP_ID = re.compile(r"^[0-9]{1,20}$")
 _PUSHER_KEY = re.compile(r"^[A-Za-z0-9]{1,64}$")
 _PUSHER_CLUSTER = re.compile(r"^[a-z0-9]{1,20}$")  # becomes part of a host name (api-<cluster>.pusher.com)
+# D5 public contact details (GET /api/v1/public/config).
+_DISCORD_INVITE = re.compile(r"^https://(?i:discord\.gg|(?:www\.)?discord\.com/invite)/[A-Za-z0-9-]{2,32}$")
+_CONTACT_EMAIL = re.compile(r"^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}$")
+_PHONE = re.compile(r"^\+?[0-9 ()-]{4,24}$")
+MAX_CONTACT_PHONES = 5
 
 
 def _secret_value(value: SecretStr | None) -> str:
@@ -79,6 +85,12 @@ class Settings(BaseSettings):
     # Extra browser origins trusted for credentialed CORS and the Origin check, besides the frontend's
     # own origin: comma-separated exact origins, e.g. "http://localhost:5173" for local development.
     allowed_origins: str = ""
+    # D5: contact details the frontend shows (GET /api/v1/public/config). Intentionally PUBLIC; unset = null / [].
+    # Checked at startup: a malformed value refuses to start rather than being shown.
+    public_contact_name: str = ""
+    public_contact_email: str = ""
+    public_contact_phones: str = ""  # comma-separated, at most 5
+    public_discord_url: str = ""  # a Discord invite: https://discord.gg/<code> or https://discord.com/invite/<code>
     session_cookie_name: str = "__Host-hc_session"  # __Host-: Secure, Path=/, no Domain
     # "lax" whenever frontend and API are same-site (production). "none" only for cross-site development
     # and never in production.
@@ -198,6 +210,44 @@ class Settings(BaseSettings):
     def discord_configured(self) -> bool:
         key = (self.discord_public_key or "").strip()
         return bool(_secret_value(self.discord_bot_token) and re.fullmatch(r"[0-9a-fA-F]{64}", key))
+
+    @field_validator("public_contact_name")
+    @classmethod
+    def _contact_name(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) > 80 or any(unicodedata.category(c).startswith("C") for c in value):
+            raise ValueError("HYPERCHAT_PUBLIC_CONTACT_NAME: at most 80 characters, no control characters")
+        return value
+
+    @field_validator("public_contact_email")
+    @classmethod
+    def _contact_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value and (len(value) > 254 or not _CONTACT_EMAIL.match(value)):
+            raise ValueError("HYPERCHAT_PUBLIC_CONTACT_EMAIL is not a valid email address")
+        return value
+
+    @field_validator("public_contact_phones")
+    @classmethod
+    def _contact_phones(cls, value: str) -> str:
+        phones = [" ".join(p.split()) for p in value.split(",") if p.strip()]
+        for phone in phones:
+            if not (_PHONE.match(phone) and 6 <= sum(c.isdigit() for c in phone) <= 15):
+                raise ValueError("HYPERCHAT_PUBLIC_CONTACT_PHONES: comma-separated numbers of 6-15 digits "
+                                 "(+, spaces, parentheses and hyphens allowed)")
+        if len(phones) > MAX_CONTACT_PHONES:
+            raise ValueError(f"HYPERCHAT_PUBLIC_CONTACT_PHONES: at most {MAX_CONTACT_PHONES} numbers")
+        return ",".join(phones)
+
+    @field_validator("public_discord_url")
+    @classmethod
+    def _discord_url(cls, value: str) -> str:
+        value = value.strip()
+        url = _https_url(value, allow_path=True) if value else ""
+        if value and not (url and _DISCORD_INVITE.match(url)):
+            raise ValueError("HYPERCHAT_PUBLIC_DISCORD_URL must be https://discord.gg/<code> or "
+                             "https://discord.com/invite/<code> (no query, fragment or credentials)")
+        return url
 
     @field_validator("realtime_publish_rate")
     @classmethod

@@ -14,6 +14,7 @@ browser-origin allowlist; requests without an `Origin` header (OBS browser sourc
 | E6 | `GET …/{slug}/goal` | 10 s | `active, name, target_amount_inr, progress_inr` |
 | E7 | `GET /api/v1/metrics/platform` | 300 s (+ in-process cache) | `total_interactions, total_alerts, active_streams` |
 | E8 | `GET /api/v1/metrics/showcase` | 60 s (+ in-process cache) | `streamers_live, alerts_last_24h, last_sync` |
+| E9 | `GET /api/v1/public/config` (D5) | 300 s | `contact {name, email, phones[], discord_url}` |
 
 Errors: `404 {"error": "Streamer not found"}` for unknown, malformed, `pending` and `rejected` slugs
 (identical, so the endpoints cannot be used to discover creators); `404 {"error": "Soundboard not
@@ -45,7 +46,27 @@ The only donor information is the leaderboard's top display name + total (E5) an
 | Showcase metrics | counted `payment_status = 'completed'` (never true → always 0); `streamersLive` = all creators | successful, approved donations in the last 24 h; `streamers_live` = active creators (D7) |
 | Profile images / tagline | static frontend assets + hard-coded tagline per page | `brand_logo_url` / `background_url` from the database; no tagline (D8) |
 | `custom_page_path` | used by hand-written pages | never exposed (D9) |
-| Reviews, signups, Discord link | public table reads / browser inserts / config function | not part of Phase 4 (D10); signups added in backend completion G3 (below) |
+| Reviews, signups, Discord link | public table reads / browser inserts / config function | not part of Phase 4 (D10); signups added in backend completion G3, the Discord link in D5 (below) |
+
+## Public contact config (owner decision D5, 2026-10-15)
+
+`GET /api/v1/public/config` (E9) gives the frontend the platform's static contact details and Discord invite:
+
+```json
+{"contact": {"name": "…", "email": "…", "phones": ["…"], "discord_url": "https://discord.gg/…"}}
+```
+
+The values come only from `HYPERCHAT_PUBLIC_CONTACT_NAME`, `HYPERCHAT_PUBLIC_CONTACT_EMAIL`,
+`HYPERCHAT_PUBLIC_CONTACT_PHONES` (comma-separated) and `HYPERCHAT_PUBLIC_DISCORD_URL`; an unset value is
+`null` (`phones`: `[]`). They are intentionally public and validated at startup (a malformed value stops the API
+from starting): the name is trimmed, at most 80 characters, without control characters; the email is trimmed and
+lowercased; each phone (at most 5) has 6–15 digits and only spaces, a leading `+`, parentheses and hyphens; the
+Discord URL is `https://discord.gg/<code>` or `https://discord.com/invite/<code>` without query, fragment,
+credentials or port. No database, no session; the response models forbid any other field, so no setting can leak.
+
+**There is no contact form.** The legacy `submit-contact` function was broken (its table never existed in the legacy
+database) and is retired: there is no contact-submission API, and the frontend shows these details, the Discord invite
+and the signup interest form below. V2's `contact_submissions` table (migration 0005) remains, unused.
 
 ## Signup interest form (backend completion G3)
 

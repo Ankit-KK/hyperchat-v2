@@ -210,6 +210,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(public.streamers_router)
     app.include_router(public.metrics_router)
+    app.include_router(public.config_router)
     app.include_router(signups.router)
     app.include_router(partners.router)
     app.include_router(partners.admin_router)

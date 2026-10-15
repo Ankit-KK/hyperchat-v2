@@ -30,6 +30,9 @@ features and behaviour.
 - Realtime: Pusher, with private channels authorized by the API.
 - Uploads: directly to Cloudflare R2 with short-lived URLs/grants issued by the API.
 - Payments: Razorpay checkout; orders are created and verified by the API.
+- Contact: no contact form (retired, D5). Show the contact name, email, phone numbers and Discord invite from
+  `GET /api/v1/public/config` (each may be `null` / empty: hide what is missing), plus the signup interest form
+  (`POST /api/v1/public/signups`). See `docs/public-api.md`.
 - Hosting: Vercel.
 
 ## Status
