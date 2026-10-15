@@ -8,7 +8,15 @@ from dataclasses import dataclass
 from app.auth.email import DisabledSender, EmailSender, ResendSender, render
 from app.auth.google import GoogleAuthError, GoogleOAuth
 from app.auth.passwords import hash_password, needs_rehash, validate_new_password, verify_password
-from app.auth.repository import AuthRepository, InviteAccountDisabled, InviteConflict, Session, User
+from app.auth.repository import (
+    AuthRepository,
+    InviteAccountDisabled,
+    InviteConflict,
+    InviteCreatorClaimed,
+    InviteNotApplicable,
+    Session,
+    User,
+)
 from app.auth.tokens import csrf_token_for, new_hex_token, new_token, sha256_hex
 from app.core.config import Settings
 from app.security.audit import security_event
@@ -284,6 +292,13 @@ class AuthService:
         except InviteAccountDisabled:  # same answer as a disabled account's Google sign-in; nothing was changed
             security_event("invite_rejected", reason="account_disabled", client_ip=ip)
             raise AuthError(403, "This account is disabled", "account_disabled") from None
+        except InviteCreatorClaimed:  # application invite: never a transfer; nothing was changed
+            security_event("invite_rejected", reason="creator_claimed", client_ip=ip)
+            raise AuthError(409, "This creator already has an owner. Please contact support.",
+                            "creator_claimed") from None
+        except InviteNotApplicable:  # the same answer as an invalid link
+            security_event("invite_rejected", reason="application_mismatch", client_ip=ip)
+            raise AuthError(400, "Invalid or expired invite link", "bad_invite_token") from None
         if accepted is None:
             raise AuthError(400, "Invalid or expired invite link", "bad_invite_token")
         user, session = accepted

@@ -232,17 +232,38 @@ class AuthRepository:
         is the upsert's own condition, evaluated under that row lock (ON CONFLICT locks the row even when the condition
         fails), so a deactivation that commits first is always seen (InviteAccountDisabled, nothing changed) and one
         that commits after revokes this session and burns the links as usual. `session` holds _INSERT_SESSION's
-        parameters; its user id is replaced by the accepted account's. Lock order: user_invites -> users ->
-        password_reset_tokens -> sessions; no path locks a user row before an invite row."""
+        parameters; its user id is replaced by the accepted account's. Lock order: user_invites -> streamers (an
+        application invite) -> users -> password_reset_tokens -> sessions; no path locks a user row before an invite
+        row, and the creator row comes before users as in the admin owner routes (D13).
+
+        An invite issued for an approved application (KYC PR2, signup_id set) also makes the new account the OWNER of
+        the application's creator, atomically and only while that creator is unclaimed: an owner already there is
+        refused (InviteCreatorClaimed: nothing consumed, never a transfer), and such an invite never takes over an
+        existing account (InviteConflict). It never activates the creator (it stays pending until an admin does)."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
                 UPDATE public.user_invites SET accepted_at = now()
                 WHERE token_hash = %s AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()
-                RETURNING id, email::text, role, streamer_id
+                RETURNING id, email::text, role, streamer_id, signup_id
             """, (token_hash,))
             invite = await cur.fetchone()
             if not invite:
                 return None
+            if invite["signup_id"] is not None:
+                await cur.execute("""
+                    SELECT s.user_id, a.review_status, a.streamer_id, lower(a.email) AS email
+                    FROM public.user_signups a JOIN public.streamers s ON s.id = a.streamer_id
+                    WHERE a.id = %s FOR NO KEY UPDATE OF s
+                """, (invite["signup_id"],))
+                app = await cur.fetchone()
+                if (app is None or app["review_status"] != "approved" or app["streamer_id"] != invite["streamer_id"]
+                        or app["email"] != invite["email"].lower()):
+                    raise InviteNotApplicable()  # no longer bound to its approved application and creator
+                if app["user_id"] is not None:
+                    raise InviteCreatorClaimed()
+                await cur.execute("SELECT 1 FROM public.users WHERE email = %s", (invite["email"],))
+                if await cur.fetchone() is not None:
+                    raise InviteConflict()  # an existing account is linked by an admin, never taken over
             await cur.execute(f"""
                 INSERT INTO public.users (email, password_hash, username, role, streamer_id, email_verified_at,
                                           password_changed_at)
@@ -268,6 +289,11 @@ class AuthRepository:
                 raise InviteConflict()  # already has a password: the invite cannot take it over (active or not)
             await cur.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s",
                               (user["id"], invite["id"]))
+            if invite["signup_id"] is not None:  # the creator row is locked above: this cannot race another claim
+                await cur.execute("UPDATE public.streamers SET user_id = %s WHERE id = %s AND user_id IS NULL",
+                                  (user["id"], invite["streamer_id"]))
+                if cur.rowcount != 1:
+                    raise InviteCreatorClaimed()
             await burn_reset_tokens(cur, user["id"])  # F10: the account now has a password
             await cur.execute(_INSERT_SESSION, (session[0], user["id"], *session[2:]))
             return User(**user), Session(**await cur.fetchone())
@@ -298,6 +324,14 @@ class AuthRepository:
 
     async def clear_rate_limits(self, key: str, buckets: list[str]) -> None:
         await self._exec("DELETE FROM public.rate_limits WHERE ip_address = %s AND endpoint = ANY(%s)", (key, buckets))
+
+
+class InviteCreatorClaimed(Exception):
+    """An application invite's creator already has an owner: the invite never transfers ownership."""
+
+
+class InviteNotApplicable(Exception):
+    """An application invite no longer matches its approved application, creator and applicant email."""
 
 
 class InviteConflict(Exception):

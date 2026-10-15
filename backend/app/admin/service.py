@@ -41,6 +41,10 @@ def public_invite(row: dict) -> dict:
     return {**row, **{k: iso(row[k]) for k in ("created_at", "expires_at", "accepted_at", "revoked_at")}}
 
 
+def creator_conflict(exc: CreatorConflict) -> AuthError:
+    return AuthError(409, f"That {exc.field.replace('_', ' ')} is already used", f"{exc.field}_taken")
+
+
 class AdminService:
     def __init__(self, repo: AdminRepository, *, payment_accounts: frozenset[str] = frozenset(),
                  pusher_groups: tuple[int, ...] = ()) -> None:
@@ -53,6 +57,17 @@ class AdminService:
         """Onboard a creator (legacy: a manual SQL insert, docs/ADD_NEW_STREAMER.md step 3). The new creator is
         unclaimed: only admins can manage it until an invite with its streamer_id is accepted (step 16). The
         Razorpay account is never defaulted (owner decision D12): the admin names it, and it must be configured."""
+        fields = self.creator_fields(body)
+        try:
+            row = await self.repo.create_creator(fields, self.pusher_groups)
+        except CreatorConflict as exc:
+            raise creator_conflict(exc) from None
+        security_event("creator_created", level=20, user_id=admin.id, streamer_id=row["id"],
+                       streamer_slug=row["slug"], account=row["razorpay_account"])
+        return {"creator": {**row, "created_at": iso(row["created_at"])}}
+
+    def creator_fields(self, body: dict) -> dict:
+        """The validated columns of a new creator (also used by application approval)."""
         slug = body["slug"].strip().lower()
         if not NEW_SLUG.fullmatch(slug):
             raise AuthError(400, "Slug must be 3-64 characters: a-z, 0-9, '_' or '-', starting with a letter or "
@@ -76,13 +91,7 @@ class AdminService:
                 raise AuthError(400, "order_prefix must look like 'abc_rp_' (1-10 of a-z/0-9, then _rp_)",
                                 "bad_order_prefix")
             fields["order_prefix"] = body["order_prefix"]
-        try:
-            row = await self.repo.create_creator(fields, self.pusher_groups)
-        except CreatorConflict as exc:
-            raise AuthError(409, f"That {exc.field.replace('_', ' ')} is already used", f"{exc.field}_taken") from None
-        security_event("creator_created", level=20, user_id=admin.id, streamer_id=row["id"], streamer_slug=slug,
-                       account=account)
-        return {"creator": {**row, "created_at": iso(row["created_at"])}}
+        return fields
 
     async def assign_creator_owner(self, admin: User, streamer_id: str, user_id: str) -> dict:
         """Hand an unclaimed creator to its owner (legacy step 16 set streamers.user_id by hand). Ownership is never

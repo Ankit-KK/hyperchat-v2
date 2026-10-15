@@ -55,6 +55,20 @@ class CreatorStatusChange(BaseModel):
     reason: StrictStr | None = Field(default=None, max_length=500)
 
 
+class ApplicationApprove(CreatorCreate):
+    """The pending creator to create for an approved application (the same rules as POST /admin/creators)."""
+
+
+class ApplicationReject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: StrictStr = Field(max_length=500)
+
+
+class ApplicationNote(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    note: StrictStr | None = Field(default=None, max_length=2000)
+
+
 class OwnerAssign(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_id: StrictStr = Field(max_length=64)
@@ -141,6 +155,62 @@ async def reactivate_creator(streamer_id: str, body: CreatorStatusChange, reques
                              current: CurrentUser = Depends(require_admin)) -> dict:
     """suspended -> active, only if the creator could accept donations again (else 409 with the reason)."""
     return await _status("reactivate", streamer_id, body, request, current)
+
+
+def application_service(request: Request):
+    service = getattr(request.app.state, "applications", None)
+    if service is None:
+        raise AuthError(503, "Administration is not configured", "admin_not_configured")
+    return service
+
+
+@router.get("/applications")
+async def list_applications(request: Request, status: str = "submitted", limit: int = Query(50, ge=1, le=200),
+                            offset: int = Query(0, ge=0, le=100_000),
+                            current: CurrentUser = Depends(require_admin)) -> dict:
+    """Creator applications (the public signup form), newest first; status: submitted (default), legacy_unreviewed,
+    approved, rejected or all."""
+    return await application_service(request).search(status=status, limit=limit, offset=offset)
+
+
+@router.get("/applications/{signup_id}")
+async def get_application(signup_id: str, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
+    """One application with its review history and latest invitation."""
+    return await application_service(request).get(signup_id)
+
+
+@router.post("/applications/{signup_id}/approve")
+async def approve_application(signup_id: str, body: ApplicationApprove, request: Request,
+                              current: CurrentUser = Depends(require_admin)) -> dict:
+    """Approve and create the creator, PENDING (never active), in one transaction; a repeat approval is 409."""
+    return await application_service(request).approve(current.user, signup_id, body.model_dump(), client_ip(request))
+
+
+@router.post("/applications/{signup_id}/reject")
+async def reject_application(signup_id: str, body: ApplicationReject, request: Request,
+                             current: CurrentUser = Depends(require_admin)) -> dict:
+    return await application_service(request).reject(current.user, signup_id, body.reason, client_ip(request))
+
+
+@router.post("/applications/{signup_id}/reopen")
+async def reopen_application(signup_id: str, body: ApplicationNote, request: Request,
+                             current: CurrentUser = Depends(require_admin)) -> dict:
+    """rejected -> submitted, with an optional note."""
+    return await application_service(request).reopen(current.user, signup_id, body.note, client_ip(request))
+
+
+@router.post("/applications/{signup_id}/notes")
+async def note_application(signup_id: str, body: ApplicationNote, request: Request,
+                           current: CurrentUser = Depends(require_admin)) -> dict:
+    """An internal review note (admins only; never shown to the applicant)."""
+    return await application_service(request).note(current.user, signup_id, body.note, client_ip(request))
+
+
+@router.post("/applications/{signup_id}/invite")
+async def invite_application(signup_id: str, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
+    """Send (or resend: the previous open link is revoked) the applicant's account invitation; accepting it makes
+    them the owner of the application's still-unclaimed creator."""
+    return await application_service(request).invite(current.user, signup_id, client_ip(request))
 
 
 @router.put("/creators/{streamer_id}/soundboard")
