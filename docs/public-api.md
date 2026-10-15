@@ -64,8 +64,9 @@ lowercased; each phone (at most 5) has 6–15 digits and only spaces, a leading 
 Discord URL is `https://discord.gg/<code>` or `https://discord.com/invite/<code>` without query, fragment,
 credentials or port. No database, no session; the response models forbid any other field, so no setting can leak.
 
-**There is no contact form.** The legacy `submit-contact` function was broken (its table never existed) and is
-retired: the frontend shows these details, the Discord invite and the signup interest form below.
+**There is no contact form.** The legacy `submit-contact` function was broken (its table never existed in the legacy
+database) and is retired: there is no contact-submission API, and the frontend shows these details, the Discord invite
+and the signup interest form below. V2's `contact_submissions` table (migration 0005) remains, unused.
 
 ## Signup interest form (backend completion G3)
 

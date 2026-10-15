@@ -254,7 +254,7 @@ W = webhook, J = job/internal, CLI = admin script, X = drop.
 | soundboard-confirm-upload | HEAD R2 object, validate, write slot | dashboard | SESSION+OWN | E |
 | soundboard-tnc | Soundboard T&C status/accept | dashboard | SESSION+OWN | E |
 | soundboard-upload-url | Presigned R2 PUT (300 s) | dashboard | SESSION+OWN | E |
-| submit-contact | Contact form (table missing) | none | rate limit | X: retired (D5); static contact details in `GET /api/v1/public/config` |
+| submit-contact | Contact form (legacy table missing) | none | rate limit | X: retired (D5; V2's unused `contact_submissions` table from 0005 stays); static contact details in `GET /api/v1/public/config` |
 | submit-payout-account | Bank/UPI/PAN, AES-GCM encrypted | dashboard | Origin+CSRF+HMAC+SESSION+OWN | E |
 | telegram-webhook | Bot commands + buttons → moderation | Telegram | none | W (add secret token) |
 | terms-acceptance | Terms gate | dashboard | SESSION(+ADMIN) | E |
