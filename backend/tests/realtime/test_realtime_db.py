@@ -580,8 +580,15 @@ def test_config_endpoint(rt):
     r = rt.get("/api/v1/realtime/config", params={"streamer": "authtest-p9-cfg"})
     assert r.status_code == 200 and r.json() == {"key": APP.key, "cluster": "ap2", "auth_endpoint": AUTH}
     assert r.headers["cache-control"] == "public, max-age=300" and SECRET not in r.text
-    assert rt.get("/api/v1/realtime/config", params={"streamer": "authtest-p9-none"}).status_code == 404
-    assert rt.get("/api/v1/realtime/config", params={"streamer": "../x"}).status_code == 404
+    unknown = rt.get("/api/v1/realtime/config", params={"streamer": "authtest-p9-none"})
+    assert unknown.status_code == 404
+    # D3: pending, rejected, unknown and malformed creators are indistinguishable (no status oracle).
+    update_streamer(make_streamer("authtest-p9-cfg-pending"), status="pending")
+    update_streamer(make_streamer("authtest-p9-cfg-rejected"), status="rejected", rejection_reason="nope")
+    for ref in ("authtest-p9-cfg-pending", "authtest-p9-cfg-rejected", "../x", "Bad Slug", "", "x" * 70):
+        r = rt.get("/api/v1/realtime/config", params={"streamer": ref})
+        assert (r.status_code, r.json(), r.headers.get("cache-control")) == (
+            404, unknown.json(), unknown.headers.get("cache-control")), ref
 
 
 def test_no_secrets_or_tokens_in_logs(rt):

@@ -212,10 +212,17 @@ def test_goal_is_public_and_aggregate_only():
     r = render(make_event("goal-progress", subject_id=None))
     assert r.channel == "ankit-goal"
     assert r.data == {"event_id": r.data["event_id"], "v": 1, "active": True, "name": "New mic",
-                      "target_amount_inr": 5000.0, "progress_inr": 1234.5}
+                      "target_amount_inr": 5000.0, "progress_inr": 1234.5, "brand_color": "#ff0000",
+                      "goal_overlay_id": 2}  # exactly GET /public/streamers/{slug}/goal
     inactive = render(make_event("goal-progress", subject_id=None), streamer=streamer_row(goal_is_active=False))
-    assert inactive.data["active"] is False and inactive.data["progress_inr"] == 0.0
-    hidden = render(make_event("goal-progress", subject_id=None), streamer=streamer_row(status="pending"))
+    assert inactive.data == {"event_id": inactive.data["event_id"], "v": 1, "active": False, "name": None,
+                             "target_amount_inr": None, "progress_inr": None, "brand_color": None,
+                             "goal_overlay_id": None}  # no stale goal on the public channel
+
+
+@pytest.mark.parametrize("status", ["pending", "rejected"])
+def test_no_public_goal_event_for_a_creator_that_is_not_active(status):
+    hidden = render(make_event("goal-progress", subject_id=None), streamer=streamer_row(status=status))
     assert hidden == Skip("streamer_not_public")
 
 

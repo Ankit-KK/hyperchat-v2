@@ -87,7 +87,8 @@ creator id (`tts-audio/<creator id>/…`, Phase 8 key layout); they are sent on 
   - plays the celebration on `vaani-celebration`
   - does not replay missed alerts after a reconnect
 - **Settings, leaderboard and goal:** as in Phase 9 (`settings-updated`, `leaderboard-updated`, public `goal-progress`), with initial
-  state from the public read API.
+  state from the OBS-token endpoints `GET /api/v1/obs/overlay-config` and `GET /api/v1/obs/leaderboard` (the token's
+  creator) and, for the goal, the public `GET /api/v1/public/streamers/{slug}/goal`.
 
 ## OBS tokens
 

@@ -610,6 +610,23 @@ try:
     hdr = {"x-obs-token": obs_token}
     check(S, "OBS session with the token",
           httpx.get(API + "/api/v1/obs/session", headers=hdr, timeout=15).status_code == 200)
+    # Exposure cleanup: overlay settings and the leaderboard are OBS-token data for the TOKEN's creator.
+    if httpx.get(API + "/api/v1/obs/overlay-config", timeout=15).status_code == 404:
+        blocked(S, "OBS overlay-config / leaderboard (exposure cleanup)", "not deployed on DEV yet")
+    else:
+        for path in ("/api/v1/obs/overlay-config", "/api/v1/obs/leaderboard"):
+            check(S, f"{path} without a token -> 401", httpx.get(API + path, timeout=15).status_code == 401)
+            check(S, f"{path} with an invalid token -> 401", httpx.get(
+                API + path, headers={"x-obs-token": "obs_" + "0" * 64}, timeout=15).status_code == 401)
+        r = httpx.get(API + "/api/v1/obs/overlay-config", headers=hdr, params={"slug": slug_b}, timeout=15)
+        check(S, "overlay-config: the token's creator, exactly the overlay settings",
+              r.status_code == 200 and set(r.json()) == {
+                  "brand_color", "alert_box_scale", "alert_overlay_id", "leaderboard_overlay_id", "goal_overlay_id",
+                  "overlay_adjust_mode", "leaderboard_widget_enabled", "leaderboard_bg_enabled"}
+              and r.headers.get("cache-control") == "no-store", r.text[:150])
+        r = httpx.get(API + "/api/v1/obs/leaderboard", headers=hdr, timeout=15)
+        check(S, "leaderboard: {enabled, top_donor} of the token's creator", r.status_code == 200
+              and set(r.json()) == {"enabled", "top_donor"} and "latest" not in r.text, r.text[:150])
     r = httpx.post(API + "/api/v1/obs/audio/claim", headers=hdr, timeout=15)
     claim = r.json() if r.status_code == 200 else {}
     check(S, "claim returns the approved donation's audio", r.status_code == 200 and claim.get("donation_id") == d_ok,
@@ -657,9 +674,33 @@ try:
 
     # ── public API ──────────────────────────────────────────────────────────
     S = "public"
-    for path in ("", "/pricing", "/overlay-config", "/goal", "/leaderboard", "/soundboard"):
+    for path in ("", "/pricing", "/goal", "/soundboard"):
         r = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}{path}", timeout=15)
         check(S, f"GET /public/streamers/<slug>{path or ''}", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    old = {p: httpx.get(f"{API}/api/v1/public/streamers/{slug_a}{p}", timeout=15) for p in ("/overlay-config",
+                                                                                             "/leaderboard")}
+    if all(r.status_code == 200 for r in old.values()):
+        blocked(S, "Anonymous creator data minimized (exposure cleanup)", "not deployed on DEV yet")
+    else:
+        for p, r in old.items():
+            check(S, f"anonymous {p} is gone (no overlay settings, no donor data)",
+                  r.status_code == 404 and "alert" not in r.text and "top_donor" not in r.text, str(r.status_code))
+        profile = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}", timeout=15).json()
+        check(S, "profile: donor-page fields only (no leaderboard_widget_enabled)", set(profile) == {
+            "slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled", "hyperemotes_enabled",
+            "media_upload_enabled", "media_max_file_size_mb", "soundboard_enabled"}, str(sorted(profile)))
+        g = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}/goal", timeout=15).json()
+        check(S, "goal: the public goal overlay's fields only (no goal_activated_at)", set(g) == {
+            "active", "name", "target_amount_inr", "progress_inr", "brand_color", "goal_overlay_id"}, str(sorted(g)))
+        pending = make_creator("pend", None)
+        with db() as c:
+            c.execute("UPDATE public.streamers SET status = 'pending' WHERE id = %s", (pending,))
+            pslug = c.execute("SELECT streamer_slug FROM public.streamers WHERE id = %s", (pending,)).fetchone()[0]
+        cfg = {ref: httpx.get(API + "/api/v1/realtime/config", params={"streamer": ref}, timeout=15)
+               for ref in (pslug, TAG + "zz-unknown")}
+        check(S, "realtime config: a pending creator looks exactly like an unknown one (404)",
+              len({(r.status_code, r.text) for r in cfg.values()}) == 1
+              and next(iter(cfg.values())).status_code == 404, str([r.status_code for r in cfg.values()]))
     goal = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}/goal", timeout=15).json()
     check(S, "goal counts the approved donation", goal.get("active") is True and goal.get("progress_inr", 0) >= 500,
           str(goal)[:200])

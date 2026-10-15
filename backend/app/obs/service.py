@@ -15,10 +15,13 @@ from app.dashboard.moderation import actor_label
 from app.obs.queue import AudioQueue, ClaimResult, NotReplayable
 from app.obs.tokens import TokenRepository, obs_urls
 from app.realtime.auth import AUTH_ENDPOINT
+from app.realtime.channels import channel_name
+from app.realtime.outbox import OVERLAY_SETTINGS
 from app.realtime.payloads import RealtimeRepository, now_playing
 from app.realtime.pusher import PusherApps
 from app.security.crypto import sha256_hex
 from app.security.dependencies import ObsCaller
+from app.security.obs_token import obs_channel_allowed
 from app.storage.r2 import SILENCE_KEY
 
 log = logging.getLogger("hyperchat.obs")
@@ -26,6 +29,7 @@ RATE_CLAIM = ("obs:claim", 120, 60)
 RATE_SESSION = ("obs:session", 30, 60)
 RATE_TOKEN_CREATE = ("obs:token-create", 10, 3600)
 RATE_REPLAY = ("obs:replay", 30, 3600)
+RATE_OVERLAY = ("obs:overlay", 60, 60)  # overlay settings + leaderboard reads, per token
 POLL_SECONDS = 30  # the player's safety-net claim interval while idle (missed audio-ready events)
 
 
@@ -106,6 +110,30 @@ class ObsService:
         return {"streamer": {"slug": caller.info.streamer_slug, "name": caller.info.streamer_name},
                 "realtime": realtime, "claim_endpoint": "/api/v1/obs/audio/claim", "poll_seconds": POLL_SECONDS,
                 "silence_url": f"{self.public_base}/{SILENCE_KEY}" if self.public_base else None}
+
+    # ── OBS: overlay settings and leaderboard (initial state of the private settings / leaderboard channels) ──
+    async def _overlay_streamer(self, caller: ObsCaller, obs_tokens, channel: str) -> dict:
+        """The token's own creator (never a slug from the request), if the token may read that channel."""
+        await self._limit(self._token_key(caller), RATE_OVERLAY)
+        if not await obs_channel_allowed(obs_tokens, caller.token, caller.info,
+                                         channel_name(caller.info.streamer_slug, channel)):
+            raise ApiError(403, "Forbidden", "channel_not_allowed")
+        streamer = await self.realtime.streamer(caller.info.streamer_id)
+        if streamer is None:
+            raise ApiError(404, "Streamer not found", "streamer_not_found")
+        return streamer
+
+    async def overlay_config(self, caller: ObsCaller, obs_tokens) -> dict:
+        """Exactly what settings-updated carries on private-{slug}-settings."""
+        s = await self._overlay_streamer(caller, obs_tokens, "settings")
+        return {k: float(s[k]) if k == "alert_box_scale" and s[k] is not None else s[k] for k in OVERLAY_SETTINGS}
+
+    async def leaderboard(self, caller: ObsCaller, obs_tokens) -> dict:
+        """Top donor (approved donations' running totals) while the creator shows the leaderboard widget."""
+        s = await self._overlay_streamer(caller, obs_tokens, "leaderboard")
+        top = await self.realtime.top_donor(caller.info.streamer_id) if s["leaderboard_widget_enabled"] else None
+        return {"enabled": bool(s["leaderboard_widget_enabled"]),
+                "top_donor": {"name": top["name"], "total_amount_inr": float(top["total_amount"])} if top else None}
 
     async def claim(self, caller: ObsCaller) -> ClaimResult:
         await self._limit(self._token_key(caller), RATE_CLAIM)

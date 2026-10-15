@@ -33,7 +33,7 @@ Code: `backend/app/realtime/` (`outbox`, `channels`, `pusher`, `payloads`, `publ
 | D9 | Per-creator FIFO; 6 attempts, 2–30 s backoff; events older than 10 minutes expire unsent; at-least-once delivery, `event_id` for deduplication. |
 | D10 | Goal progress counts approved / auto-approved donations only (as `GET /public/streamers/{slug}/goal`). |
 | D11 | Finished outbox rows are deleted 7 days after creation by the daily cleanup. |
-| D12 | `GET /api/v1/realtime/config?streamer=` returns `{key, cluster, auth_endpoint}`; 503 while disabled. |
+| D12 | `GET /api/v1/realtime/config?streamer=` returns `{key, cluster, auth_endpoint}` for an **active** creator; unknown, `pending`, `rejected` and malformed creators get the identical 404 (2026-10-15); 503 while disabled. |
 
 ## Events
 
@@ -60,8 +60,10 @@ responses; moderator identities.
   moderation_status, is_hyperemote, voice_message_url, tts_audio_url, hypersound_url, media_url, media_type,
   created_at}}`. `message` is `null` while the message is hidden. The donation id is the key of the dashboard
   moderation API.
-- `goal-progress` (public): `{event_id, v, active, name, target_amount_inr, progress_inr}`, the same
-  aggregates as the public goal endpoint. Only for `active` creators.
+- `goal-progress` (public): `{event_id, v, active, name, target_amount_inr, progress_inr, brand_color,
+  goal_overlay_id}`, exactly the public goal endpoint (every field but `active` is `null` while no goal is
+  active). Only for `active` creators: nothing is published on the public channel of a `pending` or `rejected`
+  creator.
 - `leaderboard-updated`: `{event_id, v, enabled, top_donor: {name, total_amount} | null,
   latest: {name, amount, currency, created_at} | null}` (approved donations only; both null while the widget is
   off).
@@ -114,7 +116,10 @@ socket_id:channel)>"}` with `Cache-Control: no-store`. Refusals are security eve
 token, cookie or CSRF value.
 
 `GET /api/v1/realtime/config?streamer={slug}` returns `{key, cluster, auth_endpoint}`, cached publicly for
-5 minutes. The key and cluster are public by Pusher's design. Both endpoints answer 503 while realtime is
+5 minutes, for active creators only: an unknown, `pending`, `rejected` or malformed creator gets the same 404
+(no status oracle). OBS pages can instead use `GET /api/v1/obs/session`, which returns the same Pusher config for
+the token's creator. Initial overlay state comes from the OBS-token endpoints `GET /api/v1/obs/overlay-config`
+(= `settings-updated`) and `GET /api/v1/obs/leaderboard` (top donor; the live event also carries `latest`). The key and cluster are public by Pusher's design. Both endpoints answer 503 while realtime is
 disabled.
 
 ## Phase 10 (OBS) contract
