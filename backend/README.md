@@ -23,7 +23,8 @@ app/core/timezones.py  IST (+05:30), the one definition for day boundaries and h
 app/security/          non-browser callers: HMAC-signed requests, nonces, upload grants, OBS tokens,
                        shared secrets, partner keys (+ PostgreSQL stores and FastAPI dependencies),
                        CORS, security logging
-app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit windows, invites
+app/maintenance.py     cleanup of expired sessions, tokens, nonces, rate-limit windows, invites; abandoned donor
+                       uploads older than 24 hours (D9)
 app/cli.py             operator commands: bootstrap-admin, cleanup, enqueue-donation-audio, bot webhook
                        setup, seed-platform-soundboard, payment-health
 app/routers/           /health, /api/v1/auth/*, /api/v1/me/streamers, /api/v1/streamers/*, /api/v1/admin/*,

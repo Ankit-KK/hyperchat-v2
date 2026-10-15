@@ -166,3 +166,52 @@ def test_in_memory_store():
         asyncio.run(store.put_object(VOICE_KEY, b"abc", content_type="audio/webm"))
     with pytest.raises(ValueError):
         asyncio.run(store.put_object("../x", b"abc", content_type="audio/webm"))
+
+
+# ── D9: abandoned-upload cleanup capability (list + delete donor uploads only) ──
+
+def test_list_uploads_pages_through_one_donor_prefix_with_last_modified():
+    from datetime import UTC, datetime
+    store, stub = stubbed_store()
+    when = datetime(2026, 10, 1, tzinfo=UTC)
+    stub.add_response("list_objects_v2", {"Contents": [{"Key": VOICE_KEY, "LastModified": when}], "IsTruncated": True,
+                                          "NextContinuationToken": "t1"},
+                      {"Bucket": "hyperchat-dev-media", "Prefix": "voice-messages/", "MaxKeys": 1000})
+    stub.add_response("list_objects_v2", {"Contents": [{"Key": "voice-messages/odd.webm", "LastModified": when}],
+                                          "IsTruncated": False},
+                      {"Bucket": "hyperchat-dev-media", "Prefix": "voice-messages/", "MaxKeys": 1000,
+                       "ContinuationToken": "t1"})
+    with stub:
+        listed = asyncio.run(store.list_uploads("voice-messages/"))
+    stub.assert_no_pending_responses()
+    assert [(o.key, o.last_modified) for o in listed] == [(VOICE_KEY, when), ("voice-messages/odd.webm", when)]
+
+
+@pytest.mark.parametrize("prefix", ["", "/", "soundboards/", "tts-audio/", "system/", "hypersounds/", "voice-messages",
+                                    "voice-messages/creator-a", "donation-media/../"])
+def test_list_uploads_refuses_every_other_prefix(prefix):
+    store, stub = stubbed_store()
+    with stub, pytest.raises(ValueError):
+        asyncio.run(store.list_uploads(prefix))
+    stub.assert_no_pending_responses()
+
+
+def test_delete_upload_deletes_one_donor_upload_key():
+    store, stub = stubbed_store()
+    stub.add_response("delete_object", {}, {"Bucket": "hyperchat-dev-media", "Key": VOICE_KEY})
+    with stub:
+        asyncio.run(store.delete_upload(VOICE_KEY))
+    stub.assert_no_pending_responses()
+
+
+@pytest.mark.parametrize("key", [
+    "soundboards/creator-a/" + "0" * 8 + "-0000-4000-8000-" + "0" * 12 + ".mp3",
+    "tts-audio/" + "1" * 8 + "-0000-4000-8000-" + "1" * 12 + "/" + "2" * 8 + "-0000-4000-8000-" + "2" * 12 + ".mp3",
+    "system/silence.mp3", "hypersounds/boom.mp3", "hypersound-thumbs/boom.png", "voice-messages/odd.webm",
+    "voice-messages/", "../" + VOICE_KEY, VOICE_KEY + "/x", "",
+])
+def test_delete_upload_refuses_everything_else(key):
+    store, stub = stubbed_store()
+    with stub, pytest.raises(ValueError):
+        asyncio.run(store.delete_upload(key))
+    stub.assert_no_pending_responses()

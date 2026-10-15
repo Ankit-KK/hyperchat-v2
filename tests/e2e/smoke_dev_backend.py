@@ -12,14 +12,16 @@ Environment (defaults = v2 development):
 
 Safety: refuses to run unless the API reports environment "development", the database is not a production or
 restore database, the API is not api.hyperchat.space, and bots are disabled. It never changes configuration,
-never creates a Razorpay order, never writes to R2, never sends email and never calls a TTS or transcription
-provider; checks that would need any of that are reported as BLOCKED with the credential or approval they need.
+never creates a Razorpay order, never writes to R2 (except the approval-gated upload-cleanup section), never sends
+email and never calls a TTS or transcription provider; checks that would need any of that are reported as BLOCKED with the credential or approval they need.
 Approving a synthetic donation makes the worker publish realtime events to the DEV Pusher app (realtime is on in
 DEV); nothing else leaves the server. Every synthetic row is recognizable (users @authtest.invalid, creators
 "authtest-*", orders "authtest-*") and removed at the end, and the cleanup is verified. The login rate-limit counters
 the suite consumes (auth:* rows) are cleared, as smoke_auth.py does. Nothing secret is printed.
-Feature sections (payments-account D6, payment-health D7, admin-email D11, owner-transfer D13, ...) report BLOCKED
-while the deployed release predates them. The owner-transfer section moves a synthetic creator between two synthetic
+Feature sections (payments-account D6, payment-health D7, admin-email D11, owner-transfer D13, upload-cleanup D9,
+...) report BLOCKED while the deployed release predates them. upload-cleanup also writes and deletes a few synthetic
+objects in the DEV R2 bucket, so it runs only with HYPERCHAT_SMOKE_R2=1 (an explicit approval) and otherwise reports
+BLOCKED; it runs the deployed cleanup on this run's keys only, with the clock moved 25 hours ahead. The owner-transfer section moves a synthetic creator between two synthetic
 users only; no real creator or account is touched.
 Exit code: 0 = every runnable check passed (BLOCKED checks do not fail the run), 1 = a check failed, 2 = refused.
 """
@@ -949,6 +951,85 @@ try:
               r.status_code == 200 and r.json().get("changed") is False and r.json().get("sessions_revoked") == 0,
               r.text[:200])
         reset_login_counters()
+
+    # ── abandoned-upload cleanup (D9): synthetic objects in the DEV bucket only, approval-gated ──
+    S = "upload-cleanup"
+    deployed = Path("/opt/hyperchat/current/backend/app/maintenance.py")
+    if not (deployed.exists() and "def abandoned_uploads" in deployed.read_text()):
+        blocked(S, "Abandoned-upload cleanup (D9)", "not deployed on DEV yet; needs an approved DEV deploy")
+    elif os.environ.get("HYPERCHAT_SMOKE_R2") != "1":
+        blocked(S, "Abandoned-upload cleanup (D9)",
+                "BLOCKED_BY_APPROVAL: writes and deletes synthetic objects in the DEV R2 bucket (HYPERCHAT_SMOKE_R2=1)")
+    else:
+        import asyncio
+        import uuid
+
+        from app.cli import connection_factory
+        from app.core.config import Settings
+        from app.maintenance import abandoned_uploads
+        from app.storage.r2 import build_object_store
+
+        settings = Settings(_env_file=ENV_FILE)
+        r2 = build_object_store(settings)
+        slug_d9 = TAG + "d9"
+        now = time.time()
+
+        def up_key(prefix: str, ms: float, ext: str) -> str:
+            return f"{prefix}/{slug_d9}_{int(ms * 1000)}_{secrets.token_hex(16)}.{ext}"
+
+        orphan_voice = up_key("voice-messages", now - 25 * 3600, "webm")
+        orphan_media = up_key("donation-media", now - 25 * 3600, "png")
+        referenced = up_key("voice-messages", now - 25 * 3600, "webm")
+        too_new = up_key("donation-media", now + 2 * 3600, "png")  # still young under the simulated clock below
+        board = f"soundboards/{slug_d9}/{uuid.uuid4()}.mp3"
+        mine = {orphan_voice, orphan_media, referenced, too_new}
+
+        class OnlyThisRun:
+            """The deployed cleanup, but it sees (and may delete) only this run's synthetic keys."""
+            def public_url(self, k):
+                return r2.public_url(k)
+
+            async def list_uploads(self, prefix):
+                return [o for o in await r2.list_uploads(prefix) if o.key in mine]
+
+            async def delete_upload(self, k):
+                assert k in mine, "refusing to delete a key this run did not create"
+                await r2.delete_upload(k)
+
+        async def d9() -> tuple:
+            for k, t in ((orphan_voice, "audio/webm"), (orphan_media, "image/png"), (referenced, "audio/webm"),
+                         (too_new, "image/png"), (board, "audio/mpeg")):
+                await r2.put_object(k, b"synthetic", content_type=t)
+            sid = make_creator("d9", None)
+            make_donation(sid, "D9 donor", 50)
+            with db() as c:
+                c.execute("UPDATE public.donations SET voice_message_url = %s WHERE streamer_id = %s",
+                          (r2.public_url(referenced), sid))
+            later = datetime.fromtimestamp(now + 25 * 3600, UTC)  # "a day later": the synthetic orphans are old
+            dry = await abandoned_uploads(OnlyThisRun(), connection_factory(settings), dry_run=True, now=later)
+            done = await abandoned_uploads(OnlyThisRun(), connection_factory(settings), dry_run=False, now=later)
+            present = {k: await r2.head_upload(k) is not None for k in mine}
+            board_kept = await r2.head_object(board) is not None
+            for k in (referenced, too_new):  # remove what the cleanup rightly kept
+                await r2.delete_upload(k)
+            await r2.delete_object(board)
+            left = [k for k in mine if await r2.head_upload(k) is not None] + (
+                [board] if await r2.head_object(board) is not None else [])
+            return dry, done, present, board_kept, left
+
+        try:
+            dry, done, present, board_kept, left = asyncio.run(d9())
+        except Exception as exc:  # noqa: BLE001 - the reason class only
+            check(S, "D9 cleanup run", False, type(exc).__name__)
+        else:
+            check(S, "D9 dry run: 2 eligible, 1 referenced, 1 too new, nothing deleted",
+                  (dry["eligible"], dry["kept_referenced"], dry["kept_too_new"], dry["deleted"]) == (2, 1, 1, 0),
+                  str(dry))
+            check(S, "D9 old unreferenced voice and media deleted",
+                  done["deleted"] == 2 and not present[orphan_voice] and not present[orphan_media], str(done))
+            check(S, "D9 referenced and too-new uploads kept", present[referenced] and present[too_new], str(present))
+            check(S, "D9 soundboard object never touched", board_kept)
+            check(S, "D9 synthetic objects removed afterwards", left == [], str(len(left)))
 
     # ── bots: disabled ──────────────────────────────────────────────────────
     S = "bots"

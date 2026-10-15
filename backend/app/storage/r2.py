@@ -17,6 +17,10 @@ Every operation is limited to the key patterns it needs, so a bug can never touc
   delete (delete_object)            creator soundboard keys ONLY (never hypersounds/, hypersound-thumbs/,
                                     voice-messages/, donation-media/ or anything else)
   list (list_keys)                  the platform library prefixes hypersounds/ and hypersound-thumbs/
+  list (list_uploads)               the donor upload prefixes voice-messages/ and donation-media/: keys and
+                                    LastModified only (D9 abandoned-upload cleanup, CLI only)
+  delete (delete_upload)            one donor upload key matching the upload pattern (D9 cleanup, CLI only;
+                                    the caller decides it is unreferenced and older than 24 hours)
 """
 
 import asyncio
@@ -24,6 +28,7 @@ import logging
 import re
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 from urllib.parse import quote
 
@@ -54,9 +59,11 @@ GENERATED_KEY = re.compile(rf"^({_GENERATED})$")
 # Server-generated keys: donor uploads, soundboard objects and generated audio.
 WRITABLE_KEY = re.compile(rf"^({_UPLOAD}|soundboards/{_SLUG}/{_UUID}\.(mp3|jpg|png|webp|gif)|{_GENERATED})$")
 LISTABLE_PREFIXES = ("hypersounds/", "hypersound-thumbs/")
+UPLOAD_PREFIXES = ("voice-messages/", "donation-media/")  # D9: listed (and pruned) only by the cleanup CLI
 IMMUTABLE = "public, max-age=31536000, immutable"  # keys are unique and never rewritten
 PRESIGN_SECONDS = 300
 MAX_LISTED_KEYS = 10_000
+MAX_LISTED_UPLOADS = 200_000  # per prefix; legacy holds a few thousand. The cleanup reports when it hits this.
 
 
 class StorageError(Exception):
@@ -68,6 +75,12 @@ class ObjectHead:
     size: int
     content_type: str
     metadata: dict[str, str] = field(default_factory=dict)  # user metadata (head_upload only)
+
+
+@dataclass(frozen=True)
+class ListedObject:
+    key: str
+    last_modified: datetime  # timezone-aware, from the listing
 
 
 class ObjectStore(Protocol):
@@ -92,6 +105,10 @@ class ObjectStore(Protocol):
     async def delete_object(self, key: str) -> None: ...
 
     async def list_keys(self, prefix: str) -> list[str]: ...
+
+    async def list_uploads(self, prefix: str) -> list[ListedObject]: ...
+
+    async def delete_upload(self, key: str) -> None: ...
 
 
 def check_writable_key(key: str) -> None:
@@ -120,6 +137,11 @@ def check_voice_key(key: str) -> None:
     """get_voice only ever reads donor voice messages."""
     if not isinstance(key, str) or not VOICE_KEY.match(key):
         raise ValueError("refusing to read an object outside voice-messages/<slug>_<ms>_<hex>.webm")
+
+
+def check_upload_prefix(prefix: str) -> None:
+    if prefix not in UPLOAD_PREFIXES:
+        raise ValueError("refusing to list outside the donor upload prefixes")
 
 
 def check_listable_prefix(prefix: str) -> None:
@@ -317,6 +339,30 @@ class R2Store:
                 token = r.get("NextContinuationToken")
             return keys[:MAX_LISTED_KEYS]
         return await self._call(list_all)
+
+    async def list_uploads(self, prefix: str) -> list[ListedObject]:
+        """Every object under one donor upload prefix (key + LastModified), at most MAX_LISTED_UPLOADS. A failed
+        page fails the whole listing (StorageError): the cleanup then deletes nothing."""
+        check_upload_prefix(prefix)
+
+        def list_all():
+            found, token = [], None
+            while len(found) < MAX_LISTED_UPLOADS:
+                kwargs = {"Bucket": self._config.bucket, "Prefix": prefix, "MaxKeys": 1000}
+                if token:
+                    kwargs["ContinuationToken"] = token
+                r = self._s3().list_objects_v2(**kwargs)
+                found += [ListedObject(o["Key"], o["LastModified"]) for o in r.get("Contents", [])
+                          if o.get("Key") and isinstance(o.get("LastModified"), datetime)]
+                if not r.get("IsTruncated"):
+                    break
+                token = r.get("NextContinuationToken")
+            return found[:MAX_LISTED_UPLOADS]
+        return await self._call(list_all)
+
+    async def delete_upload(self, key: str) -> None:
+        check_upload_key(key)
+        await self._call(lambda: self._s3().delete_object(Bucket=self._config.bucket, Key=key))
 
 
 def build_object_store(settings: Settings) -> R2Store | None:

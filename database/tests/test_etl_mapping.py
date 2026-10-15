@@ -77,3 +77,62 @@ def test_both_legacy_key_pairs_are_the_one_account_and_orders_get_none():
 
     assert set(RAZORPAY_ACCOUNTS.values()) == {"primary"} and len(RAZORPAY_ACCOUNTS) == 2
     assert "payment_account" not in DONATION_COLUMNS and "provider_payment_id" not in DONATION_COLUMNS
+
+
+# ── D9: media URL base rewrite ─────────────────────────────────────────────────
+
+LEGACY = ("https://pub-aaa.r2.dev", "https://pub-bbb.r2.dev")
+TARGET = "https://media.example.test"
+VOICE = "voice-messages/creator_1700000000000_" + "a" * 32 + ".webm"
+
+
+@pytest.mark.parametrize("url, expected", [
+    (f"{LEGACY[0]}/{VOICE}", f"{TARGET}/{VOICE}"),                                    # voice
+    (f"{LEGACY[1]}/donation-media/x_1700000000000_{'b' * 32}.png",
+     f"{TARGET}/donation-media/x_1700000000000_{'b' * 32}.png"),                       # the second legacy host
+    (f"{LEGACY[0]}/soundboards/s/x.mp3", f"{TARGET}/soundboards/s/x.mp3"),            # soundboard
+    (f"{LEGACY[0]}/tts-audio/a/b.mp3", f"{TARGET}/tts-audio/a/b.mp3"),
+    (f"{TARGET}/{VOICE}", f"{TARGET}/{VOICE}"),                                       # already on the target
+    ("https://xyz.supabase.co/storage/v1/object/public/a.png",
+     "https://xyz.supabase.co/storage/v1/object/public/a.png"),                        # unrelated: unchanged
+    ("https://pub-aaa.r2.dev.evil.example/" + VOICE, "https://pub-aaa.r2.dev.evil.example/" + VOICE),
+    (f"{LEGACY[0]}", f"{LEGACY[0]}"), (f"{LEGACY[0]}/", f"{LEGACY[0]}/"),           # no key: unchanged
+    (None, None),
+])
+def test_rewrite_media_url(url, expected):
+    from etl.mapping import rewrite_media_url
+    assert rewrite_media_url(url, LEGACY, TARGET) == expected
+    assert rewrite_media_url(expected, LEGACY, TARGET) == expected  # idempotent
+    assert rewrite_media_url(url, LEGACY, None) == url               # no target: copy unchanged
+
+
+@pytest.mark.parametrize("value, ok", [
+    ("https://media.example.test", "https://media.example.test"), ("https://media.example.test/", "https://media.example.test"),
+    ("https://x.example/media/", "https://x.example/media"), ("http://media.example.test", None), ("", None),
+    ("https://media.example.test/?a=1", None), ("https://u:p@media.example.test", None), ("media.example.test", None),
+])
+def test_media_base(value, ok):
+    from etl.mapping import media_base
+    if ok is None:
+        with pytest.raises(ValueError):
+            media_base(value)
+    else:
+        assert media_base(value) == ok
+
+
+def test_loader_rewrites_only_media_url_columns_and_counts():
+    from etl.rehearsal import DONATION_COLUMNS, Loader
+    loader = Loader(None, None, media_from=LEGACY, media_to=TARGET)
+    i = {c: DONATION_COLUMNS.index(c) for c in ("voice_message_url", "media_url", "message", "hypersound_url")}
+    row = [None] * len(DONATION_COLUMNS)
+    row[i["voice_message_url"]] = f"{LEGACY[0]}/{VOICE}"
+    row[i["message"]] = f"{LEGACY[0]}/{VOICE}"            # not a media column: never touched
+    row[i["hypersound_url"]] = "https://elsewhere.example/a.mp3"
+    out = loader.media("donations", DONATION_COLUMNS, [tuple(row)])[0]
+    assert out[i["voice_message_url"]] == f"{TARGET}/{VOICE}" and out[i["message"]] == f"{LEGACY[0]}/{VOICE}"
+    assert out[i["hypersound_url"]] == "https://elsewhere.example/a.mp3" and out[i["media_url"]] is None
+    assert dict(loader.media_rewritten) == {"donations.voice_message_url": 1}
+    assert loader.media("donations", DONATION_COLUMNS, [out])[0] == out  # idempotent
+    assert loader.media("visits", ("voice_message_url",), [(f"{LEGACY[0]}/{VOICE}",)]) == [(f"{LEGACY[0]}/{VOICE}",)]
+    plain = Loader(None, None)
+    assert plain.media("donations", DONATION_COLUMNS, [tuple(row)]) == [tuple(row)]  # no rewrite configured

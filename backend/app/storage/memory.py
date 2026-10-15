@@ -6,17 +6,20 @@ content-type/content-length, refuses anything else or an expired URL.
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from app.storage.r2 import (
     IMMUTABLE,
     LISTABLE_PREFIXES,
     PRESIGN_SECONDS,
+    ListedObject,
     ObjectHead,
     StorageError,
     check_listable_prefix,
     check_generated_key,
     check_soundboard_key,
     check_upload_key,
+    check_upload_prefix,
     check_voice_key,
     check_writable_key,
     public_url_for,
@@ -29,6 +32,7 @@ class StoredObject:
     content_type: str
     cache_control: str
     metadata: dict[str, str]
+    modified: float = 0.0  # epoch seconds (the listing's LastModified)
 
 
 @dataclass(frozen=True)
@@ -59,7 +63,8 @@ class InMemoryObjectStore:
                          metadata: dict[str, str] | None = None) -> None:
         check_writable_key(key)
         self._maybe_fail("put")
-        self.objects[key] = StoredObject(bytes(data), content_type, cache_control, dict(metadata or {}))
+        self.objects[key] = StoredObject(bytes(data), content_type, cache_control, dict(metadata or {}),
+                                         self.clock())
 
     def presign_put(self, key: str, *, content_type: str, content_length: int,
                     expires_in: int = PRESIGN_SECONDS) -> str:
@@ -76,7 +81,7 @@ class InMemoryObjectStore:
             return 403
         if content_type != p.content_type or len(data) != p.content_length:
             return 403  # signature mismatch
-        self.objects[key] = StoredObject(bytes(data), content_type, "", {})
+        self.objects[key] = StoredObject(bytes(data), content_type, "", {}, self.clock())
         return 200
 
     async def head_object(self, key: str) -> ObjectHead | None:
@@ -124,6 +129,23 @@ class InMemoryObjectStore:
         check_listable_prefix(prefix)
         self._maybe_fail("list")
         return sorted(k for k in self.objects if k.startswith(prefix))
+
+    async def list_uploads(self, prefix: str) -> list[ListedObject]:
+        check_upload_prefix(prefix)
+        self._maybe_fail("list")
+        return [ListedObject(k, datetime.fromtimestamp(o.modified, UTC))
+                for k, o in sorted(self.objects.items()) if k.startswith(prefix)]
+
+    async def delete_upload(self, key: str) -> None:
+        check_upload_key(key)
+        self._maybe_fail("delete")
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+    def seed_object(self, key: str, *, age_seconds: float = 0.0, data: bytes = b"x") -> None:
+        """Test helper: any object as if written `age_seconds` ago (bypasses the write rules on purpose, so tests
+        can place objects under prefixes the app never writes)."""
+        self.objects[key] = StoredObject(data, "application/octet-stream", "", {}, self.clock() - age_seconds)
 
     def seed_library(self, key: str, data: bytes = b"x", content_type: str = "audio/mpeg") -> None:
         """Test helper: platform library objects (hypersounds/, hypersound-thumbs/) as an operator uploads them."""

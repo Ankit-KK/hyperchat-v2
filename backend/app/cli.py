@@ -8,7 +8,8 @@ bootstrap-admin creates the first admin account (or activates a password-less on
 while any active admin can already sign in. The password is read without echo (or from stdin with
 --password-stdin) and is never printed or logged.
 cleanup deletes expired sessions, reset tokens, nonces, rate-limit windows, old unused invites, finished
-jobs (30 days) and TTS moderation audit rows (90 days) (see app.maintenance); --dry-run only counts. It runs
+jobs (30 days) and TTS moderation audit rows (90 days), then donor uploads that no donation uses after 24
+hours when R2 is configured (D9) (see app.maintenance); --dry-run only counts. It runs
 daily from deploy/systemd/hyperchat-cleanup.timer.
 
 enqueue-donation-audio <donation id> queues one donation's audio job for the worker (manual/controlled cases;

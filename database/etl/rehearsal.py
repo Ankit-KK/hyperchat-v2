@@ -1,7 +1,8 @@
 """Load the restored Supabase data into the Alembic-managed schema.
 
     python -m etl.rehearsal --source "<dsn of hyperchat_restore_test>" \
-        --target "<dsn of hyperchat_dev>" --report report.txt
+        --target "<dsn of hyperchat_dev>" --report report.txt \
+        [--media-base-from https://pub-<legacy>.r2.dev ... --media-base-to https://<configured media base>]
 
 * Source is read in ONE read-only REPEATABLE READ snapshot; nothing is ever written to it.
 * Target is loaded in ONE transaction as hyperchat_owner: TRUNCATE everything, then COPY.
@@ -10,6 +11,9 @@
 * Strict: unexpected NULLs or values make the load fail instead of inventing defaults.
 * Passwords are NOT migrated here (current hashes come from Supabase Auth at cutover).
 * Output: counts and sums only; no row data is printed.
+* Media URLs (D9): with --media-base-to, URLs starting with a --media-base-from prefix (repeatable: legacy used
+  more than one r2.dev host) are rewritten to the target base in etl.mapping.MEDIA_URL_COLUMNS; the key is kept
+  and any other URL is left alone. Without it, URLs are copied unchanged.
 """
 
 import argparse
@@ -22,9 +26,12 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from etl.mapping import (
+    MEDIA_URL_COLUMNS,
     RAZORPAY_ACCOUNTS,
+    media_base,
     normalize_currency,
     obs_token_hash,
+    rewrite_media_url,
     slug_from_table,
     split_approved_by,
     user_role,
@@ -50,9 +57,28 @@ STRAIGHT_COPIES = (
 
 
 class Loader:
-    def __init__(self, src: psycopg.Connection, tgt: psycopg.Connection) -> None:
+    def __init__(self, src: psycopg.Connection, tgt: psycopg.Connection, *, media_from: tuple[str, ...] = (),
+                 media_to: str | None = None) -> None:
         self.src, self.tgt = src, tgt
         self.stats: dict[str, dict] = {}
+        self.media_from, self.media_to = media_from, media_to
+        self.media_rewritten: Counter = Counter()  # "table.column" -> URLs rewritten (reported, never the URLs)
+
+    def media(self, table: str, columns: tuple[str, ...] | list[str], rows: list[tuple]) -> list[tuple]:
+        """Rewrite the legacy media base in this table's media URL columns (no-op without --media-base-to)."""
+        targets = [(i, c) for i, c in enumerate(columns) if c in MEDIA_URL_COLUMNS.get(table, ())]
+        if not self.media_to or not targets:
+            return rows
+        out = []
+        for row in rows:
+            row = list(row)
+            for i, c in targets:
+                new = rewrite_media_url(row[i], self.media_from, self.media_to)
+                if new != row[i]:
+                    self.media_rewritten[f"{table}.{c}"] += 1
+                    row[i] = new
+            out.append(tuple(row))
+        return out
 
     # ── helpers ────────────────────────────────────────────────────────────
     def fetch(self, query: str, params: tuple | None = None) -> list[tuple]:
@@ -130,7 +156,8 @@ class Loader:
         src_expr = [{"razorpay_key_ref": '"razorpay-keyid"', "razorpay_secret_ref": '"razorpay-keysecret"',
                      "razorpay_account": account}
                     .get(c, sql.Identifier(c).as_string(self.src)) for c in tgt_cols]
-        streamers = self.fetch(f"SELECT {', '.join(src_expr)} FROM public.streamers")
+        streamers = self.media("streamers", tgt_cols,
+                               self.fetch(f"SELECT {', '.join(src_expr)} FROM public.streamers"))
         self.note("streamers", len(streamers), self.copy("streamers", tgt_cols, streamers))
 
         with self.tgt.cursor() as cur:
@@ -150,8 +177,8 @@ class Loader:
             missing = [c for c in cols if c not in src_cols]
             if missing:
                 raise RuntimeError(f"{table}: target columns missing in source: {missing}")
-            rows = self.fetch(sql.SQL("SELECT {} FROM {}").format(
-                sql.SQL(", ").join(map(sql.Identifier, cols)), sql.Identifier("public", table)).as_string(self.src))
+            rows = self.media(table, cols, self.fetch(sql.SQL("SELECT {} FROM {}").format(
+                sql.SQL(", ").join(map(sql.Identifier, cols)), sql.Identifier("public", table)).as_string(self.src)))
             self.note(table, len(rows), self.copy(table, cols, rows))
 
     def load_donations(self) -> None:
@@ -186,6 +213,7 @@ class Loader:
                 rows.append((did, sid, order_id, "razorpay", rzp, name, amount, normalize_currency(cur), amount_inr,
                              msg, visible, pay, mod, appr_at, mod_id, label, hyper, voice, hs, media, mtype, tts,
                              sched, played, notified, st_hash, ut_hash, table, created, updated))
+        rows = self.media("donations", DONATION_COLUMNS, rows)
         self.note("donations", len(rows), self.copy("donations", DONATION_COLUMNS, rows))
         self.stats["donations"]["source_tables"] = len(tables)
         self.stats["donations"]["approved_by_split"] = dict(split)
@@ -246,7 +274,17 @@ def main() -> int:
     ap.add_argument("--source", required=True)
     ap.add_argument("--target", required=True)
     ap.add_argument("--report", required=True)
+    ap.add_argument("--media-base-from", action="append", default=[], help="legacy public media base (repeatable)")
+    ap.add_argument("--media-base-to", help="the configured V2 media base (HYPERCHAT_R2_PUBLIC_BASE_URL)")
     args = ap.parse_args()
+    try:
+        media_from = tuple(media_base(u) for u in args.media_base_from)
+        media_to = media_base(args.media_base_to) if args.media_base_to else None
+    except ValueError as exc:
+        raise SystemExit(f"refusing to run: {exc}") from None
+    if bool(media_from) != bool(media_to) or (media_to and media_to in media_from):
+        raise SystemExit("refusing to run: give --media-base-to together with at least one different "
+                         "--media-base-from, or neither")
 
     with psycopg.connect(args.source) as src, psycopg.connect(args.target) as tgt:
         src.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
@@ -261,7 +299,7 @@ def main() -> int:
             raise SystemExit("refusing to run: source must be read-only hyperchat_restore_test, "
                              "target must be a dev database")
 
-        loader = Loader(src, tgt)
+        loader = Loader(src, tgt, media_from=media_from, media_to=media_to)
         loader.prepare_target()
         loader.load_users_and_streamers()
         loader.load_obs_tokens()
@@ -272,7 +310,8 @@ def main() -> int:
         tgt.commit()
         src.rollback()
 
-        ok, text = reconcile(src, tgt, loader.stats, target_db)
+        ok, text = reconcile(src, tgt, loader.stats, target_db, legacy_media_bases=media_from,
+                             media_rewritten=dict(loader.media_rewritten))
     with open(args.report, "w", encoding="utf-8") as fh:
         fh.write(text)
     print(text)
