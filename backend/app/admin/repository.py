@@ -121,6 +121,49 @@ class AdminRepository:
                               (user_id, streamer_id))
             return "ok", await cur.fetchone()
 
+    async def transfer_owner(self, streamer_id: str, user_id: str,
+                             expected_owner_id: str) -> tuple[str, dict | None, dict]:
+        """D13: move a CLAIMED creator from its current owner (who must be `expected_owner_id`) to an active user, in
+        one transaction. Locks: the creator row FOR NO KEY UPDATE (not FOR UPDATE: a concurrent users.streamer_id
+        change takes a key-share lock on it for its foreign key, which this does not block), then both user rows FOR
+        UPDATE in id order (users -> sessions, as every other path). The previous owner loses the creator: their
+        users.streamer_id is cleared only when it links to THIS creator, and their sessions are revoked; nothing else
+        on either account changes (role, email, password, identities, the new owner's link). Creator data (donations,
+        payment account, settings, media, OBS tokens, soundboard rows) is untouched. Returns ("ok" | "unchanged" |
+        "not_found" | "unclaimed" | "owner_changed" | "bad_user", the creator, the counts)."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT user_id::text FROM public.streamers WHERE id = %s FOR NO KEY UPDATE",
+                              (streamer_id,))
+            current = await cur.fetchone()
+            if current is None:
+                return "not_found", None, {}
+            owner = current["user_id"]
+            if owner is None:
+                return "unclaimed", None, {}
+            if owner != expected_owner_id:
+                return "owner_changed", None, {}
+            if owner == user_id:
+                await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
+                return "unchanged", await cur.fetchone(), {}
+            await cur.execute("SELECT id::text, is_active FROM public.users WHERE id = ANY(%s::uuid[]) ORDER BY id "
+                              "FOR UPDATE", ([owner, user_id],))
+            target = {r["id"]: r for r in await cur.fetchall()}.get(user_id)
+            if target is None or not target["is_active"]:
+                return "bad_user", None, {}
+            await cur.execute(f"UPDATE public.streamers SET user_id = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
+                              (user_id, streamer_id))
+            row = await cur.fetchone()
+            await cur.execute("UPDATE public.users SET streamer_id = NULL WHERE id = %s AND streamer_id = %s",
+                              (owner, streamer_id))
+            unlinked = cur.rowcount == 1
+            revoked = await self._revoke_sessions(cur, owner)
+            await cur.execute("SELECT count(*) AS n FROM public.obs_tokens WHERE streamer_id = %s AND is_active IS TRUE "
+                              "AND (expires_at IS NULL OR expires_at > now()) "
+                              "AND (revoked_at IS NULL OR revoked_at > now())", (streamer_id,))
+            obs = (await cur.fetchone())["n"]
+            return "ok", row, {"previous_owner_id": owner, "sessions_revoked": revoked, "old_owner_unlinked": unlinked,
+                               "active_obs_tokens": obs}
+
     async def set_soundboard_eligibility(self, streamer_id: str, enabled: bool) -> bool | None:
         """streamers.soundboard_enabled (D3 eligibility only: terms acceptances are never created or removed here).
         Returns the previous value, or None for an unknown creator."""

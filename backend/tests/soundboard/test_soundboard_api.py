@@ -169,8 +169,9 @@ def test_every_route_needs_a_signed_in_user_with_access(sb):
     assert call(linked, "GET", "authtest-sb-unclaimed", "", None).status_code == 403
     r = call(admin, "GET", "authtest-sb-unclaimed", "", None)  # no owner, so nobody has accepted the terms (D3)
     assert (r.status_code, r.json()["error"]) == (403, "Accept the current Custom Soundboard terms first")
-    accept_soundboard_terms(unclaimed)
-    assert board(sb, "authtest-sb-unclaimed", admin)["active"]
+    accept_soundboard_terms(unclaimed, user_id=make_user("sb-not-owner@authtest.invalid"))
+    r = call(admin, "GET", "authtest-sb-unclaimed", "", None)  # only the current owner's acceptance counts (D13)
+    assert (r.status_code, r.json()["error"]) == (403, "Accept the current Custom Soundboard terms first")
     assert sb.get(f"{S}/authtest-sb-nobody/soundboard").status_code == 404
 
 

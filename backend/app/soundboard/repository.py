@@ -78,25 +78,26 @@ class SoundboardRepository:
         self._conn = connection_factory
 
     async def terms_state(self, streamer_id: str) -> dict | None:
-        """Eligibility and the CURRENT version's acceptance (D3): {enabled, accepted_at, revoked_at} or None."""
+        """Eligibility and the current owner's acceptance of the CURRENT version (D3, owner-specific since D13):
+        {enabled, accepted_at, revoked_at} or None."""
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT s.soundboard_enabled AS enabled, t.accepted_at, t.revoked_at "
                               "FROM public.streamers s LEFT JOIN public.soundboard_tnc_acceptances t "
-                              "ON t.streamer_id = s.id AND t.terms_version = %s WHERE s.id = %s",
+                              "ON t.streamer_id = s.id AND t.user_id = s.user_id AND t.terms_version = %s WHERE s.id = %s",
                               (terms.VERSION, streamer_id))
             return await cur.fetchone()
 
     async def accept_terms(self, streamer_id: str, user_id: str, user_agent: str | None) -> bool:
-        """Records the owner's acceptance of the current version. Idempotent (UNIQUE (streamer_id, terms_version)):
-        an existing row, revoked or not, is never touched; older versions' rows stay as they are. True only when
-        this call recorded it."""
+        """Records the owner's acceptance of the current version. Idempotent per owner (UNIQUE (streamer_id,
+        terms_version, user_id), migration 0019): an existing row, revoked or not, is never touched; other owners' and
+        older versions' rows stay as they are. True only when this call recorded it."""
         async with self._conn() as conn, conn.cursor() as cur:
             await cur.execute("""
                 INSERT INTO public.soundboard_tnc_acceptances (streamer_slug, streamer_id, streamer_name, user_id,
                     user_email, terms_version, user_agent)
                 SELECT s.streamer_slug, s.id, s.streamer_name, u.id, u.email::text, %s, %s
                 FROM public.streamers s JOIN public.users u ON u.id = %s WHERE s.id = %s
-                ON CONFLICT (streamer_id, terms_version) DO NOTHING
+                ON CONFLICT (streamer_id, terms_version, user_id) DO NOTHING
             """, (terms.VERSION, user_agent, user_id, streamer_id))
             return cur.rowcount == 1
 

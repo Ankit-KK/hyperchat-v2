@@ -40,8 +40,9 @@ All soundboard routes live under `/api/v1/dashboard/streamers/{streamer}/soundbo
 - `accepted` means the current version was accepted (even if revoked since); `usable` is
   `eligible AND accepted AND NOT revoked`; `can_accept` is true for the owner while the acceptance is not revoked.
 - Accepting does not need eligibility (a creator may accept before an admin grants access). It records the owner,
-  their email and User-Agent in `soundboard_tnc_acceptances`: one row per creator and version; older versions' rows are
-  never changed.
+  their email and User-Agent in `soundboard_tnc_acceptances`: one row per creator, version and owner (migration 0019);
+  only the current owner's acceptance counts, so after an ownership transfer (D13) the new owner must accept; other
+  owners' and older versions' rows are never changed.
 - Eligibility is changed only by an admin: `PUT /api/v1/admin/creators/{id}/soundboard` `{enabled}` (CSRF; idempotent;
   `{creator_id, soundboard_enabled, changed}`). Revoking an acceptance has no endpoint (HyperChat sets `revoked_at`).
 

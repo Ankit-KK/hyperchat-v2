@@ -8,6 +8,7 @@ Owner decisions, 2026-10-13: **keep the Custom Soundboard terms gate.** Implemen
   **owner** accepted `soundboard-2026-10-13`, and (3) that acceptance is not revoked. Eligibility and acceptance are
   separate controls: granting eligibility never accepts, revoking it never deletes acceptances.
 - **Who accepts:** the creator owner only. Linked/moderator accounts cannot, and an admin cannot on the owner's behalf.
+- **Owner-specific (D13, migration 0019, 2026-10-15):** only the **current** owner's acceptance counts; each owner accepts once per version (`UNIQUE (streamer_id, terms_version, user_id)`). After an ownership transfer the previous owner's acceptance stays as history (not revoked), eligibility is unchanged, and the Custom Soundboard is unusable until the new owner accepts the current version. If the creator later returns to an owner who accepted that version, their acceptance applies again. An unclaimed creator has no owner, so it is never usable.
 - **Older acceptances do not count.** Legacy creators accepted `soundboard-2026-07-14` (the table default
   `soundboard-2026-07-13` is older); those rows are kept as history, and every currently enabled creator must accept
   `soundboard-2026-10-13` before the Custom Soundboard works again.

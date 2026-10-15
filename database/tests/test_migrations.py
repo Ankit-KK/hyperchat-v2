@@ -226,6 +226,52 @@ def test_0018_retires_secondary(monkeypatch):
         command.upgrade(cfg, "head")
 
 
+def _tnc_keys() -> set[str]:
+    with _owner() as conn:
+        return {r[0] for r in conn.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = "
+                                           "'public.soundboard_tnc_acceptances'::regclass AND contype = 'u'")}
+
+
+def test_0019_owner_specific_soundboard_terms(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0018")
+    assert _tnc_keys() == {"UNIQUE (streamer_id, terms_version)"}
+    insert = ("INSERT INTO public.soundboard_tnc_acceptances (streamer_slug, streamer_id, user_id, terms_version) "
+              "VALUES ('migtest19', %s, %s, 'v1')")
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest19'")
+            conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest19-%%'")
+            a, b = (conn.execute("INSERT INTO public.users (email) VALUES (%s) RETURNING id",
+                                 (f"migtest19-{n}@x.invalid",)).fetchone()[0] for n in "ab")
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) "
+                               "VALUES ('migtest19', 'M19', %s) RETURNING id", (a,)).fetchone()[0]
+            conn.execute(insert, (sid, a))
+        command.upgrade(cfg, "0019")  # existing rows are kept as they are
+        assert _tnc_keys() == {"UNIQUE (streamer_id, terms_version, user_id)"}
+        with _owner() as conn:
+            conn.execute(insert, (sid, b))  # a second owner accepts the same version
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                conn.execute(insert, (sid, b))  # still once per owner
+        with pytest.raises(Exception, match="acceptances by more than one owner"):
+            command.downgrade(cfg, "0018")  # never deletes or merges an acceptance
+        assert _version() == "0019" and _tnc_keys() == {"UNIQUE (streamer_id, terms_version, user_id)"}
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_id = %s",
+                                (sid,)).fetchone()[0] == 2
+            conn.execute("DELETE FROM public.soundboard_tnc_acceptances WHERE streamer_id = %s AND user_id = %s",
+                         (sid, b))
+        command.downgrade(cfg, "0018")
+        assert _version() == "0018" and _tnc_keys() == {"UNIQUE (streamer_id, terms_version)"}
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest19'")  # cascades acceptances
+            conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest19-%%'")
+        command.upgrade(cfg, "head")
+
+
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):
     monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
     cfg = _cfg()
