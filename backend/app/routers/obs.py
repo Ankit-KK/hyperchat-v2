@@ -2,6 +2,8 @@
 
 OBS (OBS token: x-obs-token header, or ?token= for the Media Source URL; Origin absent, allowlisted or the API's own):
   GET  /api/v1/obs/session        the player's start-up data (creator, Pusher config, poll interval)
+  GET  /api/v1/obs/overlay-config overlay display settings of the TOKEN's creator (= settings-updated)
+  GET  /api/v1/obs/leaderboard    {enabled, top_donor{name, total_amount_inr}|null} of the TOKEN's creator
   POST /api/v1/obs/audio/claim    atomic queue pop -> 200 {donation_id, kind, audio_url, display} | 204 (Retry-After)
   GET  /api/v1/obs/audio/next     the same claim for an OBS Media Source -> 302 to the audio file | 204 (P10-D8)
   GET  /obs/player, /obs/player.js the browser-source audio player (token in the URL #fragment, never sent)
@@ -47,6 +49,18 @@ def _no_content(retry_after: int | None) -> Response:
 @obs_router.get("/session")
 async def obs_session(request: Request, caller: ObsCaller = Depends(require_obs_token)):
     return JSONResponse(await _service(request).session(caller), headers=NO_STORE)
+
+
+@obs_router.get("/overlay-config")
+async def overlay_config(request: Request, caller: ObsCaller = Depends(require_obs_token)):
+    return JSONResponse(await _service(request).overlay_config(caller, request.app.state.security.obs_tokens),
+                        headers=NO_STORE)
+
+
+@obs_router.get("/leaderboard")
+async def leaderboard(request: Request, caller: ObsCaller = Depends(require_obs_token)):
+    return JSONResponse(await _service(request).leaderboard(caller, request.app.state.security.obs_tokens),
+                        headers=NO_STORE)
 
 
 @obs_router.post("/audio/claim")

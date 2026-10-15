@@ -611,6 +611,23 @@ Bandit ran on 11,050 lines with no errors and no `# nosec` suppressions. Each re
     - **Proof:** with `main`'s `text.py` restored, the check fails and names all five characters on line 32.
 - **Observation (not changed; outside F8):** `sanitize_for_tts` strips most bidi controls but **not** U+061C ARABIC LETTER MARK, nor the soft hyphen or Hangul fillers. The moderation normaliser does strip them. Text-to-speech output is audio, so there is no display effect; recorded only so a future change to the TTS filter can include it.
 
+## Anonymous exposure review (2026-10-15)
+
+All 90 routes were reviewed for data returned without any credential (CORS and rate limits are not authentication).
+Nothing secret was anonymous (no ids, emails, tokens, order or payment data). Three minimum-exposure problems were
+fixed (owner decisions 2026-10-15: the donor page keeps the goal bar but not the leaderboard; OBS and dashboard
+settings are never anonymous; tokenless legacy goal-overlay URLs keep working):
+
+| Finding | Was | Now |
+|---|---|---|
+| EXP-1 (P2) overlay settings | `GET /api/v1/public/streamers/{slug}/overlay-config` returned overlay template ids, `alert_box_scale`, `overlay_adjust_mode`, leaderboard flags, `goal_activated_at` for any active creator; its only consumer (the alerts overlay) always has an OBS token, and the realtime counterpart was already private | route removed; `GET /api/v1/obs/overlay-config` (OBS token, the token's creator, the token's channel scope): exactly the `settings-updated` fields |
+| EXP-2 (P2) donor leaderboard | `GET …/{slug}/leaderboard` returned the top donor's name and lifetime total for any active creator | route removed; `GET /api/v1/obs/leaderboard` (OBS token, the token's creator): `{enabled, top_donor}`; `leaderboard_widget_enabled` left the public profile |
+| EXP-3 (P3) creator-status oracle | `GET /api/v1/realtime/config` answered 200 for `pending` / `rejected` creators and 404 for unknown ones | active creators only; identical 404 otherwise |
+| EXP-4 (P3) goal | name and target served while no goal was active | every field but `active` is `null` while inactive; `brand_color` and `goal_overlay_id` added so the tokenless goal overlay needs nothing else |
+
+The public `{slug}-goal` channel already skipped non-active creators (renderer); now covered for `pending` and
+`rejected`. Platform metrics stay public (owner decision).
+
 ## Tracked decisions and approvals (unchanged by this audit)
 
 | ID | Item | State |
@@ -657,12 +674,14 @@ All 82 routes of `create_app()` (the dependency chain is what FastAPI resolves b
 - **Admin** (`require_admin`): `/api/v1/admin/*`, `POST /api/v1/auth/invites`.
 - **Creator access** (`require_streamer_access`): every `/api/v1/dashboard/streamers/{streamer}/…` route and
   `/api/v1/streamers/{streamer}/access`.
-- **OBS token** (`require_obs_token`): `/api/v1/obs/{session, audio/claim, audio/next}`.
+- **OBS token** (`require_obs_token`): `/api/v1/obs/{session, overlay-config, leaderboard, audio/claim, audio/next}`
+  (the creator comes from the token).
 - **Trusted Origin + per-IP limit** (`_guard`): signups, upload grant and uploads, checkout, payment status and confirm.
 - **Checked inside the handler:** login, password forgot / reset, invite accept (Origin), Google start / callback
   (state), the three webhooks (signatures), Pusher auth (session or OBS token).
-- **Public by design:** `/health`, public reads under `/api/v1/public/` and `/api/v1/metrics/` (Nginx per-IP limit),
-  `/api/v1/realtime/config`, `/obs/player*` (static; the token stays in the fragment).
+- **Public by design:** `/health`, the donor-page reads under `/api/v1/public/` (profile, pricing, soundboard, goal,
+  hypersounds, config) and `/api/v1/metrics/` (Nginx per-IP limit; not authentication), `/api/v1/realtime/config`
+  (active creators only), `/obs/player*` (static; the token stays in the fragment). See "Anonymous exposure review".
 
 Test runs on `bfb9a1e`, 2026-10-10:
 - Disposable PostgreSQL 17 (created and dropped on the VPS): database **47 passed**; backend **4,511 passed, 0 failed**.

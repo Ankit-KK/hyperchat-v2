@@ -25,7 +25,15 @@ pytestmark = requires_db
 P = "/api/v1/public/streamers"
 NOT_FOUND = {"error": "Streamer not found"}
 E1_FIELDS = {"slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled", "hyperemotes_enabled",
-             "media_upload_enabled", "media_max_file_size_mb", "soundboard_enabled", "leaderboard_widget_enabled"}
+             "media_upload_enabled", "media_max_file_size_mb", "soundboard_enabled"}
+GOAL_FIELDS = {"active", "name", "target_amount_inr", "progress_inr", "brand_color", "goal_overlay_id"}
+INACTIVE_GOAL = {"active": False, "name": None, "target_amount_inr": None, "progress_inr": None, "brand_color": None, "goal_overlay_id": None}
+# OBS-token or dashboard-session data: never in any anonymous response (key or value).
+NOT_PUBLIC_KEYS = {"alert_box_scale", "alert_overlay_id", "leaderboard_overlay_id", "overlay_adjust_mode",
+                   "leaderboard_bg_enabled", "leaderboard_widget_enabled", "goal_activated_at", "goal_is_active",
+                   "top_donor", "total_amount_inr", "user_id", "streamer_id", "owner_id", "razorpay_account",
+                   "razorpay_key_ref", "order_prefix", "pusher_group", "obs_token", "token_hash", "status",
+                   "moderation_mode", "el_voice_id"}
 
 
 def streamer(slug: str, user_id: str | None = None, terms: bool = True, **cols) -> str:
@@ -66,11 +74,11 @@ def test_profile_exact_fields_values_and_cache(app):
     r = app.get(f"{P}/authtest-prof")
     assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=60"
     body = r.json()
-    assert set(body) == E1_FIELDS
+    assert set(body) == E1_FIELDS and "leaderboard_widget_enabled" not in body  # OBS-only (owner decision)
     assert body == {"slug": "authtest-prof", "name": "Prof Creator", "brand_color": "#112233", "brand_logo_url": None,
                     "background_url": "https://cdn.example.test/bg.png", "tts_enabled": True,
                     "hyperemotes_enabled": True, "media_upload_enabled": False, "media_max_file_size_mb": 25.0,
-                    "soundboard_enabled": True, "leaderboard_widget_enabled": False}
+                    "soundboard_enabled": True}
     assert app.get(f"{P}/AUTHTEST-PROF").json()["slug"] == "authtest-prof"  # slugs are case-insensitive
 
 
@@ -79,16 +87,13 @@ def test_null_database_values_are_served_safely(app):
              media_max_file_size_mb=None, leaderboard_widget_enabled=None, alert_box_scale=None, goal_is_active=None)
     body = app.get(f"{P}/authtest-nulls").json()
     assert body["brand_color"] is None and body["tts_enabled"] is True and body["media_upload_enabled"] is False
-    assert body["leaderboard_widget_enabled"] is True and body["media_max_file_size_mb"] is None
-    cfg = app.get(f"{P}/authtest-nulls/overlay-config").json()
-    assert cfg["alert_box_scale"] is None and cfg["goal_is_active"] is False
-    assert app.get(f"{P}/authtest-nulls/goal").json() == {"active": False, "name": None, "target_amount_inr": None,
-                                                         "progress_inr": 0.0}
+    assert body["media_max_file_size_mb"] is None
+    assert app.get(f"{P}/authtest-nulls/goal").json() == INACTIVE_GOAL
 
 
 # ── 404 behaviour (D3) ──────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("suffix", ["", "/pricing", "/overlay-config", "/soundboard", "/leaderboard", "/goal"])
+@pytest.mark.parametrize("suffix", ["", "/pricing", "/soundboard", "/goal"])
 def test_unknown_inactive_and_malformed_slugs_are_identical_404s(app, suffix):
     streamer("authtest-pending", status="pending", soundboard_enabled=True)
     streamer("authtest-rejected", status="rejected", rejection_reason="nope", soundboard_enabled=True)
@@ -152,22 +157,16 @@ def test_pricing_platform_tiers_then_builtin_fallback(strict_scratch_db, app):
             conn.execute("DELETE FROM public.platform_voice_tiers WHERE id = ANY(%s)", (ids,))
 
 
-# ── E3 overlay config ───────────────────────────────────────────────────────────
+# ── removed: E3 overlay config and E5 leaderboard are OBS-token data now (tests/obs/test_obs_overlay.py) ──
 
-def test_overlay_config_fields(app):
-    activated = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
-    streamer("authtest-ovl", goal_name="New mic", goal_target_amount=5000, goal_activated_at=activated,
-             goal_is_active=True, alert_overlay_id=2, goal_overlay_id=3, alert_box_scale=1.25)
-    r = app.get(f"{P}/authtest-ovl/overlay-config")
-    assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=30"
-    body = r.json()
-    assert set(body) == {"slug", "name", "brand_color", "brand_logo_url", "alert_box_scale", "alert_overlay_id",
-                         "leaderboard_overlay_id", "goal_overlay_id", "overlay_adjust_mode",
-                         "leaderboard_widget_enabled", "leaderboard_bg_enabled", "hyperemotes_enabled",
-                         "media_upload_enabled", "tts_enabled", "goal_name", "goal_target_amount",
-                         "goal_activated_at", "goal_is_active"}
-    assert body["slug"] == "authtest-ovl" and body["alert_overlay_id"] == 2 and body["alert_box_scale"] == 1.25
-    assert body["goal_target_amount"] == 5000.0 and body["goal_activated_at"].startswith("2026-09-01T12:00:00")
+@pytest.mark.parametrize("suffix", ["/overlay-config", "/leaderboard"])
+def test_overlay_config_and_leaderboard_are_not_anonymous_any_more(app, suffix):
+    sid = streamer("authtest-gone", alert_overlay_id=2, alert_box_scale=1.25, overlay_adjust_mode=True)
+    totals(sid, ("Big Fan", 2500.5))
+    for headers in ({}, {"origin": FRONT}, {"cookie": "__Host-hc_session=garbage"}):
+        r = app.get(f"{P}/authtest-gone{suffix}", headers=headers)
+        assert r.status_code == 404, suffix
+        assert "Big Fan" not in r.text and "alert" not in r.text and "1.25" not in r.text
 
 
 # ── E4 soundboard ───────────────────────────────────────────────────────────────
@@ -221,36 +220,13 @@ def test_soundboard_platform_defaults_and_overrides(strict_scratch_db, app):
     assert [(s["id"], s["display_name"]) for s in mine] == [(o, "Renamed"), (p[0], "Plat 0")]
 
 
-# ── E5 leaderboard (D2) ─────────────────────────────────────────────────────────
-
-def test_leaderboard_enabled_disabled_and_empty(app):
-    on = streamer("authtest-lb-on")
-    totals(on, ("Small", 100), ("Big Fan", 2500.5), ("Mid", 900))
-    r = app.get(f"{P}/authtest-lb-on/leaderboard")
-    assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=10"
-    assert r.json() == {"top_donor": {"name": "Big Fan", "total_amount_inr": 2500.5}}
-    off = streamer("authtest-lb-off", leaderboard_widget_enabled=False)
-    totals(off, ("Hidden", 9999))
-    assert app.get(f"{P}/authtest-lb-off/leaderboard").json() == {"top_donor": None}
-    streamer("authtest-lb-empty")
-    assert app.get(f"{P}/authtest-lb-empty/leaderboard").json() == {"top_donor": None}
-    zero = streamer("authtest-lb-zero")
-    totals(zero, ("Nobody", 0))
-    assert app.get(f"{P}/authtest-lb-zero/leaderboard").json() == {"top_donor": None}
-
-
-def test_leaderboard_tie_is_deterministic(app):
-    sid = streamer("authtest-lb-tie")
-    totals(sid, ("Zed", 500), ("Amy", 500))
-    assert app.get(f"{P}/authtest-lb-tie/leaderboard").json()["top_donor"]["name"] == "Amy"
-
-
 # ── E6 goal (D4: amount_inr) ────────────────────────────────────────────────────
 
 def test_goal_progress_boundaries(app):
     activated = datetime.now(UTC) - timedelta(days=2)
     sid = streamer("authtest-goal", goal_name="Chair", goal_target_amount=10000, goal_activated_at=activated,
-                   goal_is_active=True)
+                   goal_is_active=True, brand_color="#abcdef", goal_overlay_id=3, alert_overlay_id=5,
+                   alert_box_scale=1.5, overlay_adjust_mode=True)
     other = streamer("authtest-goal-other")
     donation(sid, 100, at=activated)                                    # exactly at activation: counted
     donation(sid, 200, moderation="approved")                           # counted
@@ -263,17 +239,19 @@ def test_goal_progress_boundaries(app):
     donation(other, 999)                                                # another creator
     r = app.get(f"{P}/authtest-goal/goal")
     assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=10"
-    assert r.json() == {"active": True, "name": "Chair", "target_amount_inr": 10000.0, "progress_inr": 1190.0}
+    assert set(r.json()) == GOAL_FIELDS
+    assert r.json() == {"active": True, "name": "Chair", "target_amount_inr": 10000.0, "progress_inr": 1190.0,
+                        "brand_color": "#abcdef", "goal_overlay_id": 3}  # what the tokenless goal overlay renders
+    assert "goal_activated_at" not in r.text and "alert" not in r.text and "1.5" not in r.text
     with db() as conn:
         conn.execute("UPDATE public.streamers SET goal_is_active = false WHERE id = %s", (sid,))
-    assert app.get(f"{P}/authtest-goal/goal").json()["active"] is False
-    assert app.get(f"{P}/authtest-goal/goal").json()["progress_inr"] == 0.0
+    stale = app.get(f"{P}/authtest-goal/goal")
+    assert stale.json() == INACTIVE_GOAL and "Chair" not in stale.text and "10000" not in stale.text
 
 
 def test_goal_active_without_activation_time_is_inactive(app):
     streamer("authtest-goal2", goal_is_active=True, goal_activated_at=None, goal_name="X")
-    assert app.get(f"{P}/authtest-goal2/goal").json() == {"active": False, "name": "X", "target_amount_inr": None,
-                                                         "progress_inr": 0.0}
+    assert app.get(f"{P}/authtest-goal2/goal").json() == INACTIVE_GOAL
 
 
 # ── E7 / E8 metrics (D7) ────────────────────────────────────────────────────────
@@ -324,7 +302,15 @@ def test_metrics_aggregates_corrected_24h_and_cache(strict_scratch_db, env):
 
 # ── public = no authentication, no CSRF, CORS by allowlist ──────────────────────
 
-ALL_PATHS = ["", "/pricing", "/overlay-config", "/soundboard", "/leaderboard", "/goal"]
+ALL_PATHS = ["", "/pricing", "/soundboard", "/goal"]
+
+
+def json_keys(value) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {k for v in value.values() for k in json_keys(v)}
+    if isinstance(value, list):
+        return {k for v in value for k in json_keys(v)}
+    return set()
 
 
 def test_public_endpoints_need_no_auth_csrf_or_origin(app):
@@ -349,7 +335,9 @@ def test_public_endpoints_need_no_auth_csrf_or_origin(app):
 def test_no_private_data_in_any_public_response(strict_scratch_db, app):
     owner = make_user("owner-private" + DOMAIN)
     sid = streamer("authtest-priv", user_id=owner, soundboard_enabled=True, goal_is_active=True,
-                   goal_activated_at=datetime.now(UTC) - timedelta(days=1), goal_name="G", goal_target_amount=1,
+                   goal_activated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC), goal_name="G", goal_target_amount=1,
+                   alert_overlay_id=2, leaderboard_overlay_id=6, alert_box_scale=1.37, overlay_adjust_mode=True,
+                   leaderboard_bg_enabled=False,
                    order_prefix="authtestPRIVPFX", custom_page_path="/authtest-secret-page",
                    discord_moderation_channel_id="authtest-discord-777", razorpay_key_ref="authtest-rzp-ref",
                    el_voice_id="authtest-voice-id", rejection_reason="authtest-reason")
@@ -368,10 +356,12 @@ def test_no_private_data_in_any_public_response(strict_scratch_db, app):
         r = app.get(url)
         assert r.status_code == 200, url
         texts.append(r.text)
+        leaked = json_keys(r.json()) & NOT_PUBLIC_KEYS
+        assert not leaked, (url, leaked)
     blob = "\n".join(texts)
     for secret in (owner, sid, DOMAIN, "authtestPRIVPFX", "authtest-secret-page", "authtest-discord-777",
                    "authtest-rzp-ref", "authtest-voice-id", "authtest-reason", "authtest-obs-hash-xyz",
                    "authtest private message", "Secret Donor", "777.77", "authtest-", "razorpay", "email",
-                   "password", "token", "order_"):
+                   "password", "token", "order_", "Public Name", "2026-01-02", "1.37"):
         assert secret not in blob.replace("authtest-priv", "").replace("authtest-a9", "").replace("authtest-i9", ""), secret
-    assert '"Public Name"' in blob  # the one intended public donor field (D2)
+    # The leaderboard (donor names and totals) is OBS-token data now: no anonymous route returns it.

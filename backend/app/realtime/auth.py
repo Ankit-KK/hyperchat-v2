@@ -96,7 +96,7 @@ class RealtimeService:
     async def config(self, streamer: str) -> dict:
         ref = parse_streamer_ref(streamer)
         found = await self.repo.streamer_by_slug(ref.slug) if ref is not None and ref.slug else None
-        if found is None:
+        if found is None or found["status"] != "active":  # unknown, pending and rejected look the same (D3)
             raise SecurityError(404, "Streamer not found", "streamer_not_found")
         app = self.apps.resolve(found["pusher_group"])
         if app is None:

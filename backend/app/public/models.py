@@ -1,6 +1,7 @@
-"""Response models for the public read API. Fixed field sets: extra fields are forbidden."""
+"""Response models for the public read API. Fixed field sets: extra fields are forbidden.
 
-from datetime import datetime
+Anonymous donor-page data only. OBS overlay settings and the leaderboard need an OBS token (app.obs); full creator
+settings need a dashboard session (app.dashboard)."""
 
 from pydantic import BaseModel, ConfigDict
 
@@ -31,7 +32,6 @@ class PublicStreamer(_Model):  # E1
     media_upload_enabled: bool
     media_max_file_size_mb: float | None
     soundboard_enabled: bool
-    leaderboard_widget_enabled: bool
 
 
 class AmountTier(_Model):
@@ -56,27 +56,6 @@ class Pricing(_Model):  # E2
     voice_duration_tiers: list[VoiceTier]
 
 
-class OverlayConfig(_Model):  # E3
-    slug: str
-    name: str
-    brand_color: str | None
-    brand_logo_url: str | None
-    alert_box_scale: float | None
-    alert_overlay_id: int
-    leaderboard_overlay_id: int
-    goal_overlay_id: int
-    overlay_adjust_mode: bool
-    leaderboard_widget_enabled: bool
-    leaderboard_bg_enabled: bool
-    hyperemotes_enabled: bool
-    media_upload_enabled: bool
-    tts_enabled: bool
-    goal_name: str | None
-    goal_target_amount: float | None
-    goal_activated_at: datetime | None
-    goal_is_active: bool
-
-
 class Sound(_Model):
     id: str  # soundboard slot id (opaque; needed later to pick a sound when donating)
     display_name: str
@@ -88,20 +67,28 @@ class Soundboard(_Model):  # E4
     sounds: list[Sound]
 
 
-class TopDonor(_Model):
-    name: str
-    total_amount_inr: float
-
-
-class Leaderboard(_Model):  # E5
-    top_donor: TopDonor | None
-
-
-class Goal(_Model):  # E6
+class Goal(_Model):  # E6: everything the tokenless legacy goal overlay renders; all null while no goal is active
     active: bool
     name: str | None
     target_amount_inr: float | None
-    progress_inr: float
+    progress_inr: float | None
+    brand_color: str | None
+    goal_overlay_id: int | None
+
+
+def goal_view(streamer: dict, progress_inr: float | None) -> dict:
+    """The public goal (GET .../goal and the public {slug}-goal channel). progress_inr is None when inactive."""
+    if progress_inr is None:
+        return {"active": False, "name": None, "target_amount_inr": None, "progress_inr": None, "brand_color": None,
+                "goal_overlay_id": None}
+    target = streamer["goal_target_amount"]
+    return {"active": True, "name": streamer["goal_name"], "target_amount_inr": float(target) if target is not None
+            else None, "progress_inr": float(progress_inr), "brand_color": streamer["brand_color"],
+            "goal_overlay_id": streamer["goal_overlay_id"]}
+
+
+def goal_active(streamer: dict) -> bool:
+    return bool(streamer["goal_is_active"] and streamer["goal_activated_at"])
 
 
 class PlatformMetrics(_Model):  # E7

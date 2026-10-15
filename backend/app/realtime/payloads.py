@@ -8,8 +8,9 @@ ids, emails, secrets, provider responses, moderator identities.
       {event_id, v, action?, previous_status?, donation{id, name, amount, currency, message, message_visible,
        moderation_status, is_hyperemote, voice_message_url, tts_audio_url, hypersound_url, media_url,
        media_type, created_at}}       message is null while hidden (message_visible = false)
-  goal-progress (PUBLIC {slug}-goal)  {event_id, v, active, name, target_amount_inr, progress_inr}
-                                      the same aggregates as GET /api/v1/public/streamers/{slug}/goal
+  goal-progress (PUBLIC {slug}-goal)  {event_id, v, active, name, target_amount_inr, progress_inr, brand_color,
+                                       goal_overlay_id}: exactly GET /api/v1/public/streamers/{slug}/goal (all
+                                      null while no goal is active); active creators only
   leaderboard-updated (private)       {event_id, v, enabled, top_donor{name, total_amount}|null,
                                        latest{name, amount, currency, created_at}|null}  (approved only)
   settings-updated (private)          {event_id, v, <overlay display settings>}
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 
 from psycopg.rows import dict_row
 
+from app.public.models import goal_active, goal_view
 from app.realtime.channels import channel_name
 from app.realtime.outbox import OVERLAY_SETTINGS, Event
 
@@ -99,8 +101,8 @@ class RealtimeRepository:
 
     async def streamer_by_slug(self, slug: str) -> dict | None:
         return await self._one("SELECT id::text AS id, streamer_slug AS slug, streamer_name AS name, "
-                               "user_id::text AS user_id, pusher_group FROM public.streamers WHERE streamer_slug = %s",
-                               (slug,))
+                               "user_id::text AS user_id, pusher_group, status FROM public.streamers "
+                               "WHERE streamer_slug = %s", (slug,))
 
     async def donation(self, donation_id: str, streamer_id: str) -> dict | None:
         return await self._one("""
@@ -211,10 +213,8 @@ class Renderer:
     async def _goal(self, event: Event, s: dict, base: dict) -> dict | Skip:
         if s["status"] != "active":
             return Skip("streamer_not_public")  # a public channel: only for public (active) creators
-        active = bool(s["goal_is_active"] and s["goal_activated_at"])
-        progress = await self.repo.goal_progress_inr(event.streamer_id, s["goal_activated_at"]) if active else 0.0
-        return {**base, "active": active, "name": s["goal_name"], "target_amount_inr": _number(s["goal_target_amount"]),
-                "progress_inr": progress}
+        progress = await self.repo.goal_progress_inr(event.streamer_id, s["goal_activated_at"]) if goal_active(s) else None
+        return {**base, **goal_view(s, progress)}
 
     async def _leaderboard(self, event: Event, s: dict, base: dict) -> dict:
         if not s["leaderboard_widget_enabled"]:

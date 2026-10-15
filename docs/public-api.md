@@ -1,17 +1,29 @@
 # Public read API (Phase 4)
 
-Unauthenticated `GET` endpoints for the donation page, OBS overlays (initial state) and the landing
-page. No cookies are required or set; CSRF does not apply (read-only). CORS follows the configured
-browser-origin allowlist; requests without an `Origin` header (OBS browser sources) work.
+Unauthenticated `GET` endpoints for the donation page, the tokenless legacy goal overlay and the landing page.
+No cookies are required or set; CSRF does not apply (read-only). CORS follows the configured browser-origin
+allowlist; requests without an `Origin` header (OBS browser sources) work.
+
+## Who may read what (exposure review, 2026-10-15)
+
+| Tier | Credential | Data |
+|---|---|---|
+| **Anonymous donor data** | none | E1 profile (donor-page fields), E2 pricing, E4 soundboard, E6 goal (also the tokenless legacy goal overlay), hypersounds, E9 contact config, E7/E8 platform metrics; the donor actions (upload grant and uploads, checkout, signup) |
+| **OBS-token data** | `x-obs-token` (or `?token=`), the creator taken from the token | `GET /api/v1/obs/overlay-config` (overlay display settings), `GET /api/v1/obs/leaderboard` (top donor), `GET /api/v1/obs/session`, the audio claim, the private overlay channels |
+| **Session-protected dashboard data** | dashboard session (owner, linked account or admin) | every creator setting (`GET /api/v1/dashboard/streamers/{streamer}/settings`), donations, moderation, OBS token management |
+
+CORS and rate limiting restrict browsers and volume; they are not authentication. Overlay settings
+(`alert_box_scale`, overlay template ids, `overlay_adjust_mode`, `leaderboard_widget_enabled`,
+`leaderboard_bg_enabled`), `goal_activated_at` and donor leaderboard data are never anonymous.
 
 | # | Endpoint | Cache-Control | Response fields |
 |---|---|---|---|
-| E1 | `GET /api/v1/public/streamers/{slug}` | 60 s | `slug, name, brand_color, brand_logo_url, background_url, tts_enabled, hyperemotes_enabled, media_upload_enabled, media_max_file_size_mb, soundboard_enabled, leaderboard_widget_enabled` |
+| E1 | `GET /api/v1/public/streamers/{slug}` | 60 s | `slug, name, brand_color, brand_logo_url, background_url, tts_enabled, hyperemotes_enabled, media_upload_enabled, media_max_file_size_mb, soundboard_enabled` |
 | E2 | `GET …/{slug}/pricing?currency=INR` | 60 s | `currency, min_text, min_tts, min_voice, min_hypersound, min_media, tts_enabled, message_char_tiers[{min_amount, max_chars}] \| null, voice_duration_tiers[{min_amount, max_duration_seconds}]` |
-| E3 | `GET …/{slug}/overlay-config` | 30 s | `slug, name, brand_color, brand_logo_url, alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id, overlay_adjust_mode, leaderboard_widget_enabled, leaderboard_bg_enabled, hyperemotes_enabled, media_upload_enabled, tts_enabled, goal_name, goal_target_amount, goal_activated_at, goal_is_active` |
+| E3 | ~~`GET …/{slug}/overlay-config`~~ | – | **removed (2026-10-15)**: OBS-token data, `GET /api/v1/obs/overlay-config` (the token's creator) |
 | E4 | `GET …/{slug}/soundboard` | 60 s | `sounds[{id, display_name, audio_url, thumb_url}]` |
-| E5 | `GET …/{slug}/leaderboard` | 10 s | `top_donor {name, total_amount_inr} \| null` |
-| E6 | `GET …/{slug}/goal` | 10 s | `active, name, target_amount_inr, progress_inr` |
+| E5 | ~~`GET …/{slug}/leaderboard`~~ | – | **removed (2026-10-15)**: OBS-token data, `GET /api/v1/obs/leaderboard` (the token's creator) |
+| E6 | `GET …/{slug}/goal` | 10 s | `active, name, target_amount_inr, progress_inr, brand_color, goal_overlay_id`; every field except `active` is `null` while no goal is active (no stale goal) |
 | E7 | `GET /api/v1/metrics/platform` | 300 s (+ in-process cache) | `total_interactions, total_alerts, active_streams` |
 | E8 | `GET /api/v1/metrics/showcase` | 60 s (+ in-process cache) | `streamers_live, alerts_last_24h, last_sync` |
 | E9 | `GET /api/v1/public/config` (D5) | 300 s | `contact {name, email, phones[], discord_url}` |
@@ -27,15 +39,16 @@ The database `rate_limits` table is not used for these reads.
 
 Never returned: emails, user/creator ids, password or session data, CSRF/OBS tokens, API keys,
 order/provider ids, donation messages, individual donation amounts, payment configuration,
-moderation/TTS internals, `custom_page_path`, `pusher_group`, Discord/Telegram ids.
-The only donor information is the leaderboard's top display name + total (E5) and goal totals (E6).
+moderation/TTS internals, `custom_page_path`, `pusher_group`, Discord/Telegram ids, overlay display settings,
+`goal_activated_at`, donor names or totals (the leaderboard is OBS-token data). The only donor-derived figure is
+the goal's aggregate progress (E6).
 `sounds[].id` is the opaque soundboard slot id (needed later to choose a sound when donating).
 
 ## Intentional differences from the legacy Edge Functions (decisions D1-D10)
 | Topic | Legacy | v2 |
 |---|---|---|
 | Hypersound library (`list-hypersounds`) | live R2 listing | not in Phase 4; moves to Phase 6 with R2 (D1) |
-| Top donor | always public | only when `leaderboard_widget_enabled`; creators with only zero totals return `null`; ties broken by name (D2) |
+| Top donor | always public | OBS token only (`GET /api/v1/obs/leaderboard`, owner decision 2026-10-15: the donor page does not show it); `null` while the widget is off or totals are zero; ties broken by name (D2) |
 | Latest-donations feed | with OBS token | not in Phase 4 (Phase 10, OBS endpoints) (D2) |
 | Inactive creators | pricing/config/goal served for any existing slug | `pending`/`rejected` give the same 404 as unknown slugs (D3) |
 | Currency | unknown currency priced as INR | only the 8 legacy currencies; others 400 (D4) |

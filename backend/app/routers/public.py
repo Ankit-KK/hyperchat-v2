@@ -1,6 +1,10 @@
 """Public read API (Phase 4): /api/v1/public/streamers/{slug}/... and /api/v1/metrics/*; D5: GET /api/v1/public/config
 (static contact details and the Discord invite, from settings; there is no contact-form submission API).
 
+Anonymous donor-page data only: profile, pricing, soundboard, goal (also the tokenless legacy goal overlay).
+OBS overlay settings and the leaderboard are OBS-token data (/api/v1/obs/overlay-config, /api/v1/obs/leaderboard);
+full creator settings are session-protected dashboard data.
+
 No authentication, no cookies, GET only. Each route declares its response model (fixed field set) and a
 Cache-Control header. Per-IP rate limiting is done by Nginx (deploy/nginx/snippets/hyperchat-public-*).
 """
@@ -10,8 +14,6 @@ from fastapi import APIRouter, Query, Request, Response
 from app.core.errors import ApiError
 from app.public.models import (
     Goal,
-    Leaderboard,
-    OverlayConfig,
     PublicConfig,
     PublicContact,
     PlatformMetrics,
@@ -26,7 +28,7 @@ streamers_router = APIRouter(prefix="/api/v1/public/streamers", tags=["public"])
 metrics_router = APIRouter(prefix="/api/v1/metrics", tags=["public"])
 config_router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
-CACHE_SECONDS = {"profile": 60, "pricing": 60, "overlay": 30, "soundboard": 60, "leaderboard": 10, "goal": 10,
+CACHE_SECONDS = {"profile": 60, "pricing": 60, "soundboard": 60, "goal": 10,
                  "platform": 300, "showcase": 60, "config": 300}
 
 
@@ -56,24 +58,10 @@ async def streamer_pricing(slug: str, request: Request, response: Response,
     return result
 
 
-@streamers_router.get("/{slug}/overlay-config", response_model=OverlayConfig)
-async def overlay_config(slug: str, request: Request, response: Response) -> OverlayConfig:
-    result = await _service(request).overlay_config(slug)
-    _cache(response, "overlay")
-    return result
-
-
 @streamers_router.get("/{slug}/soundboard", response_model=Soundboard)
 async def streamer_soundboard(slug: str, request: Request, response: Response) -> Soundboard:
     result = await _service(request).soundboard(slug)
     _cache(response, "soundboard")
-    return result
-
-
-@streamers_router.get("/{slug}/leaderboard", response_model=Leaderboard)
-async def leaderboard(slug: str, request: Request, response: Response) -> Leaderboard:
-    result = await _service(request).leaderboard(slug)
-    _cache(response, "leaderboard")
     return result
 
 

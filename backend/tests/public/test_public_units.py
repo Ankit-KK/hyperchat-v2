@@ -110,19 +110,12 @@ def test_soundboard_merge_rules():
 EXPECTED_FIELDS = {
     models.PublicStreamer: {"slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled",
                             "hyperemotes_enabled", "media_upload_enabled", "media_max_file_size_mb",
-                            "soundboard_enabled", "leaderboard_widget_enabled"},
+                            "soundboard_enabled"},
     models.Pricing: {"currency", "min_text", "min_tts", "min_voice", "min_hypersound", "min_media", "tts_enabled",
                      "message_char_tiers", "voice_duration_tiers"},
-    models.OverlayConfig: {"slug", "name", "brand_color", "brand_logo_url", "alert_box_scale", "alert_overlay_id",
-                           "leaderboard_overlay_id", "goal_overlay_id", "overlay_adjust_mode",
-                           "leaderboard_widget_enabled", "leaderboard_bg_enabled", "hyperemotes_enabled",
-                           "media_upload_enabled", "tts_enabled", "goal_name", "goal_target_amount",
-                           "goal_activated_at", "goal_is_active"},
     models.Sound: {"id", "display_name", "audio_url", "thumb_url"},
     models.Soundboard: {"sounds"},
-    models.TopDonor: {"name", "total_amount_inr"},
-    models.Leaderboard: {"top_donor"},
-    models.Goal: {"active", "name", "target_amount_inr", "progress_inr"},
+    models.Goal: {"active", "name", "target_amount_inr", "progress_inr", "brand_color", "goal_overlay_id"},
     models.PlatformMetrics: {"total_interactions", "total_alerts", "active_streams"},
     models.ShowcaseMetrics: {"streamers_live", "alerts_last_24h", "last_sync"},
     models.AmountTier: {"min_amount", "max_chars"},
@@ -139,6 +132,28 @@ def test_response_models_have_exact_fields_and_no_private_names(model, fields):
     assert all(c in "abcdefghijklmnopqrstuvwxyz_0123456789" for f in fields for c in f)  # snake_case
     assert model.model_config.get("extra") == "forbid"  # unknown fields can never be added to a response
 
+
+
+def test_no_public_model_carries_obs_or_dashboard_settings():
+    """OBS-token data (/api/v1/obs/overlay-config, /api/v1/obs/leaderboard) and dashboard data stay out of every
+    anonymous response model."""
+    public = [m for m in vars(models).values() if isinstance(m, type) and issubclass(m, models._Model)
+              and m is not models._Model]
+    names = {f for m in public for f in m.model_fields}
+    assert not names & {"alert_box_scale", "alert_overlay_id", "leaderboard_overlay_id", "overlay_adjust_mode",
+                        "leaderboard_bg_enabled", "leaderboard_widget_enabled", "goal_activated_at", "goal_is_active",
+                        "top_donor", "total_amount_inr", "latest"}
+    assert not hasattr(models, "OverlayConfig") and not hasattr(models, "Leaderboard")
+
+
+def test_goal_view_hides_everything_while_inactive():
+    s = {"goal_name": "Old goal", "goal_target_amount": Decimal("500"), "brand_color": "#fff", "goal_overlay_id": 2,
+         "goal_is_active": False, "goal_activated_at": None}
+    assert not models.goal_active(s)
+    assert models.goal_view(s, None) == {"active": False, "name": None, "target_amount_inr": None,
+                                         "progress_inr": None, "brand_color": None, "goal_overlay_id": None}
+    assert models.goal_view(s, 12.5) == {"active": True, "name": "Old goal", "target_amount_inr": 500.0,
+                                         "progress_inr": 12.5, "brand_color": "#fff", "goal_overlay_id": 2}
 
 # ── metrics cache ───────────────────────────────────────────────────────────────
 

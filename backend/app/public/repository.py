@@ -3,7 +3,6 @@
   creator by slug      streamers_streamer_slug_key (unique)                     1 row
   voice tiers          streamer_voice_tiers_streamer_idx / platform (3 rows)    few rows
   soundboard           streamer_soundboard_slug_visible_order_idx (<=45) + platform (<=44)
-  top donor            streamer_donator_totals_top_idx (streamer_id, total DESC) INCLUDE name  1 row
   goal progress        donations_streamer_created_idx (streamer_id, created_at)  creator's rows since activation
   metrics              one aggregate pass over donations, cached in-process (E7/E8)
 """
@@ -19,9 +18,7 @@ _PUBLIC_STREAMER_COLS = f"""id::text AS id, streamer_slug, streamer_name, brand_
     COALESCE(tts_enabled, true) AS tts_enabled, COALESCE(hyperemotes_enabled, true) AS hyperemotes_enabled,
     COALESCE(media_upload_enabled, false) AS media_upload_enabled, media_max_file_size_mb,
     {terms.usable_sql("streamers")} AS soundboard_enabled,
-    COALESCE(leaderboard_widget_enabled, true) AS leaderboard_widget_enabled, leaderboard_bg_enabled,
-    alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id, overlay_adjust_mode,
-    goal_name, goal_target_amount, goal_activated_at, COALESCE(goal_is_active, false) AS goal_is_active,
+    goal_overlay_id, goal_name, goal_target_amount, goal_activated_at, COALESCE(goal_is_active, false) AS goal_is_active,
     min_text_amount_inr, min_tts_amount_inr, min_voice_amount_inr, min_hypersound_amount_inr, media_min_amount,
     message_char_tiers"""
 
@@ -59,12 +56,6 @@ class PublicRepository:
                               "order_index, display_name, audio_url, image_url "
                               "FROM public.streamer_soundboard_slots WHERE streamer_slug = %s", (slug,))
         return platform, own
-
-    async def top_donor(self, streamer_id: str) -> dict | None:
-        rows = await self._all("SELECT donator_name, total_amount FROM public.streamer_donator_totals "
-                               "WHERE streamer_id = %s AND total_amount > 0 "
-                               "ORDER BY total_amount DESC, donator_name_lower LIMIT 1", (streamer_id,))
-        return rows[0] if rows else None
 
     async def goal_progress_inr(self, streamer_id: str, since: datetime) -> float:
         rows = await self._all("SELECT COALESCE(SUM(amount_inr), 0) AS total FROM public.donations "
