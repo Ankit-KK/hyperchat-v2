@@ -24,7 +24,11 @@ tables, and every write goes through a SECURITY DEFINER function owned by hyperc
 * public.kyc_purge_webhook_receipts(dry_run) is the daily 90-day cleanup (the runtime role cannot DELETE receipts).
 * public.kyc_record_provider_status(...) is internal (no runtime grant): validates the status, keeps provider order
   (an older event never overwrites a newer one; a later revocation or expiry always wins) and writes the audit row.
-* public.user_kyc_approved(user_id, environment): the one rule "this user has an approved Didit verification".
+* public.user_kyc_approved(user_id, environment): the one rule "this user has an approved Didit verification" (fail
+  closed): the user's NEWEST session (creation order) for this database's configured environment and workflow is
+  Approved, and no session of theirs in that environment shows a Declined / Kyc Expired at or after that approval's
+  provider time. So an older approval never outlives a newer attempt, revocation or expiry, and approvals from a
+  previous workflow do not count after the configured workflow changes (re-verification required).
 
 Tables: kyc_sessions (one row per Didit session; vendor_data must equal the user id; users with KYC history cannot be
 deleted), kyc_webhook_events (one row per signature-verified delivery: ids, status, provider time, check statuses and
@@ -393,9 +397,20 @@ def upgrade() -> None:
     """))
     op.execute("""
         CREATE FUNCTION public.user_kyc_approved(p_user_id uuid, p_environment text) RETURNS boolean
-        LANGUAGE sql STABLE AS $$
-            SELECT EXISTS (SELECT 1 FROM public.kyc_sessions
-                           WHERE user_id = p_user_id AND environment = p_environment AND provider_status = 'Approved')
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+            WITH latest AS (
+                SELECT s.id, s.environment, s.provider_status, s.provider_updated_at
+                FROM public.kyc_sessions s
+                JOIN public.kyc_provider_config c ON c.environment = s.environment AND c.workflow_id = s.workflow_id
+                WHERE s.user_id = p_user_id AND s.environment = p_environment
+                ORDER BY s.created_at DESC, s.id DESC LIMIT 1)
+            SELECT EXISTS (
+                SELECT 1 FROM latest l
+                WHERE l.provider_status = 'Approved' AND l.provider_updated_at IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM public.kyc_sessions o
+                                  WHERE o.user_id = p_user_id AND o.environment = l.environment AND o.id <> l.id
+                                    AND o.provider_status IN ('Declined', 'Kyc Expired')
+                                    AND o.provider_updated_at >= l.provider_updated_at))
         $$
     """)
 

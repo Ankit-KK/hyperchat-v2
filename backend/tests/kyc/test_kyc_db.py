@@ -68,13 +68,13 @@ class FakeDidit:
         return self.decisions[session_id]
 
 
-def configure(environment="sandbox") -> None:
+def configure(environment="sandbox", workflow=WF) -> None:
     """What the operator does with etl/kyc_provider_config.py: the database's Didit application and webhook secret."""
     with fixture_db() as conn:
         conn.execute("INSERT INTO public.kyc_provider_config (environment, workflow_id, application_id, webhook_secret) "
                      "VALUES (%s, %s, %s, %s) ON CONFLICT (singleton) DO UPDATE SET environment = EXCLUDED.environment, "
                      "workflow_id = EXCLUDED.workflow_id, application_id = EXCLUDED.application_id, "
-                     "webhook_secret = EXCLUDED.webhook_secret", (environment, WF, APP_ID, SECRET))
+                     "webhook_secret = EXCLUDED.webhook_secret", (environment, workflow, APP_ID, SECRET))
 
 
 def unconfigure() -> None:
@@ -426,6 +426,72 @@ def test_concurrent_deliveries_keep_the_newest_provider_state(kyc):
     for th in threads:
         th.join(20)
     assert session_row(sid)[0] == "Approved" and approved(uid)
+
+
+# ── the effective approval across sessions (one rule, SQL = API) ─────────────
+
+def new_session(uid: str, workflow: str = WF) -> str:
+    """Another Didit session of the user (as kyc_create_session stores it)."""
+    sid = str(uuid.uuid4())
+    with db() as conn:
+        assert conn.execute("SELECT public.kyc_create_session(%s, %s, %s, 1, 'sandbox')",
+                            (uid, sid, workflow)).fetchone()[0] == "ok"
+    return sid
+
+
+def me_approved(app, uid: str) -> bool:
+    """The API's answer, which must always equal public.user_kyc_approved."""
+    me = app.get(ME).json()
+    assert me["approved"] is approved(uid)
+    return me["approved"]
+
+
+def test_the_newest_session_decides_and_a_later_adverse_result_wins(kyc):
+    headers, uid = owner(kyc, "kyc-multi")
+    t = int(time.time())
+
+    def approve(sid, at):
+        return hook(kyc, session_id=sid, vendor=uid, status="Approved", created_at=at,
+                    decision=approved_decision(sid)).json()["status"]
+
+    a = start(kyc, headers)["session_id"]
+    assert approve(a, t) == "applied" and me_approved(kyc, uid)  # an ordinary single-session approval
+    b = new_session(uid)  # a newer attempt: the older approval does not outlive it
+    assert not me_approved(kyc, uid) and kyc.get(ME).json()["state"] == "in_progress"
+    assert hook(kyc, session_id=b, vendor=uid, status="Declined", created_at=t + 10).json()["status"] == "applied"
+    me = kyc.get(ME).json()
+    assert (me["approved"], me["state"], me["can_start"]) == (False, "declined", True) and not approved(uid)
+    c = new_session(uid)  # a later legitimate re-approval counts (the older decline does not block it)
+    assert approve(c, t + 20) == "applied" and me_approved(kyc, uid)
+    assert hook(kyc, session_id=a, vendor=uid, status="Kyc Expired", created_at=t + 30).json()["status"] == "applied"
+    me = kyc.get(ME).json()  # an older session's later expiry / revocation also wins (fail closed)
+    assert (me["approved"], me["state"], me["can_start"]) == (False, "reverification_required", True)
+    assert not approved(uid)
+    d = new_session(uid)
+    assert approve(d, t + 40) == "applied" and me_approved(kyc, uid)
+    with db() as conn:
+        assert conn.execute("SELECT public.user_kyc_approved(%s, 'live')", (uid,)).fetchone()[0] is False
+    assert hook(kyc, session_id=d, vendor=uid, status="Declined", created_at=t + 50).json()["status"] == "applied"
+    assert not me_approved(kyc, uid) and kyc.get(ME).json()["state"] == "declined"  # same-session revocation
+
+
+def test_a_workflow_change_requires_reverification(kyc):
+    headers, uid = owner(kyc, "kyc-wf")
+    t = int(time.time())
+    a = start(kyc, headers)["session_id"]
+    assert hook(kyc, session_id=a, vendor=uid, status="Approved", created_at=t,
+                decision=approved_decision(a)).json()["status"] == "applied" and me_approved(kyc, uid)
+    other = str(uuid.uuid4())
+    configure(workflow=other)  # the operator switches this database to another Didit workflow
+    me = kyc.get(ME).json()
+    assert (me["approved"], me["state"], me["can_start"]) == (False, "reverification_required", True)
+    assert not approved(uid)
+    assert hook(kyc, session_id=a, vendor=uid, status="Approved", created_at=t + 5,  # the old workflow's events
+                decision=approved_decision(a)).json()["status"] == "identity_mismatch"
+    b = new_session(uid, other)
+    assert hook(kyc, session_id=b, vendor=uid, status="Approved", created_at=t + 10, decision=approved_decision(b),
+                workflow_id=other).json()["status"] == "applied"
+    assert me_approved(kyc, uid)
 
 
 # ── ownership ───────────────────────────────────────────────────────────────────

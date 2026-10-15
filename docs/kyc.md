@@ -62,7 +62,7 @@ HYPERCHAT_MIGRATION_DSN=... python -m etl.kyc_provider_config --environment sand
 ## API
 | Endpoint | Who | What |
 |---|---|---|
-| `GET /api/v1/me/kyc` | signed-in user | `{approved, state, provider_status, updated_at, owns_creator, available, can_start}`. `state` is one of `none`, `in_progress`, `in_review`, `approved`, `declined`, `expired`, `not_completed` |
+| `GET /api/v1/me/kyc` | signed-in user | `{approved, state, provider_status, updated_at, owns_creator, available, can_start}`. `state` is one of `none`, `in_progress`, `in_review`, `approved`, `declined`, `expired`, `not_completed`, `reverification_required` (the newest session is `Approved` but the approval rule doesn't accept it). `approved` is always `public.user_kyc_approved`. |
 | `POST /api/v1/me/kyc/session` | the **owner** of at least one creator, including legacy ones (Origin + CSRF; 5 per hour) | Starts or resumes the session and returns `{session_id, status, url}`. `url` must be an https `*.didit.me` link. A linked moderator or a user without a creator gets 403; an already-verified user or one in review gets 409; a provider problem gets 503. |
 | `POST /api/v1/webhooks/didit` | Didit | See "Webhooks" below |
 | `GET /api/v1/admin/users/{id}/kyc` | admin | Sessions (status, workflow, environment, dates, check statuses) and the audit; no identity data |
@@ -114,9 +114,15 @@ These checks run in order; any failure stops processing.
 
 ## Status transitions
 - **Statuses:** Didit's exact values are stored as they are: `Not Started`, `In Progress`, `Awaiting User`, `In Review`, `Approved`, `Declined`, `Resubmitted`, `Abandoned`, `Expired`, `Kyc Expired`.
-- **The approval rule:** a user is approved (`public.user_kyc_approved(user, environment)`, or `KycService.kyc_approved`) only while one of their sessions in this environment is `Approved`.
-  - A later `Declined` (revocation) or `Kyc Expired` removes the approval.
-  - A sandbox approval never counts in production.
+- **The approval rule** (`public.user_kyc_approved(user, environment)`; the API's `approved` and `KycService.kyc_approved` both use it) is fail-closed. A user is approved only while both hold:
+  1. **Newest session approved:** their **newest** session (by creation order) for this database's configured environment **and workflow** is `Approved`.
+  2. **No later adverse result:** no session of theirs in this environment has a `Declined` or `Kyc Expired` with a provider time at or after that approval.
+- **Consequences:**
+  - **Newer attempts win:** an older approval never outlives a newer attempt, a newer decline, or a later revocation or expiry of any session.
+  - **Same-session revocation:** a later `Declined` or `Kyc Expired` on the approved session itself removes the approval.
+  - **Re-verifying clears it:** a later signed approval of a new session restores approval. An older decline doesn't block it.
+  - **Workflow changes:** approvals from a previous workflow stop counting (`reverification_required`); the owner verifies again under the new workflow.
+  - **Environments stay separate:** a sandbox approval never counts in production.
 - **After a finished session:** once a session ends in `Declined`, `Expired`, `Abandoned` or `Kyc Expired`, the owner can start again, and Didit issues a new session. `Resubmitted` continues the same session.
 
 ## Privacy and storage

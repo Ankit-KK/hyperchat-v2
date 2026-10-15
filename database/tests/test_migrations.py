@@ -409,8 +409,10 @@ def test_0022_kyc_core_changes_nothing_existing_and_guards_its_history(monkeypat
                                 "FROM public.users u").fetchone() == users_before
             assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox')", (uid,)).fetchone()[0] is False
             sid = conn.execute("INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, "
-                               "environment) VALUES (%s, %s, gen_random_uuid(), gen_random_uuid(), 'sandbox') "
-                               "RETURNING session_id", (uid, str(uid))).fetchone()[0]
+                               "environment) VALUES (%s, %s, gen_random_uuid(), %s, 'sandbox') "
+                               "RETURNING session_id", (uid, str(uid), WF22)).fetchone()[0]
+            conn.execute("INSERT INTO public.kyc_provider_config (environment, workflow_id, webhook_secret) "
+                         "VALUES ('sandbox', %s, 'whsec_migtest_0123456789')", (WF22,))
             assert conn.execute("SELECT public.kyc_record_provider_status(%s, 'Approved', now(), '{}'::jsonb, "
                                 "'webhook', NULL)", (sid,)).fetchone()[0] == "applied"
             assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox'), public.user_kyc_approved(%s, 'live')",

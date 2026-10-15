@@ -47,12 +47,20 @@ def _iso(value):
     return value.isoformat() if value is not None else None
 
 
-def summary(sessions: list[dict], environment: str | None) -> dict:
-    """The user's KYC state from their sessions in this environment (newest first). Approved only from Approved."""
+def summary(sessions: list[dict], environment: str | None, approved: bool) -> dict:
+    """The user's KYC state from their sessions in this environment (newest first). `approved` is always
+    public.user_kyc_approved (the one rule); an Approved newest session that the rule does not accept (a later
+    revocation or expiry elsewhere, or a previous workflow) needs re-verification."""
     mine = [s for s in sessions if s["environment"] == environment]
-    approved = any(s["provider_status"] == "Approved" for s in mine)
     latest = mine[0] if mine else None
-    state = "approved" if approved else (STATE[latest["provider_status"]] if latest else "none")
+    if approved:
+        state = "approved"
+    elif latest is None:
+        state = "none"
+    elif latest["provider_status"] == "Approved":
+        state = "reverification_required"
+    else:
+        state = STATE[latest["provider_status"]]
     return {"approved": approved, "state": state,
             "provider_status": latest["provider_status"] if latest else None,
             "updated_at": _iso(latest["updated_at"]) if latest else None}
@@ -144,9 +152,12 @@ class KycService:
         this environment's Didit application? False when KYC is not configured."""
         return bool(self.environment) and await self.repo.approved(user_id, self.environment)
 
+    async def _summary(self, user_id: str) -> dict:
+        return summary(await self.repo.sessions(user_id), self.environment, await self.kyc_approved(user_id))
+
     async def status(self, user: User) -> dict:
         owns = await self.repo.owns_creator(user.id)
-        state = summary(await self.repo.sessions(user.id), self.environment)
+        state = await self._summary(user.id)
         return {**state, "owns_creator": owns, "available": self.client is not None,
                 "can_start": owns and self.client is not None and state["state"] not in ("approved", "in_review")}
 
@@ -157,7 +168,7 @@ class KycService:
         if not await self.repo.owns_creator(user.id):
             raise ApiError(403, "Only a creator's owner can verify their identity here", "not_creator_owner")
         await self._limit(f"user:{user.id}", RATE_START)
-        state = summary(await self.repo.sessions(user.id), self.environment)
+        state = await self._summary(user.id)
         if state["state"] == "approved":
             raise ApiError(409, "Your identity is already verified", "kyc_already_approved")
         if state["state"] == "in_review":
@@ -195,7 +206,7 @@ class KycService:
     # ── admin ─────────────────────────────────────────────────────────────
     async def admin_view(self, user_id: str) -> dict:
         sessions = await self.repo.sessions(user_id)
-        return {**summary(sessions, self.environment),
+        return {**summary(sessions, self.environment, await self.kyc_approved(user_id)),
                 "sessions": [{**s, **{k: _iso(s[k]) for k in ("provider_updated_at", "approved_at", "created_at",
                                                               "updated_at")}} for s in sessions],
                 "events": [{**e, "created_at": _iso(e["created_at"])} for e in await self.repo.events(user_id)]}
