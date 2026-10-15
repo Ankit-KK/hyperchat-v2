@@ -103,6 +103,35 @@ class AdminService:
                        streamer_id=streamer_id)
         return {"creator": {**row, "created_at": iso(row["created_at"])}}
 
+    async def transfer_creator_owner(self, admin: User, streamer_id: str, user_id: str, expected_owner_id: str,
+                                     ip: str | None) -> dict:
+        """D13: move a claimed creator to another active user (admin correction / recovery, never self-service). The
+        caller names the owner they expect, so a stale or mistaken request changes nothing. OBS tokens are kept (the
+        same person's live overlays keep working); the count is returned so a wrong-owner case can rotate them."""
+        streamer_id = _uuid_or_404(streamer_id, "Creator")
+        try:
+            user_id, expected_owner_id = str(uuid.UUID(user_id)), str(uuid.UUID(expected_owner_id))
+        except (ValueError, AttributeError, TypeError):
+            raise AuthError(400, "user_id and expected_owner_id must be user ids", "bad_user") from None
+        result, row, counts = await self.repo.transfer_owner(streamer_id, user_id, expected_owner_id)
+        if result == "not_found":
+            raise AuthError(404, "Creator not found", "creator_not_found")
+        if result == "unclaimed":
+            raise AuthError(409, "This creator has no owner; use POST /api/v1/admin/creators/{id}/owner",
+                            "creator_unclaimed")
+        if result == "owner_changed":
+            raise AuthError(409, "The creator's current owner is not expected_owner_id", "owner_changed")
+        if result == "bad_user":
+            raise AuthError(400, "Unknown or inactive user", "bad_user")
+        changed = result == "ok"
+        if changed:  # ids and counts only
+            security_event("creator_owner_transferred", level=20, user_id=admin.id, streamer_id=streamer_id,
+                           previous_user_id=counts["previous_owner_id"], target_user_id=user_id,
+                           count=counts["sessions_revoked"], client_ip=ip)
+        return {"creator": {**row, "created_at": iso(row["created_at"])}, "changed": changed,
+                "previous_owner_id": None, "sessions_revoked": 0, "old_owner_unlinked": False, "active_obs_tokens": None,
+                **counts}
+
     async def set_soundboard_eligibility(self, admin: User, streamer_id: str, enabled: bool) -> dict:
         """Grant / revoke Custom Soundboard eligibility (D3). Idempotent. Never accepts terms for the owner and never
         deletes acceptance history: usable access also needs the owner's acceptance of the current version."""

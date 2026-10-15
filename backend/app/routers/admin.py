@@ -38,6 +38,12 @@ class SoundboardEligibility(BaseModel):
     enabled: StrictBool
 
 
+class OwnerTransfer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: StrictStr = Field(max_length=64)
+    expected_owner_id: StrictStr = Field(max_length=64)
+
+
 class EmailChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
     email: StrictStr = Field(max_length=320)  # at most 254 once trimmed (the service checks)
@@ -95,6 +101,14 @@ async def create_creator(body: CreatorCreate, request: Request, current: Current
 async def assign_creator_owner(streamer_id: str, body: OwnerAssign, request: Request,
                                current: CurrentUser = Depends(require_admin)) -> dict:
     return await admin_service(request).assign_creator_owner(current.user, streamer_id, body.user_id)
+
+
+@router.post("/creators/{streamer_id}/owner/transfer")
+async def transfer_creator_owner(streamer_id: str, body: OwnerTransfer, request: Request,
+                                 current: CurrentUser = Depends(require_admin)) -> dict:
+    """D13: move a claimed creator to another active user; the previous owner is unlinked and signed out."""
+    return await admin_service(request).transfer_creator_owner(current.user, streamer_id, body.user_id,
+                                                               body.expected_owner_id, client_ip(request))
 
 
 @router.put("/creators/{streamer_id}/soundboard")

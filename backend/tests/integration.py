@@ -81,12 +81,16 @@ def update_streamer(streamer_id: str, **cols) -> None:
 def accept_soundboard_terms(streamer_id: str, user_id: str | None = None, version: str | None = None,
                             revoked: bool = False) -> None:
     """Record a Custom Soundboard terms acceptance (D3) as the owner's dashboard acceptance would; defaults: the
-    creator's owner (or a new synthetic user for an unclaimed creator) and the current version."""
+    creator's owner and the current version. Only the CURRENT owner's acceptance counts (D13, migration 0019), so an
+    unclaimed creator first gets a new synthetic owner; pass `user_id` to record someone else's acceptance."""
     from app.soundboard import terms
     with db() as conn:
         if user_id is None:
             owner = conn.execute("SELECT user_id::text FROM public.streamers WHERE id = %s", (streamer_id,)).fetchone()[0]
-            user_id = owner or make_user(f"sbterms-{secrets.token_hex(4)}{DOMAIN}")
+            if owner is None:
+                owner = make_user(f"sbterms-{secrets.token_hex(4)}{DOMAIN}")
+                conn.execute("UPDATE public.streamers SET user_id = %s WHERE id = %s", (owner, streamer_id))
+            user_id = owner
         conn.execute("INSERT INTO public.soundboard_tnc_acceptances (streamer_slug, streamer_id, user_id, "
                      "terms_version, revoked_at) SELECT streamer_slug, id, %s, %s, CASE WHEN %s THEN now() END "
                      "FROM public.streamers WHERE id = %s", (user_id, version or terms.VERSION, revoked, streamer_id))

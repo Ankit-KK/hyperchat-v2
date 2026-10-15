@@ -18,6 +18,9 @@ Approving a synthetic donation makes the worker publish realtime events to the D
 DEV); nothing else leaves the server. Every synthetic row is recognizable (users @authtest.invalid, creators
 "authtest-*", orders "authtest-*") and removed at the end, and the cleanup is verified. The login rate-limit counters
 the suite consumes (auth:* rows) are cleared, as smoke_auth.py does. Nothing secret is printed.
+Feature sections (payments-account D6, payment-health D7, admin-email D11, owner-transfer D13, ...) report BLOCKED
+while the deployed release predates them. The owner-transfer section moves a synthetic creator between two synthetic
+users only; no real creator or account is touched.
 Exit code: 0 = every runnable check passed (BLOCKED checks do not fail the run), 1 = a check failed, 2 = refused.
 """
 
@@ -45,7 +48,7 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-KNOWN_HEADS = ("0017", "0018")  # 0018 (D6) once deployed; the D6 section reports BLOCKED before that
+KNOWN_HEADS = ("0017", "0018", "0019")  # 0018 = D6, 0019 = D13 (owner-specific soundboard terms)
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
@@ -748,7 +751,7 @@ try:
 
     # ── payments account model (D6): one 'primary' account; no Razorpay call, no order ──
     S = "payments-account"
-    if head != "0018":  # the deployed release predates D6
+    if head not in ("0018", "0019"):  # the deployed release predates D6
         blocked(S, "Razorpay secondary retired (D6)", "not deployed on DEV yet; needs an approved DEV deploy")
     else:
         with db() as c:
@@ -855,6 +858,96 @@ try:
         check(S, "D11 same address ignoring case -> 200 changed:false, nothing revoked",
               r.status_code == 200 and r.json().get("changed") is False and r.json().get("sessions_revoked") == 0
               and d11_new.get("/api/v1/auth/session").status_code == 200, r.text[:200])
+        reset_login_counters()
+
+    # ── creator ownership transfer (D13): synthetic users and creator only, no external call ──
+    S = "owner-transfer"
+    anon = httpx.post(f"{API}/api/v1/admin/creators/{ids['a']}/owner/transfer", headers=ORIGIN, timeout=15,
+                      json={"user_id": ids["plain"], "expected_owner_id": ids["owner_a"]})
+    if anon.status_code in (404, 405):  # the deployed release predates D13
+        blocked(S, "Admin creator ownership transfer (D13)", "not deployed on DEV yet; needs an approved DEV deploy")
+    else:
+        check(S, "D13 needs a session -> 401", anon.status_code == 401, str(anon.status_code))
+        check(S, "D13 database at migration 0019 (owner-specific soundboard terms)", head == "0019", head)
+        d13_pw = {k: password() for k in ("d13old", "d13new")}
+        ids["d13old"] = make_user("d13old", d13_pw["d13old"])
+        ids["d13new"] = make_user("d13new", d13_pw["d13new"], role="user")
+        ids["d13off"] = make_user("d13off", None, active=False)
+        ids["d13"] = make_creator("d13", ids["d13old"])
+        slug_d13 = TAG + "d13"
+        with db() as c:  # migrated shape: owner linked both ways; eligible and accepted; history and an OBS token
+            c.execute("UPDATE public.users SET streamer_id = %s WHERE id = %s", (ids["d13"], ids["d13old"]))
+            c.execute("UPDATE public.streamers SET soundboard_enabled = true, razorpay_account = 'primary' "
+                      "WHERE id = %s", (ids["d13"],))
+            c.execute("INSERT INTO public.soundboard_tnc_acceptances (streamer_slug, streamer_id, user_id, "
+                      "terms_version) VALUES (%s, %s, %s, 'soundboard-2026-10-13')",
+                      (slug_d13, ids["d13"], ids["d13old"]))
+            c.execute("INSERT INTO public.obs_tokens (streamer_id, token_hash) VALUES (%s, %s)",
+                      (ids["d13"], sha256_hex(secrets.token_urlsafe(32))))
+        make_donation(ids["d13"], "D13 donor", 150)
+
+        def d13_snapshot() -> str:
+            with db() as c:
+                return str(c.execute("""
+                    SELECT (SELECT to_jsonb(s) - 'user_id' - 'updated_at' FROM public.streamers s WHERE s.id = %(s)s),
+                           (SELECT jsonb_agg(to_jsonb(d) ORDER BY d.id) FROM public.donations d
+                            WHERE d.streamer_id = %(s)s),
+                           (SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM public.obs_tokens o
+                            WHERE o.streamer_id = %(s)s),
+                           (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM public.soundboard_tnc_acceptances t
+                            WHERE t.streamer_id = %(s)s)""", {"s": ids["d13"]}).fetchone())
+
+        def d13_account(key: str) -> tuple:
+            with db() as c:
+                return c.execute("SELECT email::text, role, is_active, streamer_id::text FROM public.users "
+                                 "WHERE id = %s", (ids[key],)).fetchone()
+
+        d13_old, d13_new = Session("d13old", d13_pw["d13old"]), Session("d13new", d13_pw["d13new"])
+        sessions += [d13_old, d13_new]
+        access = f"/api/v1/streamers/{slug_d13}/access"
+        public_sb = f"{API}/api/v1/public/streamers/{slug_d13}"
+        check(S, "D13 before: old owner has access, new owner does not",
+              d13_old.get(access).status_code == 200 and d13_new.get(access).status_code == 403)
+        check(S, "D13 before: soundboard usable (eligible + the owner's acceptance)",
+              httpx.get(public_sb, timeout=15).json().get("soundboard_enabled") is True)
+        url = f"/api/v1/admin/creators/{ids['d13']}/owner/transfer"
+        r = owner_a.write("POST", url, json={"user_id": ids["d13new"], "expected_owner_id": ids["d13old"]})
+        check(S, "D13 non-admin -> 403", r.status_code == 403, r.text[:200])
+        r = admin.write("POST", url, json={"user_id": ids["d13new"], "expected_owner_id": ids["d13new"]})
+        check(S, "D13 stale expected_owner_id -> 409", r.status_code == 409, r.text[:200])
+        r = admin.write("POST", url, json={"user_id": ids["d13off"], "expected_owner_id": ids["d13old"]})
+        check(S, "D13 inactive target -> 400", r.status_code == 400, r.text[:200])
+        check(S, "D13 refusals changed nothing (old owner still has access)", d13_old.get(access).status_code == 200)
+        before, new_before = d13_snapshot(), d13_account("d13new")
+        r = admin.write("POST", url, json={"user_id": ids["d13new"], "expected_owner_id": ids["d13old"]})
+        body = r.json() if r.status_code == 200 else {}
+        check(S, "D13 transfer -> 200 (previous owner, 1 session revoked, unlinked, 1 active OBS token)",
+              body.get("changed") is True and body.get("previous_owner_id") == ids["d13old"]
+              and body.get("sessions_revoked") == 1 and body.get("old_owner_unlinked") is True
+              and body.get("active_obs_tokens") == 1 and "@" not in r.text, r.text[:300])
+        check(S, "D13 the old owner's session is revoked", d13_old.get("/api/v1/auth/session").status_code == 401)
+        check(S, "D13 the old owner's link to this creator is cleared", d13_account("d13old")[3] is None)
+        reset_login_counters()
+        d13_old2 = Session("d13old", d13_pw["d13old"])
+        sessions.append(d13_old2)
+        check(S, "D13 the old owner signs in but has no access to the creator",
+              d13_old2.status == 200 and d13_old2.get(access).status_code == 403)
+        check(S, "D13 the new owner has access on the existing session", d13_new.get(access).status_code == 200)
+        check(S, "D13 the new owner's account is untouched", d13_account("d13new") == new_before)
+        check(S, "D13 creator, donations, OBS tokens and acceptances unchanged", d13_snapshot() == before)
+        st = d13_new.get(f"/api/v1/dashboard/streamers/{slug_d13}/soundboard/terms").json()
+        check(S, "D13 soundboard unusable until the new owner accepts",
+              st.get("eligible") is True and st.get("usable") is False and st.get("can_accept") is True
+              and httpx.get(public_sb, timeout=15).json().get("soundboard_enabled") is False, str(st))
+        r = d13_new.write("POST", f"/api/v1/dashboard/streamers/{slug_d13}/soundboard/terms/accept",
+                          json={"version": "soundboard-2026-10-13"})
+        check(S, "D13 the new owner accepts and the soundboard is usable again",
+              r.status_code == 200 and r.json().get("usable") is True
+              and httpx.get(public_sb, timeout=15).json().get("soundboard_enabled") is True, r.text[:200])
+        r = admin.write("POST", url, json={"user_id": ids["d13new"], "expected_owner_id": ids["d13new"]})
+        check(S, "D13 transfer to the current owner -> 200 changed:false",
+              r.status_code == 200 and r.json().get("changed") is False and r.json().get("sessions_revoked") == 0,
+              r.text[:200])
         reset_login_counters()
 
     # ── bots: disabled ──────────────────────────────────────────────────────
