@@ -1180,6 +1180,9 @@ finally:
     wait_for(_open_jobs, 60)
     with db() as c:
         c.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+        with fixture_db() as owner:  # review history is append-only for the runtime roles (migration 0021)
+            owner.execute("DELETE FROM public.application_events WHERE signup_id IN "
+                          "(SELECT id FROM public.user_signups WHERE email LIKE %s)", ("%" + DOMAIN,))
         c.execute("DELETE FROM public.user_signups WHERE email LIKE %s", ("%" + DOMAIN,))
         c.execute("DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
                   "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')")

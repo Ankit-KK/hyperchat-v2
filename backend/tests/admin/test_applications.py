@@ -337,3 +337,58 @@ def test_database_constraints_keep_states_consistent(env):
                     "UPDATE public.user_signups SET review_status = 'other' WHERE id = %s"):
             with pytest.raises(psycopg.errors.CheckViolation):
                 conn.execute(sql, (sid,))
+
+
+def test_an_application_invite_can_never_lose_its_binding(app):
+    """An application invite cannot become an ordinary invite: its application cannot be deleted while it exists and
+    its signup_id cannot be changed, so acceptance keeps the application's ownership and email rules."""
+    headers = _admin(app)
+    sid = _apply(app, "apps-bind")
+    cid = _approve(app, headers, sid, "authtest-apps-bind").json()["creator"]["id"]
+    assert app.post(f"{AP}/{sid}/invite", headers=headers).status_code == 200
+    token = app.app_state.auth.sender.last_token()
+    with db() as conn:  # the API's own role
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute("DELETE FROM public.user_signups WHERE id = %s", (sid,))
+        with pytest.raises(psycopg.errors.IntegrityConstraintViolation):
+            conn.execute("UPDATE public.user_invites SET signup_id = NULL WHERE signup_id = %s", (sid,))
+        other = conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES ('O', %s, "
+                             "'+91 90000 00005') RETURNING id", ("apps-bind-other" + DOMAIN,)).fetchone()[0]
+        with pytest.raises(psycopg.errors.IntegrityConstraintViolation):
+            conn.execute("UPDATE public.user_invites SET signup_id = %s WHERE signup_id = %s", (other, sid))
+        assert conn.execute("SELECT count(*) FROM public.user_invites WHERE signup_id = %s AND accepted_at IS NULL "
+                            "AND revoked_at IS NULL", (sid,)).fetchone()[0] == 1
+        conn.execute("UPDATE public.streamers SET user_id = %s WHERE id = %s",
+                     (make_user("apps-bind-owner" + DOMAIN), cid))
+    r = _accept(app, token)  # still an application invite: an owner already there is refused, never transferred
+    assert (r.status_code, r.json()["error"]) == (409, "This creator already has an owner. Please contact support.")
+    with db() as conn:  # deleting the invite itself (e.g. the daily cleanup of expired ones) stays possible
+        conn.execute("DELETE FROM public.user_invites WHERE signup_id = %s", (sid,))
+        assert conn.execute("SELECT invite_id FROM public.user_signups WHERE id = %s", (sid,)).fetchone()[0] is None
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):  # the review history still protects it
+            conn.execute("DELETE FROM public.user_signups WHERE id = %s", (sid,))
+
+
+def test_review_history_cannot_be_erased_by_deleting_the_application(app):
+    headers = _admin(app)
+    reviewed = _apply(app, "apps-hist")
+    assert app.post(f"{AP}/{reviewed}/reject", json={"reason": "spam"}, headers=headers).status_code == 200
+    app.post(f"{AP}/{reviewed}/notes", json={"note": "keep"}, headers=headers)
+    unreviewed = _apply(app, "apps-fresh")
+    with db() as conn:  # the API's own role
+        with pytest.raises(psycopg.errors.ForeignKeyViolation):
+            conn.execute("DELETE FROM public.user_signups WHERE id = %s", (reviewed,))
+        assert conn.execute("SELECT count(*) FROM public.application_events WHERE signup_id = %s",
+                            (reviewed,)).fetchone()[0] == 2
+        conn.execute("DELETE FROM public.user_signups WHERE id = %s", (unreviewed,))  # nothing to protect: allowed
+
+
+def test_ordinary_invites_are_unaffected_by_the_binding_rules(app):
+    headers = _admin(app)
+    r = app.post("/api/v1/auth/invites", json={"email": "apps-ordinary" + DOMAIN}, headers=headers)
+    assert r.status_code == 201, r.text
+    with db() as conn:  # an existing-style invite (no application): revoking and deleting work as before
+        conn.execute("UPDATE public.user_invites SET revoked_at = now() WHERE id = %s", (r.json()["invite_id"],))
+        conn.execute("DELETE FROM public.user_invites WHERE id = %s", (r.json()["invite_id"],))
+    r = app.post("/api/v1/auth/invites", json={"email": "apps-ordinary2" + DOMAIN}, headers=headers)
+    assert _accept(app, app.app_state.auth.sender.last_token()).status_code == 200

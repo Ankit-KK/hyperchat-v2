@@ -13,9 +13,15 @@ Revises: 0020
     invite_id       the latest account invitation sent for it.
   Existing rows take 'legacy_unreviewed' from the column default (no rewrite); new rows default to 'submitted'.
 * application_events: append-only review history (approve / reject / reopen / note / invite); the runtime roles may
-  insert and read, never update or delete. Never holds a token.
+  insert and read, never update or delete. Never holds a token. Its application is ON DELETE RESTRICT, so the history
+  cannot be erased indirectly either: an application with any review event cannot be deleted by the runtime roles
+  (who cannot delete events); only the schema owner can remove both (synthetic test cleanup does).
 * user_invites.signup_id: an invitation issued for an approved application. Only such an invite may make its invitee
-  the owner of its (still unclaimed) creator on acceptance (app.auth.repository.accept_invite).
+  the owner of its (still unclaimed) creator on acceptance (app.auth.repository.accept_invite). The binding can never
+  be lost: ON DELETE RESTRICT (an application with invitations cannot be deleted) and a trigger refuses any change of
+  signup_id after insert, so an application invite can never turn into an ordinary invite with weaker rules.
+  Ordinary invites (signup_id NULL, every existing row) are unaffected; deleting an invite (e.g. the daily cleanup
+  of expired ones) stays possible and clears user_signups.invite_id.
 
 The public signup endpoint is unchanged. No creator, user or donation is modified.
 
@@ -52,7 +58,19 @@ def upgrade() -> None:
     op.execute("CREATE INDEX user_signups_review_idx ON public.user_signups (review_status, created_at)")
 
     op.execute("ALTER TABLE public.user_invites ADD COLUMN signup_id uuid "
-               "REFERENCES public.user_signups(id) ON DELETE SET NULL")
+               "REFERENCES public.user_signups(id) ON DELETE RESTRICT")
+    op.execute("""
+        CREATE FUNCTION public.user_invites_signup_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.signup_id IS DISTINCT FROM OLD.signup_id THEN
+                RAISE EXCEPTION 'user_invites.signup_id cannot change: an application invitation stays bound to its '
+                                'application' USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+            RETURN NEW;
+        END $$
+    """)
+    op.execute("CREATE TRIGGER user_invites_signup_immutable BEFORE UPDATE OF signup_id ON public.user_invites "
+               "FOR EACH ROW EXECUTE FUNCTION public.user_invites_signup_immutable()")
     op.execute("CREATE INDEX user_invites_signup_idx ON public.user_invites (signup_id) WHERE signup_id IS NOT NULL")
     op.execute("ALTER TABLE public.user_signups ADD CONSTRAINT user_signups_invite_fk "
                "FOREIGN KEY (invite_id) REFERENCES public.user_invites(id) ON DELETE SET NULL")
@@ -60,7 +78,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE public.application_events (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-            signup_id uuid NOT NULL REFERENCES public.user_signups(id) ON DELETE CASCADE,
+            signup_id uuid NOT NULL REFERENCES public.user_signups(id) ON DELETE RESTRICT,
             action text NOT NULL CHECK (action IN ('approve', 'reject', 'reopen', 'note', 'invite')),
             actor_user_id uuid REFERENCES public.users(id) ON DELETE SET NULL,
             note text CHECK (char_length(note) <= 2000),
@@ -91,6 +109,8 @@ def downgrade() -> None:
     """)
     op.execute("DROP TABLE public.application_events")
     op.execute("ALTER TABLE public.user_signups DROP CONSTRAINT user_signups_invite_fk")
+    op.execute("DROP TRIGGER user_invites_signup_immutable ON public.user_invites")
+    op.execute("DROP FUNCTION public.user_invites_signup_immutable()")
     op.execute("ALTER TABLE public.user_invites DROP COLUMN signup_id")
     op.execute("DROP INDEX public.user_signups_review_idx")
     op.execute("""

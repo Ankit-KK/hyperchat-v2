@@ -359,6 +359,11 @@ def test_0021_creator_applications_keep_existing_signups(monkeypatch):
             new = conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES "
                                "('New', 'migtest21-new@x.invalid', '12345678') RETURNING id, review_status").fetchone()
             assert new[1] == "submitted"
+            delete_rules = dict(conn.execute(
+                "SELECT conrelid::regclass::text, confdeltype FROM pg_constraint WHERE contype = 'f' AND confrelid = "
+                "'public.user_signups'::regclass AND conrelid IN ('public.user_invites'::regclass, "
+                "'public.application_events'::regclass)").fetchall())
+            assert delete_rules == {"user_invites": "r", "application_events": "r"}  # RESTRICT: no silent loss
             with pytest.raises(psycopg.errors.CheckViolation):  # approved needs its creator
                 conn.execute("UPDATE public.user_signups SET review_status = 'approved' WHERE id = %s", (new[0],))
             conn.execute("UPDATE public.user_signups SET review_status = 'rejected', rejection_reason = 'x' "

@@ -151,6 +151,9 @@ def creator_state(streamer_id: str) -> str:
 def cleanup_synthetic_rows() -> None:
     with db() as conn:
         conn.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+        with fixture_db() as owner:  # review history is ON DELETE RESTRICT and append-only for the runtime roles
+            owner.execute("DELETE FROM public.application_events WHERE signup_id IN "
+                          "(SELECT id FROM public.user_signups WHERE email LIKE %s)", ("%" + DOMAIN,))
         conn.execute("DELETE FROM public.user_signups WHERE email LIKE %s", ("%" + DOMAIN,))
         conn.execute("DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
                      "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s) "
