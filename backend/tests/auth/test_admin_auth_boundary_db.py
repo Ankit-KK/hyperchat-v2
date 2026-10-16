@@ -236,26 +236,58 @@ def test_admin_password_change_reset_deactivation_and_logout_still_work(app):
     assert admin_api(c) == 401 and login(new_browser(app), email, "Reset-Pass-66").status_code == 401
 
 
-def test_bootstrap_removes_identities_prepared_on_the_account(env):
+def no_sign_in_admins() -> None:
+    """bootstrap-admin runs only while no admin can sign in: demote this suite's admins, skip on a real one."""
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.users SET role = 'streamer' WHERE role = 'admin' AND email::text LIKE %s",
+                     ("%" + DOMAIN,))
+    with db() as conn:
+        if conn.execute("SELECT count(*) FROM public.users WHERE role = 'admin' AND is_active").fetchone()[0]:
+            pytest.skip("the scratch database has a real admin")
+
+
+def test_bootstrap_never_promotes_an_existing_account(env):
     import asyncio
 
     from app.cli import bootstrap_admin
     from app.core.config import Settings
-    with fixture_db() as conn:
-        conn.execute("UPDATE public.users SET role = 'streamer' WHERE role = 'admin' AND email::text LIKE %s",
-                     ("%" + DOMAIN,))
-    with db() as conn:  # no other admin may be able to sign in for bootstrap to run
-        others = conn.execute("SELECT count(*) FROM public.users WHERE role = 'admin' AND is_active").fetchone()[0]
-    if others:
-        pytest.skip("the scratch database has a real admin")
+    no_sign_in_admins()
     uid = make_user("ab-boot" + DOMAIN, password=None, role="user")
     app_sql("INSERT INTO public.user_identities (user_id, provider, provider_subject) VALUES (%s, 'google', "
             "'planted-sub')", (uid,))
-    assert asyncio.run(bootstrap_admin(Settings(), "ab-boot" + DOMAIN, "Bootstrap-Pass-77")) == 0
+    assert asyncio.run(bootstrap_admin(Settings(), "ab-boot" + DOMAIN, "Bootstrap-Pass-77")) == 1
     with db() as conn:
-        assert conn.execute("SELECT role FROM public.users WHERE id = %s", (uid,)).fetchone()[0] == "admin"
-        assert conn.execute("SELECT count(*) FROM public.user_identities WHERE user_id = %s",
-                            (uid,)).fetchone()[0] == 0
+        assert conn.execute("SELECT role, password_hash FROM public.users WHERE id = %s", (uid,)).fetchone() == (
+            "user", None)
+
+
+def test_no_api_role_can_update_an_account_into_an_admin(app):
+    uid = make_user("ab-authpromo" + DOMAIN, password=None, role="user")
+    for role in ("hyperchat_app", "hyperchat_auth"):
+        with db(role) as conn, pytest.raises(REFUSED):
+            conn.execute("UPDATE public.users SET role = 'admin' WHERE id = %s", (uid,))
+    with db("hyperchat_auth") as conn:  # hyperchat_auth's other user writes are unchanged
+        conn.execute("UPDATE public.users SET role = 'streamer' WHERE id = %s", (uid,))
+        with pytest.raises(REFUSED):  # also via an upsert's DO UPDATE
+            conn.execute("INSERT INTO public.users (email, role) VALUES (%s, 'admin') "
+                         "ON CONFLICT (email) DO UPDATE SET role = EXCLUDED.role", ("ab-authpromo" + DOMAIN,))
+    with db() as conn:
+        assert conn.execute("SELECT role FROM public.users WHERE id = %s", (uid,)).fetchone()[0] == "streamer"
+
+
+def test_an_ordinary_invite_never_gives_a_password_to_a_password_less_admin(app):
+    email = "ab-googleonly" + DOMAIN
+    aid = make_user(email, password=None, role="admin")  # signs in with Google only
+    token = new_token(32)
+    app_sql("INSERT INTO public.user_invites (email, role, token_hash, expires_at) VALUES (%s, 'user', %s, "
+            "now() + interval '1 day')", (email, sha(token)))
+    r = app.post("/api/v1/auth/invites/accept", json={"token": token, "password": EVIL}, headers=ORIGIN)
+    assert r.status_code == 409
+    with db() as conn:
+        assert conn.execute("SELECT role, password_hash FROM public.users WHERE id = %s", (aid,)).fetchone() == (
+            "admin", None)
+        assert conn.execute("SELECT accepted_at FROM public.user_invites WHERE token_hash = %s",
+                            (sha(token),)).fetchone()[0] is None
 
 
 # ── 7. concurrency ──────────────────────────────────────────────────────────────

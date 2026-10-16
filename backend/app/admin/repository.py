@@ -358,7 +358,9 @@ class AdminRepository:
 
     # ── bootstrap ──────────────────────────────────────────────────────────
     async def bootstrap_admin(self, email: str, password_hash: str) -> str:
-        """Create (or activate a password-less) admin account, only while no admin can sign in."""
+        """Create a NEW admin account, only while no admin can sign in. Insert-only (migration 0024): an existing
+        account with the address, including one inserted concurrently, is refused (account_exists), so no identity,
+        reset link or session prepared on an existing row can come with the privilege."""
         async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(_SIGN_IN_ADMINS)
             if await cur.fetchall():
@@ -366,20 +368,12 @@ class AdminRepository:
             await cur.execute("""
                 INSERT INTO public.users (email, password_hash, role, is_active, email_verified_at, password_changed_at)
                 VALUES (%s, %s, 'admin', true, now(), now())
-                ON CONFLICT (email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash, role = 'admin', is_active = true,
-                    failed_login_attempts = 0, locked_until = NULL, password_changed_at = now(),
-                    email_verified_at = COALESCE(public.users.email_verified_at, now())
-                WHERE public.users.password_hash IS NULL
+                ON CONFLICT (email) DO NOTHING
                 RETURNING id::text
             """, (email, password_hash))
             row = await cur.fetchone()
             if row is None:
-                raise BootstrapRefused("account_has_password")
-            await burn_reset_tokens(cur, row["id"])  # security audit F10: the account now has a password
-            # Migration 0024: an existing password-less row may carry identities someone else linked: drop them.
-            await cur.execute("DELETE FROM public.user_identities WHERE user_id = %s", (row["id"],))
-            await self._revoke_sessions(cur, row["id"])  # users -> reset tokens / identities -> sessions (lock order)
+                raise BootstrapRefused("account_exists")
             return row["id"]
 
 

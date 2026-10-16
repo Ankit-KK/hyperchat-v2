@@ -26,6 +26,10 @@ Now:
     password_reset_tokens  creating one for an admin; anything but burning (used_at NULL -> now)
     user_invites           an invite with role 'admin'; anything but accepting or revoking (once)
   The runtime roles keep everything else (ordinary users and creators, revocations, cleanups, deletes).
+* No role the API connects as (hyperchat_app, hyperchat_worker, hyperchat_auth) may UPDATE an existing account into
+  an admin. hyperchat_auth creates admins only by INSERT (a new-account admin invitation, bootstrap-admin), and both
+  are insert-only (no ON CONFLICT DO UPDATE), so credentials, identities or sessions prepared on an existing row
+  never come with the privilege, even when that row is inserted concurrently.
 * SECURITY DEFINER functions run as the owner and are not the runtime roles; none callable by them writes these tables.
 
 Not covered here (see docs/admin-auth-boundary.md): a compromised API PROCESS can open hyperchat_auth connections
@@ -50,6 +54,9 @@ GUARDS = {  # table -> (trigger function, events)
     "password_reset_tokens": ("auth_guard_password_reset_tokens", "INSERT OR UPDATE"),
     "user_invites": ("auth_guard_user_invites", "INSERT OR UPDATE"),
 }
+API_ROLES = "('hyperchat_app', 'hyperchat_worker', 'hyperchat_auth')"
+NO_PROMOTION = ("RAISE EXCEPTION 'an existing account cannot be made an administrator' "
+                "USING ERRCODE = 'insufficient_privilege';")
 REFUSE = ("RAISE EXCEPTION 'administrator credentials, privileges and sessions are written only by the "
           "authentication role' USING ERRCODE = 'insufficient_privilege';")
 
@@ -60,10 +67,12 @@ def _admin(user_expr: str) -> str:
     return f"COALESCE((SELECT u.role FROM public.users u WHERE u.id = {user_expr} FOR SHARE OF u) = 'admin', false)"
 
 
-def _fn(name: str, body: str) -> str:
+def _fn(name: str, body: str, every_api_role: str = "") -> str:
+    """`body` runs for the runtime roles only; `every_api_role` first, for hyperchat_auth too."""
     return f"""
         CREATE FUNCTION public.{name}() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
         BEGIN
+{every_api_role}
             IF current_user NOT IN {RUNTIME} THEN
                 RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
             END IF;
@@ -82,6 +91,10 @@ def upgrade() -> None:
                    AND ((to_jsonb(NEW) - 'streamer_id' - 'updated_at') <> (to_jsonb(OLD) - 'streamer_id' - 'updated_at')
                         OR NEW.streamer_id IS NOT NULL AND NEW.streamer_id IS DISTINCT FROM OLD.streamer_id)) THEN
                 {REFUSE}
+            END IF;""", every_api_role=f"""
+            IF TG_OP = 'UPDATE' AND NEW.role = 'admin' AND OLD.role IS DISTINCT FROM 'admin'
+               AND current_user IN {API_ROLES} THEN
+                {NO_PROMOTION}
             END IF;"""))
     op.execute(_fn("auth_guard_sessions", f"""
             IF TG_OP = 'INSERT' THEN

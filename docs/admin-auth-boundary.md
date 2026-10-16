@@ -55,8 +55,9 @@ A sixth path was found during the assessment: **credentials prepared on an ordin
 | `user_invites` | role `admin`; anything but accepting or revoking, once |
 
 **Policy changes that close the prepared-credential path:**
-- **No promotion.** An existing account can't be made an admin: the API answers 409, "Send an admin invitation instead". Admins come only from an **admin invitation**, which always creates a **new** account, or the bootstrap CLI. Demotion and deactivation still work.
-- **Bootstrap clean-up.** Bootstrap onto an existing password-less row removes any Google identities linked to it, and burns reset links and sessions as before.
+- **No promotion.** An existing account can't be made an admin: the API answers 409, "Send an admin invitation instead". The `users` guard refuses an UPDATE that makes a row admin for **every** role the API connects as, `hyperchat_auth` included. Demotion and deactivation still work.
+- **Insert-only admin creation.** Admins come only from an **admin invitation** or the **bootstrap CLI**, and both are a plain `INSERT ... ON CONFLICT (email) DO NOTHING`, with no `DO UPDATE` fallback. An account with the address, even one another transaction inserts while they run, refuses the whole transaction: the invitation is not consumed (409), and bootstrap exits with "already exists". An application (creator-owner) invitation is insert-only the same way.
+- **Ordinary invitations never touch an admin row.** A user or creator-staff invitation may still give a password to an existing password-less, active account, but never to an admin (409).
 
 **What stays with `hyperchat_app`:** everything about ordinary users and creators. That covers reads, rate limits, session sliding and revocation, logout, the owner-transfer unlink and cleanup deletes.
 

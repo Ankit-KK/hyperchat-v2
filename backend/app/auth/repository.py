@@ -56,6 +56,24 @@ _INSERT_SESSION = """
     RETURNING id::text, user_id::text, idle_expires_at, absolute_expires_at
 """
 
+_ACCEPT_INSERT = """
+    INSERT INTO public.users (email, password_hash, username, role, streamer_id, email_verified_at, password_changed_at)
+    VALUES (%(email)s, %(hash)s, %(username)s, %(role)s, %(streamer_id)s, now(), now())
+"""
+_ACCEPT_INSERT_NEW = _ACCEPT_INSERT + f"ON CONFLICT (email) DO NOTHING RETURNING {_USER_COLS}"
+# Ordinary and creator-staff invites may give a password to an existing password-less, active, non-admin account.
+_ACCEPT_UPSERT = _ACCEPT_INSERT + f"""
+    ON CONFLICT (email) DO UPDATE SET
+        password_hash = EXCLUDED.password_hash,
+        username = COALESCE(public.users.username, EXCLUDED.username),
+        streamer_id = COALESCE(EXCLUDED.streamer_id, public.users.streamer_id),
+        role = EXCLUDED.role,
+        email_verified_at = COALESCE(public.users.email_verified_at, now()),
+        password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL
+    WHERE public.users.password_hash IS NULL AND public.users.is_active AND public.users.role <> 'admin'
+    RETURNING {_USER_COLS}
+"""
+
 
 class AuthRepository:
     def __init__(self, connection_factory, auth_factory=None) -> None:
@@ -237,7 +255,9 @@ class AuthRepository:
         reset is serialized with it: one that commits first gave the account a password, so the invite is refused
         (InviteConflict) and nothing is consumed; one that commits after finds its link burned (if it predates the
         acceptance) or revokes this session (if requested afterwards). Any failure leaves nothing behind: no consumed
-        invite, no account or password, no session. An existing account must be password-less AND active: the check
+        invite, no account or password, no session. An admin invite or an application invite is insert-only (ON
+        CONFLICT DO NOTHING): any account with the address, including one inserted concurrently, is InviteConflict.
+        For other invites an existing account must be password-less, active AND not an admin: the check
         is the upsert's own condition, evaluated under that row lock (ON CONFLICT locks the row even when the condition
         fails), so a deactivation that commits first is always seen (InviteAccountDisabled, nothing changed) and one
         that commits after revokes this session and burns the links as usual. `session` holds _INSERT_SESSION's
@@ -270,36 +290,23 @@ class AuthRepository:
                     raise InviteNotApplicable()  # no longer bound to its approved application and creator
                 if app["user_id"] is not None:
                     raise InviteCreatorClaimed()
-                await cur.execute("SELECT 1 FROM public.users WHERE email = %s", (invite["email"],))
-                if await cur.fetchone() is not None:
-                    raise InviteConflict()  # an existing account is linked by an admin, never taken over
-            if invite["role"] == "admin":  # migration 0024: an admin is always a NEW account, so no identity, reset link
-                await cur.execute("SELECT 1 FROM public.users WHERE email = %s", (invite["email"],))  # or password
-                if await cur.fetchone() is not None:  # prepared on an existing row can come with the privilege
-                    raise InviteConflict()
-            await cur.execute(f"""
-                INSERT INTO public.users (email, password_hash, username, role, streamer_id, email_verified_at,
-                                          password_changed_at)
-                VALUES (%(email)s, %(hash)s, %(username)s, %(role)s, %(streamer_id)s, now(), now())
-                ON CONFLICT (email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
-                    username = COALESCE(public.users.username, EXCLUDED.username),
-                    streamer_id = COALESCE(EXCLUDED.streamer_id, public.users.streamer_id),
-                    role = CASE WHEN public.users.role = 'admin' THEN 'admin' ELSE EXCLUDED.role END,
-                    email_verified_at = COALESCE(public.users.email_verified_at, now()),
-                    password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL
-                WHERE public.users.password_hash IS NULL AND public.users.is_active
-                RETURNING {_USER_COLS}
-            """, {"email": invite["email"], "hash": password_hash, "username": username, "role": invite["role"],
-                  "streamer_id": invite["streamer_id"]})
+            # An admin (migration 0024: no identity, reset link or password prepared on an existing row may come with
+            # the privilege) and an application's owner are always a NEW account: insert-only, and an account with the
+            # address, even one committed concurrently, refuses the whole transaction (the invite is not consumed).
+            new_only = invite["role"] == "admin" or invite["signup_id"] is not None
+            await cur.execute(_ACCEPT_INSERT_NEW if new_only else _ACCEPT_UPSERT,
+                              {"email": invite["email"], "hash": password_hash, "username": username,
+                               "role": invite["role"], "streamer_id": invite["streamer_id"]})
             user = await cur.fetchone()
+            if not user and new_only:  # DO NOTHING waited for a concurrent insert of the address and saw it commit
+                raise InviteConflict()
             if not user:  # the existing row is locked now (ON CONFLICT), so this reading is stable
-                await cur.execute("SELECT password_hash IS NULL AS password_less FROM public.users WHERE email = %s",
-                                  (invite["email"],))
+                await cur.execute("SELECT password_hash IS NULL AND role <> 'admin' AS password_less FROM public.users "
+                                  "WHERE email = %s", (invite["email"],))
                 existing = await cur.fetchone()
                 if existing and existing["password_less"]:
                     raise InviteAccountDisabled()  # password-less but deactivated
-                raise InviteConflict()  # already has a password: the invite cannot take it over (active or not)
+                raise InviteConflict()  # has a password or is an admin: never taken over (active or not)
             await cur.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s",
                               (user["id"], invite["id"]))
             if invite["signup_id"] is not None:  # the creator row is locked above: this cannot race another claim

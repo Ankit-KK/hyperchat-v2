@@ -264,7 +264,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Deactivation:** a link issued before an admin deactivated an account could still set its password, which then worked once the account was reactivated.
 - **Severity: P3.** The impact is account takeover, but it requires an unexpired reset link: the 60-minute TTL, single use, and stored only as a hash.
 - **Status: merged in #31 (`3b834d8`); not deployed.** No policy decision needed; standard practice.
-  - **Burned whenever a password is set or the account is deactivated:** `AuthRepository.reset_password`, `AuthRepository.change_password`, `accept_invite`, `AdminRepository.bootstrap_admin` and `AdminRepository.update_user` (deactivation) burn every open reset token of the user **in the same transaction** (`burn_reset_tokens`).
+  - **Burned whenever a password is set or the account is deactivated:** `AuthRepository.reset_password`, `AuthRepository.change_password`, `accept_invite`, `AdminRepository.bootstrap_admin` and `AdminRepository.update_user` (deactivation) burn every open reset token of the user **in the same transaction** (`burn_reset_tokens`). Since migration 0024's follow-up, `bootstrap_admin` only inserts a new account, so it has no links to burn.
   - **Active accounts only:** `AuthRepository.reset_password` redeems a token only for an **active** account; a deactivated account's link gets the generic "invalid or expired" answer.
   - **Unchanged:** a link requested after the change works; reset is still single use and still revokes all sessions.
   - **Race fixed (owner review of PR #31):**
@@ -299,7 +299,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Password change:** a link sent before a password change is refused, the owner's new password stays, and a link requested afterwards works.
   - **Deactivated account:** a deactivated account's link is refused, and after reactivation the original password still works.
   - **Invite acceptance:** accepting an invite burns a password-less account's open reset link (`tests/auth/test_auth_flow.py`).
-  - **`bootstrap-admin`:** does the same (`tests/admin/test_bootstrap_cli.py`).
+  - **`bootstrap-admin`:** did the same; since migration 0024's follow-up it refuses an existing account outright, leaving its link and state untouched (`tests/admin/test_bootstrap_cli.py`).
 - **Regression proof:** all four tests **fail** against the previous repository code.
 - **Limitations:**
   - **Google sign-in session (follow-up: merged in #36, `c5b8751`; not deployed):**

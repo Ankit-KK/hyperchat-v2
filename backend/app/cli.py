@@ -4,9 +4,9 @@
     python -m app.cli --env-file /etc/hyperchat/api.env cleanup [--dry-run]
     python -m app.cli --env-file /etc/hyperchat/api.env payment-health
 
-bootstrap-admin creates the first admin account (or activates a password-less one) and refuses to run
-while any active admin can already sign in. The password is read without echo (or from stdin with
---password-stdin) and is never printed or logged.
+bootstrap-admin creates the first admin account as a NEW account (an existing account with the address is
+refused) and refuses to run while any active admin can already sign in. The password is read without echo
+(or from stdin with --password-stdin) and is never printed or logged.
 cleanup deletes expired sessions, reset tokens, nonces, rate-limit windows, old unused invites, finished
 jobs (30 days) and TTS moderation audit rows (90 days), then donor uploads that no donation uses after 24
 hours when R2 is configured (D9) (see app.maintenance); --dry-run only counts. It runs
@@ -49,7 +49,8 @@ from app.storage.r2 import StorageError, build_object_store
 
 REFUSALS = {
     "admin_exists": "An active admin who can sign in already exists. Use the admin API instead.",
-    "account_has_password": "This account already has a password. Sign in with it, or have an admin change its role.",
+    "account_exists": "An account with this email already exists. Bootstrap only creates a new account: use another "
+                      "email, or send an admin invitation from the admin API.",
 }
 
 
