@@ -215,17 +215,15 @@ class AdminRepository:
                     block = (await cur.fetchone())["block"]
                     if block is not None:
                         return block, None
-                await cur.execute(f"UPDATE public.streamers SET status = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
-                                  (target, streamer_id))
+                try:  # activation / reactivation: the streamers_guard_activation trigger re-checks the rules
+                    await cur.execute(f"UPDATE public.streamers SET status = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
+                                      (target, streamer_id))
+                except pg_errors.InsufficientPrivilege as exc:
+                    raise _Refused(exc.diag.message_hint or "kyc_required") from None
                 row = await cur.fetchone()
                 if action == "suspend":  # grace never survives a suspension (migration 0023)
                     await cur.execute("SELECT public.kyc_revoke_grace(%s, 'creator_suspended', %s)",
                                       (streamer_id, actor_id))
-                if action == "reactivate":  # back only if it could accept donations again: the same rule as checkout
-                    await cur.execute("SELECT public.creator_donation_block(%s) AS block", (streamer_id,))
-                    block = (await cur.fetchone())["block"]
-                    if block is not None:
-                        raise _Refused(block)
                 await cur.execute("INSERT INTO public.creator_status_events (streamer_id, action, from_status, "
                                   "to_status, actor_user_id, reason) VALUES (%s, %s, %s, %s, %s, %s)",
                                   (streamer_id, action, source, target, actor_id, reason))

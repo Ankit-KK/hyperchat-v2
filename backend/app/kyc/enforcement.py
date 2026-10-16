@@ -1,10 +1,11 @@
 """KYC enforcement administration (KYC PR4, migration 0023; docs/kyc-rollout.md).
 
 Read-only: the enforcement record and rollout readiness, the impact preview, the audit, one creator's eligibility.
-Changes through the API are only the fail-closed ones: add a restriction (it also revokes the creator's grace),
-lift one (with a note; a lift never bypasses KYC, the rule still needs the owner's KYC or valid grace) and revoke
-grace. Activation, closure and grace grants are NOT here: they loosen nothing silently, need the operator's
-approvals and run with the migration role (app.kyc.operator). Each change is recorded in the restore witness.
+Changes through the API are only the fail-closed ones: add a restriction (it also revokes the creator's grace) and
+revoke grace; they stay allowed while a restore is suspected (they are how lost revocations are re-applied) but never
+re-anchor the witness. Lifting a restriction, activation, closure and grace grants are NOT here: they loosen
+eligibility, need the operator's approvals and run with the migration role (app.kyc.operator); the application's
+database credentials cannot do them either (no grant).
 """
 
 import uuid
@@ -43,6 +44,12 @@ class EnforcementRepository:
 
     async def state(self) -> dict:
         return (await self._rows(f"SELECT {_STATE_COLS} FROM public.kyc_enforcement"))[0]
+
+    async def head(self, anchor_generation: int) -> dict:
+        """state, generation, chain (the head) and the chain at the witness's anchor generation."""
+        return (await self._rows("SELECT e.state, e.generation, e.chain, (SELECT ev.chain FROM "
+                                 "public.kyc_enforcement_events ev WHERE ev.generation = %s) AS anchor_chain "
+                                 "FROM public.kyc_enforcement e", (anchor_generation,)))[0]
 
     async def counts(self) -> dict:
         return (await self._rows("""
@@ -84,10 +91,18 @@ class EnforcementService:
     def __init__(self, repo: EnforcementRepository, witness: KycWitness) -> None:
         self.repo, self.witness = repo, witness
 
+    async def check(self) -> tuple[dict, str | None]:
+        head = await self.repo.head(self.witness.anchor_generation())
+        return head, self.witness.problem(head["state"], head["generation"], head["anchor_chain"])
+
     async def sync_witness(self, **event) -> None:
-        """Record the database's current enforcement generation and state outside PostgreSQL (after a change)."""
-        state = await self.repo.state()
-        self.witness.record(state["state"], state["generation"], **event)
+        """Record the database's head outside PostgreSQL, only as an extension of the witnessed history: a database
+        that diverged from it (a restore) is never re-anchored here (that is the operator's acknowledgement)."""
+        head, problem = await self.check()
+        if problem is None:
+            self.witness.record(head["state"], head["generation"], head["chain"], **event)
+        elif self.witness.path is not None:
+            security_event("kyc_enforcement_witness_mismatch", level=50, reason=problem)
 
     def _require_witness(self) -> None:
         if self.witness.path is None:  # an unwitnessed change could be undone by a restore without anyone noticing
@@ -96,7 +111,7 @@ class EnforcementService:
 
     async def status(self) -> dict:
         state = await self.repo.state()
-        problem = self.witness.problem(state["state"], state["generation"])
+        _, problem = await self.check()
         return {"enforcement": _iso(state), **await self.repo.counts(),
                 "witness": {"configured": self.witness.path is not None, "problem": problem},
                 "new_donations_fail_closed": problem is not None}
@@ -140,25 +155,6 @@ class EnforcementService:
         await self.sync_witness(action="restriction_added", streamer_id=streamer_id)
         security_event("kyc_creator_restricted", level=20, user_id=admin_id, streamer_id=streamer_id, reason=reason,
                        client_ip=ip)
-        return await self.creator(streamer_id)
-
-    async def lift(self, admin_id: str, streamer_id: str, restriction_id: str, note: str, ip: str | None) -> dict:
-        streamer_id, note = _creator_id(streamer_id), " ".join((note or "").split())
-        try:
-            restriction_id = str(uuid.UUID(restriction_id))
-        except (ValueError, AttributeError, TypeError):
-            raise ApiError(404, "Restriction not found", "restriction_not_found") from None
-        if not note:
-            raise ApiError(400, "A note is required to lift a restriction", "note_required")
-        self._require_witness()
-        result = await self.repo.call("SELECT public.kyc_lift_restriction(%s, %s, %s, %s)",
-                                      (streamer_id, restriction_id, note, admin_id))
-        if result == "not_found":
-            raise ApiError(404, "Restriction not found", "restriction_not_found")
-        if result == "already_lifted":
-            raise ApiError(409, "This restriction was already lifted", "restriction_already_lifted")
-        await self.sync_witness(action="restriction_lifted", streamer_id=streamer_id)
-        security_event("kyc_restriction_lifted", level=20, user_id=admin_id, streamer_id=streamer_id, client_ip=ip)
         return await self.creator(streamer_id)
 
     async def revoke_grace(self, admin_id: str, streamer_id: str, reason: str, ip: str | None) -> dict:

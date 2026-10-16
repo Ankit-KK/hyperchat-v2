@@ -87,7 +87,7 @@ class PublicService:
         if block is not None:
             raise donations_unavailable()
         if self.witness is not None:  # KYC PR4: a database behind its restore witness accepts no new donations
-            problem = self.witness.problem(*await self.repo.enforcement())
+            problem = self.witness.problem(*await self.repo.enforcement(self.witness.anchor_generation()))
             if problem is not None:
                 security_event("kyc_enforcement_witness_mismatch", level=50, reason=problem,
                                streamer_slug=s["streamer_slug"])

@@ -87,18 +87,14 @@ async def admin_refresh_kyc(user_id: str, request: Request, current: CurrentUser
                         headers=NO_STORE)
 
 
-# ── KYC enforcement (PR4, migration 0023). No route activates or closes enforcement or grants grace: those are the
-#    operator's (app.kyc.operator, migration role) after the approvals of docs/kyc-rollout.md. ──
+# ── KYC enforcement (PR4, migration 0023). No route activates or closes enforcement, grants grace or lifts a
+#    restriction: those are the operator's (app.kyc.operator, migration role) after the approvals of
+#    docs/kyc-rollout.md. ──
 
 class RestrictionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: StrictStr = Field(max_length=32)
     note: StrictStr | None = Field(default=None, max_length=500)
-
-
-class NoteBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    note: StrictStr = Field(max_length=500)
 
 
 class GraceRevoke(BaseModel):
@@ -141,13 +137,6 @@ async def restrict_creator(streamer_id: str, body: RestrictionCreate, request: R
                            current: CurrentUser = Depends(require_admin)):
     return JSONResponse(await _enforcement(request).restrict(current.user.id, streamer_id, body.reason, body.note,
                                                              client_ip(request)), headers=NO_STORE)
-
-
-@enforcement_router.post("/creators/{streamer_id}/kyc/restrictions/{restriction_id}/lift")
-async def lift_restriction(streamer_id: str, restriction_id: str, body: NoteBody, request: Request,
-                           current: CurrentUser = Depends(require_admin)):
-    return JSONResponse(await _enforcement(request).lift(current.user.id, streamer_id, restriction_id, body.note,
-                                                         client_ip(request)), headers=NO_STORE)
 
 
 @enforcement_router.post("/creators/{streamer_id}/kyc/grace/revoke")

@@ -45,10 +45,12 @@ class PublicRepository:
         donations insert trigger runs the same function again, so no path can skip it."""
         return (await self._all("SELECT public.creator_donation_block(%s) AS block", (streamer_id,)))[0]["block"]
 
-    async def enforcement(self) -> tuple[str, int]:
-        """KYC enforcement (migration 0023): (state, generation), compared with the restore witness."""
-        row = (await self._all("SELECT state, generation FROM public.kyc_enforcement"))[0]
-        return row["state"], row["generation"]
+    async def enforcement(self, anchor_generation: int) -> tuple[str, int, str | None]:
+        """KYC enforcement (migration 0023): (state, generation, the history chain at the witness's anchor)."""
+        row = (await self._all("SELECT e.state, e.generation, (SELECT ev.chain FROM public.kyc_enforcement_events ev "
+                               "WHERE ev.generation = %s) AS anchor_chain FROM public.kyc_enforcement e",
+                               (anchor_generation,)))[0]
+        return row["state"], row["generation"], row["anchor_chain"]
 
     async def voice_tiers(self, streamer_id: str) -> tuple[list[tuple], list[tuple]]:
         own = await self._all("SELECT min_amount_inr, max_duration_seconds FROM public.streamer_voice_tiers "

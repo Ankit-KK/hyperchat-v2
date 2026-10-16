@@ -57,6 +57,7 @@ def enf(app, tmp_path):
     """The app with Didit configured in the database and a fresh restore witness file."""
     reset_enforcement()
     configure()
+    (tmp_path / "kyc.witness").touch()  # provisioned at deploy: an empty witness = no history yet
     witness = KycWitness(str(tmp_path / "kyc.witness"))
     app.app_state.public.witness = app.app_state.kyc_enforcement.witness = witness
     app.witness = witness
@@ -66,6 +67,11 @@ def enf(app, tmp_path):
     yield app
     unconfigure()
     reset_enforcement()
+
+
+def lift(app, sid: str, rid: str, note: str = "resolved") -> int:
+    return operator(app, "lift-restriction", "--creator", sid, "--restriction", rid, "--note", note,
+                    "--operator", "ops-test", *confirm())
 
 
 def operator(app, *args: str) -> int:
@@ -250,19 +256,15 @@ def test_restrictions_block_at_once_and_a_lift_needs_a_note_and_never_bypasses_k
     assert enf.admin.post(f"{A}/creators/{legacy}/kyc/restrictions", json={"reason": "nope"},
                           headers=enf.boss).status_code == 400
     assert enf.admin.post(f"{A}/creators/{legacy}/kyc/restrictions", json={"reason": "admin_hold"}).status_code == 403
-    assert enf.admin.post(f"{A}/creators/{legacy}/kyc/restrictions/{rid}/lift", json={"note": "  "},
-                          headers=enf.boss).status_code == 400
-    r = enf.admin.post(f"{A}/creators/{legacy}/kyc/restrictions/{rid}/lift", json={"note": "resolved"},
-                       headers=enf.boss)
-    assert r.status_code == 200 and r.json()["block_now"] is None  # draft: back to the PR1 baseline
-    assert enf.admin.post(f"{A}/creators/{legacy}/kyc/restrictions/{rid}/lift", json={"note": "again"},
-                          headers=enf.boss).status_code == 409
+    assert lift(enf, legacy, rid, note="  ") == 2  # a note is required
+    assert lift(enf, legacy, rid) == 0  # the operator's lift (the API cannot lift)
+    assert block(legacy) is None  # draft: back to the PR1 baseline
+    assert lift(enf, legacy, rid, note="again") == 2
     activate(enf)
     r = enf.admin.post(f"{A}/creators/{legacy}/kyc/restrictions", json={"reason": "admin_hold"}, headers=enf.boss)
     rid2 = r.json()["restrictions"][-1]["id"]
-    r = enf.admin.post(f"{A}/creators/{legacy}/kyc/restrictions/{rid2}/lift", json={"note": "lifted"},
-                       headers=enf.boss)
-    assert r.json()["block_now"] == "kyc_required"  # a lift never bypasses KYC
+    assert lift(enf, legacy, rid2) == 0
+    assert block(legacy) == "kyc_required"  # a lift never bypasses KYC
     assert events(legacy) == ["restriction_added", "restriction_lifted", "restriction_added", "restriction_lifted"]
     with open(enf.witness.path, encoding="utf-8") as f:
         assert [json.loads(line)["generation"] for line in f] == [1, 2, 3, 4, 5]
@@ -323,8 +325,7 @@ def test_revocation_transfer_suspension_and_restriction_end_grace(enf):
                                                       "(KYC)")  # the suspension ended its grace
     enf.admin.post(f"{A}/creators/{creators['x']}/kyc/restrictions", json={"reason": "kyc_lost"}, headers=enf.boss)
     lifted = enf.admin.get(f"{A}/creators/{creators['x']}/kyc").json()
-    enf.admin.post(f"{A}/creators/{creators['x']}/kyc/restrictions/{lifted['restrictions'][0]['id']}/lift",
-                   json={"note": "done"}, headers=enf.boss)
+    assert lift(enf, creators["x"], lifted["restrictions"][0]["id"]) == 0
     assert block(creators["x"]) == "kyc_required"  # the restriction revoked the grace
     for k in "rtsx":
         assert "grace_revoked" in events(creators[k]), k
@@ -485,7 +486,7 @@ def test_a_database_behind_its_witness_refuses_new_donations_until_reconciled(cl
     sid = make_streamer("authtest-enf-wit", user_id=owner_user("enf-wit"))
     assert grant(enf, sid) == 0  # generation 1, witnessed
     generation = state()[1]
-    enf.witness.record("draft", generation + 5, action="later_change_lost_by_a_restore")  # what a restore looks like
+    enf.witness.record("draft", generation + 5, "a-history-this-database-never-had")  # what a restore looks like
     r = client.post(f"{P}/authtest-enf-wit/donations", json={"name": "Ravi", "amount": 100}, headers=ORIGIN)
     assert (r.status_code, r.json()) == (503, UNAVAILABLE)
     view = enf.admin.get(f"{A}/kyc/enforcement").json()
@@ -495,10 +496,15 @@ def test_a_database_behind_its_witness_refuses_new_donations_until_reconciled(cl
                     *confirm()) == 0
     assert state()[1] == generation + 6 and enf.admin.get(f"{A}/kyc/enforcement").json()["witness"]["problem"] is None
     assert checkout(client, "authtest-enf-wit")["order_id"]
-    enf.witness.record("active", generation + 6)  # the witness saw activation; the database never did
+    enf.witness.record("active", generation + 7, "another")  # the witness saw activation; the database never did
     assert enf.admin.get(f"{A}/kyc/enforcement").json()["witness"]["problem"] == "restore_suspected"
     assert operator(enf, "acknowledge-restore", "--operator", "ops", "--detail", "x", *confirm()) == 2  # activate first
-    assert "restore_acknowledged" in events()
+    activate(enf)  # re-applying the lost activation is allowed (it only tightens) but does not re-anchor
+    assert enf.admin.get(f"{A}/kyc/enforcement").json()["witness"]["problem"] == "restore_suspected"
+    assert operator(enf, "acknowledge-restore", "--operator", "ops", "--detail", "activation re-applied",
+                    *confirm()) == 0
+    assert enf.admin.get(f"{A}/kyc/enforcement").json()["witness"]["problem"] is None
+    assert events().count("restore_acknowledged") == 2
 
 
 def test_without_a_witness_only_the_untouched_database_is_accepted(client, enf):

@@ -524,6 +524,8 @@ def test_0023_enforcement_starts_inactive_changes_nothing_existing_and_guards_it
                                           ("kyc_grant_grace(uuid, integer, text, text)", False),
                                           ("kyc_acknowledge_restore(text, bigint, text)", False),
                                           ("kyc_donation_decision(uuid, text)", False),
+                                          ("kyc_lift_restriction(uuid, uuid, text, text)", False),
+                                          ("kyc_owner_decided(uuid, text)", False),
                                           ("kyc_restrict_creator(uuid, text, text, uuid)", True),
                                           ("kyc_revoke_grace(uuid, text, uuid)", True)):
                 for role, allowed in (("hyperchat_app", app_allowed), ("hyperchat_worker", False)):

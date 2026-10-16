@@ -19,6 +19,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 from app.core.config import Settings
+from app.kyc.enforcement import EnforcementRepository, EnforcementService
+from app.kyc.witness import KycWitness
 from app.security.audit import security_event
 from app.storage.r2 import UPLOAD_KEY, UPLOAD_PREFIXES, MAX_LISTED_UPLOADS, StorageError, build_object_store
 
@@ -139,6 +141,9 @@ async def run_cleanup(settings: Settings, connection_factory, *, dry_run: bool, 
     except Exception as exc:  # noqa: BLE001 - report the failure class only, never connection details
         print(f"cleanup failed: {type(exc).__name__}", file=sys.stderr)
         return 1
+    if not dry_run and settings.kyc_witness_path:  # KYC PR4: witness changes committed but not yet recorded
+        await EnforcementService(EnforcementRepository(connection_factory),
+                                 KycWitness(settings.kyc_witness_path)).sync_witness(action="daily_sync")
     verb = "would delete" if dry_run else "deleted"
     print(f"cleanup ({settings.db_label}): " + ", ".join(f"{name} {verb} {n}" for name, n in counts.items()))
     if not dry_run:

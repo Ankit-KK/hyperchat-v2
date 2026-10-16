@@ -5,7 +5,7 @@ PR4 builds mandatory KYC enforcement but does **not** turn it on. After the migr
 ## The model
 **Enforcement record:** `public.kyc_enforcement` is a single row whose state goes `draft` → `active` → `closed`, and never back. A trigger refuses any other transition for every role, the schema owner included.
 - **Activation record:** activation stores the operator, the approval reference, the policy (`kyc-pr4-v1`), the time and the migration version. Neither it nor the grace maximum (90 days) can ever change.
-- **Generation:** `generation` increases with every enforcement change, which the restore witness below relies on.
+- **Generation and chain:** each enforcement change is one audit row at the next `generation`. Its `chain` is sha256 over the previous chain, the generation, the row's random id, its content and its time: a hash chain over the whole history, which the restore witness below anchors on.
 
 **The donation rule:** `public.creator_donation_block(streamer_id)`, the one rule from migration 0020. Checkout, upload grants and uploads call it, and the donations insert trigger runs it again for every runtime-role insert. Its checks, in order:
 
@@ -16,7 +16,7 @@ PR4 builds mandatory KYC enforcement but does **not** turn it on. After the migr
 | 3 | **`draft` only:** a legacy creator still owned by its baseline owner keeps its PR1 eligibility | (eligible) |
 | 4 | It has an owner, and that owner is active | `no_owner` |
 | 5 | The owner's Didit KYC is approved now (`user_kyc_approved`: the newest session, a durable veto, the workflow epoch) | (eligible) |
-| 6 | **`active` only:** a legacy creator still owned by its baseline owner holds an unexpired, unrevoked grace grant bound to that owner | (eligible) |
+| 6 | **`active` only:** a legacy creator still owned by its baseline owner holds an unexpired, unrevoked grace grant bound to that owner, **and that owner never had a Didit decision** | (eligible) |
 | 7 | Otherwise | `kyc_required` |
 
 In `closed`, no grace counts: every creator needs its owner's KYC.
@@ -27,12 +27,21 @@ In `closed`, no grace counts: every creator needs its owner's KYC.
 
 Neither a Didit webhook nor anything else activates a creator automatically. **Reactivation** re-checks the full rule.
 
+**Database-level guard:** the trigger `streamers_guard_activation` applies the same checks to any runtime-role write that makes a creator `active` (insert or update). So the application's database credentials can't bypass admin activation or reactivation.
+
+**Suspension is not a security hold.** Reactivation is an ordinary admin action, and the rules still apply. Use a restriction for a hold that the application's credentials must not undo.
+
 **Grace grants** (`kyc_grace_grants`):
 - **Finite:** 1 to 90 days, also enforced by a CHECK.
 - **Bound:** to the creator **and** its owner at grant time.
 - **One-shot:** one grant per creator-owner pair, ever, so there are no rolling extensions.
 - **Immutable** except for one revocation.
-- **Who can grant:** the operator only (`kyc_grant_grace`, no runtime grant), and only for an active, unrestricted legacy creator still owned by its baseline owner.
+- **Who can grant:** the operator only (`kyc_grant_grace`, no runtime grant), and only for an active, unrestricted legacy creator still owned by its baseline owner, **whose owner never had a Didit decision**.
+- **For never-verified owners only:** grace is a finite rollout allowance for owners who haven't verified yet. It never covers an owner whose verification failed, was revoked or expired.
+  - **What counts as a decision:** an approval, a `Declined` or a `Kyc Expired`, in this environment.
+  - **Where it's recorded:** durably, in `kyc_sessions.adverse_at` and the append-only `kyc_events`.
+  - **Effect:** once the owner has any decision, grace never applies again, even after a later `Resubmitted`. Only a new approval restores eligibility, through KYC.
+  - **Undecided sessions don't count:** a session still undecided (`In Progress`, `In Review` and so on) keeps grace.
 - **What ends grace:**
   - expiry (the clock);
   - revocation (admin API);
@@ -43,7 +52,10 @@ Neither a Didit webhook nor anything else activates a creator automatically. **R
 
 **Restrictions** (`kyc_restrictions`) are admin holds with a reason code: `identity_concern`, `owner_dispute`, `fraud_review`, `kyc_lost` or `admin_hold`.
 - **Blocking:** an open restriction blocks new donations and activation, and adding one revokes the creator's grace.
-- **Lifting:** each restriction is lifted at most once, with a note, and is audited. A lift never bypasses KYC: the rule still needs the owner's KYC, or valid grace while `active`.
+- **Lifting:** **operator-only** (`python -m app.kyc.operator lift-restriction`, migration role).
+  - The API and its database role can add restrictions, but can't remove them: `kyc_lift_restriction` has no runtime grant, and the tables refuse runtime writes.
+  - Each restriction is lifted at most once, with a note, and is audited under the operator's name.
+  - A lift never bypasses KYC: the rule still needs the owner's KYC, or valid grace while `active`.
 
 **Audit** (`kyc_enforcement_events`): append-only.
 - **Recorded:** activation, closure, grants, revocations, expiries (the daily cleanup records them), restrictions, lifts and restore acknowledgements.
@@ -58,36 +70,47 @@ Neither a Didit webhook nor anything else activates a creator automatically. **R
 | Enforcement history | `GET /api/v1/admin/kyc/enforcement/events[?streamer_id=]` | admin |
 | One creator's eligibility, restrictions, grants | `GET /api/v1/admin/creators/{id}/kyc` | admin |
 | Add a restriction | `POST /api/v1/admin/creators/{id}/kyc/restrictions` `{reason, note?}` | admin (Origin + CSRF) |
-| Lift a restriction | `POST …/kyc/restrictions/{rid}/lift` `{note}` | admin (Origin + CSRF) |
+| Lift a restriction | `python -m app.kyc.operator lift-restriction` | **operator** (migration role) |
 | Revoke grace | `POST …/kyc/grace/revoke` `{reason}` | admin (Origin + CSRF) |
 | Grant grace | `python -m app.kyc.operator grant` | **operator** (migration role) |
 | Activate / close enforcement | `python -m app.kyc.operator activate` / `close` | **operator** (migration role) |
 | Acknowledge a reconciled restore | `python -m app.kyc.operator acknowledge-restore` | **operator** (migration role) |
 
 **API limits:**
-- **Nothing in the API loosens enforcement:** no endpoint marks KYC approved, grants grace, or activates, closes or reopens enforcement.
-- **What the API role can do:** call the fail-closed functions plus the lift.
+- **Nothing in the API loosens enforcement:** no endpoint marks KYC approved, grants grace, lifts a restriction, or activates, closes or reopens enforcement.
+- **What the API role can do:** call the fail-closed functions (restrict, revoke grace) and reads.
 - **Refused to it:** writing the tables, and calling the operator functions.
 - **Public errors stay generic:** `503 {"error": "Donations are temporarily unavailable"}`. Reason codes appear only in the admin views.
 
 ## Restore safety (and its limits)
-**Why:** a database restored from an older snapshot would silently go back on all of this: re-open revoked grace, lift restrictions, or return to `draft`. Nothing inside that database can tell. So the API and the operator tool record the database's highest **generation and state** in a **restore witness outside PostgreSQL**:
+**Why:** a database restored from an older snapshot would silently go back on all of this: re-open revoked grace, lift restrictions, or return to `draft`. Nothing inside that database can tell. So the API and the operator tool record the database's **generation, chain and state** in a **restore witness outside PostgreSQL**:
 - **Where:** `HYPERCHAT_KYC_WITNESS_PATH`.
 - **Format:** one JSON line per change, ids and codes only, fsynced.
 
+**The anchor** is the witnessed line with the highest generation. The database is consistent only while both hold:
+- it still holds **that exact chain at that generation**;
+- it hasn't gone back in state.
+
+**Why a restore can't be caught up:** a restored database fails this, and adding changes never heals it. Its history diverged, and its later audit rows carry other random ids, so its chain at the anchor's generation is different forever. Ordinary API changes, and any direct calls by the database role, therefore can't clear a restore mismatch, however far they advance the generation. Comparing generation numbers alone would allow exactly that.
+
 **The check:**
-- **When:** before every new donation (checkout, upload grants, uploads), the database's state and generation are compared with the witness.
-- **Failure:** if the database is behind (a lower generation, or an earlier state), **new donations fail closed** (generic 503) and a critical `kyc_enforcement_witness_mismatch` event is logged. The admin view shows `witness.problem`.
+- **When:** before every new donation (checkout, upload grants, uploads), the database's state and generation, and its chain at the anchor, are compared with the witness.
+- **Failure:** on a mismatch, **new donations fail closed** (generic 503) and a critical `kyc_enforcement_witness_mismatch` event is logged. The admin view shows `witness.problem`.
 - **Also fail closed:**
   - no path is configured but the database is no longer the untouched `draft`/0;
-  - the file is missing while the database has history;
+  - the file is **missing** while the database has history (an empty file is a fresh witness: create it at deploy, or with `witness-init`);
   - the file is unreadable.
-- **Changes need it:** admin changes (restrict, lift, revoke) refuse to run without a witness path (503). The operator tool refuses every change without one, and refuses to change a database that is behind its witness.
+
+**Recording:**
+- **The API and the daily cleanup** append a line only when the database **extends** the anchored history. They never re-anchor.
+- **The only re-anchoring:** the operator's `acknowledge-restore`, an audited database change, and `witness-init` when no file exists.
+- **Admin changes** (restrict, revoke grace) need a witness path (503 otherwise). They stay allowed during a suspected restore, because they are how lost revocations are re-applied.
+- **The operator tool** refuses every change without a witness path. It also refuses to loosen anything on a database inconsistent with its witness. Only `activate` and `close`, which tighten, may re-apply a state that a restore lost.
 
 **Server setup (per environment, separate files):**
 ```
 install -d -o root -g root -m 0755 /var/lib/hyperchat-kyc
-install -o hyperchat -g hyperchat -m 0600 /dev/null /var/lib/hyperchat-kyc/<env>.witness
+install -o hyperchat -g hyperchat -m 0600 /dev/null /var/lib/hyperchat-kyc/<env>.witness  # empty: a fresh witness
 chattr +a /var/lib/hyperchat-kyc/<env>.witness   # append-only: not even its owner can rewrite or delete it
 ```
 - **Running the service:** set `HYPERCHAT_KYC_WITNESS_PATH` in that environment's api.env (DEV and production use different files). The cleanup service uses the same env file.
@@ -95,12 +118,20 @@ chattr +a /var/lib/hyperchat-kyc/<env>.witness   # append-only: not even its own
 
 **After a restore:**
 1. Compare the audit in the restored database with the witness lines. They name each lost change (action, creator and grant ids).
-2. Re-apply the lost revocations and restrictions through the admin API, and re-run `activate` / `close` if the state went back.
-3. Run `python -m app.kyc.operator acknowledge-restore --operator NAME --detail "…" --confirm-database DB`. It moves the generation past the witness. It refuses while the state is still behind.
+2. Re-apply what was lost:
+   - lost revocations and restrictions, through the admin API;
+   - the state, with `activate` / `close`, if it went back.
+
+   Lost lifts and grants are re-applied only after the acknowledgement, through the operator tool.
+3. Run `python -m app.kyc.operator acknowledge-restore --operator NAME --detail "…" --confirm-database DB`.
+   - **Effect:** it records an audited change past the witness and re-anchors the witness on the database's history.
+   - **Refusals:** it refuses while the state is still behind, and when there is nothing to acknowledge.
 4. New donations resume.
 
 **Limits (deliberately not claimed):**
-- **Read-time check only:** the witness is checked by the API and the operator tool, not by PostgreSQL itself. The donations trigger can't read a file, so a runtime-role insert outside the API would still use only the in-database rule.
+- **Read-time check only:** the witness is checked by the API and the operator tool, not by PostgreSQL itself. The donations trigger can't read a file, so a donation inserted directly with the application's database credentials, outside the API, still uses only the in-database rule.
+- **Unwitnessed changes:** a change committed but not yet witnessed is accepted as an extension of the witnessed history. This covers a crash between the commit and the file write, and a direct database-role call. It is only protected against a later restore once a line records it: the next witnessed change, or the daily cleanup. A restore to a point between the last witnessed line and such a change goes undetected.
+- **Only enforcement history is witnessed:** Didit results (`kyc_sessions`, migration 0022) are not. A restore that loses a later Didit decline or expiry revives that owner's approval until Didit sends a new result, or an admin refresh records the adverse state again.
 - **File handling matters:** the witness protects only as long as the file is kept with the server, not inside the restored backup. Losing or replacing it (as root, with `chattr -a`) removes the protection.
 - **Not a defence against a compromised host or operator:** the schema owner can disable any trigger. The witness is a detection mechanism for restores and wrong-snapshot mistakes.
 - **Release switching:** an older application release (before PR4) still uses the database rule, because the rule lives in PostgreSQL. It lacks only the witness check. A database can't be downgraded below 0023 once enforcement left `draft` or has any history: the downgrade refuses.

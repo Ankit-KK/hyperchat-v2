@@ -28,14 +28,23 @@ runs it for every runtime-role insert):
   restore acknowledgements. UPDATE is refused for every role; the runtime roles may only read. Creator rows with
   enforcement history cannot be deleted (RESTRICT), and creator_status_events (migration 0020) becomes RESTRICT too,
   so deleting a creator can no longer erase its status audit.
-* kyc_enforcement.generation: +1 on every change of the above. The API records it, with the state, in a restore
-  witness OUTSIDE PostgreSQL (app.kyc.witness); a database restored from an older snapshot shows a lower generation or
-  an earlier state, and new donations then fail closed until an operator reconciles. A database-local value alone
-  cannot detect a restore; the witness file is the external, monotonic part.
+* kyc_enforcement.generation / chain: every enforcement change is one audit row at the next generation whose chain
+  is sha256(previous chain | generation | the row's random id | its content | time): a hash chain over the history.
+  The API and the operator tool record (generation, chain) in a restore witness OUTSIDE PostgreSQL (app.kyc.witness).
+  A database restored from an older snapshot no longer holds the witnessed chain at the witnessed generation, and
+  that never heals by adding changes (the restored history diverged; its later rows carry other random ids), so new
+  donations fail closed until the operator's audited acknowledgement (kyc_acknowledge_restore) re-anchors it. A
+  database-local value alone cannot detect a restore; the witness file is the external part.
+* Grace is for a NEVER-decided owner only: once the owner has any Didit decision (an approval, a Declined or a Kyc
+  Expired, in this environment, durable in kyc_sessions.adverse_at / kyc_events), grace never applies again: a
+  revoked, expired or failed verification never falls back to legacy grace; only a new approval restores eligibility.
+* streamers_guard_activation: the runtime roles cannot set a creator 'active' (insert or update) unless the activation
+  rule (pending: the owner's own KYC, no restriction) and the donation rule allow it, so the application's database
+  credentials cannot bypass admin activation / reactivation checks.
 
 Grants to the API role: SELECT on the new tables; EXECUTE on creator_donation_block, kyc_activation_block,
-kyc_revoke_grace, kyc_restrict_creator, kyc_lift_restriction, kyc_record_grace_expiries, kyc_enforcement_preview.
-None of them can activate enforcement, grant grace or lift a revocation.
+kyc_revoke_grace, kyc_restrict_creator, kyc_record_grace_expiries, kyc_enforcement_preview: only fail-closed changes
+and reads. Lifting a restriction is operator-only (kyc_lift_restriction), like activation, closure and grants.
 
 Downgrade refuses (and changes nothing) once enforcement left 'draft', its generation moved, or any grant,
 restriction or enforcement event exists.
@@ -52,14 +61,15 @@ DEFINER = "SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp"
 GRACE_MAX_DAYS = 90
 RESTRICTION_REASONS = "'identity_concern', 'owner_dispute', 'fraud_review', 'kyc_lost', 'admin_hold'"
 RUNTIME_FUNCTIONS = ("public.kyc_activation_block(uuid)", "public.kyc_revoke_grace(uuid, text, uuid)",
-                     "public.kyc_restrict_creator(uuid, text, text, uuid)",
-                     "public.kyc_lift_restriction(uuid, uuid, text, uuid)", "public.kyc_record_grace_expiries()",
+                     "public.kyc_restrict_creator(uuid, text, text, uuid)", "public.kyc_record_grace_expiries()",
                      "public.kyc_enforcement_preview()")
 OPERATOR_FUNCTIONS = ("public.kyc_enforcement_activate(text, text)", "public.kyc_enforcement_close(text, text)",
                       "public.kyc_grant_grace(uuid, integer, text, text)",
+                      "public.kyc_lift_restriction(uuid, uuid, text, text)",
                       "public.kyc_acknowledge_restore(text, bigint, text)")
-INTERNAL_FUNCTIONS = ("public.kyc_donation_decision(uuid, text)",
-                      "public.kyc_enforcement_log(text, uuid, uuid, uuid, uuid, text, text)",
+INTERNAL_FUNCTIONS = ("public.kyc_donation_decision(uuid, text)", "public.kyc_owner_decided(uuid, text)",
+                      "public.kyc_enforcement_log(text, uuid, uuid, uuid, uuid, text, text, bigint)",
+                      "public.streamers_guard_activation()",
                       "public.kyc_enforcement_guard()", "public.kyc_grace_grants_guard()",
                       "public.kyc_restrictions_guard()", "public.kyc_enforcement_events_guard()")
 NEW_TABLES = ("kyc_enforcement", "kyc_grace_grants", "kyc_restrictions", "kyc_enforcement_events")
@@ -90,6 +100,7 @@ def upgrade() -> None:
             singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
             state text NOT NULL DEFAULT 'draft' CHECK (state IN ('draft', 'active', 'closed')),
             generation bigint NOT NULL DEFAULT 0 CHECK (generation >= 0),
+            chain text NOT NULL DEFAULT '',  -- hash-chain head of kyc_enforcement_events (the restore witness's anchor)
             grace_max_days integer NOT NULL DEFAULT __GRACE_MAX_DAYS__
                 CHECK (grace_max_days BETWEEN 1 AND __GRACE_MAX_DAYS__),
             policy text CHECK (char_length(policy) <= 64),
@@ -119,7 +130,7 @@ def upgrade() -> None:
                 RAISE EXCEPTION 'the KYC enforcement record cannot be deleted' USING ERRCODE = 'insufficient_privilege';
             END IF;
             IF new_rank < old_rank OR NEW.generation < OLD.generation
-               OR (new_rank <> old_rank AND NEW.generation <= OLD.generation) THEN
+               OR (NEW.chain IS DISTINCT FROM OLD.chain AND NEW.generation <= OLD.generation) THEN
                 RAISE EXCEPTION 'KYC enforcement only moves forward' USING ERRCODE = 'insufficient_privilege';
             END IF;
             IF NEW.grace_max_days <> OLD.grace_max_days
@@ -218,9 +229,12 @@ def upgrade() -> None:
             operator text CHECK (char_length(operator) <= 200),
             detail text CHECK (char_length(detail) <= 500),
             generation bigint,
+            chain text,
             created_at timestamptz NOT NULL DEFAULT now()
         )
     """)
+    op.execute("CREATE UNIQUE INDEX kyc_enforcement_events_generation ON public.kyc_enforcement_events (generation) "
+               "WHERE generation IS NOT NULL")
     op.execute("CREATE INDEX kyc_enforcement_events_streamer_idx ON public.kyc_enforcement_events "
                "(streamer_id, created_at)")
     op.execute("CREATE UNIQUE INDEX kyc_enforcement_events_expiry_once ON public.kyc_enforcement_events (grant_id) "
@@ -243,6 +257,19 @@ def upgrade() -> None:
     """)
 
     # ── the rule ──
+    # Has this user ever had a Didit decision here (an approval, a Declined or a Kyc Expired)? Durable: adverse_at is
+    # never lowered and kyc_events is append-only.
+    op.execute(_sql("""
+        CREATE FUNCTION public.kyc_owner_decided(p_user_id uuid, p_environment text) RETURNS boolean
+        LANGUAGE sql STABLE __DEFINER__ AS $$
+            SELECT EXISTS (
+                SELECT 1 FROM public.kyc_sessions s
+                WHERE s.user_id = p_user_id AND s.environment = p_environment
+                  AND (s.adverse_at IS NOT NULL OR s.provider_status IN ('Approved', 'Declined', 'Kyc Expired')
+                       OR EXISTS (SELECT 1 FROM public.kyc_events e WHERE e.session_id = s.session_id
+                                  AND e.to_status IN ('Approved', 'Declined', 'Kyc Expired'))))
+        $$
+    """))
     op.execute(_sql("""
         CREATE FUNCTION public.kyc_donation_decision(p_streamer_id uuid, p_state text) RETURNS text
         LANGUAGE sql VOLATILE __DEFINER__ AS $$
@@ -257,10 +284,14 @@ def upgrade() -> None:
                 WHEN NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = s.user_id AND u.is_active) THEN 'no_owner'
                 WHEN public.user_kyc_approved(s.user_id, (SELECT c.environment FROM public.kyc_provider_config c))
                     THEN NULL
+                -- Rollout grace: only for an owner who never had a Didit decision (a revoked, expired or failed
+                -- verification never falls back to grace).
                 WHEN p_state = 'active' AND s.kyc_track = 'legacy' AND s.user_id = s.kyc_baseline_owner_id
                      AND EXISTS (SELECT 1 FROM public.kyc_grace_grants g
                                  WHERE g.streamer_id = s.id AND g.owner_id = s.user_id AND g.revoked_at IS NULL
-                                   AND clock_timestamp() < g.expires_at) THEN NULL
+                                   AND clock_timestamp() < g.expires_at)
+                     AND NOT public.kyc_owner_decided(s.user_id, (SELECT c.environment FROM public.kyc_provider_config c))
+                    THEN NULL
                 ELSE 'kyc_required'
             END
             FROM (SELECT 1) AS one LEFT JOIN public.streamers s ON s.id = p_streamer_id
@@ -289,17 +320,48 @@ def upgrade() -> None:
         $$
     """))
 
-    # ── audit + generation (internal) ──
+    # The application's database credentials cannot activate or reactivate a creator past the rules (the admin API
+    # checks first; this catches any direct write). AFTER: the functions see the new row.
+    op.execute("""
+        CREATE FUNCTION public.streamers_guard_activation() RETURNS trigger LANGUAGE plpgsql
+        SET search_path = pg_catalog, public AS $$
+        DECLARE refusal text;
+        BEGIN
+            IF current_user IN ('hyperchat_app', 'hyperchat_worker') AND NEW.status = 'active'
+               AND (TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'active') THEN
+                IF TG_OP = 'INSERT' OR OLD.status <> 'suspended' THEN
+                    refusal := public.kyc_activation_block(NEW.id);
+                END IF;
+                refusal := COALESCE(refusal, public.creator_donation_block(NEW.id));
+                IF refusal IS NOT NULL THEN
+                    RAISE EXCEPTION 'creator activation refused: %', refusal
+                        USING ERRCODE = 'insufficient_privilege', HINT = refusal;
+                END IF;
+            END IF;
+            RETURN NULL;
+        END $$
+    """)
+    op.execute("CREATE TRIGGER streamers_guard_activation AFTER INSERT OR UPDATE OF status ON public.streamers "
+               "FOR EACH ROW EXECUTE FUNCTION public.streamers_guard_activation()")
+
+    # ── audit + generation + hash chain (internal) ──
     op.execute(_sql("""
         CREATE FUNCTION public.kyc_enforcement_log(p_action text, p_streamer uuid, p_grant uuid, p_restriction uuid,
-                                                   p_actor uuid, p_operator text, p_detail text)
+                                                   p_actor uuid, p_operator text, p_detail text,
+                                                   p_min_generation bigint DEFAULT NULL)
         RETURNS bigint LANGUAGE plpgsql __DEFINER__ AS $$
-        DECLARE g bigint;
+        DECLARE e public.kyc_enforcement%ROWTYPE; g bigint; event_id uuid := gen_random_uuid();
+                at timestamptz := clock_timestamp(); detail text := left(p_detail, 500); head text;
         BEGIN
-            UPDATE public.kyc_enforcement SET generation = generation + 1 RETURNING generation INTO g;
-            INSERT INTO public.kyc_enforcement_events (action, streamer_id, grant_id, restriction_id, actor_user_id,
-                                                       operator, detail, generation)
-            VALUES (p_action, p_streamer, p_grant, p_restriction, p_actor, p_operator, left(p_detail, 500), g);
+            SELECT * INTO e FROM public.kyc_enforcement FOR UPDATE;  -- serializes every change (one chain)
+            g := GREATEST(e.generation + 1, COALESCE(p_min_generation, 0));
+            head := encode(sha256(convert_to(format('%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s', e.chain, g, event_id,
+                    p_action, e.state, p_streamer, p_grant, p_restriction, p_actor, p_operator, detail, at), 'UTF8')),
+                    'hex');
+            UPDATE public.kyc_enforcement SET generation = g, chain = head;
+            INSERT INTO public.kyc_enforcement_events (id, action, streamer_id, grant_id, restriction_id, actor_user_id,
+                                                       operator, detail, generation, chain, created_at)
+            VALUES (event_id, p_action, p_streamer, p_grant, p_restriction, p_actor, p_operator, detail, g, head, at);
             RETURN g;
         END $$
     """))
@@ -308,7 +370,7 @@ def upgrade() -> None:
     op.execute(_sql("""
         CREATE FUNCTION public.kyc_enforcement_activate(p_operator text, p_authorization text)
         RETURNS bigint LANGUAGE plpgsql __DEFINER__ AS $$
-        DECLARE e public.kyc_enforcement%ROWTYPE; g bigint;
+        DECLARE e public.kyc_enforcement%ROWTYPE;
         BEGIN
             SELECT * INTO e FROM public.kyc_enforcement FOR UPDATE;
             IF e.state <> 'draft' THEN
@@ -317,31 +379,27 @@ def upgrade() -> None:
             IF NOT EXISTS (SELECT 1 FROM public.kyc_provider_config) THEN
                 RAISE EXCEPTION 'Didit is not configured in this database' USING ERRCODE = 'check_violation';
             END IF;
-            UPDATE public.kyc_enforcement SET state = 'active', generation = generation + 1, policy = 'kyc-pr4-v1',
-                activated_at = now(), activated_by = btrim(p_operator), activation_authorization = btrim(p_authorization),
-                activation_migration = (SELECT version_num FROM public.alembic_version)
-            RETURNING generation INTO g;
-            INSERT INTO public.kyc_enforcement_events (action, operator, detail, generation)
-            VALUES ('enforcement_activated', btrim(p_operator), btrim(p_authorization), g);
-            RETURN g;
+            UPDATE public.kyc_enforcement SET state = 'active', policy = 'kyc-pr4-v1', activated_at = now(),
+                activated_by = btrim(p_operator), activation_authorization = btrim(p_authorization),
+                activation_migration = (SELECT version_num FROM public.alembic_version);
+            RETURN public.kyc_enforcement_log('enforcement_activated', NULL, NULL, NULL, NULL, btrim(p_operator),
+                                              btrim(p_authorization));
         END $$
     """))
     op.execute(_sql("""
         CREATE FUNCTION public.kyc_enforcement_close(p_operator text, p_authorization text)
         RETURNS bigint LANGUAGE plpgsql __DEFINER__ AS $$
-        DECLARE e public.kyc_enforcement%ROWTYPE; g bigint;
+        DECLARE e public.kyc_enforcement%ROWTYPE;
         BEGIN
             SELECT * INTO e FROM public.kyc_enforcement FOR UPDATE;
             IF e.state <> 'active' THEN
                 RAISE EXCEPTION 'only active KYC enforcement can be closed (it is %)', e.state
                     USING ERRCODE = 'check_violation';
             END IF;
-            UPDATE public.kyc_enforcement SET state = 'closed', generation = generation + 1, closed_at = now(),
-                closed_by = btrim(p_operator), closure_authorization = btrim(p_authorization)
-            RETURNING generation INTO g;
-            INSERT INTO public.kyc_enforcement_events (action, operator, detail, generation)
-            VALUES ('enforcement_closed', btrim(p_operator), btrim(p_authorization), g);
-            RETURN g;
+            UPDATE public.kyc_enforcement SET state = 'closed', closed_at = now(), closed_by = btrim(p_operator),
+                closure_authorization = btrim(p_authorization);
+            RETURN public.kyc_enforcement_log('enforcement_closed', NULL, NULL, NULL, NULL, btrim(p_operator),
+                                              btrim(p_authorization));
         END $$
     """))
     op.execute(_sql("""
@@ -360,9 +418,10 @@ def upgrade() -> None:
             IF s.id IS NULL OR s.status <> 'active' OR s.kyc_track <> 'legacy' OR s.user_id IS NULL
                OR s.user_id IS DISTINCT FROM s.kyc_baseline_owner_id
                OR EXISTS (SELECT 1 FROM public.kyc_restrictions r WHERE r.streamer_id = s.id AND r.lifted_at IS NULL)
+               OR public.kyc_owner_decided(s.user_id, (SELECT c.environment FROM public.kyc_provider_config c))
             THEN
                 RAISE EXCEPTION 'grace is only for an active, unrestricted legacy creator still owned by its baseline '
-                                'owner' USING ERRCODE = 'check_violation';
+                                'owner, who never had a Didit decision' USING ERRCODE = 'check_violation';
             END IF;
             INSERT INTO public.kyc_grace_grants (streamer_id, owner_id, expires_at, granted_by, reason)
             VALUES (s.id, s.user_id, now() + make_interval(days => p_days), btrim(p_operator), btrim(p_reason))
@@ -378,17 +437,16 @@ def upgrade() -> None:
         DECLARE g bigint;
         BEGIN
             SELECT generation INTO g FROM public.kyc_enforcement FOR UPDATE;
-            IF p_generation IS NULL OR p_generation <= g THEN
-                RAISE EXCEPTION 'the generation only moves forward (it is %)', g USING ERRCODE = 'check_violation';
+            IF p_generation IS NULL OR p_generation <= g OR NULLIF(btrim(p_detail), '') IS NULL THEN
+                RAISE EXCEPTION 'an acknowledgement moves the generation forward (it is %) and says why', g
+                    USING ERRCODE = 'check_violation';
             END IF;
-            UPDATE public.kyc_enforcement SET generation = p_generation;
-            INSERT INTO public.kyc_enforcement_events (action, operator, detail, generation)
-            VALUES ('restore_acknowledged', btrim(p_operator), left(btrim(p_detail), 500), p_generation);
-            RETURN p_generation;
+            RETURN public.kyc_enforcement_log('restore_acknowledged', NULL, NULL, NULL, NULL, btrim(p_operator),
+                                              btrim(p_detail), p_generation);
         END $$
     """))
 
-    # ── the API's role: only fail-closed changes, a lift that never bypasses KYC, and reads ──
+    # ── the API's role: only fail-closed changes and reads ──
     op.execute(_sql("""
         CREATE FUNCTION public.kyc_revoke_grace(p_streamer_id uuid, p_reason text, p_actor uuid)
         RETURNS integer LANGUAGE plpgsql __DEFINER__ AS $$
@@ -423,7 +481,7 @@ def upgrade() -> None:
     """))
     op.execute(_sql("""
         CREATE FUNCTION public.kyc_lift_restriction(p_streamer_id uuid, p_restriction_id uuid, p_note text,
-                                                    p_actor uuid)
+                                                    p_operator text)
         RETURNS text LANGUAGE plpgsql __DEFINER__ AS $$
         DECLARE r public.kyc_restrictions%ROWTYPE;
         BEGIN
@@ -439,9 +497,11 @@ def upgrade() -> None:
             IF r.lifted_at IS NOT NULL THEN
                 RETURN 'already_lifted';
             END IF;
-            UPDATE public.kyc_restrictions SET lifted_at = now(), lifted_by = p_actor, lift_note = btrim(p_note)
-                WHERE id = r.id;
-            PERFORM public.kyc_enforcement_log('restriction_lifted', p_streamer_id, NULL, r.id, p_actor, NULL,
+            IF NULLIF(btrim(p_operator), '') IS NULL THEN
+                RAISE EXCEPTION 'the operator is required' USING ERRCODE = 'check_violation';
+            END IF;
+            UPDATE public.kyc_restrictions SET lifted_at = now(), lift_note = btrim(p_note) WHERE id = r.id;
+            PERFORM public.kyc_enforcement_log('restriction_lifted', p_streamer_id, NULL, r.id, NULL, btrim(p_operator),
                                                btrim(p_note));
             RETURN 'ok';
         END $$
@@ -512,6 +572,7 @@ def downgrade() -> None:
             ADD CONSTRAINT creator_status_events_streamer_id_fkey FOREIGN KEY (streamer_id)
                 REFERENCES public.streamers(id) ON DELETE CASCADE
     """)
+    op.execute("DROP TRIGGER streamers_guard_activation ON public.streamers")
     for table in ("kyc_enforcement_events", "kyc_restrictions", "kyc_grace_grants", "kyc_enforcement"):
         op.execute(f"DROP TABLE public.{table}")
     for function in RUNTIME_FUNCTIONS + OPERATOR_FUNCTIONS + INTERNAL_FUNCTIONS:

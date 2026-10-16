@@ -87,8 +87,10 @@ def make_streamer(slug: str, user_id: str | None = None, name: str = "Auth Test"
 
 
 def update_streamer(streamer_id: str, **cols) -> None:
+    """Fixture setup, written as the schema owner like make_streamer (the runtime role may not activate a creator past
+    the KYC rules: migration 0023's streamers_guard_activation)."""
     sets = ", ".join(f"{k} = %({k})s" for k in cols)
-    with db() as conn:
+    with fixture_db() as conn:
         conn.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", {**cols, "id": streamer_id})
 
 
