@@ -165,6 +165,11 @@ def cleanup_synthetic_rows() -> None:
         # donations.streamer_id is ON DELETE RESTRICT: synthetic donations go first.
         conn.execute("DELETE FROM public.donations WHERE streamer_id IN "
                      "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))
+        with fixture_db() as owner:  # creator audits are RESTRICT / append-only for the runtime roles (0020, 0023)
+            synthetic_creators = "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)"
+            for table in ("kyc_enforcement_events", "kyc_grace_grants", "kyc_restrictions", "creator_status_events"):
+                owner.execute(f"DELETE FROM public.{table} WHERE streamer_id IN {synthetic_creators}",
+                              (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.platform_soundboard_slots WHERE audio_key LIKE %s OR audio_key LIKE %s",
                      (SLUG_PREFIX + "%", "hypersounds/" + SLUG_PREFIX + "%"))

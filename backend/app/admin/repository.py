@@ -134,15 +134,16 @@ class AdminRepository:
                               (user_id, streamer_id))
             return "ok", await cur.fetchone()
 
-    async def transfer_owner(self, streamer_id: str, user_id: str,
-                             expected_owner_id: str) -> tuple[str, dict | None, dict]:
+    async def transfer_owner(self, streamer_id: str, user_id: str, expected_owner_id: str,
+                             actor_id: str | None = None) -> tuple[str, dict | None, dict]:
         """D13: move a CLAIMED creator from its current owner (who must be `expected_owner_id`) to an active user, in
         one transaction. Locks: the creator row FOR NO KEY UPDATE (not FOR UPDATE: a concurrent users.streamer_id
         change takes a key-share lock on it for its foreign key, which this does not block), then both user rows FOR
         UPDATE in id order (users -> sessions, as every other path). The previous owner loses the creator: their
         users.streamer_id is cleared only when it links to THIS creator, and their sessions are revoked; nothing else
         on either account changes (role, email, password, identities, the new owner's link). Creator data (donations,
-        payment account, settings, media, OBS tokens, soundboard rows) is untouched. Returns ("ok" | "unchanged" |
+        payment account, settings, media, OBS tokens, soundboard rows) is untouched; the old owner's KYC grace is
+        revoked (migration 0023: grace is bound to its owner). Returns ("ok" | "unchanged" |
         "not_found" | "unclaimed" | "owner_changed" | "bad_user", the creator, the counts)."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT user_id::text FROM public.streamers WHERE id = %s FOR NO KEY UPDATE",
@@ -169,6 +170,7 @@ class AdminRepository:
             await cur.execute("UPDATE public.users SET streamer_id = NULL WHERE id = %s AND streamer_id = %s",
                               (owner, streamer_id))
             unlinked = cur.rowcount == 1
+            await cur.execute("SELECT public.kyc_revoke_grace(%s, 'owner_changed', %s)", (streamer_id, actor_id))
             revoked = await self._revoke_sessions(cur, owner)
             await cur.execute("SELECT count(*) AS n FROM public.obs_tokens WHERE streamer_id = %s AND is_active IS TRUE "
                               "AND (expires_at IS NULL OR expires_at > now()) "
@@ -188,7 +190,8 @@ class AdminRepository:
         """activate / suspend / reactivate, with an audit row, in one transaction on the locked creator row (so a
         concurrent checkout's share lock waits for it). Compare-and-set: refused unless the status is still
         `expected_status`. Returns ("ok" | "not_found" | "status_changed" | "bad_transition" | "unclaimed" |
-        "account_not_configured" | "kyc_required" | a donation block code, the creator)."""
+        "account_not_configured" | "kyc_required" | "restricted" | "no_owner" | a donation block code, the creator).
+        Lock order (migration 0023): the creator row first, then KYC / grace rows, then the enforcement record."""
         source, target = STATUS_ACTIONS[action]
         try:
             async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
@@ -206,12 +209,18 @@ class AdminRepository:
                         return "unclaimed", None
                     if current["razorpay_account"] not in accounts:
                         return "account_not_configured", None
-                    # shortcut: no KYC verification exists yet, so no creator can be activated; the KYC PRs replace
-                    # this with "the current owner's Didit verification is approved" (owner decision 2026-10-15).
-                    return "kyc_required", None
+                    # The current owner's own approved Didit KYC (never baseline or grace), checked under the
+                    # creator lock; every donation re-checks the rule, so a later KYC loss stops donations anyway.
+                    await cur.execute("SELECT public.kyc_activation_block(%s) AS block", (streamer_id,))
+                    block = (await cur.fetchone())["block"]
+                    if block is not None:
+                        return block, None
                 await cur.execute(f"UPDATE public.streamers SET status = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
                                   (target, streamer_id))
                 row = await cur.fetchone()
+                if action == "suspend":  # grace never survives a suspension (migration 0023)
+                    await cur.execute("SELECT public.kyc_revoke_grace(%s, 'creator_suspended', %s)",
+                                      (streamer_id, actor_id))
                 if action == "reactivate":  # back only if it could accept donations again: the same rule as checkout
                     await cur.execute("SELECT public.creator_donation_block(%s) AS block", (streamer_id,))
                     block = (await cur.fetchone())["block"]

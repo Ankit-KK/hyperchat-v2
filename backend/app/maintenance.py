@@ -75,6 +75,12 @@ async def cleanup(connection_factory, *, dry_run: bool) -> dict[str, int]:
         # KYC PR3: Didit webhook receipts after 90 days, through the database (the API's role cannot DELETE them).
         await cur.execute("SELECT public.kyc_purge_webhook_receipts(%s)", (dry_run,))
         counts["kyc_webhook_events"] = (await cur.fetchone())[0]
+        # KYC PR4: one audit row per grace grant that ran out (the expiry itself is the clock; nothing is deleted).
+        await cur.execute("SELECT count(*) FROM public.kyc_grace_grants g WHERE g.revoked_at IS NULL "
+                          "AND g.expires_at <= now() AND NOT EXISTS (SELECT 1 FROM public.kyc_enforcement_events e "
+                          "WHERE e.grant_id = g.id AND e.action = 'grace_expired')" if dry_run
+                          else "SELECT public.kyc_record_grace_expiries()")
+        counts["kyc_grace_expiries"] = (await cur.fetchone())[0]
     return counts
 
 

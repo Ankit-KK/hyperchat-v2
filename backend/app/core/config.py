@@ -147,6 +147,9 @@ class Settings(BaseSettings):
     didit_workflow_id: str | None = None   # not secret; must equal the workflow in kyc_provider_config
     didit_environment: Literal["sandbox", "live"] | None = None
     didit_api_base: str = "https://verification.didit.me"
+    # KYC PR4 restore witness (app.kyc.witness): an append-only file OUTSIDE PostgreSQL holding the highest KYC
+    # enforcement generation / state seen. Unset: only the untouched pre-rollout database is accepted.
+    kyc_witness_path: str | None = None
 
     @property
     def didit_configured(self) -> bool:
