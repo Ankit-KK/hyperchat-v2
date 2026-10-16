@@ -221,10 +221,11 @@ def test_runtime_roles_cannot_touch_the_kyc_columns_or_the_audit(app):
 def test_a_donation_insert_waits_for_a_concurrent_suspension_and_is_then_refused(app):
     sid = make_streamer("authtest-life-c", user_id=make_user("life-c" + DOMAIN))
     outcome: list = []
-    with db() as admin_conn:
+    boss = make_user("life-c-boss" + DOMAIN, role="admin")
+    with db("hyperchat_lifecycle") as admin_conn:  # the admin API's transition connection
         admin_conn.autocommit = False
-        admin_conn.execute("SELECT public.kyc_change_creator_status(%s, 'suspend', 'active', %s, 'race', "
-                           "ARRAY[]::text[])", (sid, make_user("life-c-boss" + DOMAIN, role="admin")))  # row locked
+        admin_conn.execute("SELECT public.kyc_change_creator_status(%s, 'suspend', 'active', %s, 'race', NULL)",
+                           (sid, boss))  # row locked
 
         def checkout():
             try:

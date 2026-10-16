@@ -96,8 +96,9 @@ def _like(term: str) -> str:
 
 
 class AdminRepository:
-    def __init__(self, connection_factory) -> None:
+    def __init__(self, connection_factory, lifecycle_factory=None) -> None:
         self._conn = connection_factory
+        self._lifecycle = lifecycle_factory  # hyperchat_lifecycle connections (creator status transitions only)
 
     # ── creators ───────────────────────────────────────────────────────────
     async def create_creator(self, fields: dict, pusher_groups: tuple[int, ...]) -> dict:
@@ -178,16 +179,29 @@ class AdminRepository:
 
     async def change_status(self, streamer_id: str, action: str, expected_status: str, actor_id: str,
                             reason: str | None, accounts) -> tuple[str, dict | None]:
-        """activate / suspend / reactivate through public.kyc_change_creator_status (migration 0023): the
-        compare-and-set, the checks (owner, Razorpay account, the owner's own KYC and no restriction to activate, the
+        """activate / suspend / reactivate through public.kyc_change_creator_status (migration 0023), on the
+        dedicated hyperchat_lifecycle connection (the application role may not execute it): the compare-and-set, the
+        checks (owner, the Razorpay account configured here, the owner's own KYC and no restriction to activate, the
         full donation rule to reactivate), the transition, grace revocation on suspension and the audit row, in one
-        transaction on the locked creator row. Returns ("ok" | a refusal code, the creator)."""
+        transaction on the locked creator row. The account is checked against this server's configuration first and
+        then compare-and-set in the function. Returns ("ok" | a refusal code, the creator)."""
+        if self._lifecycle is None:
+            return "lifecycle_not_configured", None
+        account = None
+        if action == "activate":
+            async with self._conn() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT razorpay_account FROM public.streamers WHERE id = %s", (streamer_id,))
+                current = await cur.fetchone()
+            if current is not None and current[0] not in accounts:
+                return "account_not_configured", None
+            account = current[0] if current is not None else None
+        async with self._lifecycle() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT public.kyc_change_creator_status(%s, %s, %s, %s, %s, %s)",
+                              (streamer_id, action, expected_status, actor_id, reason, account))
+            result = (await cur.fetchone())[0]
+        if result != "ok":
+            return result, None
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT public.kyc_change_creator_status(%s, %s, %s, %s, %s, %s) AS r",
-                              (streamer_id, action, expected_status, actor_id, reason, sorted(accounts)))
-            result = (await cur.fetchone())["r"]
-            if result != "ok":
-                return result, None
             await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
             return "ok", await cur.fetchone()
 

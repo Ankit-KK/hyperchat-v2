@@ -526,11 +526,19 @@ def test_0023_enforcement_starts_inactive_changes_nothing_existing_and_guards_it
                                           ("kyc_donation_decision(uuid, text)", False),
                                           ("kyc_lift_restriction(uuid, uuid, text, text)", False),
                                           ("kyc_owner_decided(uuid, text)", False),
+                                          ("kyc_change_creator_status(uuid, text, text, uuid, text, text)", False),
                                           ("kyc_restrict_creator(uuid, text, text, uuid)", True),
                                           ("kyc_revoke_grace(uuid, text, uuid)", True)):
                 for role, allowed in (("hyperchat_app", app_allowed), ("hyperchat_worker", False)):
                     assert conn.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')",
                                         (role, "public." + function)).fetchone()[0] is allowed, (role, function)
+            assert conn.execute("SELECT has_function_privilege('hyperchat_lifecycle', "
+                                "'public.kyc_change_creator_status(uuid, text, text, uuid, text, text)', 'EXECUTE')"
+                                ).fetchone()[0] is True  # the dedicated role, and only it
+            assert conn.execute("SELECT count(*) FROM information_schema.role_table_grants "
+                                "WHERE grantee = 'hyperchat_lifecycle'").fetchone()[0] == 0  # no table access
+            assert conn.execute("SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND prosecdef "
+                                "AND has_function_privilege('public', oid, 'EXECUTE')").fetchone()[0] == 0
             conn.execute("SELECT public.kyc_restrict_creator(%s, 'admin_hold', NULL, NULL)", (sid,))
         assert _fk_action() == "r"  # deleting a creator no longer erases its status audit
         with pytest.raises(Exception, match="downgrade of 0023 stopped"):

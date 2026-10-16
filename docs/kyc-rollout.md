@@ -27,16 +27,24 @@ In `closed`, no grace counts: every creator needs its owner's KYC.
 
 Neither a Didit webhook nor anything else activates a creator automatically. **Reactivation** re-checks the full rule.
 
-**One transition path:** eligibility is necessary but not sufficient. A creator's status changes only through `public.kyc_change_creator_status`, which the admin API calls. In one transaction on the locked creator row, it does all of the following:
+**One transition path:** eligibility is necessary but not sufficient. A creator's status changes only through `public.kyc_change_creator_status`. Only the dedicated database role `hyperchat_lifecycle` can execute it. That role is the admin API's own connection (`HYPERCHAT_DB_LIFECYCLE_USER`), and it has no table access of its own. In one transaction on the locked creator row, the function does all of the following:
 - **compare-and-set** on the expected status;
-- **activation checks:** an owner, the configured Razorpay account, the owner's own KYC and no restriction;
+- **activation checks:** an owner, the owner's own KYC and no restriction, plus a compare-and-set of the Razorpay account. The function trusts no account list: the API checks the account against this server's configuration, then the function confirms the locked row still has that account;
 - **reactivation checks:** the full donation rule;
 - **suspension:** revokes grace;
 - **audit:** writes the `creator_status_events` row.
 
 **No other way in:** the trigger `streamers_guard_activation` refuses every other runtime-role status write: a raw `UPDATE` of `status`, or an `INSERT` that isn't `pending`.
 
-**Known limit:** the function requires its actor to be an active admin. That is a sanity check, not proof of authority: the database can't tell the admin API apart from someone holding the application's credentials. What holds for any caller is that no status changes without every check and an audit row, atomically.
+**The boundary is the role.** The application role (`hyperchat_app`) can't execute the function, whatever admin id it names; the actor check inside is for consistency only. A SQL injection in, or a leaked password for, the application's connection therefore can't activate, suspend or reactivate a creator directly.
+
+**Remaining limit: forged web sessions.** The application role owns the authentication tables (`users`, `sessions`), as it must to sign people in. So someone holding only the application's database credentials can still write an admin session row and then call the admin API over HTTPS. The API then performs the transition legitimately, and the audit names that admin.
+
+Closing this needs authentication itself behind a separate boundary. The smallest secure follow-up is to move admin sign-in to a dedicated database role:
+- admin sessions, admin password hashes and role changes become writable only through SECURITY DEFINER functions owned by a separate `hyperchat_auth` role, used only by the login and session code;
+- `hyperchat_app` keeps read access, but can no longer mint or extend an admin session.
+
+The alternative is to require a step-up second factor for lifecycle actions, verified by a component outside the application's database role. Either is a change to the authentication system, not to KYC, and is outside PR4.
 
 **Grace grants** (`kyc_grace_grants`):
 - **Finite:** 1 to 90 days, also enforced by a CHECK.
@@ -147,6 +155,13 @@ chattr +a /var/lib/hyperchat-kyc/<env>.witness   # append-only: not even its own
 1. **Code merged.**
    - **Result:** PR4 is on `main`, and nothing runs.
 2. **Migration deployment** (DEV first, then production; the normal deploy procedure, with a backup first).
+   - **Before the migration:**
+     - re-run `deploy/postgres/roles.sql`, which creates `hyperchat_lifecycle`;
+     - grant it `CONNECT` on the database;
+     - add its line to that cluster's `pg_ident` map;
+     - set `HYPERCHAT_DB_LIFECYCLE_USER=hyperchat_lifecycle` in api.env.
+
+     Without the role the migration fails, and that is safe. Without the env var, creator status changes answer 503.
    - **Before:** migrations 0020–0023 verified on PostgreSQL 15 (DEV's version).
    - **Check:** `SELECT state, generation FROM public.kyc_enforcement` gives `draft`, `0`.
    - **Set up:** the witness file (above), and set `HYPERCHAT_KYC_WITNESS_PATH`.

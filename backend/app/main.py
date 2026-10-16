@@ -17,7 +17,7 @@ from app.core.errors import install_api_error_handler
 from app.core.logging import configure_logging
 from app.dashboard.repository import DashboardRepository
 from app.dashboard.service import DashboardService
-from app.db.pool import Database
+from app.db.pool import Database, single_connection_factory
 from app.public.repository import PublicRepository
 from app.public.service import PublicService
 from app.partners.repository import PartnerRepository
@@ -90,7 +90,9 @@ async def lifespan(app: FastAPI):
     if app.state.db.enabled:
         app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection))
         app.state.authz = AuthzRepository(app.state.db.connection)
-        app.state.admin = AdminService(AdminRepository(app.state.db.connection),
+        lifecycle = single_connection_factory(settings.db_conninfo(lifecycle=True)) \
+            if settings.db_lifecycle_user else None  # KYC PR4: creator status transitions only
+        app.state.admin = AdminService(AdminRepository(app.state.db.connection, lifecycle),
                                        payment_accounts=frozenset(payment_accounts.summary()["payments"]),
                                        pusher_groups=tuple(settings.pusher_groups_configured))
         app.state.kyc = KycService.from_settings(KycRepository(app.state.db.connection), settings,

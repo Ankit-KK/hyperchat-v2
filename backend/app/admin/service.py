@@ -167,6 +167,9 @@ class AdminService:
             "kyc_required": (409, "The creator's owner has no approved identity verification (KYC)"),
             "restricted": (409, "The creator has an open KYC restriction"),
             "no_owner": (409, "The creator's owner is missing or inactive"),
+            "account_changed": (409, "The creator's Razorpay account changed; please retry"),
+            "lifecycle_not_configured": (503, "Creator status changes are not configured on this server"),
+            "not_authorized": (403, "Only an active admin can change a creator's status"),
         }
         if result != "ok":
             status, message = refusals.get(result, (409, "The creator could not accept donations"))

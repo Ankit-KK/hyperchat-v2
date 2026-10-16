@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     db_name: str = "hyperchat_dev"
     db_user: str = "hyperchat_app"  # runtime role: DML only (see deploy/postgres/roles.sql)
     db_password: SecretStr | None = None
+    # KYC PR4: the admin creator status transition runs on its own role (deploy/postgres/roles.sql), which may only
+    # execute public.kyc_change_creator_status. Unset: activate / suspend / reactivate answer 503.
+    db_lifecycle_user: str | None = None
+    db_lifecycle_password: SecretStr | None = None
     # Human-readable label shown in logs and /health so nobody mistakes dev data for production.
     db_label: str = "DEV"
     db_connect_timeout: int = 5
@@ -448,18 +452,21 @@ class Settings(BaseSettings):
         except OSError:
             return "dev"
 
-    def db_conninfo(self) -> str:
-        """libpq connection string. Contains the password if one is configured: never log it."""
+    def db_conninfo(self, *, lifecycle: bool = False) -> str:
+        """libpq connection string (the runtime role, or the lifecycle role). Contains the password if one is
+        configured: never log it."""
+        user, password = ((self.db_lifecycle_user, self.db_lifecycle_password) if lifecycle
+                          else (self.db_user, self.db_password))
         params = {
             "host": self.db_host,
             "port": self.db_port,
             "dbname": self.db_name,
-            "user": self.db_user,
+            "user": user,
             "connect_timeout": self.db_connect_timeout,
-            "application_name": "hyperchat-api",
+            "application_name": "hyperchat-api-lifecycle" if lifecycle else "hyperchat-api",
         }
-        if self.db_password is not None:
-            params["password"] = self.db_password.get_secret_value()
+        if password is not None:
+            params["password"] = password.get_secret_value()
         return make_conninfo(**params)
 
 

@@ -39,7 +39,8 @@ runs it for every runtime-role insert):
   Expired, in this environment, durable in kyc_sessions.adverse_at / kyc_events), grace never applies again: a
   revoked, expired or failed verification never falls back to legacy grace; only a new approval restores eligibility.
 * Creator status: eligibility is necessary, not sufficient. Status changes go only through
-  public.kyc_change_creator_status (admin activate / suspend / reactivate: compare-and-set, owner, Razorpay account,
+  public.kyc_change_creator_status, executable ONLY by the dedicated hyperchat_lifecycle role (the admin API's own
+  connection; not the application role) (admin activate / suspend / reactivate: compare-and-set, owner, Razorpay account,
   the owner's own KYC and no restriction to activate, the full rule to reactivate, grace revoked on suspension, and
   the creator_status_events row, all in one transaction); the streamers_guard_activation trigger refuses every other
   runtime-role status write (a raw UPDATE, or an INSERT that is not 'pending').
@@ -62,8 +63,8 @@ depends_on = None
 DEFINER = "SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp"
 GRACE_MAX_DAYS = 90
 RESTRICTION_REASONS = "'identity_concern', 'owner_dispute', 'fraud_review', 'kyc_lost', 'admin_hold'"
+LIFECYCLE_FUNCTION = "public.kyc_change_creator_status(uuid, text, text, uuid, text, text)"
 RUNTIME_FUNCTIONS = ("public.kyc_activation_block(uuid)", "public.kyc_revoke_grace(uuid, text, uuid)",
-                     "public.kyc_change_creator_status(uuid, text, text, uuid, text, text[])",
                      "public.kyc_restrict_creator(uuid, text, text, uuid)", "public.kyc_record_grace_expiries()",
                      "public.kyc_enforcement_preview()")
 OPERATOR_FUNCTIONS = ("public.kyc_enforcement_activate(text, text)", "public.kyc_enforcement_close(text, text)",
@@ -341,13 +342,13 @@ def upgrade() -> None:
     op.execute("CREATE TRIGGER streamers_guard_activation BEFORE INSERT OR UPDATE OF status ON public.streamers "
                "FOR EACH ROW EXECUTE FUNCTION public.streamers_guard_activation()")
     # The one transition path (admin activate / suspend / reactivate). Returns 'ok' or a refusal code; on a refusal
-    # nothing changes. p_accounts: the Razorpay accounts this server can take payments with (its configuration).
-    # p_actor must be an active admin: a sanity check, NOT proof of authority (the application's database role cannot
-    # be told apart from the admin API); what holds for every caller is that each check runs and the audit row is
-    # written in the same transaction as the change.
+    # nothing changes. Only hyperchat_lifecycle may execute it (the admin API's dedicated connection; no table access
+    # of its own): the application's database role cannot, whatever actor id it names. p_actor must be an active
+    # admin (consistency, not the authority: the role is). p_expected_account: the Razorpay account the API found
+    # configured on this server, compare-and-set against the locked row (the function trusts no account list).
     op.execute(_sql("""
         CREATE FUNCTION public.kyc_change_creator_status(p_streamer_id uuid, p_action text, p_expected_status text,
-                                                         p_actor uuid, p_reason text, p_accounts text[])
+                                                         p_actor uuid, p_reason text, p_expected_account text)
         RETURNS text LANGUAGE plpgsql __DEFINER__ AS $$
         DECLARE s public.streamers%ROWTYPE; source text; target text; refusal text;
         BEGIN
@@ -377,8 +378,8 @@ def upgrade() -> None:
                 IF s.user_id IS NULL THEN
                     RETURN 'unclaimed';
                 END IF;
-                IF NOT (s.razorpay_account = ANY(COALESCE(p_accounts, ARRAY[]::text[]))) THEN
-                    RETURN 'account_not_configured';
+                IF p_expected_account IS NULL OR s.razorpay_account IS DISTINCT FROM p_expected_account THEN
+                    RETURN 'account_changed';  -- not the account the API verified as configured
                 END IF;
                 refusal := public.kyc_activation_block(s.id);  -- the owner's own KYC, no restriction
                 IF refusal IS NOT NULL THEN
@@ -610,6 +611,13 @@ def upgrade() -> None:
     op.execute(f"REVOKE ALL ON FUNCTION {', '.join(RUNTIME_FUNCTIONS + OPERATOR_FUNCTIONS + INTERNAL_FUNCTIONS)} "
                "FROM PUBLIC")
     op.execute(f"GRANT EXECUTE ON FUNCTION {', '.join(RUNTIME_FUNCTIONS)} TO hyperchat_app")
+    # 0007's per-schema default privileges cannot remove PostgreSQL's built-in PUBLIC EXECUTE, so 0020's rule (now
+    # SECURITY DEFINER) was executable by every role: only the runtime roles keep it.
+    op.execute("REVOKE ALL ON FUNCTION public.creator_donation_block(uuid) FROM PUBLIC")
+    # hyperchat_lifecycle (deploy/postgres/roles.sql): this one function and nothing else.
+    op.execute(f"REVOKE ALL ON FUNCTION {LIFECYCLE_FUNCTION} FROM PUBLIC")
+    op.execute("GRANT USAGE ON SCHEMA public TO hyperchat_lifecycle")
+    op.execute(f"GRANT EXECUTE ON FUNCTION {LIFECYCLE_FUNCTION} TO hyperchat_lifecycle")
 
 
 def downgrade() -> None:
@@ -636,5 +644,6 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER streamers_guard_activation ON public.streamers")
     for table in ("kyc_enforcement_events", "kyc_restrictions", "kyc_grace_grants", "kyc_enforcement"):
         op.execute(f"DROP TABLE public.{table}")
-    for function in RUNTIME_FUNCTIONS + OPERATOR_FUNCTIONS + INTERNAL_FUNCTIONS:
+    for function in (LIFECYCLE_FUNCTION, *RUNTIME_FUNCTIONS, *OPERATOR_FUNCTIONS, *INTERNAL_FUNCTIONS):
         op.execute(f"DROP FUNCTION {function}")
+    op.execute("REVOKE USAGE ON SCHEMA public FROM hyperchat_lifecycle")
