@@ -177,6 +177,9 @@ def fake_dev(root: Path) -> None:
     (root / "usr/bin/python3.14").write_text("")
     link(release / "venv/bin/python3.14", root / "usr/bin/python3.14")
     link(release / "venv/bin/python", release / "venv/bin/python3.14")
+    (release / "venv/lib/python3.14/site-packages").mkdir(parents=True)
+    (release / "venv/lib/python3.14/site-packages/dep.py").write_text("")
+    link(release / "venv/lib64", release / "venv/lib")  # a directory link inside the release, as venv makes it
     link(root / "opt/hyperchat/current", release)
     (root / "etc/hyperchat").mkdir(parents=True)
     (root / "etc/hyperchat/api.env").write_text("HYPERCHAT_APP_ENV=development\n")
@@ -200,7 +203,8 @@ def audit(root: Path) -> subprocess.CompletedProcess:
            "HYPERCHAT_CHECK_OWNER": pwd.getpwuid(os.getuid()).pw_name,
            "HYPERCHAT_CHECK_GROUP": grp.getgrgid(os.getgid()).gr_name,
            "HYPERCHAT_CHECK_MOUNTINFO": str(root / "mountinfo")}
-    return subprocess.run(["bash", str(DEPLOY / "check_isolation.sh"), "dev"], capture_output=True, text=True, env=env)
+    return subprocess.run(["bash", str(DEPLOY / "check_isolation.sh"), "dev"], capture_output=True, text=True, env=env,
+                          timeout=60)  # a cycle must end the audit, never hang it
 
 
 @needs_bash
@@ -277,6 +281,93 @@ def _mount_point_inside(root):
         f.write(f"40 22 0:50 / {root / RELEASE / 'backend'} rw - tmpfs tmpfs rw\n")
 
 
+def _safe_linked_dir(root) -> Path:
+    """A directory outside the release, safe by itself, that the release links to (backend/vendor -> /srv/lib)."""
+    lib = root / "srv/lib"
+    lib.mkdir(parents=True)
+    (lib / "vendored.py").write_text("")
+    for path in (root / "srv", lib, lib / "vendored.py"):
+        path.chmod(0o750 if path.is_dir() else 0o640)
+    link(root / RELEASE / "backend/vendor", lib)
+    return lib
+
+
+@needs_bash
+def test_the_audit_accepts_a_safe_directory_reached_through_a_symlink(tmp_path):
+    fake_dev(tmp_path)
+    _safe_linked_dir(tmp_path)
+    out = audit(tmp_path)
+    assert out.returncode == 0, out.stdout
+    assert "OK    every directory reached through a symlink" in out.stdout
+
+
+@needs_bash
+def test_a_failing_traversal_tool_never_passes(tmp_path):
+    """namei that prints nothing and fails (broken, killed, missing library) must not read as "no problem"."""
+    fake_dev(tmp_path / "root")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "namei").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "namei").chmod(0o755)
+    os.environ["PATH"], saved = f"{bin_dir}:{os.environ['PATH']}", os.environ["PATH"]
+    try:
+        out = audit(tmp_path / "root")
+    finally:
+        os.environ["PATH"] = saved
+    assert out.returncode == 1
+    fails = [line for line in out.stdout.splitlines() if line.startswith("FAIL")]
+    assert any("no writable directory on the way to /opt/hyperchat" in line and "[exit 1]" in line for line in fails)
+    assert any(LINKS in line for line in fails), out.stdout
+
+
+def _writable_file_in_linked_dir(root):
+    (_safe_linked_dir(root) / "vendored.py").chmod(0o666)  # the link and the directory look fine; the code does not
+
+
+def _writable_subdir_in_linked_dir(root):
+    (_safe_linked_dir(root) / "plugins").mkdir(mode=0o777)
+    (root / "srv/lib/plugins").chmod(0o777)
+
+
+def _nested_link_escape(root):
+    """A link inside the linked directory leads on to a writable file elsewhere."""
+    lib = _safe_linked_dir(root)
+    (root / "srv/evil").mkdir(mode=0o750)
+    (root / "srv/evil/hook.py").write_text("")
+    (root / "srv/evil/hook.py").chmod(0o666)
+    link(lib / "hook.py", root / "srv/evil/hook.py")
+
+
+def _nested_directory_escape(root):
+    """Two levels: the linked directory links to another directory that holds writable code."""
+    lib = _safe_linked_dir(root)
+    deeper = root / "srv/deeper"
+    deeper.mkdir(mode=0o750)
+    (deeper / "inner.py").write_text("")
+    (deeper / "inner.py").chmod(0o646)  # writable by "other" only
+    link(lib / "more", deeper)
+
+
+def _symlink_loop(root):
+    app = root / RELEASE / "backend/app"
+    (app / "a.py").symlink_to("b.py")
+    (app / "b.py").symlink_to("a.py")
+
+
+def _directory_cycle_in_release(root):
+    (root / RELEASE / "backend/self").symlink_to(".")
+
+
+def _directory_cycle_outside(root):
+    link(_safe_linked_dir(root) / "up", root / "srv")  # /srv/lib/up -> /srv, which contains /srv/lib
+
+
+def _mount_in_linked_dir(root):
+    lib = _safe_linked_dir(root)
+    with open(root / "mountinfo", "a") as f:
+        f.write(f"41 22 0:51 / {lib / 'cache'} rw - tmpfs tmpfs rw\n")
+
+
 def _world_readable_env(root):
     (root / "etc/hyperchat/api.env").chmod(0o644)
 
@@ -325,6 +416,7 @@ def _ident_maps_prod_user(root):
 
 
 LINKS = "every symlink under /opt/hyperchat"
+LINKED = "every directory reached through a symlink"
 TAKES_EFFECT = "pg_hba HyperChat rule takes effect"
 
 
@@ -338,6 +430,10 @@ TAKES_EFFECT = "pg_hba HyperChat rule takes effect"
     (_writable_ancestor, "no writable directory on the way to /opt/hyperchat"),
     (_other_writable_ancestor, "no writable directory on the way to /opt/hyperchat"),
     (_mount_point_inside, "no mount point inside"),
+    (_writable_file_in_linked_dir, LINKED), (_writable_subdir_in_linked_dir, LINKED),
+    (_nested_link_escape, LINKS), (_nested_directory_escape, LINKED),
+    (_symlink_loop, LINKS), (_directory_cycle_in_release, LINKS), (_directory_cycle_outside, LINKS),
+    (_mount_in_linked_dir, "no mount point inside"),
     (_world_readable_env, "api.env is"), (_unit_as_root, "hyperchat-worker runs as 'root'"),
     (_hba_missing_auth, "missing: hyperchat_auth"), (_hba_rule_below_generic, TAKES_EFFECT),
     (_hba_shadowed_by_a_role_rule, TAKES_EFFECT), (_hba_two_rules, TAKES_EFFECT), (_hba_include, TAKES_EFFECT),
