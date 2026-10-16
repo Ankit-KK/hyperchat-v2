@@ -114,15 +114,26 @@ These checks run in order; any failure stops processing.
 
 ## Status transitions
 - **Statuses:** Didit's exact values are stored as they are: `Not Started`, `In Progress`, `Awaiting User`, `In Review`, `Approved`, `Declined`, `Resubmitted`, `Abandoned`, `Expired`, `Kyc Expired`.
-- **The approval rule** (`public.user_kyc_approved(user, environment)`; the API's `approved` and `KycService.kyc_approved` both use it) is fail-closed. A user is approved only while both hold:
-  1. **Newest session approved:** their **newest** session (by creation order) for this database's configured environment **and workflow** is `Approved`.
-  2. **No later adverse result:** no session of theirs in this environment has a `Declined` or `Kyc Expired` with a provider time at or after that approval.
+- **The approval rule** (`public.kyc_effective(user, environment)` returns `(approved, current session)`; `user_kyc_approved`, the API's `approved` and its displayed state all use it) is fail-closed.
+  - **Current session:** the user's **newest** session (by creation order) for this database's configured environment **and workflow**, within the current **workflow epoch**. A session belongs to the epoch if it was created, or updated by Didit, at or after the moment the workflow was configured.
+  - **Approved:** only while the current session is `Approved` **and** its approval is strictly later than the **veto** of every session of the user in this environment.
+  - **The veto (`kyc_sessions.adverse_at`):** the latest provider time of any `Declined` or `Kyc Expired` ever recorded for that session.
+    - It counts even when it arrived stale or came from an admin refresh.
+    - It is never lowered: a later `Resubmitted`, `In Progress` or `In Review` doesn't erase it.
+    - It lives on the session, so the 90-day receipt purge doesn't touch it.
+    - On equal times, the veto wins.
 - **Consequences:**
-  - **Newer attempts win:** an older approval never outlives a newer attempt, a newer decline, or a later revocation or expiry of any session.
-  - **Same-session revocation:** a later `Declined` or `Kyc Expired` on the approved session itself removes the approval.
-  - **Re-verifying clears it:** a later signed approval of a new session restores approval. An older decline doesn't block it.
-  - **Workflow changes:** approvals from a previous workflow stop counting (`reverification_required`); the owner verifies again under the new workflow.
+  - **Newer attempts and revocations win:** an older approval never outlives a newer attempt, decline or expiry, including a revocation later followed by a non-approving status.
+  - **Restoring approval:** only a later genuine **signed** approval restores it. A refresh never approves.
+  - **Same-session revocation:** still removes the approval.
   - **Environments stay separate:** a sandbox approval never counts in production.
+- **States:**
+  - `reverification_required`: the current session is `Approved` but vetoed, or the user has only sessions of an obsolete workflow or epoch. They can start again.
+  - **Obsolete sessions don't block:** an obsolete-workflow session (`In Review` included) never blocks a new verification.
+- **Workflow changes (fail-closed):**
+  - **New epoch:** changing the configured workflow or environment starts a new epoch. A trigger on `kyc_provider_config` enforces this: a secret rotation keeps the epoch, and the epoch can't be set by hand.
+  - **Restoring an earlier workflow does NOT restore** its earlier approvals. While another workflow was configured, that workflow's webhooks were refused, so a revocation or expiry Didit sent in that period was never recorded. Reviving the old approvals could therefore resurrect a verification Didit had already withdrawn.
+  - **Re-verification:** after any switch, the owner needs a new signed approval. That can be a new session, or a Didit update of an unfinished old session dated after the switch.
 - **After a finished session:** once a session ends in `Declined`, `Expired`, `Abandoned` or `Kyc Expired`, the owner can start again, and Didit issues a new session. `Resubmitted` continues the same session.
 
 ## Privacy and storage

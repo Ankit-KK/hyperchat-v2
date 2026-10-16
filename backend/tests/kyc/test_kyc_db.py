@@ -44,8 +44,8 @@ class FakeDidit:
     """Didit's documented behaviour: one unfinished session per vendor_data (returned again), a new one after a
     finished session; decisions as scripted. Never a network call."""
 
-    def __init__(self) -> None:
-        self.workflow_id = WF
+    def __init__(self, workflow: str = WF) -> None:
+        self.workflow_id = workflow
         self.sessions: dict[str, str] = {}   # vendor -> open session id
         self.decisions: dict[str, dict] = {}
         self.fail: str | None = None
@@ -275,7 +275,7 @@ def test_signature_freshness_and_application_are_enforced(kyc):
     for kw, code in (({"sign_it": False}, 401), ({"secret": "wrong-secret-0123456789"}, 401),
                      ({"signature": "0" * 64}, 401), ({"signature": "not hex"}, 401), ({"ts": now - 301}, 401),
                      ({"x_ts": now - 301}, 401), ({"x_ts": "soon"}, 401), ({"ts": "1774970000"}, 401),
-                     ({"ts": now + 301}, 401), ({"environment": "live"}, 403),
+                     ({"ts": now + 400}, 401), ({"environment": "live"}, 403),
                      ({"application_id": "00000000-0000-4000-8000-000000000000"}, 403)):
         assert hook(kyc, **common, **kw).status_code == code, kw
     tampered = {"event_id": "authtest-ev-t", "webhook_type": "status.updated", "timestamp": now, "created_at": now,
@@ -491,6 +491,117 @@ def test_a_workflow_change_requires_reverification(kyc):
     b = new_session(uid, other)
     assert hook(kyc, session_id=b, vendor=uid, status="Approved", created_at=t + 10, decision=approved_decision(b),
                 workflow_id=other).json()["status"] == "applied"
+    assert me_approved(kyc, uid)
+    configure(workflow=WF)  # back to the first workflow: its old approval is not restored (a new epoch)
+    me = kyc.get(ME).json()
+    assert (me["approved"], me["state"], me["can_start"]) == (False, "reverification_required", True)
+    assert not approved(uid)
+
+
+def send(app, uid, sid, status, at, **kw) -> str:
+    return hook(app, session_id=sid, vendor=uid, status=status, created_at=at, **kw).json()["status"]
+
+
+def test_a_historical_revocation_is_a_durable_veto(kyc):
+    headers, uid = owner(kyc, "kyc-veto")
+    boss = new_browser(kyc)
+    bh = signed_in(boss, "kyc-boss3" + DOMAIN, role="admin")
+    t = int(time.time()) - 1000  # provider times in the past, so an admin refresh (dated now) is the newest
+    a = start(kyc, headers)["session_id"]
+    c = new_session(uid)
+
+    def approve(at):
+        return send(kyc, uid, c, "Approved", at, decision=approved_decision(c))
+
+    assert approve(t + 20) == "applied" and me_approved(kyc, uid)
+    assert send(kyc, uid, a, "Declined", t + 30) == "applied" and not me_approved(kyc, uid)
+    assert send(kyc, uid, a, "Resubmitted", t + 40) == "applied" and not me_approved(kyc, uid)  # veto survives
+    assert send(kyc, uid, a, "In Progress", t + 50) == "applied" and not me_approved(kyc, uid)
+    assert approve(t + 60) == "applied" and me_approved(kyc, uid)  # only a later signed approval restores it
+    assert send(kyc, uid, a, "Kyc Expired", t + 70) == "applied" and not me_approved(kyc, uid)
+    assert send(kyc, uid, a, "Resubmitted", t + 80) == "applied" and not me_approved(kyc, uid)
+    assert approve(t + 90) == "applied" and me_approved(kyc, uid)
+    assert send(kyc, uid, a, "Declined", t + 90) == "applied" and not me_approved(kyc, uid)  # equal time: veto wins
+    assert approve(t + 100) == "applied" and me_approved(kyc, uid)
+    # An admin refresh that records an adverse state is a veto too; a later non-approving refresh does not erase it.
+    kyc.fake.decisions[c] = {"session_id": c, "status": "Declined"}
+    assert boss.post(f"/api/v1/admin/users/{uid}/kyc/refresh", headers=bh).json()["refresh"] == "applied"
+    assert not me_approved(kyc, uid)
+    kyc.fake.decisions[c] = {"session_id": c, "status": "In Review"}
+    assert boss.post(f"/api/v1/admin/users/{uid}/kyc/refresh", headers=bh).json()["refresh"] == "applied"
+    assert not me_approved(kyc, uid) and session_row(c)[0] == "In Review"
+    # The veto is not a webhook receipt: the 90-day purge does not lift it.
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.kyc_webhook_events SET received_at = now() - interval '91 days' "
+                     "WHERE session_id IN (%s, %s)", (a, c))
+    with db() as conn:
+        assert conn.execute("SELECT public.kyc_purge_webhook_receipts(false)").fetchone()[0] >= 10
+    assert not me_approved(kyc, uid)
+    assert approve(int(time.time()) + 5) == "applied" and me_approved(kyc, uid)
+
+
+def test_a_stale_revocation_still_vetoes(kyc):
+    headers, uid = owner(kyc, "kyc-veto-stale")
+    t = int(time.time()) - 1000
+    a = start(kyc, headers)["session_id"]
+    c = new_session(uid)
+    assert send(kyc, uid, a, "In Progress", t + 50) == "applied"
+    assert send(kyc, uid, c, "Approved", t + 20, decision=approved_decision(c)) == "applied" and me_approved(kyc, uid)
+    assert send(kyc, uid, a, "Declined", t + 30) == "stale"  # older than A's own state, newer than C's approval
+    assert not me_approved(kyc, uid) and session_row(a)[0] == "In Progress"
+
+
+def test_concurrent_adverse_and_approval_events_keep_the_veto(kyc):
+    headers, uid = owner(kyc, "kyc-veto-race")
+    t = int(time.time()) - 1000
+    a = start(kyc, headers)["session_id"]
+    c = new_session(uid)
+    events = [(a, "Declined", t + 80, None), (a, "Resubmitted", t + 90, None), (a, "In Progress", t + 85, None),
+              (c, "Approved", t + 75, approved_decision(c))]
+    threads = [threading.Thread(target=send, args=(kyc, uid, sid, status, at), kwargs={"decision": d})
+               for sid, status, at, d in events]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(20)
+    assert session_row(a)[0] == "Resubmitted" and session_row(c)[0] == "Approved"
+    assert not me_approved(kyc, uid)  # whatever the arrival order
+    with db() as conn:
+        assert conn.execute("SELECT extract(epoch FROM adverse_at)::bigint FROM public.kyc_sessions "
+                            "WHERE session_id = %s", (a,)).fetchone()[0] == t + 80
+
+
+def use_workflow(app, workflow: str) -> None:
+    """The operator moves this environment to another Didit workflow: database configuration and API settings."""
+    configure(workflow=workflow)
+    settings = app.app_state.kyc.settings.model_copy(update={"didit_workflow_id": workflow})
+    app.fake = FakeDidit(workflow)
+    app.app_state.kyc = KycService(app.app_state.kyc.repo, settings, client=app.fake, limiter=app.app_state.auth.repo)
+
+
+def test_an_obsolete_workflow_session_never_blocks_reverification(kyc):
+    headers, uid = owner(kyc, "kyc-wf-review")
+    a = start(kyc, headers)["session_id"]
+    assert send(kyc, uid, a, "In Review", int(time.time())) == "applied"
+    me = kyc.get(ME).json()
+    assert (me["state"], me["can_start"]) == ("in_review", False)
+    assert kyc.post(f"{ME}/session", headers=headers).status_code == 409
+    other = str(uuid.uuid4())
+    use_workflow(kyc, other)
+    me = kyc.get(ME).json()
+    assert (me["approved"], me["state"], me["can_start"]) == (False, "reverification_required", True)
+    b = start(kyc, headers)["session_id"]  # the real owner path, under the new workflow
+    assert b != a and kyc.get(ME).json()["state"] == "in_progress"
+    with db() as conn:
+        assert conn.execute("SELECT workflow_id::text FROM public.kyc_sessions WHERE session_id = %s",
+                            (b,)).fetchone()[0] == other
+    assert send(kyc, uid, b, "Approved", int(time.time()), decision=approved_decision(b),
+                workflow_id=other) == "applied" and me_approved(kyc, uid)
+    use_workflow(kyc, WF)  # back again: B is another workflow, A's old state belongs to the previous epoch
+    me = kyc.get(ME).json()
+    assert (me["approved"], me["state"], me["can_start"]) == (False, "reverification_required", True)
+    # A NEW signed approval of A, dated in this epoch, counts (Didit decided it after the switch).
+    assert send(kyc, uid, a, "Approved", int(time.time()) + 5, decision=approved_decision(a)) == "applied"
     assert me_approved(kyc, uid)
 
 

@@ -408,11 +408,12 @@ def test_0022_kyc_core_changes_nothing_existing_and_guards_its_history(monkeypat
             assert conn.execute("SELECT count(*), md5(string_agg(to_jsonb(u)::text, ',' ORDER BY id)) "
                                 "FROM public.users u").fetchone() == users_before
             assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox')", (uid,)).fetchone()[0] is False
+            conn.execute("INSERT INTO public.kyc_provider_config (environment, workflow_id, webhook_secret) "
+                         "VALUES ('sandbox', %s, 'whsec_migtest_0123456789')", (WF22,))  # opens the workflow epoch
+            since = conn.execute("SELECT workflow_since FROM public.kyc_provider_config").fetchone()[0]
             sid = conn.execute("INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, "
                                "environment) VALUES (%s, %s, gen_random_uuid(), %s, 'sandbox') "
                                "RETURNING session_id", (uid, str(uid), WF22)).fetchone()[0]
-            conn.execute("INSERT INTO public.kyc_provider_config (environment, workflow_id, webhook_secret) "
-                         "VALUES ('sandbox', %s, 'whsec_migtest_0123456789')", (WF22,))
             assert conn.execute("SELECT public.kyc_record_provider_status(%s, 'Approved', now(), '{}'::jsonb, "
                                 "'webhook', NULL)", (sid,)).fetchone()[0] == "applied"
             assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox'), public.user_kyc_approved(%s, 'live')",
@@ -449,6 +450,14 @@ def test_0022_kyc_core_changes_nothing_existing_and_guards_its_history(monkeypat
             assert conn.execute("SELECT environment, workflow_id::text, application_id, webhook_secret "
                                 "FROM public.kyc_provider_config").fetchall() == [
                 ("sandbox", WF22, None, "whsec_migtest_0123456789")]
+            # A secret rotation keeps the workflow epoch; a workflow change (even back) starts a new one.
+            assert conn.execute("SELECT workflow_since FROM public.kyc_provider_config").fetchone()[0] == since
+            assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox')", (uid,)).fetchone()[0] is True
+            conn.execute("UPDATE public.kyc_provider_config SET workflow_id = gen_random_uuid()")
+            conn.execute("UPDATE public.kyc_provider_config SET workflow_id = %s, workflow_since = '2000-01-01'",
+                         (WF22,))
+            assert conn.execute("SELECT workflow_since FROM public.kyc_provider_config").fetchone()[0] > since
+            assert conn.execute("SELECT public.user_kyc_approved(%s, 'sandbox')", (uid,)).fetchone()[0] is False
         with pytest.raises(Exception, match="KYC session"):
             command.downgrade(cfg, "0021")  # never drops verification history
         assert _version() == "0022"

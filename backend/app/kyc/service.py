@@ -47,16 +47,17 @@ def _iso(value):
     return value.isoformat() if value is not None else None
 
 
-def summary(sessions: list[dict], environment: str | None, approved: bool) -> dict:
-    """The user's KYC state from their sessions in this environment (newest first). `approved` is always
-    public.user_kyc_approved (the one rule); an Approved newest session that the rule does not accept (a later
-    revocation or expiry elsewhere, or a previous workflow) needs re-verification."""
+def summary(sessions: list[dict], environment: str | None, effective: tuple[bool, str | None]) -> dict:
+    """The user's KYC state. `effective` is public.kyc_effective (the one rule): (approved, the CURRENT session, i.e.
+    the newest of the configured workflow and its epoch). Sessions of an obsolete workflow never decide the state, and
+    an Approved current session the rule does not accept (a later revocation or expiry) needs re-verification."""
+    approved, current = effective
     mine = [s for s in sessions if s["environment"] == environment]
-    latest = mine[0] if mine else None
+    latest = next((s for s in mine if s["session_id"] == current), None)
     if approved:
         state = "approved"
     elif latest is None:
-        state = "none"
+        state = "reverification_required" if mine else "none"  # only obsolete-workflow sessions
     elif latest["provider_status"] == "Approved":
         state = "reverification_required"
     else:
@@ -92,6 +93,12 @@ class KycRepository:
         async with self._conn() as conn, conn.cursor() as cur:
             await cur.execute("SELECT public.user_kyc_approved(%s, %s)", (user_id, environment))
             return (await cur.fetchone())[0]
+
+    async def effective(self, user_id: str, environment: str) -> tuple[bool, str | None]:
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT approved, session_id::text FROM public.kyc_effective(%s, %s)", (user_id, environment))
+            approved, session_id = await cur.fetchone()
+            return approved, session_id
 
     async def record_session(self, user_id: str, created: CreatedSession, workflow_id: str, environment: str) -> dict:
         """Store a session Didit returned (idempotent) and apply the signed webhooks that arrived before it."""
@@ -153,7 +160,10 @@ class KycService:
         return bool(self.environment) and await self.repo.approved(user_id, self.environment)
 
     async def _summary(self, user_id: str) -> dict:
-        return summary(await self.repo.sessions(user_id), self.environment, await self.kyc_approved(user_id))
+        return summary(await self.repo.sessions(user_id), self.environment, await self._effective(user_id))
+
+    async def _effective(self, user_id: str) -> tuple[bool, str | None]:
+        return await self.repo.effective(user_id, self.environment) if self.environment else (False, None)
 
     async def status(self, user: User) -> dict:
         owns = await self.repo.owns_creator(user.id)
@@ -206,7 +216,7 @@ class KycService:
     # ── admin ─────────────────────────────────────────────────────────────
     async def admin_view(self, user_id: str) -> dict:
         sessions = await self.repo.sessions(user_id)
-        return {**summary(sessions, self.environment, await self.kyc_approved(user_id)),
+        return {**summary(sessions, self.environment, await self._effective(user_id)),
                 "sessions": [{**s, **{k: _iso(s[k]) for k in ("provider_updated_at", "approved_at", "created_at",
                                                               "updated_at")}} for s in sessions],
                 "events": [{**e, "created_at": _iso(e["created_at"])} for e in await self.repo.events(user_id)]}

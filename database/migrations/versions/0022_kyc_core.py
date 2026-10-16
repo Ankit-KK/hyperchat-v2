@@ -24,11 +24,16 @@ tables, and every write goes through a SECURITY DEFINER function owned by hyperc
 * public.kyc_purge_webhook_receipts(dry_run) is the daily 90-day cleanup (the runtime role cannot DELETE receipts).
 * public.kyc_record_provider_status(...) is internal (no runtime grant): validates the status, keeps provider order
   (an older event never overwrites a newer one; a later revocation or expiry always wins) and writes the audit row.
-* public.user_kyc_approved(user_id, environment): the one rule "this user has an approved Didit verification" (fail
-  closed): the user's NEWEST session (creation order) for this database's configured environment and workflow is
-  Approved, and no session of theirs in that environment shows a Declined / Kyc Expired at or after that approval's
-  provider time. So an older approval never outlives a newer attempt, revocation or expiry, and approvals from a
-  previous workflow do not count after the configured workflow changes (re-verification required).
+  Every Declined / Kyc Expired it is given, even a stale one or a refresh, raises the session's adverse_at (the latest
+  adverse provider time, never lowered): a durable veto that no later non-approving status and no receipt purge
+  erases.
+* public.kyc_effective(user_id, environment) -> (approved, session_id): the one rule, fail closed. The CURRENT session
+  is the user's newest (creation order) for this database's configured environment and workflow that belongs to the
+  current workflow epoch (created, or updated by Didit, at or after kyc_provider_config.workflow_since). The user is
+  approved only while that session is Approved and its approval is strictly later than every adverse_at of the
+  user's sessions in this environment. So an older approval never outlives a newer attempt, a revocation or expiry
+  (even one later followed by Resubmitted / In Progress), and any workflow change (also back to an earlier one)
+  requires a new signed approval. public.user_kyc_approved(user_id, environment) returns its `approved`.
 
 Tables: kyc_sessions (one row per Didit session; vendor_data must equal the user id; users with KYC history cannot be
 deleted), kyc_webhook_events (one row per signature-verified delivery: ids, status, provider time, check statuses and
@@ -59,8 +64,10 @@ PUBLIC_FUNCTIONS = ("public.kyc_create_session(uuid, uuid, uuid, integer, text)"
                     "public.kyc_receive_webhook(text, text, text)",
                     "public.kyc_apply_refresh(uuid, text, jsonb, timestamptz, uuid)",
                     "public.kyc_purge_webhook_receipts(boolean)",
+                    "public.kyc_effective(uuid, text)",
                     "public.user_kyc_approved(uuid, text)")
 INTERNAL_FUNCTIONS = ("public.kyc_record_provider_status(uuid, text, timestamptz, jsonb, text, uuid)",
+                      "public.kyc_provider_config_epoch()",
                       "public.kyc_hmac_sha256(bytea, bytea)", "public.kyc_uuid(text)", "public.kyc_check_statuses(jsonb)")
 
 
@@ -83,6 +90,7 @@ def upgrade() -> None:
             provider_updated_at timestamptz,
             check_statuses jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(check_statuses) = 'object'),
             approved_at timestamptz,
+            adverse_at timestamptz,  -- latest Declined / Kyc Expired provider time ever recorded; never lowered
             created_at timestamptz NOT NULL DEFAULT now(),
             updated_at timestamptz NOT NULL DEFAULT now(),
             CONSTRAINT kyc_sessions_vendor_is_user CHECK (vendor_data = user_id::text)
@@ -134,9 +142,27 @@ def upgrade() -> None:
             workflow_id uuid NOT NULL,
             application_id uuid,
             webhook_secret text NOT NULL CHECK (char_length(webhook_secret) BETWEEN 16 AND 512),
+            workflow_since timestamptz NOT NULL DEFAULT now(),  -- the current workflow epoch (kept by the trigger)
             updated_at timestamptz NOT NULL DEFAULT now()
         )
     """)
+    # A new environment or workflow (also back to an earlier one) starts a new epoch; a secret rotation does not.
+    op.execute("""
+        CREATE FUNCTION public.kyc_provider_config_epoch() RETURNS trigger LANGUAGE plpgsql
+        SET search_path = pg_catalog AS $$
+        BEGIN
+            IF TG_OP = 'INSERT' THEN
+                NEW.workflow_since := now();
+            ELSIF NEW.workflow_id IS DISTINCT FROM OLD.workflow_id OR NEW.environment IS DISTINCT FROM OLD.environment THEN
+                NEW.workflow_since := now();
+            ELSE
+                NEW.workflow_since := OLD.workflow_since;
+            END IF;
+            RETURN NEW;
+        END $$
+    """)
+    op.execute("CREATE TRIGGER kyc_provider_config_epoch BEFORE INSERT OR UPDATE ON public.kyc_provider_config "
+               "FOR EACH ROW EXECUTE FUNCTION public.kyc_provider_config_epoch()")
 
     # ── internal helpers (no runtime grant) ──
     op.execute("""
@@ -192,6 +218,10 @@ def upgrade() -> None:
             SELECT * INTO s FROM public.kyc_sessions WHERE session_id = p_session_id FOR UPDATE;
             IF NOT FOUND THEN
                 RETURN 'not_found';
+            END IF;
+            -- The veto is recorded first, so even a stale adverse event counts against approvals before it.
+            IF p_status IN ('Declined', 'Kyc Expired') AND (s.adverse_at IS NULL OR p_provider_at > s.adverse_at) THEN
+                UPDATE public.kyc_sessions SET adverse_at = p_provider_at, updated_at = now() WHERE id = s.id;
             END IF;
             IF s.provider_updated_at IS NOT NULL AND p_provider_at < s.provider_updated_at THEN
                 RETURN 'stale';  -- an older provider state never overwrites a newer one
@@ -396,21 +426,28 @@ def upgrade() -> None:
         END $$
     """))
     op.execute("""
-        CREATE FUNCTION public.user_kyc_approved(p_user_id uuid, p_environment text) RETURNS boolean
+        CREATE FUNCTION public.kyc_effective(p_user_id uuid, p_environment text)
+        RETURNS TABLE (approved boolean, session_id uuid)
         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-            WITH latest AS (
-                SELECT s.id, s.environment, s.provider_status, s.provider_updated_at
+            WITH current_session AS (
+                SELECT s.session_id, s.environment, s.provider_status, s.provider_updated_at
                 FROM public.kyc_sessions s
                 JOIN public.kyc_provider_config c ON c.environment = s.environment AND c.workflow_id = s.workflow_id
                 WHERE s.user_id = p_user_id AND s.environment = p_environment
+                  AND (s.created_at >= c.workflow_since OR s.provider_updated_at >= c.workflow_since)
                 ORDER BY s.created_at DESC, s.id DESC LIMIT 1)
-            SELECT EXISTS (
-                SELECT 1 FROM latest l
-                WHERE l.provider_status = 'Approved' AND l.provider_updated_at IS NOT NULL
-                  AND NOT EXISTS (SELECT 1 FROM public.kyc_sessions o
-                                  WHERE o.user_id = p_user_id AND o.environment = l.environment AND o.id <> l.id
-                                    AND o.provider_status IN ('Declined', 'Kyc Expired')
-                                    AND o.provider_updated_at >= l.provider_updated_at))
+            SELECT COALESCE(l.provider_status = 'Approved' AND l.provider_updated_at IS NOT NULL
+                            AND NOT EXISTS (SELECT 1 FROM public.kyc_sessions o
+                                            WHERE o.user_id = p_user_id AND o.environment = l.environment
+                                              AND o.adverse_at >= l.provider_updated_at), false),
+                   l.session_id
+            FROM (SELECT 1) one LEFT JOIN current_session l ON true
+        $$
+    """)
+    op.execute("""
+        CREATE FUNCTION public.user_kyc_approved(p_user_id uuid, p_environment text) RETURNS boolean
+        LANGUAGE sql STABLE SET search_path = pg_catalog, public AS $$
+            SELECT approved FROM public.kyc_effective(p_user_id, p_environment)
         $$
     """)
 
@@ -435,7 +472,7 @@ def downgrade() -> None:
             END IF;
         END $$
     """)
-    for function in PUBLIC_FUNCTIONS + INTERNAL_FUNCTIONS:
-        op.execute(f"DROP FUNCTION {function}")
     for table in ("kyc_provider_config", "kyc_events", "kyc_webhook_events", "kyc_sessions"):
         op.execute(f"DROP TABLE public.{table}")
+    for function in PUBLIC_FUNCTIONS + INTERNAL_FUNCTIONS:
+        op.execute(f"DROP FUNCTION {function}")
