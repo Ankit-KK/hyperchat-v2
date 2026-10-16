@@ -18,14 +18,13 @@ if ! pg_lsclusters -h | awk '{print $1"/"$2}' | grep -qx "${VER}/${CLUSTER}"; th
   pg_conftool "$VER" "$CLUSTER" set listen_addresses 'localhost'
 fi
 
-# pg_hba: HyperChat peer line above the generic local rule (once).
-if ! grep -q "map=hyperchat" "$CONF/pg_hba.conf"; then
-  LINE="$(grep -v '^#' "$HERE/pg_hba.conf" | grep -v '^\s*$')"
-  awk -v line="$LINE" '!done && /^local[[:space:]]+all[[:space:]]+all/ {print line; done=1} {print}' \
-      "$CONF/pg_hba.conf" > "$CONF/pg_hba.conf.new"
+# pg_hba: the HyperChat peer line above the generic local rule, replaced when the template changed (e.g. a new role).
+bash "$HERE/sync_pg_hba.sh" "$HERE/pg_hba.conf" "$CONF/pg_hba.conf" > "$CONF/pg_hba.conf.new"
+if ! cmp -s "$CONF/pg_hba.conf.new" "$CONF/pg_hba.conf"; then
+  cp -p "$CONF/pg_hba.conf" "$CONF/pg_hba.conf.bak-$(date +%Y%m%d%H%M%S)"
   install -o postgres -g postgres -m 640 "$CONF/pg_hba.conf.new" "$CONF/pg_hba.conf"
-  rm -f "$CONF/pg_hba.conf.new"
 fi
+rm -f "$CONF/pg_hba.conf.new"
 # pg_ident: append the map (once).
 if ! grep -q "^hyperchat[[:space:]]" "$CONF/pg_ident.conf"; then
   grep -v '^#' "$HERE/pg_ident.conf" | grep -v '^\s*$' >> "$CONF/pg_ident.conf"

@@ -32,7 +32,11 @@ postgres/roles.sql              hyperchat_owner / migrator / app / worker / read
                                 migration 0023)
                                 / auth (migration 0024: authentication flows; the only role that writes admin
                                 credentials or sessions; HYPERCHAT_DB_AUTH_USER; docs/admin-auth-boundary.md)
-postgres/pg_hba.conf, pg_ident.conf  Unix-socket peer auth only; PostgreSQL is never exposed
+postgres/pg_hba.conf, pg_ident.conf  Unix-socket peer auth only; PostgreSQL is never exposed. pg_hba.conf lists
+                                EVERY login role (a missing one falls through to the generic peer rule and
+                                cannot connect); sync_pg_hba.sh replaces a stale HyperChat line in place
+check_isolation.sh              read-only server audit of one environment (dev|prod): file ownership, units,
+                                service account, pg_hba / pg_ident coverage; see "Isolation audit" below
 postgres/pg_ident.production.conf    ident map of the PRODUCTION cluster only (hyperchat-prod; no DEV user)
 backup/                         nightly pg_dump of production (02:30 UTC, 14-day retention)
 api.env.example                 template for /etc/hyperchat/api.env (DEV; no secrets)
@@ -204,6 +208,29 @@ Production rollback (no step is automatic):
   explicit decision; restoring the backup over production only with explicit approval;
 - PostgreSQL map: restore `/root/pg_ident.17.bak-<commit>`, `pg_ctlcluster 17 hyperchat reload`;
 - environment: remove the production units, `/etc/hyperchat-prod`, `/opt/hyperchat-prod` and the user.
+
+## Isolation audit and the pg_hba fix (S0)
+`pg_hba.conf` in this repository listed only migrator / app / worker / readonly until S0, and `setup_cluster.sh`
+inserted the HyperChat line only once, so a cluster set up earlier keeps the old line: `hyperchat_lifecycle`
+(migration 0023) and `hyperchat_auth` (0024) then fall through to the generic `local all all peer` rule, which has
+no ident map, and cannot connect (admin sign-in and creator status changes fail). **Not applied to any server
+yet; each step below needs approval.**
+
+1. **Audit (read-only, safe):** from a root-only checkout of this commit,
+   `bash deploy/check_isolation.sh dev` (and `prod`). Every line must be `OK`; a `FAIL` names the file or rule.
+2. **Fix pg_hba [APPROVAL]:** `bash deploy/postgres/sync_pg_hba.sh deploy/postgres/pg_hba.conf
+   /etc/postgresql/<ver>/<cluster>/pg_hba.conf | diff /etc/postgresql/<ver>/<cluster>/pg_hba.conf -` shows the
+   change only. To apply it, re-run `deploy/postgres/setup_cluster.sh <ver> <cluster> <port>` (it backs up
+   `pg_hba.conf` to `pg_hba.conf.bak-<timestamp>`, installs the synced file and reloads; existing databases and
+   the ident map are untouched). Rollback: copy the backup back, `pg_ctlcluster <ver> <cluster> reload`.
+3. **pg_ident:** `setup_cluster.sh` still appends the DEV map only once and production uses
+   `pg_ident.production.conf` (step 6 of the production section); the audit checks that each API user maps to
+   exactly `hyperchat_app`, `hyperchat_worker`, `hyperchat_lifecycle` and `hyperchat_auth`.
+4. **Ownership:** a `FAIL` on the release tree or `api.env` is fixed with "Deploy a commit" step 3
+   (`chown -R root:<service> …; chmod -R g+rX,g-w,o-rwx …`) and `chown root:<service> api.env; chmod 640`.
+   The release tree must stay unwritable by the service users: S1 runs the step-up verifier from the same
+   release under its own user.
+5. Re-run the audit; it must print only `OK`.
 
 ## Rules
 - Firewall (UFW): SSH (rate-limited), 80 and 443 only. PostgreSQL listens on localhost / Unix socket only.
