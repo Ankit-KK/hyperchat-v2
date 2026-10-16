@@ -223,7 +223,8 @@ def test_a_donation_insert_waits_for_a_concurrent_suspension_and_is_then_refused
     outcome: list = []
     with db() as admin_conn:
         admin_conn.autocommit = False
-        admin_conn.execute("UPDATE public.streamers SET status = 'suspended' WHERE id = %s", (sid,))  # row locked
+        admin_conn.execute("SELECT public.kyc_change_creator_status(%s, 'suspend', 'active', %s, 'race', "
+                           "ARRAY[]::text[])", (sid, make_user("life-c-boss" + DOMAIN, role="admin")))  # row locked
 
         def checkout():
             try:

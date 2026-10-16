@@ -57,15 +57,6 @@ _CREATOR_COLS = """id::text, streamer_slug AS slug, streamer_name AS name, statu
     order_prefix, brand_color, moderation_mode, user_id IS NOT NULL AS claimed, created_at"""
 
 
-# Admin creator status actions: (from status, to status). Anything else is refused; nothing is ever skipped.
-STATUS_ACTIONS = {"activate": ("pending", "active"), "suspend": ("active", "suspended"),
-                  "reactivate": ("suspended", "active")}
-
-
-class _Refused(Exception):
-    """Rolls a status change back (raised inside the transaction) with the reason code."""
-
-
 async def insert_creator(cur, fields: dict, pusher_groups: tuple[int, ...]) -> dict:
     """Insert a new, unclaimed creator with the legacy launch defaults on the caller's cursor (so an application
     approval creates it in the same transaction). The Pusher group is the least-loaded configured group (legacy rule;
@@ -187,49 +178,18 @@ class AdminRepository:
 
     async def change_status(self, streamer_id: str, action: str, expected_status: str, actor_id: str,
                             reason: str | None, accounts) -> tuple[str, dict | None]:
-        """activate / suspend / reactivate, with an audit row, in one transaction on the locked creator row (so a
-        concurrent checkout's share lock waits for it). Compare-and-set: refused unless the status is still
-        `expected_status`. Returns ("ok" | "not_found" | "status_changed" | "bad_transition" | "unclaimed" |
-        "account_not_configured" | "kyc_required" | "restricted" | "no_owner" | a donation block code, the creator).
-        Lock order (migration 0023): the creator row first, then KYC / grace rows, then the enforcement record."""
-        source, target = STATUS_ACTIONS[action]
-        try:
-            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT status, user_id, razorpay_account FROM public.streamers WHERE id = %s "
-                                  "FOR NO KEY UPDATE", (streamer_id,))
-                current = await cur.fetchone()
-                if current is None:
-                    return "not_found", None
-                if current["status"] != expected_status:
-                    return "status_changed", None
-                if current["status"] != source:
-                    return "bad_transition", None
-                if action == "activate":
-                    if current["user_id"] is None:
-                        return "unclaimed", None
-                    if current["razorpay_account"] not in accounts:
-                        return "account_not_configured", None
-                    # The current owner's own approved Didit KYC (never baseline or grace), checked under the
-                    # creator lock; every donation re-checks the rule, so a later KYC loss stops donations anyway.
-                    await cur.execute("SELECT public.kyc_activation_block(%s) AS block", (streamer_id,))
-                    block = (await cur.fetchone())["block"]
-                    if block is not None:
-                        return block, None
-                try:  # activation / reactivation: the streamers_guard_activation trigger re-checks the rules
-                    await cur.execute(f"UPDATE public.streamers SET status = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
-                                      (target, streamer_id))
-                except pg_errors.InsufficientPrivilege as exc:
-                    raise _Refused(exc.diag.message_hint or "kyc_required") from None
-                row = await cur.fetchone()
-                if action == "suspend":  # grace never survives a suspension (migration 0023)
-                    await cur.execute("SELECT public.kyc_revoke_grace(%s, 'creator_suspended', %s)",
-                                      (streamer_id, actor_id))
-                await cur.execute("INSERT INTO public.creator_status_events (streamer_id, action, from_status, "
-                                  "to_status, actor_user_id, reason) VALUES (%s, %s, %s, %s, %s, %s)",
-                                  (streamer_id, action, source, target, actor_id, reason))
-                return "ok", row
-        except _Refused as exc:
-            return str(exc), None
+        """activate / suspend / reactivate through public.kyc_change_creator_status (migration 0023): the
+        compare-and-set, the checks (owner, Razorpay account, the owner's own KYC and no restriction to activate, the
+        full donation rule to reactivate), the transition, grace revocation on suspension and the audit row, in one
+        transaction on the locked creator row. Returns ("ok" | a refusal code, the creator)."""
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT public.kyc_change_creator_status(%s, %s, %s, %s, %s, %s) AS r",
+                              (streamer_id, action, expected_status, actor_id, reason, sorted(accounts)))
+            result = (await cur.fetchone())["r"]
+            if result != "ok":
+                return result, None
+            await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
+            return "ok", await cur.fetchone()
 
     async def set_soundboard_eligibility(self, streamer_id: str, enabled: bool) -> bool | None:
         """streamers.soundboard_enabled (D3 eligibility only: terms acceptances are never created or removed here).

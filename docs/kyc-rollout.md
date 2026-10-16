@@ -27,9 +27,16 @@ In `closed`, no grace counts: every creator needs its owner's KYC.
 
 Neither a Didit webhook nor anything else activates a creator automatically. **Reactivation** re-checks the full rule.
 
-**Database-level guard:** the trigger `streamers_guard_activation` applies the same checks to any runtime-role write that makes a creator `active` (insert or update). So the application's database credentials can't bypass admin activation or reactivation.
+**One transition path:** eligibility is necessary but not sufficient. A creator's status changes only through `public.kyc_change_creator_status`, which the admin API calls. In one transaction on the locked creator row, it does all of the following:
+- **compare-and-set** on the expected status;
+- **activation checks:** an owner, the configured Razorpay account, the owner's own KYC and no restriction;
+- **reactivation checks:** the full donation rule;
+- **suspension:** revokes grace;
+- **audit:** writes the `creator_status_events` row.
 
-**Suspension is not a security hold.** Reactivation is an ordinary admin action, and the rules still apply. Use a restriction for a hold that the application's credentials must not undo.
+**No other way in:** the trigger `streamers_guard_activation` refuses every other runtime-role status write: a raw `UPDATE` of `status`, or an `INSERT` that isn't `pending`.
+
+**Known limit:** the function requires its actor to be an active admin. That is a sanity check, not proof of authority: the database can't tell the admin API apart from someone holding the application's credentials. What holds for any caller is that no status changes without every check and an audit row, atomically.
 
 **Grace grants** (`kyc_grace_grants`):
 - **Finite:** 1 to 90 days, also enforced by a CHECK.
@@ -78,7 +85,7 @@ Neither a Didit webhook nor anything else activates a creator automatically. **R
 
 **API limits:**
 - **Nothing in the API loosens enforcement:** no endpoint marks KYC approved, grants grace, lifts a restriction, or activates, closes or reopens enforcement.
-- **What the API role can do:** call the fail-closed functions (restrict, revoke grace) and reads.
+- **What the API role can do:** call the fail-closed functions (restrict, revoke grace), the audited creator-status transition, and reads.
 - **Refused to it:** writing the tables, and calling the operator functions.
 - **Public errors stay generic:** `503 {"error": "Donations are temporarily unavailable"}`. Reason codes appear only in the admin views.
 

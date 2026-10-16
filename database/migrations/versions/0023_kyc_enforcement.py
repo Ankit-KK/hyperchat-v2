@@ -38,9 +38,11 @@ runs it for every runtime-role insert):
 * Grace is for a NEVER-decided owner only: once the owner has any Didit decision (an approval, a Declined or a Kyc
   Expired, in this environment, durable in kyc_sessions.adverse_at / kyc_events), grace never applies again: a
   revoked, expired or failed verification never falls back to legacy grace; only a new approval restores eligibility.
-* streamers_guard_activation: the runtime roles cannot set a creator 'active' (insert or update) unless the activation
-  rule (pending: the owner's own KYC, no restriction) and the donation rule allow it, so the application's database
-  credentials cannot bypass admin activation / reactivation checks.
+* Creator status: eligibility is necessary, not sufficient. Status changes go only through
+  public.kyc_change_creator_status (admin activate / suspend / reactivate: compare-and-set, owner, Razorpay account,
+  the owner's own KYC and no restriction to activate, the full rule to reactivate, grace revoked on suspension, and
+  the creator_status_events row, all in one transaction); the streamers_guard_activation trigger refuses every other
+  runtime-role status write (a raw UPDATE, or an INSERT that is not 'pending').
 
 Grants to the API role: SELECT on the new tables; EXECUTE on creator_donation_block, kyc_activation_block,
 kyc_revoke_grace, kyc_restrict_creator, kyc_record_grace_expiries, kyc_enforcement_preview: only fail-closed changes
@@ -61,6 +63,7 @@ DEFINER = "SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp"
 GRACE_MAX_DAYS = 90
 RESTRICTION_REASONS = "'identity_concern', 'owner_dispute', 'fraud_review', 'kyc_lost', 'admin_hold'"
 RUNTIME_FUNCTIONS = ("public.kyc_activation_block(uuid)", "public.kyc_revoke_grace(uuid, text, uuid)",
+                     "public.kyc_change_creator_status(uuid, text, text, uuid, text, text[])",
                      "public.kyc_restrict_creator(uuid, text, text, uuid)", "public.kyc_record_grace_expiries()",
                      "public.kyc_enforcement_preview()")
 OPERATOR_FUNCTIONS = ("public.kyc_enforcement_activate(text, text)", "public.kyc_enforcement_close(text, text)",
@@ -320,29 +323,87 @@ def upgrade() -> None:
         $$
     """))
 
-    # The application's database credentials cannot activate or reactivate a creator past the rules (the admin API
-    # checks first; this catches any direct write). AFTER: the functions see the new row.
+    # A creator's status changes only through kyc_change_creator_status (validation, transition and audit in one
+    # transaction): the runtime roles may not write streamers.status at all, except inserting a 'pending' creator.
     op.execute("""
         CREATE FUNCTION public.streamers_guard_activation() RETURNS trigger LANGUAGE plpgsql
-        SET search_path = pg_catalog, public AS $$
-        DECLARE refusal text;
+        SET search_path = pg_catalog AS $$
         BEGIN
-            IF current_user IN ('hyperchat_app', 'hyperchat_worker') AND NEW.status = 'active'
-               AND (TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'active') THEN
-                IF TG_OP = 'INSERT' OR OLD.status <> 'suspended' THEN
-                    refusal := public.kyc_activation_block(NEW.id);
-                END IF;
-                refusal := COALESCE(refusal, public.creator_donation_block(NEW.id));
-                IF refusal IS NOT NULL THEN
-                    RAISE EXCEPTION 'creator activation refused: %', refusal
-                        USING ERRCODE = 'insufficient_privilege', HINT = refusal;
-                END IF;
+            IF current_user IN ('hyperchat_app', 'hyperchat_worker')
+               AND ((TG_OP = 'INSERT' AND NEW.status <> 'pending')
+                    OR (TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status)) THEN
+                RAISE EXCEPTION 'a creator''s status changes only through public.kyc_change_creator_status'
+                    USING ERRCODE = 'insufficient_privilege';
             END IF;
-            RETURN NULL;
+            RETURN NEW;
         END $$
     """)
-    op.execute("CREATE TRIGGER streamers_guard_activation AFTER INSERT OR UPDATE OF status ON public.streamers "
+    op.execute("CREATE TRIGGER streamers_guard_activation BEFORE INSERT OR UPDATE OF status ON public.streamers "
                "FOR EACH ROW EXECUTE FUNCTION public.streamers_guard_activation()")
+    # The one transition path (admin activate / suspend / reactivate). Returns 'ok' or a refusal code; on a refusal
+    # nothing changes. p_accounts: the Razorpay accounts this server can take payments with (its configuration).
+    # p_actor must be an active admin: a sanity check, NOT proof of authority (the application's database role cannot
+    # be told apart from the admin API); what holds for every caller is that each check runs and the audit row is
+    # written in the same transaction as the change.
+    op.execute(_sql("""
+        CREATE FUNCTION public.kyc_change_creator_status(p_streamer_id uuid, p_action text, p_expected_status text,
+                                                         p_actor uuid, p_reason text, p_accounts text[])
+        RETURNS text LANGUAGE plpgsql __DEFINER__ AS $$
+        DECLARE s public.streamers%ROWTYPE; source text; target text; refusal text;
+        BEGIN
+            source := CASE p_action WHEN 'activate' THEN 'pending' WHEN 'suspend' THEN 'active'
+                                    WHEN 'reactivate' THEN 'suspended' END;
+            target := CASE p_action WHEN 'suspend' THEN 'suspended' ELSE 'active' END;
+            IF source IS NULL THEN
+                RETURN 'bad_action';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM public.users WHERE id = p_actor AND role = 'admin' AND is_active) THEN
+                RETURN 'not_authorized';
+            END IF;
+            IF p_action = 'suspend' AND NULLIF(btrim(p_reason), '') IS NULL THEN
+                RETURN 'reason_required';
+            END IF;
+            SELECT * INTO s FROM public.streamers WHERE id = p_streamer_id FOR NO KEY UPDATE;  -- creator first
+            IF NOT FOUND THEN
+                RETURN 'not_found';
+            END IF;
+            IF s.status <> p_expected_status THEN
+                RETURN 'status_changed';  -- compare-and-set
+            END IF;
+            IF s.status <> source THEN
+                RETURN 'bad_transition';
+            END IF;
+            IF p_action = 'activate' THEN
+                IF s.user_id IS NULL THEN
+                    RETURN 'unclaimed';
+                END IF;
+                IF NOT (s.razorpay_account = ANY(COALESCE(p_accounts, ARRAY[]::text[]))) THEN
+                    RETURN 'account_not_configured';
+                END IF;
+                refusal := public.kyc_activation_block(s.id);  -- the owner's own KYC, no restriction
+                IF refusal IS NOT NULL THEN
+                    RETURN refusal;
+                END IF;
+            END IF;
+            BEGIN
+                UPDATE public.streamers SET status = target WHERE id = s.id;
+                IF p_action = 'reactivate' THEN  -- back only if it could accept donations again (the full rule)
+                    refusal := public.creator_donation_block(s.id);
+                    IF refusal IS NOT NULL THEN
+                        RAISE EXCEPTION USING ERRCODE = 'HC002';
+                    END IF;
+                END IF;
+            EXCEPTION WHEN SQLSTATE 'HC002' THEN
+                RETURN refusal;  -- the status update was rolled back with this block
+            END;
+            IF p_action = 'suspend' THEN  -- grace never survives a suspension
+                PERFORM public.kyc_revoke_grace(s.id, 'creator_suspended', p_actor);
+            END IF;
+            INSERT INTO public.creator_status_events (streamer_id, action, from_status, to_status, actor_user_id, reason)
+            VALUES (s.id, p_action, source, target, p_actor, NULLIF(btrim(p_reason), ''));
+            RETURN 'ok';
+        END $$
+    """))
 
     # ── audit + generation + hash chain (internal) ──
     op.execute(_sql("""
