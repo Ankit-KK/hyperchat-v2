@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     # execute public.kyc_change_creator_status. Unset: activate / suspend / reactivate answer 503.
     db_lifecycle_user: str | None = None
     db_lifecycle_password: SecretStr | None = None
+    # Migration 0024: the authentication flows (sign-in, sessions, password change / reset, invites, identities,
+    # admin user management) run on their own role; hyperchat_app cannot write admin credentials or sessions.
+    # Unset: those flows use the general role, so admins cannot sign in (non-admin sign-in still works).
+    db_auth_user: str | None = None
+    db_auth_password: SecretStr | None = None
     # Human-readable label shown in logs and /health so nobody mistakes dev data for production.
     db_label: str = "DEV"
     db_connect_timeout: int = 5
@@ -452,18 +457,19 @@ class Settings(BaseSettings):
         except OSError:
             return "dev"
 
-    def db_conninfo(self, *, lifecycle: bool = False) -> str:
-        """libpq connection string (the runtime role, or the lifecycle role). Contains the password if one is
-        configured: never log it."""
-        user, password = ((self.db_lifecycle_user, self.db_lifecycle_password) if lifecycle
-                          else (self.db_user, self.db_password))
+    def db_conninfo(self, *, role: str | None = None) -> str:
+        """libpq connection string for the runtime role, or role="lifecycle" / "auth". Contains the password if one
+        is configured: never log it."""
+        user, password = {None: (self.db_user, self.db_password),
+                          "lifecycle": (self.db_lifecycle_user, self.db_lifecycle_password),
+                          "auth": (self.db_auth_user, self.db_auth_password)}[role]
         params = {
             "host": self.db_host,
             "port": self.db_port,
             "dbname": self.db_name,
             "user": user,
             "connect_timeout": self.db_connect_timeout,
-            "application_name": "hyperchat-api-lifecycle" if lifecycle else "hyperchat-api",
+            "application_name": f"hyperchat-api-{role}" if role else "hyperchat-api",
         }
         if password is not None:
             params["password"] = password.get_secret_value()

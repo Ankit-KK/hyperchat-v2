@@ -36,7 +36,7 @@ def auth(env):
     from app.core.config import Settings
 
     settings = Settings()
-    svc = AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+    svc = AuthService.from_settings(settings, AuthRepository(connection_factory(settings), connection_factory(settings, "auth")))
     svc.admin_id = make_user("inv-admin" + DOMAIN, role="admin")
     return svc
 
@@ -77,10 +77,12 @@ def consumed(token: str) -> bool:
 def waiting_on_lock(fragment: str, count: int = 1) -> bool:
     """True once `count` backends whose query contains `fragment` wait on a lock (probe only; locks decide)."""
     deadline = time.monotonic() + WAIT
-    with db() as probe:
+    # A role sees other backends' query text only for its own role: count as the runtime and the auth role (0024).
+    with db() as probe, db("hyperchat_auth") as auth_probe:
         while time.monotonic() < deadline:
-            if probe.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE %s "
-                             "AND pid <> pg_backend_pid()", (f"%{fragment}%",)).fetchone()[0] >= count:
+            if sum(conn.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE %s "
+                                "AND pid <> pg_backend_pid()", (f"%{fragment}%",)).fetchone()[0]
+                   for conn in (probe, auth_probe)) >= count:
                 return True
             time.sleep(0.01)
     return False
@@ -387,7 +389,7 @@ def test_a_deactivation_arriving_during_an_acceptance_waits_then_revokes_its_ses
 
     email = "inv-off-d" + DOMAIN
     user_id = make_user(email, password=None)
-    admin_repo = AdminRepository(connection_factory(Settings()))
+    admin_repo = AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
 
     async def scenario():
         await reset_link(auth, user_id)

@@ -197,7 +197,7 @@ def test_concurrent_guesses_cannot_exceed_the_allowance(env, monkeypatch):
     monkeypatch.setattr(service, "verify_password", counting)
     make_user("racer2" + DOMAIN)
     settings = Settings()
-    auth = service.AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+    auth = service.AuthService.from_settings(settings, AuthRepository(connection_factory(settings), connection_factory(settings, "auth")))
 
     async def race():
         async def guess(i):
@@ -341,7 +341,7 @@ def test_the_event_loop_keeps_running_while_a_password_is_hashed(env, monkeypatc
     monkeypatch.setattr(service, "verify_password", slow)
     make_user("patient2" + DOMAIN)
     settings = Settings()
-    auth = service.AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+    auth = service.AuthService.from_settings(settings, AuthRepository(connection_factory(settings), connection_factory(settings, "auth")))
 
     async def scenario():
         gaps, done = [], asyncio.Event()

@@ -180,7 +180,8 @@ def test_production_ident_map_excludes_the_dev_user():
     assert prod == {("hyperchat", "root", "hyperchat_migrator"), ("hyperchat", "root", "hyperchat_app"),
                     ("hyperchat", "root", "hyperchat_worker"), ("hyperchat", "root", "hyperchat_readonly"),
                     ("hyperchat", "hyperchat-prod", "hyperchat_app"), ("hyperchat", "hyperchat-prod", "hyperchat_worker"),
-                    ("hyperchat", "hyperchat-prod", "hyperchat_lifecycle")}  # KYC PR4: creator status transitions
+                    ("hyperchat", "hyperchat-prod", "hyperchat_lifecycle"),  # KYC PR4: creator status transitions
+                    ("hyperchat", "root", "hyperchat_auth"), ("hyperchat", "hyperchat-prod", "hyperchat_auth")}  # 0024
     assert not any(system == "hyperchat" for _, system, _ in prod)
     dev = _map("postgres/pg_ident.conf")  # DEV cluster template: unchanged, no production user
     assert ("hyperchat", "hyperchat", "hyperchat_app") in dev and not any("hyperchat-prod" in e for e in dev)
@@ -198,7 +199,7 @@ def test_production_env_template_values():
         "HYPERCHAT_APP_ENV": "production", "HYPERCHAT_LOG_LEVEL": "INFO", "HYPERCHAT_ENABLE_DOCS": "false",
         "HYPERCHAT_DB_ENABLED": "true", "HYPERCHAT_DB_HOST": "/var/run/postgresql", "HYPERCHAT_DB_PORT": "5432",
         "HYPERCHAT_DB_NAME": "hyperchat", "HYPERCHAT_DB_USER": "hyperchat_app",
-        "HYPERCHAT_DB_LIFECYCLE_USER": "hyperchat_lifecycle",
+        "HYPERCHAT_DB_LIFECYCLE_USER": "hyperchat_lifecycle", "HYPERCHAT_DB_AUTH_USER": "hyperchat_auth",
         "HYPERCHAT_DB_LABEL": "PROD hyperchat (HyperChat v2 production)", "HYPERCHAT_DB_POOL_MIN": "1",
         "HYPERCHAT_DB_POOL_MAX": "4", "HYPERCHAT_FRONTEND_URL": "https://hyperchat.space",
         "HYPERCHAT_ALLOWED_ORIGINS": "", "HYPERCHAT_SESSION_COOKIE_SAMESITE": "lax", "HYPERCHAT_SESSION_IDLE_DAYS": "7",

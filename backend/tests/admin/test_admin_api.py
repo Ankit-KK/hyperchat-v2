@@ -72,13 +72,15 @@ def test_role_change_revokes_target_sessions(app):
     signed_in(target_browser, "promote" + DOMAIN)
     target = _id("promote" + DOMAIN)
     assert target_browser.get("/api/v1/auth/session").status_code == 200
-    r = app.patch(f"{U}/{target}", json={"role": "admin"}, headers=headers)
+    r = app.patch(f"{U}/{target}", json={"role": "admin"}, headers=headers)  # migration 0024: admins by invite only
+    assert r.status_code == 409 and target_browser.get("/api/v1/auth/session").status_code == 200  # nothing changed
+    r = app.patch(f"{U}/{target}", json={"role": "user"}, headers=headers)
     assert r.status_code == 200, r.text
-    assert r.json()["changed"] == ["role"] and r.json()["sessions_revoked"] == 1 and r.json()["user"]["role"] == "admin"
+    assert r.json()["changed"] == ["role"] and r.json()["sessions_revoked"] == 1 and r.json()["user"]["role"] == "user"
     assert target_browser.get("/api/v1/auth/session").status_code == 401  # must sign in again
     again = login(target_browser, "promote" + DOMAIN)
-    assert again.json()["user"]["role"] == "admin"
-    same = app.patch(f"{U}/{target}", json={"role": "admin"}, headers=headers)
+    assert again.json()["user"]["role"] == "user"
+    same = app.patch(f"{U}/{target}", json={"role": "user"}, headers=headers)
     assert same.json()["changed"] == [] and same.json()["sessions_revoked"] == 0
 
 
@@ -162,7 +164,7 @@ def test_last_sign_in_admin_cannot_be_removed_even_concurrently(strict_scratch_d
     """The API forbids self-demotion; the repository additionally guarantees one sign-in admin remains."""
     only_admin = make_user("onlyadmin" + DOMAIN, role="admin")
     make_user("nopassadmin" + DOMAIN, role="admin", password=None)  # cannot sign in: does not count
-    repo = AdminRepository(connection_factory(Settings()))
+    repo = AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
     with pytest.raises(LastAdminError):
         asyncio.run(repo.update_user(only_admin, {"role": "user"}))
     with pytest.raises(LastAdminError):
@@ -304,7 +306,7 @@ def test_onboarding_conflicts_and_access(app):
 
 def test_concurrent_onboarding_of_one_slug_creates_one_creator(env):
     from app.admin.repository import CreatorConflict
-    repo = AdminRepository(connection_factory(Settings()))
+    repo = AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
 
     async def create():
         try:
@@ -350,7 +352,7 @@ def test_owner_assignment_only_for_unclaimed_creators_and_active_users(app):
 def test_concurrent_owner_assignments_have_one_winner(env):
     sid = make_streamer("authtest-own-race")
     users = [make_user(f"racer{i}" + DOMAIN) for i in range(4)]
-    repo = AdminRepository(connection_factory(Settings()))
+    repo = AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
 
     async def race():
         return await asyncio.gather(*(repo.assign_owner(sid, u) for u in users))

@@ -96,9 +96,10 @@ def _like(term: str) -> str:
 
 
 class AdminRepository:
-    def __init__(self, connection_factory, lifecycle_factory=None) -> None:
+    def __init__(self, connection_factory, lifecycle_factory=None, auth_factory=None) -> None:
         self._conn = connection_factory
         self._lifecycle = lifecycle_factory  # hyperchat_lifecycle connections (creator status transitions only)
+        self._auth = auth_factory or connection_factory  # hyperchat_auth (role / activity / email / bootstrap)
 
     # ── creators ───────────────────────────────────────────────────────────
     async def create_creator(self, fields: dict, pusher_groups: tuple[int, ...]) -> dict:
@@ -251,7 +252,7 @@ class AdminRepository:
         Returns (user, changed_fields, sessions_revoked). Any change revokes the user's sessions, so
         new privileges (or their loss) take effect immediately.
         """
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT u.id::text, u.role, u.is_active, u.streamer_id::text, "
                               "(u.password_hash IS NOT NULL OR EXISTS (SELECT 1 FROM public.user_identities i "
                               "WHERE i.user_id = u.id)) AS can_sign_in FROM public.users u WHERE u.id = %s "
@@ -290,7 +291,7 @@ class AdminRepository:
         would leave no active admin who can sign in. The unique constraint decides races for one address. Lock order
         as update_user: users -> reset tokens / identities -> sessions."""
         try:
-            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT u.role, u.is_active, u.password_hash IS NOT NULL AS has_password, "
                                   "u.email = %s AS same FROM public.users u WHERE u.id = %s FOR UPDATE",
                                   (email, user_id))
@@ -358,7 +359,7 @@ class AdminRepository:
     # ── bootstrap ──────────────────────────────────────────────────────────
     async def bootstrap_admin(self, email: str, password_hash: str) -> str:
         """Create (or activate a password-less) admin account, only while no admin can sign in."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(_SIGN_IN_ADMINS)
             if await cur.fetchall():
                 raise BootstrapRefused("admin_exists")
@@ -376,7 +377,9 @@ class AdminRepository:
             if row is None:
                 raise BootstrapRefused("account_has_password")
             await burn_reset_tokens(cur, row["id"])  # security audit F10: the account now has a password
-            await self._revoke_sessions(cur, row["id"])  # users -> reset tokens -> sessions (lock order)
+            # Migration 0024: an existing password-less row may carry identities someone else linked: drop them.
+            await cur.execute("DELETE FROM public.user_identities WHERE user_id = %s", (row["id"],))
+            await self._revoke_sessions(cur, row["id"])  # users -> reset tokens / identities -> sessions (lock order)
             return row["id"]
 
 

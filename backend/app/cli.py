@@ -53,10 +53,10 @@ REFUSALS = {
 }
 
 
-def connection_factory(settings: Settings):
+def connection_factory(settings: Settings, role: str | None = None):
     @asynccontextmanager
     async def connect():
-        async with await psycopg.AsyncConnection.connect(settings.db_conninfo(), autocommit=True) as conn:
+        async with await psycopg.AsyncConnection.connect(settings.db_conninfo(role=role), autocommit=True) as conn:
             yield conn
     return connect
 
@@ -79,7 +79,8 @@ async def bootstrap_admin(settings: Settings, email: str, password: str) -> int:
     if problem:
         print(problem, file=sys.stderr)
         return 2
-    repo = AdminRepository(connection_factory(settings))
+    repo = AdminRepository(connection_factory(settings),  # migration 0024: admins are written by hyperchat_auth
+                           auth_factory=connection_factory(settings, "auth") if settings.db_auth_user else None)
     try:
         user_id = await repo.bootstrap_admin(email, hash_password(password))
     except BootstrapRefused as exc:

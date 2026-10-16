@@ -9,7 +9,7 @@ from app.admin.repository import AdminRepository, LastAdminError
 from app.auth.google import GoogleIdentity
 from app.cli import connection_factory
 from app.core.config import Settings
-from tests.integration import DOMAIN, ORIGIN, db, login, make_user, new_browser, requires_db, signed_in
+from tests.integration import DOMAIN, ORIGIN, db, fixture_db, login, make_user, new_browser, requires_db, signed_in
 
 pytestmark = requires_db
 U = "/api/v1/admin/users"
@@ -192,10 +192,10 @@ def test_a_google_only_last_admin_keeps_a_way_in(strict_scratch_db, env):
     """Removing the identities of an admin who can only sign in with Google needs another sign-in admin."""
     google_admin = make_user("d11-gadmin" + DOMAIN, role="admin", password=None)
     make_user("d11-nopass" + DOMAIN, role="admin", password=None)  # cannot sign in: does not count
-    with db() as conn:
+    with fixture_db() as conn:  # fixture setup: an admin's identity is written by hyperchat_auth only (0024)
         conn.execute("INSERT INTO public.user_identities (user_id, provider, provider_subject) "
                      "VALUES (%s, 'google', 'd11-sub-admin')", (google_admin,))
-    repo = AdminRepository(connection_factory(Settings()))
+    repo = AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
     with pytest.raises(LastAdminError):
         asyncio.run(repo.change_email(google_admin, NEW))
     assert _row(google_admin) == ("d11-gadmin" + DOMAIN, False, 0, 0, 1)
@@ -206,7 +206,7 @@ def test_a_google_only_last_admin_keeps_a_way_in(strict_scratch_db, env):
 
 def test_two_users_racing_for_one_address_have_one_winner(env):
     users = [make_user(f"d11-racer{i}" + DOMAIN) for i in range(4)]
-    repo = AdminRepository(connection_factory(Settings()))
+    repo = AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
 
     async def race():
         return await asyncio.gather(*(repo.change_email(u, NEW) for u in users))

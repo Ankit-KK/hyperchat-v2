@@ -564,6 +564,35 @@ def test_0023_enforcement_starts_inactive_changes_nothing_existing_and_guards_it
         command.upgrade(cfg, "head")
 
 
+def _auth_guards() -> set[str]:
+    with _owner() as conn:
+        return {r[0] for r in conn.execute("SELECT tgname FROM pg_trigger WHERE tgname LIKE 'aaa_auth_guard_%%'")}
+
+
+def test_0024_admin_auth_boundary_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    guards = {"aaa_auth_guard_users", "aaa_auth_guard_sessions", "aaa_auth_guard_user_identities",
+              "aaa_auth_guard_password_reset_tokens", "aaa_auth_guard_user_invites"}
+    assert _auth_guards() == guards
+    with _owner() as conn:
+        assert conn.execute("SELECT has_table_privilege('hyperchat_auth', 'public.users', 'UPDATE'), "
+                            "has_table_privilege('hyperchat_auth', 'public.donations', 'SELECT'), "
+                            "has_column_privilege('hyperchat_auth', 'public.streamers', 'status', 'UPDATE'), "
+                            "has_column_privilege('hyperchat_auth', 'public.streamers', 'user_id', 'UPDATE')"
+                            ).fetchone() == (True, False, False, True)
+    command.downgrade(cfg, "0023")
+    try:
+        assert _auth_guards() == set()
+        with _owner() as conn:
+            assert conn.execute("SELECT has_table_privilege('hyperchat_auth', 'public.users', 'SELECT')"
+                                ).fetchone()[0] is False
+    finally:
+        command.upgrade(cfg, "head")
+    assert _auth_guards() == guards
+
+
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):
     monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
     cfg = _cfg()

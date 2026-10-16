@@ -628,6 +628,26 @@ settings are never anonymous; tokenless legacy goal-overlay URLs keep working):
 The public `{slug}-goal` channel already skipped non-active creators (renderer); now covered for `pending` and
 `rejected`. Platform metrics stay public (owner decision).
 
+## Admin authentication boundary (migration 0024)
+
+Reproduced on main `a070d2f` and fixed here (see `docs/admin-auth-boundary.md`). With only `hyperchat_app` SQL an attacker could:
+- replace an admin's password hash and sign in;
+- insert an admin session (the CSRF token is served by `/auth/session`, so a forged session row was a full session);
+- promote a user;
+- forge an admin reset link or admin invite;
+- bind their Google subject to an admin;
+- and then activate a creator through the PR4 `hyperchat_lifecycle` path.
+
+**Now:**
+- **Guard triggers** refuse the runtime roles every admin-capable write. The guard keys on the executing database role (`current_user`), never on a caller-supplied id. For every session, it also refuses re-pointing, reviving or extending an expired one.
+- **A dedicated role:** the authentication flows run on `hyperchat_auth`.
+- **Admin creation:** admins come only from a new-account admin invitation or bootstrap. Promoting existing accounts is refused, which closes credentials prepared before a promotion.
+
+**Limits:**
+- This protects against a database-only compromise (SQL injection in the general role, or a leaked connection), not a compromised API process. Peer authentication maps the same OS user to every API role, and the process holds the session secret.
+- Closing the process threat needs an admin step-up factor verified outside the process (stage 2, required before launch).
+- Ordinary accounts stay writable by `hyperchat_app`; they can no longer be escalated to admin.
+
 ## KYC enforcement and rollout (KYC PR4, migration 0023)
 
 Enforcement is one forward-only row (draft -> active -> closed; a trigger refuses any other change for every role, the schema owner included) and starts draft: the migration, Didit credentials or verified users never activate it. Activation, closure, grace grants and restriction lifts are SECURITY DEFINER functions without any runtime grant, run by the operator with the migration role (`app.kyc.operator`); the API's role can only add restrictions and revoke grace (fail-closed), and read, and creator status changes only through `kyc_change_creator_status` (compare-and-set, owner, Razorpay account compare-and-set, the owner's own KYC and no restriction to activate, the full rule to reactivate, the audit row, one transaction), executable ONLY by the dedicated `hyperchat_lifecycle` role (the admin API's own connection, no table access): `hyperchat_app` cannot run it whatever actor id it names, and a trigger refuses every other runtime-role status write. Open limit: `hyperchat_app` owns the authentication tables, so its credentials can still mint an admin web session and drive the admin API; the follow-up (admin auth behind its own role, or a step-up factor) is in `docs/kyc-rollout.md`. Also fixed: 0007's per-schema default privileges never removed PostgreSQL's built-in PUBLIC EXECUTE, so `creator_donation_block` was executable by every role (now revoked; `test_0023` asserts no SECURITY DEFINER function in `public` is executable by PUBLIC). Grace applies only to an owner who never had a Didit decision: a revoked, expired or failed verification never falls back to grace. `creator_donation_block` stays the one rule (API + donations insert trigger): restrictions, a valid (active) owner, the owner's current Didit KYC, and while active a finite (<= 90 days, CHECK), owner-bound, one-shot grace grant; before activation the PR1 legacy baseline is unchanged. Activation of a creator needs the owner's own KYC under the creator row lock (lock order: creator row, then KYC / grace rows, then the enforcement record); suspension, owner transfer and restrictions revoke grace in the same transaction. The audit is append-only (UPDATE refused for every role; no runtime INSERT / DELETE; creators with history cannot be deleted, and `creator_status_events` became RESTRICT). Restore safety: every enforcement change extends a hash chain (random event id + content), and the witness file outside PostgreSQL anchors on (generation, chain, state); a database that no longer holds the witnessed chain at the anchor (an older snapshot), however far its generation advances afterwards, refuses new donations until the operator's audited acknowledgement re-anchors it (ordinary changes never re-anchor). Limits: the check runs in the API and operator tool (not inside PostgreSQL; a direct runtime-role insert uses only the in-database rule); changes committed but not yet witnessed (crash window, direct database-role calls) are protected only once a later line records them; Didit results (0022) are not witnessed; the file protects only while kept apart from backups and append-only; no defence against a compromised host or schema owner. See `docs/kyc-rollout.md`.

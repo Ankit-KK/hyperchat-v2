@@ -286,7 +286,7 @@ def test_an_acceptance_by_anyone_but_the_owner_never_counts(app):
 # ── concurrency (repository level) ──────────────────────────────────────────────
 
 def _repo() -> AdminRepository:
-    return AdminRepository(connection_factory(Settings()))
+    return AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
 
 
 def test_two_competing_transfers_have_one_winner(env):
