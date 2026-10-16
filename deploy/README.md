@@ -34,9 +34,11 @@ postgres/roles.sql              hyperchat_owner / migrator / app / worker / read
                                 credentials or sessions; HYPERCHAT_DB_AUTH_USER; docs/admin-auth-boundary.md)
 postgres/pg_hba.conf, pg_ident.conf  Unix-socket peer auth only; PostgreSQL is never exposed. pg_hba.conf lists
                                 EVERY login role (a missing one falls through to the generic peer rule and
-                                cannot connect); sync_pg_hba.sh replaces a stale HyperChat line in place
-check_isolation.sh              read-only server audit of one environment (dev|prod): file ownership, units,
-                                service account, pg_hba / pg_ident coverage; see "Isolation audit" below
+                                cannot connect); sync_pg_hba.sh places the HyperChat rule above every local
+                                rule that could match its roles (PostgreSQL uses the first match), or fails closed
+check_isolation.sh              read-only server audit of one environment (dev|prod): file ownership, every
+                                symlink hop and ancestor directory of the code, mount points, units, service
+                                account, pg_hba coverage AND rule order, pg_ident; needs namei (util-linux)
 postgres/pg_ident.production.conf    ident map of the PRODUCTION cluster only (hyperchat-prod; no DEV user)
 backup/                         nightly pg_dump of production (02:30 UTC, 14-day retention)
 api.env.example                 template for /etc/hyperchat/api.env (DEV; no secrets)
@@ -220,7 +222,8 @@ yet; each step below needs approval.**
    `bash deploy/check_isolation.sh dev` (and `prod`). Every line must be `OK`; a `FAIL` names the file or rule.
 2. **Fix pg_hba [APPROVAL]:** `bash deploy/postgres/sync_pg_hba.sh deploy/postgres/pg_hba.conf
    /etc/postgresql/<ver>/<cluster>/pg_hba.conf | diff /etc/postgresql/<ver>/<cluster>/pg_hba.conf -` shows the
-   change only. To apply it, re-run `deploy/postgres/setup_cluster.sh <ver> <cluster> <port>` (it backs up
+   change only (a HyperChat rule below a rule that shadows it is moved above it; include directives,
+   continuation lines or two HyperChat rules are refused). To apply it, re-run `deploy/postgres/setup_cluster.sh <ver> <cluster> <port>` (it backs up
    `pg_hba.conf` to `pg_hba.conf.bak-<timestamp>`, installs the synced file and reloads; existing databases and
    the ident map are untouched). Rollback: copy the backup back, `pg_ctlcluster <ver> <cluster> reload`.
 3. **pg_ident:** `setup_cluster.sh` still appends the DEV map only once and production uses
