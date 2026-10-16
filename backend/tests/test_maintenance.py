@@ -6,7 +6,7 @@ import json
 from app.cli import connection_factory, main
 from app.core.config import Settings
 from app.maintenance import cleanup
-from tests.integration import DOMAIN, db, make_streamer, make_user, requires_db
+from tests.integration import DOMAIN, db, fixture_db, make_streamer, make_user, requires_db
 
 pytestmark = requires_db
 
@@ -98,6 +98,11 @@ def _seed() -> dict[str, list[str]]:
         for order, days in (("order_authtestOld", 31), ("order_authtestNew", 29)):
             conn.execute("INSERT INTO public.order_lookup (razorpay_order_id, order_id, donation_id, created_at) "
                          "VALUES (%s, %s, %s, now() - make_interval(days => %s))", (order, order, did, days))
+    # KYC PR3: Didit webhook receipts after 90 days (only the database writes them; the API's role cannot).
+    with fixture_db() as conn:
+        for event_id, days in (("authtest-kyc-old", 91), ("authtest-kyc-new", 89)):
+            conn.execute("INSERT INTO public.kyc_webhook_events (event_id, webhook_type, outcome, received_at) "
+                         "VALUES (%s, 'status.updated', 'applied', now() - make_interval(days => %s))", (event_id, days))
     return {"sessions": sessions, "resets": resets, "nonces": nonces, "limits": limits, "invites": invites}
 
 
@@ -118,6 +123,7 @@ def _left() -> dict[str, set[str]]:
                            "UNION ALL SELECT short_id FROM public.discord_callback_mapping WHERE short_id LIKE 'authtest-%'"),
             "notifications": q("SELECT target_id FROM public.moderator_notifications WHERE target_id LIKE 'authtest-%'"),
             "lookups": q("SELECT razorpay_order_id FROM public.order_lookup WHERE razorpay_order_id LIKE 'order_authtest%'"),
+            "kyc": q("SELECT event_id FROM public.kyc_webhook_events WHERE event_id LIKE 'authtest-kyc-%'"),
         }
 
 
@@ -129,7 +135,7 @@ def test_cleanup_dry_run_then_delete_only_expired(strict_scratch_db, env):
     assert counts == {"sessions": 2, "password_reset_tokens": 1, "request_nonces": 1, "rate_limits": 1,
                       "user_invites": 2, "jobs": 2, "tts_moderation_audit": 1, "telegram_callback_mapping": 1,
                       "discord_callback_mapping": 1, "moderator_notifications": 1, "realtime_outbox": 2,
-                      "order_lookup": 1}
+                      "order_lookup": 1, "kyc_webhook_events": 1}
     assert len(_left()["sessions"]) == 4  # dry run deleted nothing
     assert asyncio.run(cleanup(factory, dry_run=False)) == counts
     assert _left() == {
@@ -138,7 +144,7 @@ def test_cleanup_dry_run_then_delete_only_expired(strict_scratch_db, env):
         "jobs": {"authtest-j3", "authtest-j4"}, "audit": {"authtest-a2"},
         "outbox": {"authtest-o-failed", "authtest-o-pending"},
         "callbacks": {"authtest-cb-new"}, "notifications": {"authtest-n-new"},
-        "lookups": {"order_authtestNew"},
+        "lookups": {"order_authtestNew"}, "kyc": {"authtest-kyc-new"},
     }
     assert set(asyncio.run(cleanup(factory, dry_run=True)).values()) == {0}
 

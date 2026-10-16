@@ -72,6 +72,9 @@ async def cleanup(connection_factory, *, dry_run: bool) -> dict[str, int]:
             else:
                 await cur.execute(f"DELETE FROM {table} WHERE {condition}")
                 counts[name] = cur.rowcount
+        # KYC PR3: Didit webhook receipts after 90 days, through the database (the API's role cannot DELETE them).
+        await cur.execute("SELECT public.kyc_purge_webhook_receipts(%s)", (dry_run,))
+        counts["kyc_webhook_events"] = (await cur.fetchone())[0]
     return counts
 
 

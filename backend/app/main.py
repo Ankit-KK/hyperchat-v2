@@ -25,6 +25,7 @@ from app.public.signups import SignupRepository
 from app.audio.repository import AudioRepository
 from app.audio.transcriptions import TranscriptionService
 from app.jobs.queue import JobQueue
+from app.kyc.service import KycRepository, KycService
 from app.payments.accounts import AccountHealth, PaymentAccounts
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
@@ -45,6 +46,7 @@ from app.routers import (
     bots,
     dashboard,
     health,
+    kyc,
     obs,
     partners,
     payments,
@@ -89,6 +91,8 @@ async def lifespan(app: FastAPI):
         app.state.admin = AdminService(AdminRepository(app.state.db.connection),
                                        payment_accounts=frozenset(payment_accounts.summary()["payments"]),
                                        pusher_groups=tuple(settings.pusher_groups_configured))
+        app.state.kyc = KycService.from_settings(KycRepository(app.state.db.connection), settings,
+                                                 limiter=app.state.auth.repo)  # 503 until Didit is configured
         app.state.applications = ApplicationService(ApplicationRepository(app.state.db.connection),
                                                     admin=app.state.admin, auth=app.state.auth)
         conn = app.state.db.connection
@@ -231,6 +235,9 @@ def create_app() -> FastAPI:
     app.include_router(bots.router)
     app.include_router(dashboard.me_router)
     app.include_router(soundboard.soundboard_router)
+    app.include_router(kyc.me_router)
+    app.include_router(kyc.webhook_router)
+    app.include_router(kyc.admin_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.
     app.add_middleware(CorsMiddleware, allowed_origins=settings.browser_origins)
     return app

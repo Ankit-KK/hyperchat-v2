@@ -168,6 +168,11 @@ def cleanup_synthetic_rows() -> None:
         conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.platform_soundboard_slots WHERE audio_key LIKE %s OR audio_key LIKE %s",
                      (SLUG_PREFIX + "%", "hypersounds/" + SLUG_PREFIX + "%"))
+        with fixture_db() as owner:  # KYC history is RESTRICT / append-only for the runtime roles (migration 0022)
+            synthetic = "(SELECT id FROM public.users WHERE email::text LIKE %s)"
+            owner.execute(f"DELETE FROM public.kyc_events WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
+            owner.execute(f"DELETE FROM public.kyc_sessions WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
+            owner.execute("DELETE FROM public.kyc_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions
         conn.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.partner_signups WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))

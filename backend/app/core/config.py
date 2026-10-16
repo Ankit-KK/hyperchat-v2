@@ -6,6 +6,7 @@ Every value comes from environment variables prefixed with ``HYPERCHAT_`` (on th
 
 import re
 import unicodedata
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -35,6 +36,13 @@ MAX_CONTACT_PHONES = 5
 
 def _secret_value(value: SecretStr | None) -> str:
     return value.get_secret_value().strip() if value is not None else ""
+
+
+def _uuid(value: str | None) -> str | None:
+    try:
+        return str(uuid.UUID(value)) if value else None
+    except ValueError:
+        return None
 
 
 def _https_url(value: str, *, allow_path: bool) -> str | None:
@@ -129,6 +137,31 @@ class Settings(BaseSettings):
     razorpay_primary_key_id: SecretStr | None = None
     razorpay_primary_key_secret: SecretStr | None = None
     razorpay_primary_webhook_secret: SecretStr | None = None
+
+    # ── Didit identity verification (KYC PR3, app.kyc). Creator OWNERS verify their identity; starting one is
+    #    unavailable (503) until the API key and workflow id are set. The webhook secret is NOT here: it lives only in
+    #    the database (public.kyc_provider_config, unreadable by the API's role), which verifies every webhook itself.
+    #    DEV uses a Didit SANDBOX application, production a LIVE one (refused otherwise, below), so a sandbox result
+    #    can never count in production.
+    didit_api_key: SecretStr | None = None
+    didit_workflow_id: str | None = None   # not secret; must equal the workflow in kyc_provider_config
+    didit_environment: Literal["sandbox", "live"] | None = None
+    didit_api_base: str = "https://verification.didit.me"
+
+    @property
+    def didit_configured(self) -> bool:
+        return bool(_secret_value(self.didit_api_key) and _uuid(self.didit_workflow_id) and self.didit_environment)
+
+    @model_validator(mode="after")
+    def _refuse_the_wrong_didit_environment(self) -> "Settings":
+        expected = "live" if self.app_env == "production" else "sandbox"
+        if self.didit_environment is not None and self.didit_environment != expected:
+            raise ValueError(f"Refusing to start: HYPERCHAT_DIDIT_ENVIRONMENT must be {expected!r} here")
+        if self.didit_workflow_id and not _uuid(self.didit_workflow_id):
+            raise ValueError("Refusing to start: HYPERCHAT_DIDIT_WORKFLOW_ID must be a UUID")
+        if _https_url(self.didit_api_base, allow_path=False) != self.didit_api_base.rstrip("/"):
+            raise ValueError("Refusing to start: HYPERCHAT_DIDIT_API_BASE must be an https origin")
+        return self
 
     # ── Background jobs and audio (Phase 8: app.jobs, app.audio). Paid providers are only ever called by
     #    the worker, and only when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true AND the provider's key is set;

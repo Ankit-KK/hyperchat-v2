@@ -50,7 +50,7 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021")  # 0018 D6, 0019 D13, 0020/0021 KYC PR1/PR2
+KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022")  # 0018 D6, 0019 D13, 0020-0022 KYC PR1-PR3
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
@@ -745,6 +745,23 @@ try:
           and a.json() == b.json(), f"{a.status_code} {b.status_code}")
     r = httpx.post(API + "/api/v1/public/signups", json=signup, headers={"origin": "https://evil.invalid"}, timeout=15)
     check(S, "signup form from a foreign origin -> 403", r.status_code == 403, r.text)
+    # ── owner identity verification (KYC PR3, migration 0022): no Didit call is ever made by the smoke ──
+    S4 = "kyc"
+    me = owner_a.get("/api/v1/me/kyc")
+    if me.status_code == 404:
+        blocked(S4, "Owner identity verification (KYC PR3)", "not deployed on DEV yet")
+    else:
+        check(S4, "an owner sees their KYC state (never identity data)", me.status_code == 200 and set(me.json()) == {
+            "approved", "state", "provider_status", "updated_at", "owns_creator", "available", "can_start"},
+              me.text[:200])
+        check(S4, "anonymous -> 401", httpx.get(API + "/api/v1/me/kyc", timeout=15).status_code == 401)
+        unsigned = httpx.post(API + "/api/v1/webhooks/didit", content=b"{}",
+                              headers={"content-type": "application/json"}, timeout=15)
+        check(S4, "an unsigned Didit webhook is refused (401, or 503 while Didit is not configured)",
+              unsigned.status_code in (401, 503), str(unsigned.status_code))
+        if not me.json().get("available"):
+            blocked(S4, "Didit session start", "no DEV Didit sandbox credentials configured (needs owner approval)")
+
     # ── creator applications (KYC PR2, migration 0021): the synthetic signup above, synthetic creator only ──
     S3 = "applications"
     if admin.get("/api/v1/admin/applications").status_code == 404:
