@@ -88,11 +88,14 @@ async def lifespan(app: FastAPI):
     app.state.hypersounds = HypersoundLibrary(store)
     payment_accounts = PaymentAccounts.from_settings(settings)
     if app.state.db.enabled:
-        app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection))
+        auth_db = single_connection_factory(settings.db_conninfo(role="auth")) if settings.db_auth_user else None
+        if auth_db is None:  # migration 0024: without it the general role cannot write admin credentials/sessions
+            log.error("HYPERCHAT_DB_AUTH_USER is not set: administrators cannot sign in")
+        app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection, auth_db))
         app.state.authz = AuthzRepository(app.state.db.connection)
-        lifecycle = single_connection_factory(settings.db_conninfo(lifecycle=True)) \
+        lifecycle = single_connection_factory(settings.db_conninfo(role="lifecycle")) \
             if settings.db_lifecycle_user else None  # KYC PR4: creator status transitions only
-        app.state.admin = AdminService(AdminRepository(app.state.db.connection, lifecycle),
+        app.state.admin = AdminService(AdminRepository(app.state.db.connection, lifecycle, auth_db),
                                        payment_accounts=frozenset(payment_accounts.summary()["payments"]),
                                        pusher_groups=tuple(settings.pusher_groups_configured))
         app.state.kyc = KycService.from_settings(KycRepository(app.state.db.connection), settings,

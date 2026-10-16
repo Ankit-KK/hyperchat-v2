@@ -37,32 +37,26 @@ def test_bootstrap_creates_admin_once(strict_scratch_db, app, monkeypatch, capsy
                             ("second-admin" + DOMAIN,)).fetchone()[0] == 0
 
 
-def test_bootstrap_activates_imported_account_without_password(strict_scratch_db, app, monkeypatch, capsys):
+def test_bootstrap_refuses_an_existing_password_less_account(strict_scratch_db, app, monkeypatch, capsys):
+    """Migration 0024: bootstrap only creates a NEW account; an imported or prepared row is never promoted, and its
+    open reset link and state stay exactly as they were."""
     uid = make_user("imported-admin" + DOMAIN, role="streamer", password=None, is_active=False)
-    code, _ = _run(monkeypatch, capsys, "IMPORTED-ADMIN" + DOMAIN)
-    assert code == 0
-    with db() as conn:
-        assert conn.execute("SELECT role, is_active, password_hash LIKE '$argon2id$%%' FROM public.users WHERE id = %s",
-                            (uid,)).fetchone() == ("admin", True, True)
-
-
-def test_bootstrap_burns_open_reset_links(strict_scratch_db, app, monkeypatch, capsys):
-    """Security audit F10: a reset link the password-less account requested earlier must not override the
-    password bootstrap-admin just set."""
     make_user("bootstrap-reset" + DOMAIN, password=None)
     assert app.post("/api/v1/auth/password/forgot", json={"email": "bootstrap-reset" + DOMAIN}).status_code == 202
-    link = app.app_state.auth.sender.last_token()
-    code, _ = _run(monkeypatch, capsys, "bootstrap-reset" + DOMAIN)
-    assert code == 0
-    late = app.post("/api/v1/auth/password/reset", json={"token": link, "new_password": "Attacker-Pass-42"})
-    assert late.status_code == 400
-    assert login(new_browser(app), "bootstrap-reset" + DOMAIN, PASSWORD).status_code == 200
+    for email in ("IMPORTED-ADMIN" + DOMAIN, "bootstrap-reset" + DOMAIN):
+        code, out = _run(monkeypatch, capsys, email)
+        assert code == 1 and "already exists" in out.err
+    with db() as conn:
+        assert conn.execute("SELECT role, is_active, password_hash FROM public.users WHERE id = %s",
+                            (uid,)).fetchone() == ("streamer", False, None)
+        assert conn.execute("SELECT count(*) FROM public.users WHERE role = 'admin' AND email::text IN (%s, %s)",
+                            ("imported-admin" + DOMAIN, "bootstrap-reset" + DOMAIN)).fetchone()[0] == 0
 
 
 def test_bootstrap_refuses_account_with_password_and_weak_passwords(strict_scratch_db, app, monkeypatch, capsys):
     make_user("has-password" + DOMAIN)
     code, out = _run(monkeypatch, capsys, "has-password" + DOMAIN)
-    assert code == 1 and "already has a password" in out.err
+    assert code == 1 and "already exists" in out.err
     code, out = _run(monkeypatch, capsys, "weak" + DOMAIN, password="short")
     assert code == 2 and "at least" in out.err
     code, out = _run(monkeypatch, capsys, "not-an-email")

@@ -1,4 +1,6 @@
-"""SQL for authentication (runs as hyperchat_app; DML only)."""
+"""SQL for authentication. Reads, rate limits, session sliding and revocations run as hyperchat_app; every write
+that can create or change credentials, identities, invites or sessions runs as hyperchat_auth (migration 0024: the
+general role may not write an administrator's)."""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -54,10 +56,29 @@ _INSERT_SESSION = """
     RETURNING id::text, user_id::text, idle_expires_at, absolute_expires_at
 """
 
+_ACCEPT_INSERT = """
+    INSERT INTO public.users (email, password_hash, username, role, streamer_id, email_verified_at, password_changed_at)
+    VALUES (%(email)s, %(hash)s, %(username)s, %(role)s, %(streamer_id)s, now(), now())
+"""
+_ACCEPT_INSERT_NEW = _ACCEPT_INSERT + f"ON CONFLICT (email) DO NOTHING RETURNING {_USER_COLS}"
+# Ordinary and creator-staff invites may give a password to an existing password-less, active, non-admin account.
+_ACCEPT_UPSERT = _ACCEPT_INSERT + f"""
+    ON CONFLICT (email) DO UPDATE SET
+        password_hash = EXCLUDED.password_hash,
+        username = COALESCE(public.users.username, EXCLUDED.username),
+        streamer_id = COALESCE(EXCLUDED.streamer_id, public.users.streamer_id),
+        role = EXCLUDED.role,
+        email_verified_at = COALESCE(public.users.email_verified_at, now()),
+        password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL
+    WHERE public.users.password_hash IS NULL AND public.users.is_active AND public.users.role <> 'admin'
+    RETURNING {_USER_COLS}
+"""
+
 
 class AuthRepository:
-    def __init__(self, connection_factory) -> None:
+    def __init__(self, connection_factory, auth_factory=None) -> None:
         self._conn = connection_factory
+        self._auth = auth_factory or connection_factory  # hyperchat_auth connections (credential / session writes)
 
     async def _one(self, sql: str, params: tuple) -> dict | None:
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -85,7 +106,7 @@ class AuthRepository:
         commits before this is seen here (a deactivated account gets None: no session, no link, nothing recorded; a
         reset or change doesn't affect a Google sign-in, so this session is simply issued after it); one that commits
         after this revokes the session in its own transaction. Nothing is written unless the session is."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT is_active AS active FROM public.users WHERE id = %s FOR UPDATE", (user_id,))
             row = await cur.fetchone()
             if row is None or not row["active"]:
@@ -110,7 +131,7 @@ class AuthRepository:
         return None (no session); one that commits after it revokes the session in its own transaction, so a session
         authenticated against an old password can never outlive a completed reset or change. `session` holds
         _INSERT_SESSION's parameters; Argon2 runs before the call."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT password_hash, is_active FROM public.users WHERE id = %s FOR UPDATE", (user_id,))
             row = await cur.fetchone()
             if row is None or not row["is_active"] or row["password_hash"] != verified_hash:
@@ -135,7 +156,7 @@ class AuthRepository:
         (compare-and-set): a reset or another change that finished in the meantime wins, and this one is refused
         (None). In the same transaction: burn the user's open reset links and revoke every other session (the
         current one is kept). Returns the number of sessions revoked (security audit F10)."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        async with self._auth() as conn, conn.transaction(), conn.cursor() as cur:
             await cur.execute("""
                 UPDATE public.users SET password_hash = %s, password_changed_at = now(),
                        failed_login_attempts = 0, locked_until = NULL
@@ -147,10 +168,15 @@ class AuthRepository:
             return await revoke_sessions(cur, user_id, except_session_id=keep_session_id)
 
     # ── sessions ───────────────────────────────────────────────────────────
+    async def _auth_one(self, sql: str, params: tuple) -> dict | None:
+        async with self._auth() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(sql, params)
+            return await cur.fetchone()
+
     async def create_session(self, session_id: str, user_id: str, token_hash: str, csrf_hash: str,
                              ua_hash: str | None, ip: str | None, idle_days: int, absolute_days: int) -> Session:
-        row = await self._one(_INSERT_SESSION,
-                              (session_id, user_id, token_hash, csrf_hash, ua_hash, ip, idle_days, absolute_days))
+        row = await self._auth_one(_INSERT_SESSION,
+                                   (session_id, user_id, token_hash, csrf_hash, ua_hash, ip, idle_days, absolute_days))
         return Session(**row)
 
     async def active_session(self, token_hash: str, idle_days: int) -> Session | None:
@@ -176,9 +202,10 @@ class AuthRepository:
 
     # ── password reset ─────────────────────────────────────────────────────
     async def create_reset_token(self, user_id: str, token_hash: str, ttl_minutes: int) -> None:
-        await self._exec("""
+        await self._auth_one("""
             INSERT INTO public.password_reset_tokens (user_id, token_hash, expires_at)
             VALUES (%s, %s, now() + make_interval(mins => %s))
+            RETURNING id
         """, (user_id, token_hash, ttl_minutes))
 
     async def reset_password(self, token_hash: str, new_hash: str) -> str | None:
@@ -187,7 +214,7 @@ class AuthRepository:
         A change or reset that committed first has burned the link, so this one is refused and never overwrites it.
         Revokes every session in the same transaction. The caller hashes before calling, so no row lock is held while
         Argon2 runs. Returns (user id, sessions revoked) or None."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        async with self._auth() as conn, conn.transaction(), conn.cursor() as cur:
             await cur.execute("SELECT user_id::text FROM public.password_reset_tokens WHERE token_hash = %s",
                               (token_hash,))
             found = await cur.fetchone()
@@ -215,7 +242,7 @@ class AuthRepository:
     # ── invites ────────────────────────────────────────────────────────────
     async def create_invite(self, email: str, role: str, streamer_id: str | None, token_hash: str,
                             invited_by: str, ttl_days: int) -> dict:
-        return await self._one("""
+        return await self._auth_one("""
             INSERT INTO public.user_invites (email, role, streamer_id, token_hash, invited_by, expires_at)
             VALUES (%s, %s, %s, %s, %s, now() + make_interval(days => %s))
             RETURNING id::text, expires_at
@@ -228,7 +255,9 @@ class AuthRepository:
         reset is serialized with it: one that commits first gave the account a password, so the invite is refused
         (InviteConflict) and nothing is consumed; one that commits after finds its link burned (if it predates the
         acceptance) or revokes this session (if requested afterwards). Any failure leaves nothing behind: no consumed
-        invite, no account or password, no session. An existing account must be password-less AND active: the check
+        invite, no account or password, no session. An admin invite or an application invite is insert-only (ON
+        CONFLICT DO NOTHING): any account with the address, including one inserted concurrently, is InviteConflict.
+        For other invites an existing account must be password-less, active AND not an admin: the check
         is the upsert's own condition, evaluated under that row lock (ON CONFLICT locks the row even when the condition
         fails), so a deactivation that commits first is always seen (InviteAccountDisabled, nothing changed) and one
         that commits after revokes this session and burns the links as usual. `session` holds _INSERT_SESSION's
@@ -240,7 +269,7 @@ class AuthRepository:
         the application's creator, atomically and only while that creator is unclaimed: an owner already there is
         refused (InviteCreatorClaimed: nothing consumed, never a transfer), and such an invite never takes over an
         existing account (InviteConflict). It never activates the creator (it stays pending until an admin does)."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
                 UPDATE public.user_invites SET accepted_at = now()
                 WHERE token_hash = %s AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()
@@ -261,32 +290,23 @@ class AuthRepository:
                     raise InviteNotApplicable()  # no longer bound to its approved application and creator
                 if app["user_id"] is not None:
                     raise InviteCreatorClaimed()
-                await cur.execute("SELECT 1 FROM public.users WHERE email = %s", (invite["email"],))
-                if await cur.fetchone() is not None:
-                    raise InviteConflict()  # an existing account is linked by an admin, never taken over
-            await cur.execute(f"""
-                INSERT INTO public.users (email, password_hash, username, role, streamer_id, email_verified_at,
-                                          password_changed_at)
-                VALUES (%(email)s, %(hash)s, %(username)s, %(role)s, %(streamer_id)s, now(), now())
-                ON CONFLICT (email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
-                    username = COALESCE(public.users.username, EXCLUDED.username),
-                    streamer_id = COALESCE(EXCLUDED.streamer_id, public.users.streamer_id),
-                    role = CASE WHEN public.users.role = 'admin' THEN 'admin' ELSE EXCLUDED.role END,
-                    email_verified_at = COALESCE(public.users.email_verified_at, now()),
-                    password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL
-                WHERE public.users.password_hash IS NULL AND public.users.is_active
-                RETURNING {_USER_COLS}
-            """, {"email": invite["email"], "hash": password_hash, "username": username, "role": invite["role"],
-                  "streamer_id": invite["streamer_id"]})
+            # An admin (migration 0024: no identity, reset link or password prepared on an existing row may come with
+            # the privilege) and an application's owner are always a NEW account: insert-only, and an account with the
+            # address, even one committed concurrently, refuses the whole transaction (the invite is not consumed).
+            new_only = invite["role"] == "admin" or invite["signup_id"] is not None
+            await cur.execute(_ACCEPT_INSERT_NEW if new_only else _ACCEPT_UPSERT,
+                              {"email": invite["email"], "hash": password_hash, "username": username,
+                               "role": invite["role"], "streamer_id": invite["streamer_id"]})
             user = await cur.fetchone()
+            if not user and new_only:  # DO NOTHING waited for a concurrent insert of the address and saw it commit
+                raise InviteConflict()
             if not user:  # the existing row is locked now (ON CONFLICT), so this reading is stable
-                await cur.execute("SELECT password_hash IS NULL AS password_less FROM public.users WHERE email = %s",
-                                  (invite["email"],))
+                await cur.execute("SELECT password_hash IS NULL AND role <> 'admin' AS password_less FROM public.users "
+                                  "WHERE email = %s", (invite["email"],))
                 existing = await cur.fetchone()
                 if existing and existing["password_less"]:
                     raise InviteAccountDisabled()  # password-less but deactivated
-                raise InviteConflict()  # already has a password: the invite cannot take it over (active or not)
+                raise InviteConflict()  # has a password or is an admin: never taken over (active or not)
             await cur.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s",
                               (user["id"], invite["id"]))
             if invite["signup_id"] is not None:  # the creator row is locked above: this cannot race another claim

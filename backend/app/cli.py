@@ -4,9 +4,9 @@
     python -m app.cli --env-file /etc/hyperchat/api.env cleanup [--dry-run]
     python -m app.cli --env-file /etc/hyperchat/api.env payment-health
 
-bootstrap-admin creates the first admin account (or activates a password-less one) and refuses to run
-while any active admin can already sign in. The password is read without echo (or from stdin with
---password-stdin) and is never printed or logged.
+bootstrap-admin creates the first admin account as a NEW account (an existing account with the address is
+refused) and refuses to run while any active admin can already sign in. The password is read without echo
+(or from stdin with --password-stdin) and is never printed or logged.
 cleanup deletes expired sessions, reset tokens, nonces, rate-limit windows, old unused invites, finished
 jobs (30 days) and TTS moderation audit rows (90 days), then donor uploads that no donation uses after 24
 hours when R2 is configured (D9) (see app.maintenance); --dry-run only counts. It runs
@@ -49,14 +49,15 @@ from app.storage.r2 import StorageError, build_object_store
 
 REFUSALS = {
     "admin_exists": "An active admin who can sign in already exists. Use the admin API instead.",
-    "account_has_password": "This account already has a password. Sign in with it, or have an admin change its role.",
+    "account_exists": "An account with this email already exists. Bootstrap only creates a new account: use another "
+                      "email, or send an admin invitation from the admin API.",
 }
 
 
-def connection_factory(settings: Settings):
+def connection_factory(settings: Settings, role: str | None = None):
     @asynccontextmanager
     async def connect():
-        async with await psycopg.AsyncConnection.connect(settings.db_conninfo(), autocommit=True) as conn:
+        async with await psycopg.AsyncConnection.connect(settings.db_conninfo(role=role), autocommit=True) as conn:
             yield conn
     return connect
 
@@ -79,7 +80,8 @@ async def bootstrap_admin(settings: Settings, email: str, password: str) -> int:
     if problem:
         print(problem, file=sys.stderr)
         return 2
-    repo = AdminRepository(connection_factory(settings))
+    repo = AdminRepository(connection_factory(settings),  # migration 0024: admins are written by hyperchat_auth
+                           auth_factory=connection_factory(settings, "auth") if settings.db_auth_user else None)
     try:
         user_id = await repo.bootstrap_admin(email, hash_password(password))
     except BootstrapRefused as exc:

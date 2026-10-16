@@ -12,6 +12,7 @@ from app.admin.applications import ApplicationRepository
 from app.cli import connection_factory
 from app.core.config import Settings
 from tests.integration import (
+    fixture_db,
     DOMAIN,
     ORIGIN,
     PASSWORD,
@@ -282,6 +283,7 @@ def test_an_application_invite_refuses_a_claimed_creator_or_a_mismatch(app):
         assert conn.execute("SELECT accepted_at FROM public.user_invites WHERE signup_id = %s",
                             (sid,)).fetchone()[0] is None
         conn.execute("UPDATE public.streamers SET user_id = NULL WHERE id = %s", (cid,))
+    with fixture_db() as conn:  # the invite's address changed (the runtime role cannot do that: migration 0024)
         conn.execute("UPDATE public.user_invites SET email = %s WHERE signup_id = %s", ("apps-other" + DOMAIN, sid))
     assert _accept(app, token).status_code == 400  # bound to the applicant's email: no longer valid
 
@@ -350,11 +352,11 @@ def test_an_application_invite_can_never_lose_its_binding(app):
     with db() as conn:  # the API's own role
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             conn.execute("DELETE FROM public.user_signups WHERE id = %s", (sid,))
-        with pytest.raises(psycopg.errors.IntegrityConstraintViolation):
+        with pytest.raises((psycopg.errors.IntegrityConstraintViolation, psycopg.errors.InsufficientPrivilege)):
             conn.execute("UPDATE public.user_invites SET signup_id = NULL WHERE signup_id = %s", (sid,))
         other = conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES ('O', %s, "
                              "'+91 90000 00005') RETURNING id", ("apps-bind-other" + DOMAIN,)).fetchone()[0]
-        with pytest.raises(psycopg.errors.IntegrityConstraintViolation):
+        with pytest.raises((psycopg.errors.IntegrityConstraintViolation, psycopg.errors.InsufficientPrivilege)):
             conn.execute("UPDATE public.user_invites SET signup_id = %s WHERE signup_id = %s", (other, sid))
         assert conn.execute("SELECT count(*) FROM public.user_invites WHERE signup_id = %s AND accepted_at IS NULL "
                             "AND revoked_at IS NULL", (sid,)).fetchone()[0] == 1

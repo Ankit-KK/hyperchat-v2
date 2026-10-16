@@ -14,6 +14,7 @@ from app.auth.tokens import sha256_hex
 from tests.integration import DOMAIN, FRONT, ORIGIN, PASSWORD, requires_db
 from tests.integration import csrf_headers as _csrf
 from tests.integration import db as _db
+from tests.integration import fixture_db
 from tests.integration import login as _login
 from tests.integration import make_user as _user
 from tests.integration import new_browser as _new_client
@@ -169,7 +170,7 @@ def test_expired_reset_token_is_rejected(app):
     _user("oldreset" + DOMAIN)
     app.post("/api/v1/auth/password/forgot", json={"email": "oldreset" + DOMAIN})
     token = app.app_state.auth.sender.last_token()
-    with _db() as conn:
+    with fixture_db() as conn:  # time passes (the runtime role cannot change a link: migration 0024)
         conn.execute("UPDATE public.password_reset_tokens SET expires_at = now() - interval '1 second' "
                      "WHERE token_hash = %s", (sha256_hex(token),))
     r = app.post("/api/v1/auth/password/reset", json={"token": token, "new_password": "New-Password-42"})
@@ -324,7 +325,7 @@ def test_concurrent_guesses_cannot_exceed_the_limit(env):
 
     _user("racer" + DOMAIN)
     settings = Settings()
-    service = AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+    service = AuthService.from_settings(settings, AuthRepository(connection_factory(settings), connection_factory(settings, "auth")))
 
     async def race():
         user = await service.repo.user_by_email("racer" + DOMAIN)
@@ -443,7 +444,7 @@ def test_expired_invite_is_rejected(app):
     headers = _admin(app)
     app.post("/api/v1/auth/invites", headers=headers, json={"email": "late" + DOMAIN})
     token = app.app_state.auth.sender.last_token()
-    with _db() as conn:
+    with fixture_db() as conn:  # time passes
         conn.execute("UPDATE public.user_invites SET expires_at = now() - interval '1 second' WHERE token_hash = %s",
                      (sha256_hex(token),))
     r = _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,

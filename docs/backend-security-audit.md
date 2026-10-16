@@ -264,7 +264,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Deactivation:** a link issued before an admin deactivated an account could still set its password, which then worked once the account was reactivated.
 - **Severity: P3.** The impact is account takeover, but it requires an unexpired reset link: the 60-minute TTL, single use, and stored only as a hash.
 - **Status: merged in #31 (`3b834d8`); not deployed.** No policy decision needed; standard practice.
-  - **Burned whenever a password is set or the account is deactivated:** `AuthRepository.reset_password`, `AuthRepository.change_password`, `accept_invite`, `AdminRepository.bootstrap_admin` and `AdminRepository.update_user` (deactivation) burn every open reset token of the user **in the same transaction** (`burn_reset_tokens`).
+  - **Burned whenever a password is set or the account is deactivated:** `AuthRepository.reset_password`, `AuthRepository.change_password`, `accept_invite`, `AdminRepository.bootstrap_admin` and `AdminRepository.update_user` (deactivation) burn every open reset token of the user **in the same transaction** (`burn_reset_tokens`). Since migration 0024's follow-up, `bootstrap_admin` only inserts a new account, so it has no links to burn.
   - **Active accounts only:** `AuthRepository.reset_password` redeems a token only for an **active** account; a deactivated account's link gets the generic "invalid or expired" answer.
   - **Unchanged:** a link requested after the change works; reset is still single use and still revokes all sessions.
   - **Race fixed (owner review of PR #31):**
@@ -299,7 +299,7 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
   - **Password change:** a link sent before a password change is refused, the owner's new password stays, and a link requested afterwards works.
   - **Deactivated account:** a deactivated account's link is refused, and after reactivation the original password still works.
   - **Invite acceptance:** accepting an invite burns a password-less account's open reset link (`tests/auth/test_auth_flow.py`).
-  - **`bootstrap-admin`:** does the same (`tests/admin/test_bootstrap_cli.py`).
+  - **`bootstrap-admin`:** did the same; since migration 0024's follow-up it refuses an existing account outright, leaving its link and state untouched (`tests/admin/test_bootstrap_cli.py`).
 - **Regression proof:** all four tests **fail** against the previous repository code.
 - **Limitations:**
   - **Google sign-in session (follow-up: merged in #36, `c5b8751`; not deployed):**
@@ -627,6 +627,26 @@ settings are never anonymous; tokenless legacy goal-overlay URLs keep working):
 
 The public `{slug}-goal` channel already skipped non-active creators (renderer); now covered for `pending` and
 `rejected`. Platform metrics stay public (owner decision).
+
+## Admin authentication boundary (migration 0024)
+
+Reproduced on main `a070d2f` and fixed here (see `docs/admin-auth-boundary.md`). With only `hyperchat_app` SQL an attacker could:
+- replace an admin's password hash and sign in;
+- insert an admin session (the CSRF token is served by `/auth/session`, so a forged session row was a full session);
+- promote a user;
+- forge an admin reset link or admin invite;
+- bind their Google subject to an admin;
+- and then activate a creator through the PR4 `hyperchat_lifecycle` path.
+
+**Now:**
+- **Guard triggers** refuse the runtime roles every admin-capable write. The guard keys on the executing database role (`current_user`), never on a caller-supplied id. For every session, it also refuses re-pointing, reviving or extending an expired one.
+- **A dedicated role:** the authentication flows run on `hyperchat_auth`.
+- **Admin creation:** admins come only from a new-account admin invitation or bootstrap. Promoting existing accounts is refused, which closes credentials prepared before a promotion.
+
+**Limits:**
+- This protects against a database-only compromise (SQL injection in the general role, or a leaked connection), not a compromised API process. Peer authentication maps the same OS user to every API role, and the process holds the session secret.
+- Closing the process threat needs an admin step-up factor verified outside the process (stage 2, required before launch).
+- Ordinary accounts stay writable by `hyperchat_app`; they can no longer be escalated to admin.
 
 ## KYC enforcement and rollout (KYC PR4, migration 0023)
 

@@ -42,7 +42,7 @@ def env(monkeypatch, scratch_db):
     name, port = target()
     for key, value in {
         "HYPERCHAT_DB_NAME": name, "HYPERCHAT_DB_PORT": port, "HYPERCHAT_DB_USER": "hyperchat_app",
-        "HYPERCHAT_DB_LIFECYCLE_USER": "hyperchat_lifecycle",
+        "HYPERCHAT_DB_LIFECYCLE_USER": "hyperchat_lifecycle", "HYPERCHAT_DB_AUTH_USER": "hyperchat_auth",
         "HYPERCHAT_DB_HOST": PG_HOST, "HYPERCHAT_DB_LABEL": "TEST-AUTH-SCRATCH",
         "HYPERCHAT_AUTH_SECRET": new_token(32),  # random per test, never printed
         "HYPERCHAT_FRONTEND_URL": FRONT, "HYPERCHAT_EMAIL_BACKEND": "disabled",

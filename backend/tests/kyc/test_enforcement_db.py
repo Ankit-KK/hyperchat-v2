@@ -356,7 +356,9 @@ def test_closure_ends_grace_and_nothing_reopens(enf):
     with db() as conn:
         record = conn.execute("SELECT activated_by, activation_authorization, activation_migration, policy, "
                               "closed_by, closure_authorization, grace_max_days FROM public.kyc_enforcement").fetchone()
-    assert record == ("ops-test", "TEST-APPROVAL-1", "0023", "kyc-pr4-v1", "ops-test", "TEST-CLOSE", 90)
+    with fixture_db() as conn:
+        head = conn.execute("SELECT version_num FROM public.alembic_version").fetchone()[0]
+    assert record == ("ops-test", "TEST-APPROVAL-1", head, "kyc-pr4-v1", "ops-test", "TEST-CLOSE", 90)
     assert events()[:1] == ["grace_granted"] and "enforcement_activated" in events() and "enforcement_closed" in events()
 
 

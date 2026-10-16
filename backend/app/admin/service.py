@@ -206,6 +206,11 @@ class AdminService:
         user_id = _uuid_or_404(user_id, "User")
         if "role" in changes and changes["role"] not in ROLES:
             raise AuthError(400, "Invalid role", "bad_role")
+        if changes.get("role") == "admin":  # migration 0024: an existing account's credentials, identities or reset
+            current = await self.repo.user(user_id)  # links may have been prepared by anyone with database access
+            if current is not None and current["role"] != "admin":
+                raise AuthError(409, "Existing accounts cannot be made admins. Send an admin invitation instead.",
+                                "admin_by_invite_only")
         if "is_active" in changes and not isinstance(changes["is_active"], bool):
             raise AuthError(400, "is_active must be true or false", "bad_is_active")
         if changes.get("streamer_id") is not None:

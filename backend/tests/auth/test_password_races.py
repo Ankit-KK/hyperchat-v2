@@ -40,7 +40,7 @@ def auth(env, monkeypatch):
         return real_hash(password)
     monkeypatch.setattr(service, "hash_password", gate)
     settings = Settings()
-    svc = service.AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+    svc = service.AuthService.from_settings(settings, AuthRepository(connection_factory(settings), connection_factory(settings, "auth")))
     svc.gate = (reached, release, gated)
     return svc
 
@@ -126,7 +126,7 @@ def test_a_reset_waits_for_an_open_password_change_transaction_then_is_refused(a
 
         def reset_is_waiting_for_the_lock() -> bool:
             deadline = time.monotonic() + WAIT
-            with db() as probe:
+            with db("hyperchat_auth") as probe:  # the waiting sign-in / reset runs as hyperchat_auth
                 while time.monotonic() < deadline:
                     if probe.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
                                      "AND query LIKE '%%FROM public.users WHERE id = %%FOR UPDATE%%'").fetchone()[0]:
@@ -272,7 +272,7 @@ def test_a_sign_in_waits_for_an_open_reset_transaction_then_gets_no_session(auth
 
         def sign_in_is_waiting_for_the_lock() -> bool:
             deadline = time.monotonic() + WAIT
-            with db() as probe:
+            with db("hyperchat_auth") as probe:  # the waiting sign-in / reset runs as hyperchat_auth
                 while time.monotonic() < deadline:
                     if probe.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
                                      "AND query LIKE '%%password_hash, is_active FROM public.users%%'").fetchone()[0]:

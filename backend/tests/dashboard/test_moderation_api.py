@@ -10,6 +10,7 @@ from app.cli import connection_factory
 from app.core.config import Settings
 from app.dashboard.repository import DashboardRepository
 from tests.integration import (
+    fixture_db,
     DOMAIN,
     creator_state,
     db,
@@ -160,7 +161,7 @@ def test_admin_actor_is_recorded_and_survives_user_deletion(app):
     admin = _user_id("boss" + DOMAIN)
     assert _moderate(app, sid, did, "approve", headers).json()["result"] == "applied"
     assert _actions(sid)[0]["actor_user_id"] == admin and _donation(did)["label"] == "Dashboard"
-    with db() as conn:
+    with fixture_db() as conn:  # an admin row is not deletable by the runtime role (migration 0024)
         conn.execute("DELETE FROM public.users WHERE id = %s", (admin,))
     assert _actions(sid)[0]["actor_user_id"] is None and len(_actions(sid)) == 1  # ON DELETE SET NULL
 

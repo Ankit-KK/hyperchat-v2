@@ -59,7 +59,7 @@ def current_database() -> str:
 def make_user(email: str, password: str | None = PASSWORD, role: str = "streamer", hashed: str | None = None,
               streamer_id: str | None = None, is_active: bool = True) -> str:
     h = hashed if hashed is not None else (hash_password(password) if password else None)
-    with db() as conn:
+    with fixture_db() as conn:  # fixture setup (an admin cannot be written by the runtime role: migration 0024)
         return conn.execute(
             "INSERT INTO public.users (email, password_hash, role, streamer_id, is_active) "
             "VALUES (%s, %s, %s, %s, %s) RETURNING id::text", (email, h, role, streamer_id, is_active)).fetchone()[0]
@@ -180,7 +180,8 @@ def cleanup_synthetic_rows() -> None:
             owner.execute(f"DELETE FROM public.kyc_events WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
             owner.execute(f"DELETE FROM public.kyc_sessions WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
             owner.execute("DELETE FROM public.kyc_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
-        conn.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions
+        with fixture_db() as owner:  # synthetic admins are not deletable by the runtime role (migration 0024)
+            owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions
         conn.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.partner_signups WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.rate_limits WHERE ip_address LIKE %s", ("partner:" + SLUG_PREFIX + "%",))

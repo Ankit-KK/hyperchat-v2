@@ -33,7 +33,7 @@ def auth(env):
     from app.core.config import Settings
 
     settings = Settings()
-    svc = AuthService.from_settings(settings, AuthRepository(connection_factory(settings)))
+    svc = AuthService.from_settings(settings, AuthRepository(connection_factory(settings), connection_factory(settings, "auth")))
     svc.google = FakeGoogle()
     return svc
 
@@ -80,11 +80,13 @@ def pause_after_lookup(auth):
 def waiting_on_lock(fragment: str) -> bool:
     """True once a backend whose query contains `fragment` waits on a lock (probe only; locks decide outcomes)."""
     deadline = time.monotonic() + WAIT
-    with db() as probe:
+    # A role sees other backends' query text only for its own role: probe as the runtime and the auth role (0024).
+    with db() as probe, db("hyperchat_auth") as auth_probe:
         while time.monotonic() < deadline:
-            if probe.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE %s "
-                             "AND pid <> pg_backend_pid()", (f"%{fragment}%",)).fetchone()[0]:
-                return True
+            for conn in (probe, auth_probe):
+                if conn.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                                "AND query LIKE %s AND pid <> pg_backend_pid()", (f"%{fragment}%",)).fetchone()[0]:
+                    return True
             time.sleep(0.01)
     return False
 
@@ -213,7 +215,7 @@ def test_a_deactivation_completing_during_a_google_sign_in_leaves_nothing_behind
     email = "g-race-e" + DOMAIN
     user_id = make_user(email)
     google_as(auth, email, "g-sub-e")
-    admin_repo = AdminRepository(connection_factory(Settings()))
+    admin_repo = AdminRepository(connection_factory(Settings()), auth_factory=connection_factory(Settings(), "auth"))
 
     async def scenario():
         paused, go = pause_after_lookup(auth)

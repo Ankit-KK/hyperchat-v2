@@ -50,7 +50,8 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022", "0023")  # 0018 D6, 0019 D13, 0020-0023 KYC PR1-PR4
+KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024")  # 0018 D6, 0019 D13, 0020-0023 KYC PR1-PR4,
+# 0024 admin auth boundary
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
