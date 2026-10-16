@@ -88,6 +88,8 @@ Either one is what closes a compromised-process threat for admin actions. Stage 
 1. Re-run `deploy/postgres/roles.sql`, which creates `hyperchat_auth`.
 2. Grant it `CONNECT` on the database (`setup_cluster.sh` does this for new clusters).
 3. Add the `pg_ident` lines (`hyperchat` / `hyperchat-prod` and `root` → `hyperchat_auth`), then reload.
+   The cluster's HyperChat `pg_hba.conf` line must list `hyperchat_auth` too (fixed in the template by S0;
+   `deploy/check_isolation.sh` reports it, `deploy/README.md` "Isolation audit" applies it).
 4. Set `HYPERCHAT_DB_AUTH_USER=hyperchat_auth` in api.env.
    - **Without it:** non-admin sign-in still works, but **administrators cannot sign in**. The API logs an error at startup.
 5. Then migrate (the migration grants to `hyperchat_auth`, so it fails safely if the role is missing).
