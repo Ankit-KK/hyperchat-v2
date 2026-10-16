@@ -19,6 +19,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 from app.core.config import Settings
+from app.kyc.enforcement import EnforcementRepository, EnforcementService
+from app.kyc.witness import KycWitness
 from app.security.audit import security_event
 from app.storage.r2 import UPLOAD_KEY, UPLOAD_PREFIXES, MAX_LISTED_UPLOADS, StorageError, build_object_store
 
@@ -75,6 +77,12 @@ async def cleanup(connection_factory, *, dry_run: bool) -> dict[str, int]:
         # KYC PR3: Didit webhook receipts after 90 days, through the database (the API's role cannot DELETE them).
         await cur.execute("SELECT public.kyc_purge_webhook_receipts(%s)", (dry_run,))
         counts["kyc_webhook_events"] = (await cur.fetchone())[0]
+        # KYC PR4: one audit row per grace grant that ran out (the expiry itself is the clock; nothing is deleted).
+        await cur.execute("SELECT count(*) FROM public.kyc_grace_grants g WHERE g.revoked_at IS NULL "
+                          "AND g.expires_at <= now() AND NOT EXISTS (SELECT 1 FROM public.kyc_enforcement_events e "
+                          "WHERE e.grant_id = g.id AND e.action = 'grace_expired')" if dry_run
+                          else "SELECT public.kyc_record_grace_expiries()")
+        counts["kyc_grace_expiries"] = (await cur.fetchone())[0]
     return counts
 
 
@@ -133,6 +141,9 @@ async def run_cleanup(settings: Settings, connection_factory, *, dry_run: bool, 
     except Exception as exc:  # noqa: BLE001 - report the failure class only, never connection details
         print(f"cleanup failed: {type(exc).__name__}", file=sys.stderr)
         return 1
+    if not dry_run and settings.kyc_witness_path:  # KYC PR4: witness changes committed but not yet recorded
+        await EnforcementService(EnforcementRepository(connection_factory),
+                                 KycWitness(settings.kyc_witness_path)).sync_witness(action="daily_sync")
     verb = "would delete" if dry_run else "deleted"
     print(f"cleanup ({settings.db_label}): " + ", ".join(f"{name} {verb} {n}" for name, n in counts.items()))
     if not dry_run:

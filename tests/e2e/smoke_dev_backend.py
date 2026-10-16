@@ -50,7 +50,7 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022")  # 0018 D6, 0019 D13, 0020-0022 KYC PR1-PR3
+KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022", "0023")  # 0018 D6, 0019 D13, 0020-0023 KYC PR1-PR4
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
@@ -761,6 +761,16 @@ try:
               unsigned.status_code in (401, 503), str(unsigned.status_code))
         if not me.json().get("available"):
             blocked(S4, "Didit session start", "no DEV Didit sandbox credentials configured (needs owner approval)")
+    # ── KYC enforcement (PR4, migration 0023): read-only; the smoke never activates, grants or restricts ──
+    enforcement = admin.get("/api/v1/admin/kyc/enforcement")
+    if enforcement.status_code == 404:
+        blocked("kyc", "KYC enforcement (KYC PR4)", "not deployed on DEV yet")
+    else:
+        view = enforcement.json()
+        check("kyc", f"enforcement state reported ({view['enforcement']['state']}, generation "
+                     f"{view['enforcement']['generation']})", enforcement.status_code == 200, enforcement.text[:200])
+        check("kyc", "the restore witness agrees with the database", view["witness"]["problem"] is None,
+              str(view["witness"]))
 
     # ── creator applications (KYC PR2, migration 0021): the synthetic signup above, synthetic creator only ──
     S3 = "applications"

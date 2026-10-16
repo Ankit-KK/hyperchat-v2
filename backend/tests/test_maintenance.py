@@ -135,7 +135,7 @@ def test_cleanup_dry_run_then_delete_only_expired(strict_scratch_db, env):
     assert counts == {"sessions": 2, "password_reset_tokens": 1, "request_nonces": 1, "rate_limits": 1,
                       "user_invites": 2, "jobs": 2, "tts_moderation_audit": 1, "telegram_callback_mapping": 1,
                       "discord_callback_mapping": 1, "moderator_notifications": 1, "realtime_outbox": 2,
-                      "order_lookup": 1, "kyc_webhook_events": 1}
+                      "order_lookup": 1, "kyc_webhook_events": 1, "kyc_grace_expiries": 0}
     assert len(_left()["sessions"]) == 4  # dry run deleted nothing
     assert asyncio.run(cleanup(factory, dry_run=False)) == counts
     assert _left() == {

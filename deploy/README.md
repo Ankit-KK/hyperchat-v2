@@ -27,7 +27,9 @@ nginx/api.hyperchat.space.conf  PRODUCTION API vhost (port 80 + 443 -> 127.0.0.1
 nginx/snippets/                 per-IP rate limit for the public read API (install to /etc/nginx/snippets/):
                                 hyperchat-public-limit*.conf (DEV zone), hyperchat-prod-public-limit*.conf (production zone)
 postgres/setup_cluster.sh       create/check a cluster, roles and peer-auth mapping (idempotent)
-postgres/roles.sql              hyperchat_owner / migrator / app / worker / readonly
+postgres/roles.sql              hyperchat_owner / migrator / app / worker / readonly / lifecycle (KYC PR4:
+                                creator status transitions only; re-run roles.sql and the pg_ident map before
+                                migration 0023)
 postgres/pg_hba.conf, pg_ident.conf  Unix-socket peer auth only; PostgreSQL is never exposed
 postgres/pg_ident.production.conf    ident map of the PRODUCTION cluster only (hyperchat-prod; no DEV user)
 backup/                         nightly pg_dump of production (02:30 UTC, 14-day retention)

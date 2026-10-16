@@ -16,13 +16,18 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from fastapi import Query
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
+
 from app.auth.dependencies import CurrentUser, client_ip, require_admin, require_user
 from app.core.errors import ApiError
+from app.kyc.enforcement import EnforcementService
 from app.kyc.service import KycService
 
 me_router = APIRouter(prefix="/api/v1/me/kyc", tags=["kyc"])
 webhook_router = APIRouter(prefix="/api/v1/webhooks", tags=["kyc"])
 admin_router = APIRouter(prefix="/api/v1/admin/users", tags=["admin"])
+enforcement_router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 NO_STORE = {"Cache-Control": "no-store"}  # verification links and per-user state
 WEBHOOK_MAX_BYTES = 512 * 1024  # decisions carry many fields; the body is never stored
 
@@ -80,3 +85,62 @@ async def admin_user_kyc(user_id: str, request: Request, current: CurrentUser = 
 async def admin_refresh_kyc(user_id: str, request: Request, current: CurrentUser = Depends(require_admin)):
     return JSONResponse(await _service(request).admin_refresh(current.user, _user_id(user_id), client_ip(request)),
                         headers=NO_STORE)
+
+
+# ── KYC enforcement (PR4, migration 0023). No route activates or closes enforcement, grants grace or lifts a
+#    restriction: those are the operator's (app.kyc.operator, migration role) after the approvals of
+#    docs/kyc-rollout.md. ──
+
+class RestrictionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: StrictStr = Field(max_length=32)
+    note: StrictStr | None = Field(default=None, max_length=500)
+
+
+class GraceRevoke(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: StrictStr = Field(max_length=500)
+
+
+def _enforcement(request: Request) -> EnforcementService:
+    service = getattr(request.app.state, "kyc_enforcement", None)
+    if service is None:
+        raise ApiError(503, "Administration is not configured", "admin_not_configured")
+    return service
+
+
+@enforcement_router.get("/kyc/enforcement")
+async def enforcement_status(request: Request, current: CurrentUser = Depends(require_admin)):
+    return JSONResponse(await _enforcement(request).status(), headers=NO_STORE)
+
+
+@enforcement_router.get("/kyc/enforcement/preview")
+async def enforcement_preview(request: Request, current: CurrentUser = Depends(require_admin)):
+    """Read-only: what each creator's rule says now, once enforcement is active, and once it is closed."""
+    return JSONResponse(await _enforcement(request).preview(), headers=NO_STORE)
+
+
+@enforcement_router.get("/kyc/enforcement/events")
+async def enforcement_events(request: Request, streamer_id: str | None = None,
+                             limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0, le=100_000),
+                             current: CurrentUser = Depends(require_admin)):
+    return JSONResponse(await _enforcement(request).history(streamer_id, limit, offset), headers=NO_STORE)
+
+
+@enforcement_router.get("/creators/{streamer_id}/kyc")
+async def creator_kyc(streamer_id: str, request: Request, current: CurrentUser = Depends(require_admin)):
+    return JSONResponse(await _enforcement(request).creator(streamer_id), headers=NO_STORE)
+
+
+@enforcement_router.post("/creators/{streamer_id}/kyc/restrictions")
+async def restrict_creator(streamer_id: str, body: RestrictionCreate, request: Request,
+                           current: CurrentUser = Depends(require_admin)):
+    return JSONResponse(await _enforcement(request).restrict(current.user.id, streamer_id, body.reason, body.note,
+                                                             client_ip(request)), headers=NO_STORE)
+
+
+@enforcement_router.post("/creators/{streamer_id}/kyc/grace/revoke")
+async def revoke_grace(streamer_id: str, body: GraceRevoke, request: Request,
+                       current: CurrentUser = Depends(require_admin)):
+    return JSONResponse(await _enforcement(request).revoke_grace(current.user.id, streamer_id, body.reason,
+                                                                 client_ip(request)), headers=NO_STORE)

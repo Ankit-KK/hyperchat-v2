@@ -1,12 +1,23 @@
 """PostgreSQL connection pool (psycopg 3, async)."""
 
 import logging
+from contextlib import asynccontextmanager
 
+import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from app.core.config import Settings
 
 log = logging.getLogger("hyperchat.db")
+
+
+def single_connection_factory(conninfo: str):
+    """One short-lived autocommit connection per use (for rare calls on a role other than the pool's)."""
+    @asynccontextmanager
+    async def connect():
+        async with await psycopg.AsyncConnection.connect(conninfo, autocommit=True) as conn:
+            yield conn
+    return connect
 
 
 class Database:

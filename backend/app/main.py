@@ -17,7 +17,7 @@ from app.core.errors import install_api_error_handler
 from app.core.logging import configure_logging
 from app.dashboard.repository import DashboardRepository
 from app.dashboard.service import DashboardService
-from app.db.pool import Database
+from app.db.pool import Database, single_connection_factory
 from app.public.repository import PublicRepository
 from app.public.service import PublicService
 from app.partners.repository import PartnerRepository
@@ -25,7 +25,9 @@ from app.public.signups import SignupRepository
 from app.audio.repository import AudioRepository
 from app.audio.transcriptions import TranscriptionService
 from app.jobs.queue import JobQueue
+from app.kyc.enforcement import EnforcementRepository, EnforcementService
 from app.kyc.service import KycRepository, KycService
+from app.kyc.witness import KycWitness
 from app.payments.accounts import AccountHealth, PaymentAccounts
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
@@ -88,7 +90,9 @@ async def lifespan(app: FastAPI):
     if app.state.db.enabled:
         app.state.auth = AuthService.from_settings(settings, AuthRepository(app.state.db.connection))
         app.state.authz = AuthzRepository(app.state.db.connection)
-        app.state.admin = AdminService(AdminRepository(app.state.db.connection),
+        lifecycle = single_connection_factory(settings.db_conninfo(lifecycle=True)) \
+            if settings.db_lifecycle_user else None  # KYC PR4: creator status transitions only
+        app.state.admin = AdminService(AdminRepository(app.state.db.connection, lifecycle),
                                        payment_accounts=frozenset(payment_accounts.summary()["payments"]),
                                        pusher_groups=tuple(settings.pusher_groups_configured))
         app.state.kyc = KycService.from_settings(KycRepository(app.state.db.connection), settings,
@@ -96,7 +100,10 @@ async def lifespan(app: FastAPI):
         app.state.applications = ApplicationService(ApplicationRepository(app.state.db.connection),
                                                     admin=app.state.admin, auth=app.state.auth)
         conn = app.state.db.connection
-        app.state.public = PublicService(PublicRepository(conn))
+        witness = KycWitness(settings.kyc_witness_path)  # KYC PR4: restore detection outside PostgreSQL
+        app.state.kyc_enforcement = EnforcementService(EnforcementRepository(conn), witness)
+        app.state.admin.enforcement = app.state.kyc_enforcement
+        app.state.public = PublicService(PublicRepository(conn), witness=witness)
         app.state.signups = SignupRepository(conn)
         app.state.partners = PartnerRepository(conn)
         app.state.dashboard = DashboardService(DashboardRepository(conn))
@@ -238,6 +245,7 @@ def create_app() -> FastAPI:
     app.include_router(kyc.me_router)
     app.include_router(kyc.webhook_router)
     app.include_router(kyc.admin_router)
+    app.include_router(kyc.enforcement_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.
     app.add_middleware(CorsMiddleware, allowed_origins=settings.browser_origins)
     return app

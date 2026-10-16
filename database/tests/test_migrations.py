@@ -29,7 +29,8 @@ EXPECTED_TABLES = {
     "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries", "contact_submissions",
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
     "d1_hash_import_ledger", "creator_status_events", "application_events", "kyc_sessions", "kyc_webhook_events",
-    "kyc_events", "kyc_provider_config",
+    "kyc_events", "kyc_provider_config", "kyc_enforcement", "kyc_grace_grants", "kyc_restrictions",
+    "kyc_enforcement_events",
 }
 
 
@@ -474,6 +475,92 @@ def test_0022_kyc_core_changes_nothing_existing_and_guards_its_history(monkeypat
                 conn.execute("DELETE FROM public.kyc_sessions WHERE user_id IN (SELECT id FROM public.users "
                              "WHERE email::text LIKE 'migtest22-%%')")
             conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest22-%%'")
+        command.upgrade(cfg, "head")
+
+
+def _fk_action() -> str:
+    with _owner() as conn:
+        return conn.execute("SELECT confdeltype FROM pg_constraint "
+                            "WHERE conname = 'creator_status_events_streamer_id_fkey'").fetchone()[0]
+
+
+def _creator_snapshot(conn) -> tuple:
+    return conn.execute("""
+        SELECT (SELECT md5(string_agg(to_jsonb(s)::text, ',' ORDER BY id)) FROM public.streamers s),
+               (SELECT md5(string_agg(to_jsonb(d)::text, ',' ORDER BY id)) FROM public.donations d),
+               (SELECT md5(string_agg(to_jsonb(u)::text, ',' ORDER BY id)) FROM public.users u)""").fetchone()
+
+
+def test_0023_enforcement_starts_inactive_changes_nothing_existing_and_guards_its_history(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0022")
+    clean = ("DELETE FROM public.donations WHERE order_id LIKE 'migtest23-%%'",
+             "DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest23-%%'",
+             "DELETE FROM public.users WHERE email::text LIKE 'migtest23-%%'")
+    try:
+        with _owner() as conn:
+            for sql in clean:
+                conn.execute(sql)
+            uid = conn.execute("INSERT INTO public.users (email) VALUES ('migtest23-u@x.invalid') RETURNING id"
+                               ).fetchone()[0]
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id, status, kyc_track, "
+                               "kyc_baseline_owner_id) VALUES ('migtest23-legacy', 'L', %s, 'active', 'legacy', %s) "
+                               "RETURNING id", (uid, uid)).fetchone()[0]
+            conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr) "
+                         "VALUES (%s, 'migtest23-o1', 'D', 5, 'INR', 5)", (sid,))
+            before = _creator_snapshot(conn)
+            assert conn.execute("SELECT public.creator_donation_block(%s)", (sid,)).fetchone()[0] is None
+        assert _fk_action() == "c"
+        command.upgrade(cfg, "0023")
+        with _owner() as conn:
+            assert _creator_snapshot(conn) == before  # no creator, donation or user changes
+            assert conn.execute("SELECT state, generation FROM public.kyc_enforcement").fetchone() == ("draft", 0)
+            assert conn.execute("SELECT public.creator_donation_block(%s)", (sid,)).fetchone()[0] is None  # as PR1
+            assert conn.execute("SELECT count(*) FROM public.kyc_enforcement_events").fetchone()[0] == 0
+            for function, app_allowed in (("kyc_enforcement_activate(text, text)", False),
+                                          ("kyc_enforcement_close(text, text)", False),
+                                          ("kyc_grant_grace(uuid, integer, text, text)", False),
+                                          ("kyc_acknowledge_restore(text, bigint, text)", False),
+                                          ("kyc_donation_decision(uuid, text)", False),
+                                          ("kyc_lift_restriction(uuid, uuid, text, text)", False),
+                                          ("kyc_owner_decided(uuid, text)", False),
+                                          ("kyc_change_creator_status(uuid, text, text, uuid, text, text)", False),
+                                          ("kyc_restrict_creator(uuid, text, text, uuid)", True),
+                                          ("kyc_revoke_grace(uuid, text, uuid)", True)):
+                for role, allowed in (("hyperchat_app", app_allowed), ("hyperchat_worker", False)):
+                    assert conn.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                                        (role, "public." + function)).fetchone()[0] is allowed, (role, function)
+            assert conn.execute("SELECT has_function_privilege('hyperchat_lifecycle', "
+                                "'public.kyc_change_creator_status(uuid, text, text, uuid, text, text)', 'EXECUTE')"
+                                ).fetchone()[0] is True  # the dedicated role, and only it
+            assert conn.execute("SELECT count(*) FROM information_schema.role_table_grants "
+                                "WHERE grantee = 'hyperchat_lifecycle'").fetchone()[0] == 0  # no table access
+            assert conn.execute("SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND prosecdef "
+                                "AND has_function_privilege('public', oid, 'EXECUTE')").fetchone()[0] == 0
+            conn.execute("SELECT public.kyc_restrict_creator(%s, 'admin_hold', NULL, NULL)", (sid,))
+        assert _fk_action() == "r"  # deleting a creator no longer erases its status audit
+        with pytest.raises(Exception, match="downgrade of 0023 stopped"):
+            command.downgrade(cfg, "0022")  # never drops enforcement history
+        assert _version() == "0023"
+        with _owner() as conn:  # scratch only: remove the history, then the round trip works
+            conn.execute("DELETE FROM public.kyc_enforcement_events")
+            conn.execute("DELETE FROM public.kyc_restrictions")
+            conn.execute("ALTER TABLE public.kyc_enforcement DISABLE TRIGGER kyc_enforcement_guard")
+            conn.execute("UPDATE public.kyc_enforcement SET generation = 0")
+            conn.execute("ALTER TABLE public.kyc_enforcement ENABLE TRIGGER kyc_enforcement_guard")
+        command.downgrade(cfg, "0022")
+        assert _version() == "0022" and _fk_action() == "c"
+        with _owner() as conn:
+            assert conn.execute("SELECT public.creator_donation_block(%s)", (sid,)).fetchone()[0] is None
+    finally:
+        with _owner() as conn:
+            if "kyc_enforcement_events" in _tables():
+                conn.execute("DELETE FROM public.kyc_enforcement_events")
+                conn.execute("DELETE FROM public.kyc_restrictions")
+            for sql in clean:
+                conn.execute(sql)
         command.upgrade(cfg, "head")
 
 

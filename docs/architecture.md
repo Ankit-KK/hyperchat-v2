@@ -64,6 +64,21 @@ Telegram and Discord bots where features need them.
 - Moderators (Telegram/Discord bot identities, `streamers_moderators`) are authorized with the bot
   features, not as web users.
 
+## Creator eligibility and KYC
+**One rule decides who may accept new donations:** `public.creator_donation_block` (migrations 0020, 0023).
+- **Who applies it:** the API runs it for checkout, upload grants and uploads, and the donations insert trigger runs it again for every runtime-role insert.
+- **What it checks:**
+  - the creator is active and unrestricted;
+  - its owner is present and active;
+  - the owner's current Didit KYC is approved (migration 0022, `docs/kyc.md`);
+  - while KYC enforcement is `active`, a legacy creator may instead hold a finite, owner-bound grace grant;
+  - before activation, the PR1 legacy baseline still applies.
+- **What it doesn't govern:** payment readiness stays in the checkout code, and already-created orders finalize normally.
+
+**Enforcement changes are restricted:**
+- **Activation, closure and grace grants:** operator-only, with the migration role (`python -m app.kyc.operator`).
+- **Restore witness:** the API checks a witness outside PostgreSQL and fails closed after a restore from an older snapshot (`docs/kyc-rollout.md`).
+
 ## Public read API
 Unauthenticated, read-only endpoints for donation pages, overlays and the landing page — see
 [`public-api.md`](public-api.md). Only `active` creators, fixed response fields, Cache-Control,

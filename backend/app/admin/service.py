@@ -51,6 +51,7 @@ class AdminService:
         self.repo = repo
         self.payment_accounts = payment_accounts  # Razorpay account names that can take payments here
         self.pusher_groups = pusher_groups        # configured Pusher groups
+        self.enforcement = None  # app.kyc.enforcement.EnforcementService (set by app.main): records grace revocations
 
     # ── creators ───────────────────────────────────────────────────────────
     async def create_creator(self, admin: User, body: dict) -> dict:
@@ -124,7 +125,7 @@ class AdminService:
             user_id, expected_owner_id = str(uuid.UUID(user_id)), str(uuid.UUID(expected_owner_id))
         except (ValueError, AttributeError, TypeError):
             raise AuthError(400, "user_id and expected_owner_id must be user ids", "bad_user") from None
-        result, row, counts = await self.repo.transfer_owner(streamer_id, user_id, expected_owner_id)
+        result, row, counts = await self.repo.transfer_owner(streamer_id, user_id, expected_owner_id, admin.id)
         if result == "not_found":
             raise AuthError(404, "Creator not found", "creator_not_found")
         if result == "unclaimed":
@@ -135,6 +136,8 @@ class AdminService:
         if result == "bad_user":
             raise AuthError(400, "Unknown or inactive user", "bad_user")
         changed = result == "ok"
+        if changed and self.enforcement is not None:  # the old owner's grace was revoked: witness it
+            await self.enforcement.sync_witness(action="owner_changed", streamer_id=streamer_id)
         if changed:  # ids and counts only
             security_event("creator_owner_transferred", level=20, user_id=admin.id, streamer_id=streamer_id,
                            previous_user_id=counts["previous_owner_id"], target_user_id=user_id,
@@ -162,10 +165,17 @@ class AdminService:
             "unclaimed": (409, "The creator has no owner yet"),
             "account_not_configured": (409, "The creator's Razorpay account is not configured on this server"),
             "kyc_required": (409, "The creator's owner has no approved identity verification (KYC)"),
+            "restricted": (409, "The creator has an open KYC restriction"),
+            "no_owner": (409, "The creator's owner is missing or inactive"),
+            "account_changed": (409, "The creator's Razorpay account changed; please retry"),
+            "lifecycle_not_configured": (503, "Creator status changes are not configured on this server"),
+            "not_authorized": (403, "Only an active admin can change a creator's status"),
         }
         if result != "ok":
             status, message = refusals.get(result, (409, "The creator could not accept donations"))
             raise AuthError(status, message, result if result in refusals else f"creator_{result}")
+        if action == "suspend" and self.enforcement is not None:  # grace was revoked: witness it
+            await self.enforcement.sync_witness(action="creator_suspended", streamer_id=streamer_id)
         security_event("creator_status_changed", level=20, user_id=admin.id, streamer_id=streamer_id,
                        reason=action, status=row["status"], client_ip=ip)
         return {"creator": {**row, "created_at": iso(row["created_at"])},

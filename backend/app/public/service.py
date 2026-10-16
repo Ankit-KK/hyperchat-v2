@@ -19,6 +19,7 @@ from app.public.models import (
     goal_view,
 )
 from app.public.repository import PublicRepository
+from app.security.audit import security_event
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -58,9 +59,10 @@ class TTLCache:
 
 
 class PublicService:
-    def __init__(self, repo: PublicRepository, cache: TTLCache | None = None) -> None:
+    def __init__(self, repo: PublicRepository, cache: TTLCache | None = None, witness=None) -> None:
         self.repo = repo
         self.cache = cache or TTLCache()
+        self.witness = witness  # app.kyc.witness.KycWitness (always set by app.main; None only in unit tests)
 
     async def _streamer(self, slug: str) -> dict:
         slug = (slug or "").strip().lower()
@@ -84,6 +86,12 @@ class PublicService:
             raise not_found()
         if block is not None:
             raise donations_unavailable()
+        if self.witness is not None:  # KYC PR4: a database behind its restore witness accepts no new donations
+            problem = self.witness.problem(*await self.repo.enforcement(self.witness.anchor_generation()))
+            if problem is not None:
+                security_event("kyc_enforcement_witness_mismatch", level=50, reason=problem,
+                               streamer_slug=s["streamer_slug"])
+                raise donations_unavailable()
         return s
 
     async def profile(self, slug: str) -> PublicStreamer:

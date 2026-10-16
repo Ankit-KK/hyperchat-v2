@@ -20,6 +20,7 @@ from tests.integration import (
     make_user,
     requires_db,
     signed_in,
+    update_streamer,
 )
 
 pytestmark = requires_db
@@ -41,9 +42,7 @@ def streamer(slug: str, user_id: str | None = None, terms: bool = True, **cols) 
     """soundboard_enabled=True also records the owner's acceptance of the current terms (D3) unless terms=False."""
     sid = make_streamer(slug, user_id=user_id, name=cols.pop("name", "Auth Test"))
     if cols:
-        sets = ", ".join(f"{k} = %({k})s" for k in cols)
-        with db() as conn:
-            conn.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", {**cols, "id": sid})
+        update_streamer(sid, **cols)  # fixture setup, as the schema owner
     if cols.get("soundboard_enabled") and terms:
         accept_soundboard_terms(sid)
     return sid

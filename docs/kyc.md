@@ -165,8 +165,8 @@ DEV gets its own **sandbox** application and keys:
 - Try Webhook events don't match a stored session, so they're stored as `unmatched` and never applied.
 - No live or chargeable verification is run without explicit approval.
 
-## Still for PR4
-- **Activation:** require `kyc_approved` of the current owner (activation is refused until then).
-- **Enforcement:** the audited rollout, owner-bound expiring grants, restrictions and the startup guard.
-- **Eligibility:** wire KYC into `creator_donation_block`.
-- **Loss of verification:** handle a KYC loss after activation (immediate restriction).
+## Enforcement (PR4)
+`docs/kyc-rollout.md` covers how verification is enforced (migration 0023) and the rollout runbook.
+- **Activation:** an admin activates a creator only when its current owner's KYC is approved.
+- **New donations:** the donation rule requires the owner's current KYC. A Didit decline, expiry, revocation or workflow change refuses new donations at once, even while the creator's status still says `active`.
+- **Legacy creators:** they keep their pre-rollout eligibility until an operator activates enforcement. After that they need KYC, or a finite grace grant bound to their owner.
