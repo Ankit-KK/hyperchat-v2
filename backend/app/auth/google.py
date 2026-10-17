@@ -1,8 +1,14 @@
 """Google OAuth 2.0 / OpenID Connect (authorization code + PKCE + state + nonce).
 
 Sign-in only: accounts are invite-only, so a Google identity is linked to an EXISTING user, first by
-Google subject (identities imported from Supabase Auth at cutover), then by verified email.
+Google subject (identities imported from Supabase Auth at cutover), then by verified email (never for an
+administrator: S2, migration 0026).
+
+The device authorization flow (RFC 8628) is used ONLY by the operator tool (app.stepup.operator link-google), with the
+operator's own OAuth client, to verify independently of the API which Google account an administrator controls.
 """
+
+import asyncio
 
 import base64
 import hashlib
@@ -16,6 +22,9 @@ import jwt
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+DEVICE_TOKEN_MAX_AGE = 600  # seconds: a device-flow ID token must have been issued during this ceremony
 ISSUERS = ("https://accounts.google.com", "accounts.google.com")
 
 
@@ -72,6 +81,51 @@ class GoogleOAuth:
         return await self.verify_id_token(id_token, nonce)
 
     async def verify_id_token(self, id_token: str, nonce: str) -> GoogleIdentity:
+        return await self._verify(id_token, nonce=nonce)
+
+    # ── device authorization flow (operator tool only) ─────────────────────────────────────────────────────
+    async def device_start(self) -> dict:
+        """{device_code, user_code, verification_url, interval, expires_in} from Google."""
+        try:
+            resp = await self._http.post(DEVICE_CODE_URL, data={"client_id": self.client_id, "scope": "openid email"})
+        except httpx.HTTPError:
+            raise GoogleAuthError("device_endpoint_unreachable") from None
+        body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if resp.status_code != 200 or not body.get("device_code") or not body.get("user_code"):
+            raise GoogleAuthError(f"device_endpoint_status_{resp.status_code}")
+        return {"device_code": body["device_code"], "user_code": body["user_code"],
+                "verification_url": body.get("verification_url") or body.get("verification_uri"),
+                "interval": int(body.get("interval", 5)), "expires_in": int(body.get("expires_in", 600))}
+
+    async def device_poll(self, device_code: str, interval: int, expires_in: int, sleep=asyncio.sleep,
+                          clock=time.monotonic) -> GoogleIdentity:
+        """Poll Google's token endpoint until the person completes the sign-in on their own device; the ID token
+        comes straight from Google over TLS and is still fully verified (signature, issuer, THIS client as audience,
+        expiry, freshness, verified email)."""
+        deadline = clock() + expires_in
+        while clock() < deadline:
+            await sleep(interval)
+            try:
+                resp = await self._http.post(TOKEN_URL, data={
+                    "client_id": self.client_id, "client_secret": self._secret, "device_code": device_code,
+                    "grant_type": DEVICE_GRANT})
+            except httpx.HTTPError:
+                raise GoogleAuthError("token_endpoint_unreachable") from None
+            body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            if resp.status_code == 200:
+                if not body.get("id_token"):
+                    raise GoogleAuthError("no_id_token")
+                return await self._verify(body["id_token"], nonce=None, max_age=DEVICE_TOKEN_MAX_AGE)
+            error = body.get("error")
+            if error == "authorization_pending":
+                continue
+            if error == "slow_down":
+                interval += 5
+                continue
+            raise GoogleAuthError(error or f"token_endpoint_status_{resp.status_code}")
+        raise GoogleAuthError("device_flow_expired")
+
+    async def _verify(self, id_token: str, *, nonce: str | None, max_age: int | None = None) -> GoogleIdentity:
         try:
             kid = jwt.get_unverified_header(id_token).get("kid")
         except jwt.PyJWTError:
@@ -86,8 +140,10 @@ class GoogleOAuth:
             raise GoogleAuthError("invalid_id_token") from None
         if claims.get("iss") not in ISSUERS:
             raise GoogleAuthError("bad_issuer")
-        if claims.get("nonce") != nonce:
+        if nonce is not None and claims.get("nonce") != nonce:
             raise GoogleAuthError("nonce_mismatch")
+        if max_age is not None and claims["iat"] < time.time() - max_age:
+            raise GoogleAuthError("id_token_too_old")
         email = claims.get("email")
         if not email or claims.get("email_verified") is not True:
             raise GoogleAuthError("email_not_verified")

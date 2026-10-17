@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # Unset: those flows use the general role, so admins cannot sign in (non-admin sign-in still works).
     db_auth_user: str | None = None
     db_auth_password: SecretStr | None = None
+    # S2: the step-up (passkey) verifier's Unix socket (deploy/systemd/hyperchat[-prod]-stepup.socket). Unset: the
+    # passkey endpoints answer 503 and nothing can be approved; while MFA enforcement is 'draft' admin access works.
+    stepup_socket: str | None = None
     # Human-readable label shown in logs and /health so nobody mistakes dev data for production.
     db_label: str = "DEV"
     db_connect_timeout: int = 5

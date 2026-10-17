@@ -651,6 +651,28 @@ def test_0025_stepup_core_round_trip(monkeypatch):
     assert STEPUP_TABLES <= _tables() and _stepup_privileges()[1] == "draft"
 
 
+def _identity_guard() -> bool:
+    with _owner() as conn:
+        return conn.execute("SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = "
+                            "'aab_auth_guard_admin_identity_link')").fetchone()[0]
+
+
+def test_0026_admin_identity_link_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    assert _identity_guard()
+    command.downgrade(cfg, "0025")
+    try:
+        assert not _identity_guard()
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*) FROM pg_proc WHERE proname IN ('auth_guard_admin_identity_link', "
+                                "'admin_link_google_identity')").fetchone()[0] == 0
+    finally:
+        command.upgrade(cfg, "head")
+    assert _identity_guard()
+
+
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):
     monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
     cfg = _cfg()

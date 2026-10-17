@@ -1,8 +1,13 @@
-# Administrator step-up authentication (passkeys): S1
+# Administrator step-up authentication (passkeys): S1 and S2
 
 S1 is the foundation of administrator MFA (approved design: WebAuthn only, a separate verifier, operator-approved
-passkeys, single-use action-bound grants). **Nothing is enforced yet**: the enforcement state is `draft`, no API
-route calls the verifier (S2), and no database write requires a grant (S3). Nothing here is deployed.
+passkeys, single-use action-bound grants). S2 connects the API to it (endpoints, action-bound grants on the sensitive
+admin routes, no Google auto-linking for administrators).
+
+**Still not enforced:**
+- The enforcement state is `draft`.
+- No database write *requires* a grant: that is S3.
+- Nothing here is deployed.
 
 ## The trust boundary
 
@@ -74,6 +79,109 @@ transaction, and both bind the administrator, the session, the action, the targe
 - **No banking grants:** a consumed grant can be claimed only in the transaction that consumed it, so nothing can be consumed now and used later. A rolled-back transaction rolls back its consumption, so the grant stays single-use.
 
 The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
+
+## S2: API integration
+
+### Endpoints (`app/routers/mfa.py`, under `/api/v1/auth/mfa`)
+| Endpoint | What it does |
+|---|---|
+| `GET /status` | Enforcement state, this session's `aal`, `mfa_required`, verifier state, this admin's passkeys. |
+| `GET /credentials` | This admin's passkeys: fingerprint, status, dates. Never key material; listed by the verifier, since the API's roles cannot read the table. |
+| `POST /registration/options`, `POST /registration/verify` | A new passkey, stored **pending** until the operator approves it. |
+| `POST /assertion/options` `{action, target, params}`, `POST /assertion/verify` `{challenge_id, credential}` | `session.aal2` gives this session aal2. Any other action gives a **one-time grant** for exactly that action, target and params (2 minutes), sent back as `X-Step-Up-Grant`. |
+
+- **Who may call:** every endpoint needs an admin session cookie, and every POST also needs an allowlisted Origin and the session's CSRF token.
+- **Identity:** the administrator and the session come **only** from the server-side session. Request bodies refuse extra fields, so a `user_id` or `session_id` in a body is a 422.
+- **Rate limits:** per admin and per IP in the API (`auth:mfa*`), plus the verifier's own per-admin limits.
+- **Errors** are `{"error", "reason", ...}` with reasons such as `mfa_required`, `step_up_required` (with the exact `step_up: {action, target, params}` to approve), `step_up_refused` (with `detail`), `stepup_unavailable` and `stepup_not_configured`.
+- **Fail closed:** with no verifier (setting unset, socket down), no registration, assurance or grant is possible: those endpoints answer 503. Admin access is unchanged while enforcement is `draft`.
+
+### Routes bound to actions (`app/stepup/actions.py`, `ROUTES`)
+| Route | Action | Target | Params (exactly as sent) |
+|---|---|---|---|
+| `POST /api/v1/admin/creators/{id}/activate` | `creator.activate` | `creator:{id}` | `{expected_status, reason}` |
+| `POST /api/v1/admin/creators/{id}/reactivate` | `creator.reactivate` | `creator:{id}` | `{expected_status, reason}` |
+| `POST /api/v1/admin/creators` | `creator.create` | `creator:new` | the full body |
+| `POST /api/v1/admin/creators/{id}/owner` | `creator.owner.assign` | `creator:{id}` | `{user_id}` |
+| `POST /api/v1/admin/creators/{id}/owner/transfer` | `creator.owner.transfer` | `creator:{id}` | `{user_id, expected_owner_id}` |
+| `POST /api/v1/admin/applications/{id}/approve` | `application.approve` | `application:{id}` | the full body |
+| `POST /api/v1/admin/applications/{id}/invite` | `application.invite` | `application:{id}` | `{}` |
+| `POST /api/v1/auth/invites` **with `role: admin`** | `admin.invite` | `invite` | `{email, role, streamer_id}` |
+| `PATCH /api/v1/admin/users/{id}` | `admin.user.change` | `user:{id}` | exactly the fields sent |
+| `PUT /api/v1/admin/users/{id}/email` | `admin.user.email` | `user:{id}` | `{email}` |
+| `POST /api/v1/admin/partner-keys` | `partner_key.create` | `partner_key` | `{partner_slug}` |
+
+- **Unbound actions:** `mfa.credential.revoke`. Passkeys are revoked by the operator only.
+- **Not step-up actions (aal2 only once enforcement is active):**
+  - defensive actions: suspend, restrict, revoke grace, revoke sessions, revoke a partner key
+  - reads
+  - soundboard eligibility
+  - ordinary (non-admin) invitations
+- **Params come from the request body as the browser sent it, before the service normalizes anything.** The frontend therefore asks for a ceremony with the same body it will send. A grant never authorizes "this action in general": its parameter hash binds the exact values.
+
+### Transaction boundaries
+- **The consumption is inside the operation's transaction.** Each bound route's repository method calls `public.stepup_consume(grant, admin, session, action, target, params_hash)` **first inside the same transaction as the operation**, on the role that performs it:
+  - `hyperchat_lifecycle` for activate and reactivate (with the `kyc_change_creator_status` call)
+  - `hyperchat_auth` for user, email and admin-invite changes
+  - `hyperchat_app` for creators, owners, applications and partner keys
+
+  All three got EXECUTE in 0025, so S2 needs **no new database privileges**.
+- **A refused grant** (`mismatch`, `consumed`, `expired`, `credential_revoked`, `not_admin`, `session_invalid`, `not_found`) raises and rolls the operation back.
+- **A refused operation** (a stale compare-and-set, a claimed creator, an unknown user, nothing changed, an exception) rolls the **consumption** back too (`psycopg.Rollback`). A grant is spent only by the operation it approved, and stays usable for a retry within its 2 minutes.
+- **Concurrency:** two requests with one grant serialize on the grant's row, and exactly one succeeds.
+
+### Temporary compatibility (until S3; documented, no new privilege)
+- **`draft`:** a bound route without `X-Step-Up-Grant` still works, so existing admins are not locked out before enrolling. With a grant it is consumed and must be valid (fail closed).
+- **`active`** (only by the operator, after S3 and its approval): `require_admin` needs aal2 (passkey endpoints excepted), and a bound route without a grant answers `step_up_required`.
+- **What this rests on:** both behaviours are API checks. A process that skips them is stopped only by S3's database guards (`stepup_claim` and `stepup_effect` on each anchor write). **S2 does not claim those guards are active.**
+
+### Google sign-in for administrators
+- **Never by email:** a Google account whose (even verified) email matches an administrator **no longer links or signs in**, at three layers:
+  - `AuthService.google_login` refuses: 403 "Administrators sign in with their password and passkey".
+  - `AuthRepository.google_sign_in` re-checks under the user-row lock.
+  - **Migration 0026** refuses every API role, `hyperchat_auth` included, a new identity for an administrator, or moving an identity onto one.
+- **Unchanged:** an identity linked to an administrator before (or by the operator) keeps working, and only that exact Google subject does. Non-admin email linking is unchanged.
+- **Self-service Google linking for administrators is permanently off.** That covers every lifecycle path:
+  - **Email change (D11):** the admin's identities are removed and **not** re-linked by the new email.
+  - **Admin invitation:** the new account starts without a link.
+  - **Passkey recovery** (`stepup_recover_admin`): ends sessions and passkeys but **keeps** an existing link. Google alone never restores aal2.
+  - **Deactivation and reactivation:** keep the link (no sign-in while deactivated).
+  - **Promotion:** stays impossible (0024).
+  - **Demotion:** turns the account into an ordinary user, with ordinary linking.
+- **Operator-verified linking (migration 0026): the only way an administrator gets a Google link.**
+  - **Why nothing from the API counts.** A first version recorded "link requests" through `hyperchat_auth` and showed the person a reference code. Review showed a compromised API or `hyperchat_auth` can fabricate such a request, for any administrator and an attacker's Google subject. A code shown by the API proves nothing about which Google account the person controls. That table and the codes were removed: **the API records and shows nothing about linking**, and no API role can link an administrator's identity (0026 guard) or call the link function (owner only).
+  - **What the operator verifies, both required:**
+
+    | Fact | How |
+    |---|---|
+    | **Administrator's identity** | Out of band, by the operator: in person, or a call to a number the operator already had. Never a channel the API supplied. The administrator also states which Google address they will use. `--verified-by` records how this was done. |
+    | **Control of that exact Google account** | `python -m app.stepup.operator link-google --email ADMIN --expect-google-email GOOGLE --verified-by TEXT --operator NAME --confirm-database DB` starts Google's **device sign-in** for the **operator's own OAuth client** (`HYPERCHAT_OPERATOR_GOOGLE_CLIENT_ID` / `_SECRET`, a "TVs and limited input devices" client, kept outside `api.env`; the tool refuses the API's client id). It prints a Google URL and a code. **The administrator completes the sign-in on their own device while the operator is in contact.** The ID token comes **directly from Google to the tool over TLS**, never through the API. |
+
+  - **What the tool checks on the ID token:**
+    - its signature against Google's published keys
+    - the issuer
+    - the audience (the operator's client, so a token minted for the API's client is useless)
+    - issued within 10 minutes
+    - a verified email equal to `--expect-google-email`
+  - **What gets linked:** the token's **subject**, which nobody types or relays.
+  - **`admin_link_google_identity()` (owner only)** links only to an **active administrator** and requires the verification record. It never moves a Google account already linked to any account (`subject_in_use`). It is audited in `stepup_events` (`identity_linked`, with operator, `verified_by`, Google email and method).
+  - **What the database cannot do:** it cannot check a Google signature. That is why the function trusts only the owner, i.e. the operator's tool on the server, with the same trust as passkey approval.
+  - **Refused, linking nothing (tests):**
+    - a wrong Google account (email), or a token for the API's client
+    - a wrong issuer, an unverified email, a stale token
+    - another signing key
+    - the person declining, the code expiring
+    - an empty `--verified-by`, the wrong database
+    - a non-administrator target (refused before anyone is asked to sign in)
+    - a Google account in use
+  - **Deployment ([APPROVAL]):** create the operator's device-flow OAuth client in Google Cloud. Its id and secret live only in the operator's root-only environment on the server. The server must be able to reach `oauth2.googleapis.com` and `www.googleapis.com` while the operator runs the command.
+
+### Deployment additions (each [APPROVAL])
+- **`HYPERCHAT_STEPUP_SOCKET`** in `api.env` (commented in the templates; set it only once the verifier is installed).
+- **Operator Google client** for `link-google` (only if administrators need Google sign-in): `HYPERCHAT_OPERATOR_GOOGLE_CLIENT_ID` / `_SECRET` in the operator's root-only environment, never in `api.env`.
+- **Migration 0026** after 0025.
+- **No new roles or grants.** The API's existing unit can connect to the socket: AF_UNIX is allowed, and a read-only `/run` does not block connecting to a socket.
+- **PostgreSQL 15:** 0026 uses only a row trigger, `FOR SHARE` and `pg_catalog` functions (PostgreSQL 11+). The same postgres:15 CI job proposed for 0025 would cover it.
 
 ## Canonical actions (`app/stepup/canonical.py`)
 

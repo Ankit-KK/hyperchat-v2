@@ -3,6 +3,8 @@ SHA-256 of the key plus a 12-character display prefix; the key itself is shown o
 
 from psycopg.rows import dict_row
 
+from app.stepup.grants import Grant, consume
+
 _KEY_COLS = "id::text, partner_slug, key_prefix, revoked, last_used_at, created_at"
 
 
@@ -33,8 +35,10 @@ class PartnerRepository:
             return row[0] if row else None
 
     # ── key management (admin) ─────────────────────────────────────────────
-    async def create_key(self, partner_slug: str, key_hash: str, key_prefix: str) -> dict:
-        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+    async def create_key(self, partner_slug: str, key_hash: str, key_prefix: str, grant: Grant | None = None) -> dict:
+        """A step-up grant (S2) is consumed in the same transaction as the insert."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await consume(cur, grant)
             await cur.execute(f"INSERT INTO public.partner_api_keys (partner_slug, key_hash, key_prefix) "
                               f"VALUES (%s, %s, %s) RETURNING {_KEY_COLS}", (partner_slug, key_hash, key_prefix))
             return await cur.fetchone()

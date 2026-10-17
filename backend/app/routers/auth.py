@@ -18,6 +18,7 @@ from app.auth.dependencies import (
 )
 from app.auth.service import AuthError, public_user
 from app.auth.tokens import new_token, sign_payload, verify_payload
+from app.stepup.actions import StepUp, step_up
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 OAUTH_COOKIE = "__Host-hc_oauth"
@@ -112,8 +113,11 @@ async def change(body: ChangeIn, request: Request, current: CurrentUser = Depend
 
 
 @router.post("/invites", status_code=201)
-async def create_invite(body: InviteIn, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
-    return await auth_service(request).create_invite(current.user, body.email, body.role, body.streamer_id)
+async def create_invite(body: InviteIn, request: Request, current: CurrentUser = Depends(require_admin),
+                        stepup: StepUp = Depends(step_up("admin.invite"))) -> dict:
+    # Step-up applies to ADMIN invitations only (ordinary and creator-staff invites are not admin authority).
+    grant = stepup.bind("invite", body.model_dump()) if body.role == "admin" else None
+    return await auth_service(request).create_invite(current.user, body.email, body.role, body.streamer_id, grant)
 
 
 @router.post("/invites/accept")

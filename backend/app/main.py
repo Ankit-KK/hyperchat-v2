@@ -49,6 +49,7 @@ from app.routers import (
     dashboard,
     health,
     kyc,
+    mfa,
     obs,
     partners,
     payments,
@@ -65,6 +66,9 @@ from app.security.cors import CorsMiddleware
 from app.security.dependencies import SecurityStores, install_security_error_handler
 from app.security.pg_stores import PostgresNonceStore, PostgresObsTokenStore, PostgresPartnerKeyStore
 from app.soundboard.library import HypersoundLibrary
+from app.stepup.client import StepupClient
+from app.stepup.grants import StepUpError
+from app.stepup.service import MfaService
 from app.soundboard.repository import SoundboardRepository
 from app.soundboard.service import SoundboardService
 from app.storage.r2 import build_object_store
@@ -110,6 +114,10 @@ async def lifespan(app: FastAPI):
         app.state.signups = SignupRepository(conn)
         app.state.partners = PartnerRepository(conn)
         app.state.dashboard = DashboardService(DashboardRepository(conn))
+        # S2: the isolated passkey verifier, over its Unix socket only (None: the passkey endpoints answer 503).
+        stepup = StepupClient(settings.stepup_socket) if settings.stepup_socket else None
+        app.state.mfa = MfaService(stepup, app.state.auth.repo)
+        log.info("stepup", extra={"stepup_configured": stepup is not None})
         app.state.security = SecurityStores(PostgresNonceStore(conn), PostgresObsTokenStore(conn),
                                             PostgresPartnerKeyStore(conn))
         # Donor uploads reuse the public creator lookup, the request_nonces store and the auth rate limiter.
@@ -172,6 +180,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        mfa = getattr(app.state, "mfa", None)
+        if mfa is not None and mfa.client is not None:
+            await mfa.client.aclose()
         await app.state.db.close()
         log.info("stopped hyperchat-api")
 
@@ -215,6 +226,12 @@ def create_app() -> FastAPI:
     install_api_error_handler(app)
     dashboard.install_no_store(app)
 
+    @app.exception_handler(StepUpError)
+    async def _stepup_error(request: Request, exc: StepUpError) -> JSONResponse:
+        if exc.status >= 500:
+            security_event("stepup_unavailable", reason=exc.reason, status=exc.status, path=request.url.path)
+        return JSONResponse(exc.body(), status_code=exc.status)
+
     @app.exception_handler(AuthError)
     async def _auth_error(request: Request, exc: AuthError) -> JSONResponse:
         if exc.status >= 500:
@@ -223,6 +240,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(auth.router)
+    app.include_router(mfa.router)
     app.include_router(streamers.router)
     app.include_router(admin.router)
     app.include_router(public.streamers_router)

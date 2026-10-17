@@ -10,6 +10,7 @@ from app.auth.google import GoogleAuthError, GoogleOAuth
 from app.auth.passwords import hash_password, needs_rehash, validate_new_password, verify_password
 from app.auth.repository import (
     AuthRepository,
+    GoogleLinkRefused,
     InviteAccountDisabled,
     InviteConflict,
     InviteCreatorClaimed,
@@ -20,6 +21,7 @@ from app.auth.repository import (
 from app.auth.tokens import csrf_token_for, new_hex_token, new_token, sha256_hex
 from app.core.config import Settings
 from app.security.audit import security_event
+from app.stepup.grants import Grant
 
 # Security audit F2: every failed sign-in, including a throttled one, gets this one answer (status 401), so a response
 # never tells whether the account exists, the password was right, or a limit was hit.
@@ -50,6 +52,15 @@ class AuthError(Exception):
     def __init__(self, status: int, error: str, reason: str) -> None:
         super().__init__(reason)
         self.status, self.error, self.reason = status, error, reason
+
+
+class AdminGoogleNotLinked(AuthError):
+    """S2: an administrator's Google account is not linked and never links itself. Nothing is recorded: a link is made
+    only by the operator, who verifies the Google account independently of the API (app.stepup.operator link-google)."""
+
+    def __init__(self) -> None:
+        super().__init__(403, "Administrators sign in with their password and passkey; ask the operator to link "
+                              "this Google account", "admin_google_not_linked")
 
 
 @dataclass(frozen=True)
@@ -260,7 +271,8 @@ class AuthService:
             raise AuthError(400, err, "weak_password")
 
     # ── invites ────────────────────────────────────────────────────────────
-    async def create_invite(self, admin: User, email: str, role: str, streamer_id: str | None) -> dict:
+    async def create_invite(self, admin: User, email: str, role: str, streamer_id: str | None,
+                            grant: Grant | None = None) -> dict:
         email = (email or "").strip()
         if "@" not in email or len(email) > 254:
             raise AuthError(400, "A valid email is required", "bad_email")
@@ -271,7 +283,7 @@ class AuthService:
             raise AuthError(409, "An account with this email already exists", "account_exists")
         token = new_hex_token(32)
         row = await self.repo.create_invite(email, role, streamer_id, sha256_hex(token), admin.id,
-                                            self.settings.invite_ttl_days)
+                                            self.settings.invite_ttl_days, grant)
         url = f"{self.settings.frontend_url.rstrip('/')}/invite?token={token}"
         await self.sender.send(render("invite", email, url))
         security_event("invite_created", level=20, user_id=admin.id)
@@ -306,6 +318,10 @@ class AuthService:
         return user, IssuedSession(token=session_token, csrf_token=csrf, session=session)
 
     # ── Google ─────────────────────────────────────────────────────────────
+    async def _admin_google_not_linked(self, user: User, ip: str | None):
+        security_event("google_login_rejected", reason="admin_not_linked", user_id=user.id, client_ip=ip)
+        raise AdminGoogleNotLinked()
+
     async def google_login(self, code: str, code_verifier: str, nonce: str, ip: str | None,
                            user_agent: str | None) -> tuple[User, IssuedSession]:
         if self.google is None:
@@ -321,10 +337,15 @@ class AuthService:
             if user is None:
                 security_event("google_login_rejected", reason="no_account", client_ip=ip)
                 raise AuthError(403, "No HyperChat account uses this Google address", "no_account")
+            if user.role == "admin":  # S2: a matching (even verified) Google email never links to an administrator
+                await self._admin_google_not_linked(user, ip)
         if not user.is_active:
             raise AuthError(403, "This account is disabled", "account_disabled")
         token, csrf, row = self._new_session(user.id, ip, user_agent)
-        session = await self.repo.google_sign_in(user.id, identity.subject, identity.email, row)
+        try:
+            session = await self.repo.google_sign_in(user.id, identity.subject, identity.email, row)
+        except GoogleLinkRefused:  # became an admin, or the identity was never linked: re-checked under the row lock
+            await self._admin_google_not_linked(user, ip)
         if session is None:  # deactivated after the check above: same answer, nothing written
             security_event("google_login_rejected", reason="account_disabled_meanwhile", user_id=user.id, client_ip=ip)
             raise AuthError(403, "This account is disabled", "account_disabled")

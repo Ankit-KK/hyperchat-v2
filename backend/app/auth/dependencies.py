@@ -7,6 +7,7 @@ from fastapi import Request, Response
 from app.auth.repository import Session, User
 from app.auth.service import AuthError, AuthService
 from app.auth.tokens import constant_time_equal
+from app.stepup.grants import MfaRequired
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
@@ -43,10 +44,21 @@ async def require_user(request: Request) -> CurrentUser:
     return current
 
 
-async def require_admin(request: Request) -> CurrentUser:
+async def require_admin_enrolling(request: Request) -> CurrentUser:
+    """An admin session at any assurance level: only for the passkey endpoints (enrollment and ceremonies)."""
     current = await require_user(request)
     if current.user.role != "admin":
         raise AuthError(403, "Admin access required", "not_admin")
+    return current
+
+
+async def require_admin(request: Request) -> CurrentUser:
+    """An admin session. While MFA enforcement is 'draft' (S2) that is all; once it is 'active' the session must also
+    hold passkey assurance (aal2, migration 0025), or the answer is 403 mfa_required."""
+    current = await require_admin_enrolling(request)
+    state, aal = await auth_service(request).repo.stepup_session(current.session.id)
+    if state == "active" and aal < 2:
+        raise MfaRequired()
     return current
 
 

@@ -13,6 +13,7 @@ from app.auth.dependencies import CurrentUser, client_ip, require_admin
 from app.auth.service import AuthError
 from app.payments.accounts import health_report
 from app.security.audit import security_event
+from app.stepup.actions import StepUp, step_up
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -91,20 +92,24 @@ async def list_users(request: Request, q: str | None = Query(None, max_length=25
 
 @router.patch("/users/{user_id}")
 async def update_user(user_id: str, body: UserPatch, request: Request,
-                      current: CurrentUser = Depends(require_admin)) -> dict:
+                      current: CurrentUser = Depends(require_admin),
+                      stepup: StepUp = Depends(step_up("admin.user.change"))) -> dict:
     changes = {k: getattr(body, k) for k in body.model_fields_set}
     if not changes:
         raise AuthError(400, "Nothing to change", "empty_patch")
     if ("role" in changes and changes["role"] is None) or ("is_active" in changes and changes["is_active"] is None):
         raise AuthError(400, "role and is_active cannot be null", "null_field")
-    return await admin_service(request).update_user(current.user, user_id, changes)
+    grant = stepup.bind(f"user:{user_id}", dict(changes))  # the exact fields sent, as approved
+    return await admin_service(request).update_user(current.user, user_id, changes, grant)
 
 
 @router.put("/users/{user_id}/email")
 async def change_user_email(user_id: str, body: EmailChange, request: Request,
-                            current: CurrentUser = Depends(require_admin)) -> dict:
+                            current: CurrentUser = Depends(require_admin),
+                            stepup: StepUp = Depends(step_up("admin.user.email"))) -> dict:
     """D11: correct a user's email (admin recovery). Revokes sessions, burns reset links, removes Google links."""
-    return await admin_service(request).change_email(current.user, user_id, body.email, client_ip(request))
+    grant = stepup.bind(f"user:{user_id}", {"email": body.email})
+    return await admin_service(request).change_email(current.user, user_id, body.email, client_ip(request), grant)
 
 
 @router.post("/users/{user_id}/sessions/revoke")
@@ -113,34 +118,43 @@ async def revoke_user_sessions(user_id: str, request: Request, current: CurrentU
 
 
 @router.post("/creators", status_code=201)
-async def create_creator(body: CreatorCreate, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
-    return await admin_service(request).create_creator(current.user, body.model_dump())
+async def create_creator(body: CreatorCreate, request: Request, current: CurrentUser = Depends(require_admin),
+                         stepup: StepUp = Depends(step_up("creator.create"))) -> dict:
+    grant = stepup.bind("creator:new", body.model_dump())
+    return await admin_service(request).create_creator(current.user, body.model_dump(), grant)
 
 
 @router.post("/creators/{streamer_id}/owner")
 async def assign_creator_owner(streamer_id: str, body: OwnerAssign, request: Request,
-                               current: CurrentUser = Depends(require_admin)) -> dict:
-    return await admin_service(request).assign_creator_owner(current.user, streamer_id, body.user_id)
+                               current: CurrentUser = Depends(require_admin),
+                               stepup: StepUp = Depends(step_up("creator.owner.assign"))) -> dict:
+    grant = stepup.bind(f"creator:{streamer_id}", body.model_dump())
+    return await admin_service(request).assign_creator_owner(current.user, streamer_id, body.user_id, grant)
 
 
 @router.post("/creators/{streamer_id}/owner/transfer")
 async def transfer_creator_owner(streamer_id: str, body: OwnerTransfer, request: Request,
-                                 current: CurrentUser = Depends(require_admin)) -> dict:
+                                 current: CurrentUser = Depends(require_admin),
+                                 stepup: StepUp = Depends(step_up("creator.owner.transfer"))) -> dict:
     """D13: move a claimed creator to another active user; the previous owner is unlinked and signed out."""
+    grant = stepup.bind(f"creator:{streamer_id}", body.model_dump())
     return await admin_service(request).transfer_creator_owner(current.user, streamer_id, body.user_id,
-                                                               body.expected_owner_id, client_ip(request))
+                                                               body.expected_owner_id, client_ip(request), grant)
 
 
-async def _status(action: str, streamer_id: str, body: CreatorStatusChange, request: Request, current: CurrentUser):
+async def _status(action: str, streamer_id: str, body: CreatorStatusChange, request: Request, current: CurrentUser,
+                  stepup: StepUp | None = None):
+    grant = stepup.bind(f"creator:{streamer_id}", body.model_dump()) if stepup is not None else None
     return await admin_service(request).change_creator_status(current.user, streamer_id, action, body.expected_status,
-                                                              body.reason, client_ip(request))
+                                                              body.reason, client_ip(request), grant)
 
 
 @router.post("/creators/{streamer_id}/activate")
 async def activate_creator(streamer_id: str, body: CreatorStatusChange, request: Request,
-                           current: CurrentUser = Depends(require_admin)) -> dict:
+                           current: CurrentUser = Depends(require_admin),
+                           stepup: StepUp = Depends(step_up("creator.activate"))) -> dict:
     """pending -> active. Never automatic: approval, invites and KYC alone do not activate a creator."""
-    return await _status("activate", streamer_id, body, request, current)
+    return await _status("activate", streamer_id, body, request, current, stepup)
 
 
 @router.post("/creators/{streamer_id}/suspend")
@@ -152,9 +166,10 @@ async def suspend_creator(streamer_id: str, body: CreatorStatusChange, request: 
 
 @router.post("/creators/{streamer_id}/reactivate")
 async def reactivate_creator(streamer_id: str, body: CreatorStatusChange, request: Request,
-                             current: CurrentUser = Depends(require_admin)) -> dict:
+                             current: CurrentUser = Depends(require_admin),
+                             stepup: StepUp = Depends(step_up("creator.reactivate"))) -> dict:
     """suspended -> active, only if the creator could accept donations again (else 409 with the reason)."""
-    return await _status("reactivate", streamer_id, body, request, current)
+    return await _status("reactivate", streamer_id, body, request, current, stepup)
 
 
 def application_service(request: Request):
@@ -181,9 +196,12 @@ async def get_application(signup_id: str, request: Request, current: CurrentUser
 
 @router.post("/applications/{signup_id}/approve")
 async def approve_application(signup_id: str, body: ApplicationApprove, request: Request,
-                              current: CurrentUser = Depends(require_admin)) -> dict:
+                              current: CurrentUser = Depends(require_admin),
+                              stepup: StepUp = Depends(step_up("application.approve"))) -> dict:
     """Approve and create the creator, PENDING (never active), in one transaction; a repeat approval is 409."""
-    return await application_service(request).approve(current.user, signup_id, body.model_dump(), client_ip(request))
+    grant = stepup.bind(f"application:{signup_id}", body.model_dump())
+    return await application_service(request).approve(current.user, signup_id, body.model_dump(), client_ip(request),
+                                                      grant)
 
 
 @router.post("/applications/{signup_id}/reject")
@@ -207,10 +225,12 @@ async def note_application(signup_id: str, body: ApplicationNote, request: Reque
 
 
 @router.post("/applications/{signup_id}/invite")
-async def invite_application(signup_id: str, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
+async def invite_application(signup_id: str, request: Request, current: CurrentUser = Depends(require_admin),
+                             stepup: StepUp = Depends(step_up("application.invite"))) -> dict:
     """Send (or resend: the previous open link is revoked) the applicant's account invitation; accepting it makes
     them the owner of the application's still-unclaimed creator."""
-    return await application_service(request).invite(current.user, signup_id, client_ip(request))
+    grant = stepup.bind(f"application:{signup_id}", {})
+    return await application_service(request).invite(current.user, signup_id, client_ip(request), grant)
 
 
 @router.put("/creators/{streamer_id}/soundboard")

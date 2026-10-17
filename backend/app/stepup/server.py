@@ -77,6 +77,10 @@ def create_app(settings: StepupSettings | None = None, environ: dict | None = No
             state = (await cur.fetchone())[0]
         return {"status": "ok", "enforcement": state, "db_label": settings.db_label}
 
+    @app.post("/v1/credentials")
+    async def list_credentials(body: Who) -> dict:
+        return await verifier.list_credentials(body.user_id, body.session_id)
+
     @app.post("/v1/registration/options")
     async def registration_options(body: Who) -> dict:
         return await verifier.registration_options(body.user_id, body.session_id)

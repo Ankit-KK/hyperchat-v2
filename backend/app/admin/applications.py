@@ -25,6 +25,7 @@ from app.auth.repository import User
 from app.auth.service import AuthError, AuthService
 from app.auth.tokens import new_hex_token, sha256_hex
 from app.security.audit import security_event
+from app.stepup.grants import Grant, consume
 
 STATUSES = ("legacy_unreviewed", "submitted", "approved", "rejected")
 REVIEWABLE = ("legacy_unreviewed", "submitted")
@@ -88,15 +89,18 @@ class ApplicationRepository:
                           "streamer_id, invite_id) VALUES (%s, %s, %s, %s, %s, %s)",
                           (signup_id, action, actor_id, note, streamer_id, invite_id))
 
-    async def _run(self, work) -> tuple[str, dict | None]:
-        """One transaction; the application row is locked first, so concurrent decisions on it are serialized."""
+    async def _run(self, work, grant: Grant | None = None) -> tuple[str, dict | None]:
+        """One transaction; the application row is locked first, so concurrent decisions on it are serialized. A
+        step-up grant (S2) is consumed first in the same transaction; a refusal (_Stop) rolls it back unspent."""
         try:
             async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                await consume(cur, grant)
                 return "ok", await work(cur)
         except _Stop as stop:
             return str(stop), None
 
-    async def approve(self, signup_id: str, actor_id: str, fields: dict, pusher_groups: tuple[int, ...]):
+    async def approve(self, signup_id: str, actor_id: str, fields: dict, pusher_groups: tuple[int, ...],
+                      grant: Grant | None = None):
         async def work(cur):
             app = await self._locked(cur, signup_id)
             if app["review_status"] == "approved":
@@ -109,7 +113,7 @@ class ApplicationRepository:
                               (actor_id, creator["id"], signup_id))
             await self._event(cur, signup_id, "approve", actor_id, streamer_id=creator["id"])
             return creator
-        return await self._run(work)
+        return await self._run(work, grant)
 
     async def reject(self, signup_id: str, actor_id: str, reason: str):
         async def work(cur):
@@ -140,7 +144,8 @@ class ApplicationRepository:
             return None
         return await self._run(work)
 
-    async def issue_invite(self, signup_id: str, actor_id: str, token_hash: str, ttl_days: int):
+    async def issue_invite(self, signup_id: str, actor_id: str, token_hash: str, ttl_days: int,
+                           grant: Grant | None = None):
         """Revoke this application's open invitations and issue a new one (a retry never leaves two usable links).
         Lock order: application -> its invites -> its creator, matching accept_invite (invite -> creator -> users),
         so a retry racing an acceptance waits instead of deadlocking (and then sees the creator claimed)."""
@@ -168,7 +173,7 @@ class ApplicationRepository:
             await self._event(cur, signup_id, "invite", actor_id, streamer_id=app["streamer_id"],
                               invite_id=invite["id"])
             return {**invite, "email": app["email"], "replaced": replaced}
-        return await self._run(work)
+        return await self._run(work, grant)
 
 
 _REFUSALS = {
@@ -228,11 +233,12 @@ class ApplicationService:
         # Ids and codes only: never the applicant's name, email, phone or a note.
         security_event("application_reviewed", level=20, user_id=admin.id, reason=action, client_ip=ip, **extra)
 
-    async def approve(self, admin: User, signup_id: str, body: dict, ip: str | None) -> dict:
+    async def approve(self, admin: User, signup_id: str, body: dict, ip: str | None, grant: Grant | None = None) -> dict:
         signup_id = self._id(signup_id)
         fields = self.admin.creator_fields(body)
         try:
-            result, creator = await self.repo.approve(signup_id, admin.id, fields, self.admin.pusher_groups)
+            result, creator = await self.repo.approve(signup_id, admin.id, fields, self.admin.pusher_groups,
+                                                      grant)
         except CreatorConflict as exc:
             raise creator_conflict(exc) from None
         self._check(result)
@@ -257,14 +263,14 @@ class ApplicationService:
         self._audit(admin, "note", ip)
         return await self.get(signup_id)
 
-    async def invite(self, admin: User, signup_id: str, ip: str | None) -> dict:
+    async def invite(self, admin: User, signup_id: str, ip: str | None, grant: Grant | None = None) -> dict:
         """Create (or retry: the previous open link is revoked) the account invitation of an approved application,
         then email it. A failed email leaves the new invitation in place and answers 502: retrying issues a fresh
         link and revokes this one; the creator is never created twice."""
         signup_id = self._id(signup_id)
         token = new_hex_token(32)
         result, invite = await self.repo.issue_invite(signup_id, admin.id, sha256_hex(token),
-                                                      self.auth.settings.invite_ttl_days)
+                                                      self.auth.settings.invite_ttl_days, grant)
         self._check(result)
         url = f"{self.auth.settings.frontend_url.rstrip('/')}/invite?token={token}"
         try:

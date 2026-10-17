@@ -34,6 +34,9 @@ class StepupClient:
                                 else "refused")
         return data
 
+    async def list_credentials(self, user_id: str, session_id: str) -> dict:
+        return await self._post("/v1/credentials", {"user_id": user_id, "session_id": session_id})
+
     async def registration_options(self, user_id: str, session_id: str) -> dict:
         return await self._post("/v1/registration/options", {"user_id": user_id, "session_id": session_id})
 
