@@ -12,9 +12,11 @@ service with its own OS user and its own database role, hyperchat_stepup, which 
   stepup_challenges     single-use, expiring challenges. A challenge is SHA-256 over the canonical action it signs
                         (app.stepup.canonical); the database recomputes the hash and checks that the canonical text
                         names the row's own purpose, administrator, session, action, target, parameter hash and expiry.
-  stepup_grants         one-time authorizations for one action, written by the verifier only for a challenge it has
+  stepup_grants         one-time authorizations for ONE action, written by the verifier only for a challenge it has
                         just verified, bound to administrator, session, credential, action, target and exact
-                        parameters, expiring within 2 minutes. Consumed only through stepup_consume(), atomically.
+                        parameters, expiring within 2 minutes. Consumed once through stepup_consume() (the API), then
+                        claimed once, in that same transaction, by the action's anchor write through stepup_claim()
+                        (S3's guards); stepup_effect() records that action's secondary effects, each once.
   session_assurance     "this session passed a passkey ceremony": written only by the verifier, read through
                         stepup_session_aal(), which also requires the credential, the administrator and the session to
                         still be valid.
@@ -39,8 +41,8 @@ depends_on = None
 
 STEPUP = "hyperchat_stepup"
 API_ROLES = ("hyperchat_app", "hyperchat_worker", "hyperchat_auth", "hyperchat_lifecycle")
-TABLES = ("webauthn_credentials", "stepup_challenges", "stepup_grants", "session_assurance", "stepup_events",
-          "stepup_rate_limits", "stepup_enforcement")
+TABLES = ("webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects", "session_assurance",
+          "stepup_events", "stepup_rate_limits", "stepup_enforcement")
 DEFINER = "SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp"
 REFUSE = "USING ERRCODE = 'insufficient_privilege'"
 # Every action a challenge may name. Grants exist only for these; S2/S3 bind each to its route and database write.
@@ -48,14 +50,16 @@ ACTIONS = ("session.aal2", "mfa.register", "creator.activate", "creator.reactiva
            "creator.owner.assign", "creator.owner.transfer", "application.approve", "application.invite",
            "admin.invite", "admin.user.change", "admin.user.email", "partner_key.create", "mfa.credential.revoke")
 EVENTS = ("challenge_issued", "registration_ok", "registration_failed", "assertion_ok", "assertion_failed",
-          "grant_issued", "grant_consumed", "session_assured", "credential_approved", "credential_revoked",
+          "grant_issued", "grant_consumed", "grant_claimed", "session_assured", "credential_approved", "credential_revoked",
           "admin_recovered", "enforcement_changed", "rate_limited")
 OPERATOR_FUNCTIONS = ("public.stepup_approve_credential(text, text, text, text)",
                       "public.stepup_revoke_credential(text, text, text, text)",
                       "public.stepup_recover_admin(text, text, text)", "public.stepup_enforcement_readiness()")
-INTERNAL_FUNCTIONS = ("public.stepup_consumed_here(uuid, text, text, text)", "public.stepup_admin_ok(uuid)")
+GUARD_HELPERS = ("public.stepup_claim(uuid, uuid, text, text, text, text)",
+                 "public.stepup_effect(uuid, uuid, text, text, text, text)")  # for S3's guards: owner only
+INTERNAL_FUNCTIONS = GUARD_HELPERS + ("public.stepup_admin_ok(uuid)",)
 API_FUNCTIONS = ("public.stepup_consume(uuid, uuid, uuid, text, text, text)", "public.stepup_session_aal(uuid)")
-TRIGGER_FUNCTIONS = ("stepup_guard_credentials", "stepup_guard_challenges", "stepup_guard_grants",
+TRIGGER_FUNCTIONS = ("stepup_guard_credentials", "stepup_guard_challenges", "stepup_guard_grants", "stepup_guard_effects",
                      "stepup_guard_assurance", "stepup_guard_events", "stepup_guard_enforcement")
 
 
@@ -137,8 +141,21 @@ def upgrade() -> None:
             expires_at timestamptz NOT NULL,
             consumed_at timestamptz,
             consumed_txid xid8,
+            claimed_at timestamptz,
+            claimed_anchor text CHECK (length(claimed_anchor) BETWEEN 1 AND 200),
             CHECK ((consumed_at IS NULL) = (consumed_txid IS NULL)),
+            CHECK ((claimed_at IS NULL) = (claimed_anchor IS NULL)),
+            CHECK (claimed_at IS NULL OR consumed_at IS NOT NULL),
             CHECK (expires_at > created_at AND expires_at <= created_at + interval '2 minutes')
+        )
+    """)
+    # The secondary effects of ONE claimed grant (one logical action): each named effect at most once per grant.
+    op.execute("""
+        CREATE TABLE public.stepup_grant_effects (
+            grant_id uuid NOT NULL REFERENCES public.stepup_grants(id) ON DELETE CASCADE,
+            effect text NOT NULL CHECK (length(effect) BETWEEN 1 AND 200),
+            at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (grant_id, effect)
         )
     """)
 
@@ -320,10 +337,35 @@ def upgrade() -> None:
                 END IF;
                 RETURN OLD;
             END IF;
-            IF (to_jsonb(NEW) - 'consumed_at' - 'consumed_txid') <> (to_jsonb(OLD) - 'consumed_at' - 'consumed_txid')
-               OR OLD.consumed_at IS NOT NULL OR NEW.consumed_at IS NULL THEN
-                RAISE EXCEPTION 'a grant is only ever consumed, once' {REFUSE};
+            -- Two transitions, both only through the owner's functions: consumed once (stepup_consume), then claimed
+            -- once, in the transaction that consumed it (stepup_claim). Nothing else about a grant ever changes.
+            IF current_user <> 'hyperchat_owner' THEN
+                RAISE EXCEPTION 'grants change only through stepup_consume and stepup_claim' {REFUSE};
             END IF;
+            IF (to_jsonb(NEW) - 'consumed_at' - 'consumed_txid' - 'claimed_at' - 'claimed_anchor')
+                   <> (to_jsonb(OLD) - 'consumed_at' - 'consumed_txid' - 'claimed_at' - 'claimed_anchor')
+               OR NOT ((OLD.consumed_at IS NULL AND NEW.consumed_at IS NOT NULL AND NEW.claimed_at IS NULL)
+                       OR (OLD.consumed_at IS NOT NULL AND OLD.claimed_at IS NULL AND NEW.claimed_at IS NOT NULL
+                           AND (NEW.consumed_at, NEW.consumed_txid) = (OLD.consumed_at, OLD.consumed_txid)
+                           AND OLD.consumed_txid = pg_current_xact_id_if_assigned())) THEN
+                RAISE EXCEPTION 'a grant is consumed once, then claimed once in the same transaction' {REFUSE};
+            END IF;
+            RETURN NEW;
+        END $$
+    """)
+    op.execute(f"""
+        CREATE FUNCTION public.stepup_guard_effects() RETURNS trigger LANGUAGE plpgsql
+        SET search_path = pg_catalog, public AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' AND current_user = 'hyperchat_owner' THEN
+                RETURN OLD;  -- a cascade from its grant
+            END IF;
+            IF TG_OP <> 'INSERT' OR current_user <> 'hyperchat_owner' OR NOT EXISTS (
+                    SELECT 1 FROM public.stepup_grants g WHERE g.id = NEW.grant_id AND g.claimed_at IS NOT NULL
+                      AND g.consumed_txid = pg_current_xact_id_if_assigned()) THEN
+                RAISE EXCEPTION 'grant effects are recorded only via stepup_effect, for a grant claimed now' {REFUSE};
+            END IF;
+            NEW.at := now();
             RETURN NEW;
         END $$
     """)
@@ -408,6 +450,7 @@ def upgrade() -> None:
     for table, fn, events in (("webauthn_credentials", "stepup_guard_credentials", "INSERT OR UPDATE OR DELETE"),
                               ("stepup_challenges", "stepup_guard_challenges", "INSERT OR UPDATE OR DELETE"),
                               ("stepup_grants", "stepup_guard_grants", "INSERT OR UPDATE OR DELETE"),
+                              ("stepup_grant_effects", "stepup_guard_effects", "INSERT OR UPDATE OR DELETE"),
                               ("session_assurance", "stepup_guard_assurance", "INSERT OR UPDATE OR DELETE"),
                               ("stepup_events", "stepup_guard_events", "INSERT OR UPDATE OR DELETE"),
                               ("stepup_enforcement", "stepup_guard_enforcement", "INSERT OR UPDATE OR DELETE")):
@@ -456,14 +499,58 @@ def upgrade() -> None:
             RETURN 'ok';
         END $$
     """)
-    # For the database guards of S3 (owner-only): was a matching grant consumed in THIS transaction?
+    # ── for the database guards of S3 (owner-only; S3's SECURITY DEFINER guards call them) ─────────────────────
+    # Policy (docs/admin-stepup.md, "One grant, one action"): one grant authorizes exactly ONE logical action.
+    #   * The action's ANCHOR write (the one write that IS the action, e.g. the creator's status change) calls
+    #     stepup_claim(). It takes one grant consumed in THIS transaction with exactly these bindings, the session
+    #     included, that no write has claimed yet, and claims it. A second anchor write (the same action again, or a
+    #     second independent sensitive action) finds no unclaimed grant and is refused: it needs its own grant.
+    #   * Legitimate secondary effects of that same action (an event row, a revoked grace grant) call stepup_effect(),
+    #     which needs a grant CLAIMED in this transaction with the same bindings and records each named effect at
+    #     most once per grant (stepup_grant_effects' primary key). An effect never authorizes anything on its own.
+    #   * Anything that is itself a sensitive action is an anchor, never an effect.
     op.execute(f"""
-        CREATE FUNCTION public.stepup_consumed_here(p_user uuid, p_action text, p_target text, p_params_hash text)
-        RETURNS boolean LANGUAGE sql STABLE {DEFINER} AS $$
-            SELECT EXISTS (SELECT 1 FROM public.stepup_grants g
-                           WHERE g.consumed_txid = pg_current_xact_id_if_assigned() AND g.user_id = p_user
-                             AND g.action = p_action AND g.target = p_target AND g.params_hash = p_params_hash)
-        $$
+        CREATE FUNCTION public.stepup_claim(p_user uuid, p_session uuid, p_action text, p_target text,
+                                            p_params_hash text, p_anchor text)
+        RETURNS uuid LANGUAGE plpgsql {DEFINER} AS $$
+        DECLARE g uuid;
+        BEGIN
+            IF btrim(coalesce(p_anchor, '')) = '' THEN
+                RAISE EXCEPTION 'a claim names its anchor write' {REFUSE};
+            END IF;
+            SELECT id INTO g FROM public.stepup_grants
+            WHERE consumed_txid = pg_current_xact_id_if_assigned() AND claimed_at IS NULL
+              AND user_id = p_user AND session_id = p_session AND action = p_action AND target = p_target
+              AND params_hash = p_params_hash
+            ORDER BY consumed_at, id LIMIT 1 FOR UPDATE;
+            IF g IS NULL THEN
+                RAISE EXCEPTION 'this write needs its own step-up grant, consumed in this transaction for exactly this administrator, session, action, target and parameters' {REFUSE};
+            END IF;
+            UPDATE public.stepup_grants SET claimed_at = now(), claimed_anchor = p_anchor WHERE id = g;
+            INSERT INTO public.stepup_events (event, user_id, grant_id, detail)
+            VALUES ('grant_claimed', p_user, g, jsonb_build_object('action', p_action, 'target', p_target,
+                                                                   'anchor', p_anchor));
+            RETURN g;
+        END $$
+    """)
+    op.execute(f"""
+        CREATE FUNCTION public.stepup_effect(p_user uuid, p_session uuid, p_action text, p_target text,
+                                             p_params_hash text, p_effect text)
+        RETURNS uuid LANGUAGE plpgsql {DEFINER} AS $$
+        DECLARE g uuid;
+        BEGIN
+            SELECT id INTO g FROM public.stepup_grants gr
+            WHERE consumed_txid = pg_current_xact_id_if_assigned() AND claimed_at IS NOT NULL
+              AND user_id = p_user AND session_id = p_session AND action = p_action AND target = p_target
+              AND params_hash = p_params_hash
+              AND NOT EXISTS (SELECT 1 FROM public.stepup_grant_effects e WHERE e.grant_id = gr.id AND e.effect = p_effect)
+            ORDER BY claimed_at, id LIMIT 1 FOR UPDATE;
+            IF g IS NULL THEN
+                RAISE EXCEPTION 'effect % needs a step-up grant claimed in this transaction for the same action, and happens once per grant', p_effect {REFUSE};
+            END IF;
+            INSERT INTO public.stepup_grant_effects (grant_id, effect) VALUES (g, p_effect);
+            RETURN g;
+        END $$
     """)
     # The session's assurance level: 2 only while the ceremony, its passkey, the administrator and the session hold.
     op.execute(f"""
@@ -594,9 +681,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for fn in API_FUNCTIONS + OPERATOR_FUNCTIONS + INTERNAL_FUNCTIONS[:1]:
+    for fn in API_FUNCTIONS + OPERATOR_FUNCTIONS + GUARD_HELPERS:
         op.execute(f"DROP FUNCTION {fn}")
-    for table in ("session_assurance", "stepup_grants", "stepup_challenges", "webauthn_credentials", "stepup_events",
+    for table in ("session_assurance", "stepup_grant_effects", "stepup_grants", "stepup_challenges", "webauthn_credentials", "stepup_events",
                   "stepup_rate_limits", "stepup_enforcement"):
         op.execute(f"DROP TABLE public.{table}")
     for fn in TRIGGER_FUNCTIONS + ("stepup_refuse_truncate",):

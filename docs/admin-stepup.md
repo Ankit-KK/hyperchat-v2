@@ -29,7 +29,7 @@ browser (frontend origin) ──▶ API  (OS user hyperchat; roles app / auth / 
   - a passkey's identity never changes, and its sign count never decreases
   - a challenge is SHA-256 over its canonical action, and the database recomputes that hash
   - a challenge names its own administrator, session, action, target, parameter hash and expiry; it lasts at most 5 minutes and is used once
-  - a grant needs an action challenge verified **in the same transaction**, with identical bindings and an active passkey; it lasts at most 2 minutes and is consumed once, only through `stepup_consume()`
+  - a grant needs an action challenge verified **in the same transaction**, with identical bindings and an active passkey; it lasts at most 2 minutes, is consumed once through `stepup_consume()`, and is claimed once, by one anchor write, in that same transaction (see "One grant, one action")
   - session assurance needs a session ceremony in the same transaction, for that administrator's own live session; it lasts at most 12 hours
   - the audit history is append-only for everyone, the owner included
   - enforcement can become `active` only through the operator, and only while every active administrator has at least two active passkeys
@@ -48,6 +48,32 @@ browser (frontend origin) ──▶ API  (OS user hyperchat; roles app / auth / 
 - The frontend origin is part of the trusted base. A script injected there could show a misleading action, so S2 and the frontend phase need a strict CSP and a separate admin origin.
 - A compromised API process can still read whatever its roles read, act as any non-admin user, and use the third-party keys in `api.env`.
 - Nothing is enforced until S2 and S3.
+
+## One grant, one action (the interface S3 enforces)
+
+A grant is consumed by the API and **claimed** by the database write that *is* the action. Both happen in the same
+transaction, and both bind the administrator, the session, the action, the target and the exact parameter hash.
+
+| Step | Who | Function | Rule |
+|---|---|---|---|
+| Consume | The API's transaction | `stepup_consume(grant, admin, session, action, target, params_hash)` | Exact bindings; once; unexpired; the administrator, passkey and session are still valid. |
+| Claim | S3's guard on the action's **anchor** write (owner-only, SECURITY DEFINER) | `stepup_claim(admin, session, action, target, params_hash, anchor)` | Takes **one** grant consumed **in this transaction** with exactly these bindings that nothing has claimed yet. Otherwise it refuses. |
+| Effect | S3's guards on the action's secondary writes | `stepup_effect(admin, session, action, target, params_hash, effect)` | Needs a grant **claimed** in this transaction with the same bindings. Records each named effect **once per grant** (`stepup_grant_effects`). |
+
+**The policy.**
+- **One approved logical action** has exactly one anchor write (e.g. the creator's status change for `creator.activate`). Its legitimate multi-table consequences are **effects** of that one claimed grant: the status event row, a revoked grace grant, an audit row. Each named effect happens once per grant, and only for the same administrator, session, action, target and parameters.
+- **A second, independent sensitive action needs its own grant**:
+  - the same action again (a second anchor write in the same transaction)
+  - another action or another target
+  - other parameters
+  - a write attributed to another session
+
+  In every case `stepup_claim` finds no unclaimed matching grant and refuses. Two approvals of the same action authorize exactly two anchor writes.
+- **Anything that is itself sensitive is an anchor, never an effect.** S3 must classify every guarded write into exactly one of the two, and the S3 review checks that table.
+- **Session attribution:** a grant from session A can never be claimed for a write attributed to session B. S3 must take the acting session from the authenticated request path, the same session `stepup_consume` was called for, never from a free parameter.
+- **No banking grants:** a consumed grant can be claimed only in the transaction that consumed it, so nothing can be consumed now and used later. A rolled-back transaction rolls back its consumption, so the grant stays single-use.
+
+The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
 
 ## Canonical actions (`app/stepup/canonical.py`)
 

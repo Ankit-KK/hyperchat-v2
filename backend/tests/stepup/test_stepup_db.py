@@ -48,14 +48,17 @@ def refusal(coro) -> tuple[int, str]:
     return exc.value.status, exc.value.code
 
 
+def admin_session(uid: str) -> str:
+    with fixture_db() as conn:
+        return conn.execute("INSERT INTO public.sessions (user_id, token_hash, csrf_token_hash, idle_expires_at, "
+                            "absolute_expires_at) VALUES (%s, %s, 'x', now() + interval '1 day', "
+                            "now() + interval '2 days') RETURNING id::text", (uid, secrets.token_hex(32))).fetchone()[0]
+
+
 def admin(name: str, role: str = "admin") -> tuple[str, str]:
     """(user id, session id): an administrator with one live session."""
     uid = make_user(name + DOMAIN, role=role)
-    with fixture_db() as conn:
-        sid = conn.execute("INSERT INTO public.sessions (user_id, token_hash, csrf_token_hash, idle_expires_at, "
-                           "absolute_expires_at) VALUES (%s, %s, 'x', now() + interval '1 day', "
-                           "now() + interval '2 days') RETURNING id::text", (uid, secrets.token_hex(32))).fetchone()[0]
-    return uid, sid
+    return uid, admin_session(uid)
 
 
 def register(v: Verifier, uid: str, sid: str, auth: SoftAuthenticator | None = None) -> tuple[SoftAuthenticator, str]:
@@ -161,23 +164,128 @@ def test_a_grant_is_bound_to_admin_session_action_target_and_parameters_and_is_s
     assert consume("hyperchat_auth", g, uid, sid) == "consumed"
 
 
-def test_a_grant_expires_and_a_consumption_is_only_visible_to_its_own_transaction(verifier):
+def test_a_grant_expires(verifier):
     uid, sid, auth = enrolled(verifier, "su-expire")
     g = grant(verifier, uid, sid, auth)
     with guards_off("stepup_grants") as conn:
         conn.execute("UPDATE public.stepup_grants SET created_at = now() - interval '3 minutes', "
                      "expires_at = now() - interval '1 minute' WHERE id = %s", (g["grant_id"],))
     assert consume("hyperchat_app", g, uid, sid) == "expired"
-    g2 = grant(verifier, uid, sid, auth)
-    with fixture_db() as conn, conn.transaction():  # S3's guards ask: consumed in THIS transaction?
-        here = "SELECT public.stepup_consumed_here(%s, %s, %s, %s)"
-        args = (uid, g2["action"], g2["target"], g2["params_hash"])
-        assert conn.execute(here, args).fetchone()[0] is False
-        assert conn.execute("SELECT public.stepup_consume(%s, %s, %s, %s, %s, %s)",
-                            (g2["grant_id"], uid, sid, *args[1:])).fetchone()[0] == "ok"
-        assert conn.execute(here, args).fetchone()[0] is True
+
+
+# ── S3's interface: one grant, one action (stepup_claim / stepup_effect) ────────
+# These run as the owner: in S3 they are called by SECURITY DEFINER guards inside the API's own transaction.
+
+CONSUME = "SELECT public.stepup_consume(%s, %s, %s, %s, %s, %s)"
+CLAIM = "SELECT public.stepup_claim(%s, %s, %s, %s, %s, %s)"
+EFFECT = "SELECT public.stepup_effect(%s, %s, %s, %s, %s, %s)"
+
+
+def bindings(g: dict, uid: str, sid: str) -> tuple:
+    return (uid, sid, g["action"], g["target"], g["params_hash"])
+
+
+def refused(conn, sql: str, args: tuple) -> None:
+    """The statement is refused by a step-up guard; the transaction continues from a savepoint."""
+    with pytest.raises(REFUSED), conn.transaction():
+        conn.execute(sql, args)
+
+
+def test_a_grant_for_session_a_cannot_authorize_a_write_attributed_to_session_b(verifier):
+    uid, sid_a, auth = enrolled(verifier, "su-sessions")
+    sid_b = admin_session(uid)  # the same administrator, a second live session
+    g = grant(verifier, uid, sid_a, auth)
+    with fixture_db() as conn, conn.transaction():
+        assert conn.execute(CONSUME, (g["grant_id"], *bindings(g, uid, sid_b))).fetchone()[0] == "mismatch"
+        assert conn.execute(CONSUME, (g["grant_id"], *bindings(g, uid, sid_a))).fetchone()[0] == "ok"
+        refused(conn, CLAIM, (*bindings(g, uid, sid_b), "streamers:x status"))  # attributed to session B
+        assert str(conn.execute(CLAIM, (*bindings(g, uid, sid_a), "streamers:x status")).fetchone()[0]) == g["grant_id"]
+
+
+def test_one_grant_authorizes_exactly_one_anchor_write(verifier):
+    uid, sid, auth = enrolled(verifier, "su-one-action")
+    g1, g2, g3 = (grant(verifier, uid, sid, auth) for _ in range(3))
+    with fixture_db() as conn, conn.transaction():
+        assert conn.execute(CONSUME, (g1["grant_id"], *bindings(g1, uid, sid))).fetchone()[0] == "ok"
+        conn.execute(CLAIM, (*bindings(g1, uid, sid), "anchor 1"))
+        refused(conn, CLAIM, (*bindings(g1, uid, sid), "anchor 2"))  # the same action again: needs its own grant
+    with fixture_db() as conn, conn.transaction():  # two approvals of the same action: exactly two anchors
+        for g in (g2, g3):
+            assert conn.execute(CONSUME, (g["grant_id"], *bindings(g, uid, sid))).fetchone()[0] == "ok"
+        claimed = {str(conn.execute(CLAIM, (*bindings(g2, uid, sid), f"anchor {i}")).fetchone()[0]) for i in (1, 2)}
+        assert claimed == {g2["grant_id"], g3["grant_id"]}
+        refused(conn, CLAIM, (*bindings(g2, uid, sid), "anchor 3"))
     with fixture_db() as conn:
-        assert conn.execute(here, args).fetchone()[0] is False  # another transaction: nothing consumed here
+        rows = conn.execute("SELECT count(*) FILTER (WHERE claimed_at IS NOT NULL), count(*) FROM public.stepup_grants "
+                            "WHERE user_id = %s", (uid,)).fetchone()
+    assert rows == (3, 3)
+
+
+def test_a_second_independent_action_needs_its_own_grant(verifier):
+    uid, sid, auth = enrolled(verifier, "su-independent")
+    g = grant(verifier, uid, sid, auth)
+    b = bindings(g, uid, sid)
+    with fixture_db() as conn, conn.transaction():
+        assert conn.execute(CONSUME, (g["grant_id"], *b)).fetchone()[0] == "ok"
+        refused(conn, CLAIM, (uid, sid, "creator.reactivate", g["target"], g["params_hash"], "other action"))
+        refused(conn, CLAIM, (uid, sid, g["action"], "creator:another", g["params_hash"], "other creator"))
+        refused(conn, CLAIM, (uid, sid, g["action"], g["target"], "0" * 64, "other parameters"))
+        refused(conn, CLAIM, (*b, " "))  # an anchor must be named
+        conn.execute(CLAIM, (*b, "the approved action"))
+
+
+def test_a_grant_is_claimable_only_in_the_transaction_that_consumed_it(verifier):
+    uid, sid, auth = enrolled(verifier, "su-later")
+    g = grant(verifier, uid, sid, auth)
+    with fixture_db() as conn, conn.transaction():
+        refused(conn, CLAIM, (*bindings(g, uid, sid), "before consumption"))
+        assert conn.execute(CONSUME, (g["grant_id"], *bindings(g, uid, sid))).fetchone()[0] == "ok"
+    with fixture_db() as conn, conn.transaction():  # consumed earlier, committed: never usable again
+        refused(conn, CLAIM, (*bindings(g, uid, sid), "later"))
+        assert conn.execute(CONSUME, (g["grant_id"], *bindings(g, uid, sid))).fetchone()[0] == "consumed"
+
+
+def test_effects_belong_to_one_claimed_action_and_happen_once_per_grant(verifier):
+    uid, sid, auth = enrolled(verifier, "su-effects")
+    g, g2 = grant(verifier, uid, sid, auth), grant(verifier, uid, sid, auth)
+    b = bindings(g, uid, sid)
+    with fixture_db() as conn, conn.transaction():
+        assert conn.execute(CONSUME, (g["grant_id"], *b)).fetchone()[0] == "ok"
+        refused(conn, EFFECT, (*b, "status_event"))  # consumed but not yet claimed by its anchor
+        conn.execute(CLAIM, (*b, "status change"))
+        assert str(conn.execute(EFFECT, (*b, "status_event")).fetchone()[0]) == g["grant_id"]
+        conn.execute(EFFECT, (*b, "grace_revoked"))
+        refused(conn, EFFECT, (*b, "status_event"))  # each effect once per approved action
+        refused(conn, EFFECT, (uid, sid, g["action"], "creator:another", g["params_hash"], "status_event"))
+        refused(conn, EFFECT, (uid, admin_session(uid), g["action"], g["target"], g["params_hash"], "audit"))  # session B
+        refused(conn, "INSERT INTO public.stepup_grant_effects (grant_id, effect) VALUES (%s, 'forged')",
+                (str(uuid.uuid4()),))
+        # A second approval of the same action carries its own effects.
+        assert conn.execute(CONSUME, (g2["grant_id"], *b)).fetchone()[0] == "ok"
+        conn.execute(CLAIM, (*b, "status change 2"))
+        assert str(conn.execute(EFFECT, (*b, "status_event")).fetchone()[0]) == g2["grant_id"]
+        refused(conn, EFFECT, (*b, "status_event"))
+    with fixture_db() as conn:
+        refused(conn, "UPDATE public.stepup_grant_effects SET effect = 'x'", ())
+        refused(conn, "UPDATE public.stepup_grants SET claimed_at = NULL, claimed_anchor = NULL WHERE id = %s",
+                (g["grant_id"],))  # a claim is final
+
+
+def test_a_grant_cannot_be_claimed_outside_the_functions(verifier):
+    uid, sid, auth = enrolled(verifier, "su-direct")
+    g = grant(verifier, uid, sid, auth)
+    with fixture_db() as conn, conn.transaction():
+        refused(conn, "UPDATE public.stepup_grants SET claimed_at = now(), claimed_anchor = 'x' WHERE id = %s",
+                (g["grant_id"],))  # not consumed in this transaction
+        assert conn.execute(CONSUME, (g["grant_id"], *bindings(g, uid, sid))).fetchone()[0] == "ok"
+        refused(conn, "INSERT INTO public.stepup_grant_effects (grant_id, effect) VALUES (%s, 'event')",
+                (g["grant_id"],))  # the table's own guard: consumed is not claimed
+    with fixture_db() as conn, conn.transaction():  # the table's own guard: consumed in ANOTHER transaction
+        refused(conn, "UPDATE public.stepup_grants SET claimed_at = now(), claimed_anchor = 'x' WHERE id = %s",
+                (g["grant_id"],))
+    with db("hyperchat_stepup") as conn, pytest.raises(REFUSED):
+        conn.execute("UPDATE public.stepup_grants SET consumed_at = now(), consumed_txid = pg_current_xact_id() "
+                     "WHERE id = %s", (g["grant_id"],))
 
 
 def test_two_concurrent_consumptions_of_one_grant_succeed_exactly_once(verifier):
@@ -363,7 +471,9 @@ def test_a_compromised_api_role_cannot_touch_passkeys_grants_assurance_enforceme
         ("SET ROLE hyperchat_owner", ()),
         ("SELECT public.stepup_approve_credential('a', 'b', 'c', 'd')", ()),
         ("SELECT public.stepup_recover_admin('a', 'b', 'c')", ()),
-        ("SELECT public.stepup_consumed_here(%s, 'a', 'b', 'c')", (uid,)),
+        ("SELECT public.stepup_claim(%s, %s, 'creator.activate', 't', 'h', 'anchor')", (uid, sid)),
+        ("SELECT public.stepup_effect(%s, %s, 'creator.activate', 't', 'h', 'effect')", (uid, sid)),
+        ("INSERT INTO public.stepup_grant_effects (grant_id, effect) VALUES (%s, 'x')", (str(uuid.uuid4()),)),
         ("SELECT public.stepup_admin_ok(%s)", (uid,)),
     ]
     for sql, args in attempts:
@@ -406,6 +516,8 @@ def test_the_verifier_role_cannot_approve_promote_or_forge(verifier):
         ("UPDATE public.stepup_challenges SET outcome = 'ok' WHERE id = %s", (challenge,)),  # already used
         ("SELECT public.stepup_approve_credential('su-verifier-role@authtest.invalid', %s, 'v', 'v')", (fingerprint,)),
         ("SET ROLE hyperchat_owner", ()),
+        ("SELECT public.stepup_claim(%s, %s, 'creator.activate', 't', 'h', 'anchor')", (uid, sid)),
+        ("CREATE TABLE public.stepup_hijack (x int)", ()),  # nothing can be planted in the schema
     ]
     for sql, args in attempts:
         with db("hyperchat_stepup") as conn, pytest.raises((REFUSED, psycopg.errors.CheckViolation,

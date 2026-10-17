@@ -30,7 +30,8 @@ EXPECTED_TABLES = {
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
     "d1_hash_import_ledger", "creator_status_events", "application_events", "kyc_sessions", "kyc_webhook_events",
     "kyc_events", "kyc_provider_config", "kyc_enforcement", "kyc_grace_grants", "kyc_restrictions",
-    "kyc_enforcement_events", "webauthn_credentials", "stepup_challenges", "stepup_grants", "session_assurance",
+    "kyc_enforcement_events", "webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
+    "session_assurance",
     "stepup_events", "stepup_rate_limits", "stepup_enforcement",
 }
 
@@ -594,8 +595,8 @@ def test_0024_admin_auth_boundary_round_trip(monkeypatch):
     assert _auth_guards() == guards
 
 
-STEPUP_TABLES = {"webauthn_credentials", "stepup_challenges", "stepup_grants", "session_assurance", "stepup_events",
-                 "stepup_rate_limits", "stepup_enforcement"}
+STEPUP_TABLES = {"webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
+                 "session_assurance", "stepup_events", "stepup_rate_limits", "stepup_enforcement"}
 
 
 def _stepup_privileges() -> dict:
