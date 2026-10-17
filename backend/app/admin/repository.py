@@ -319,7 +319,7 @@ class AdminRepository:
     async def change_email(self, user_id: str, email: str, grant: Grant | None = None) -> tuple[str, dict | None, dict]:
         """D11: correct a user's email (admin recovery). One transaction under the user-row lock: the new address
         becomes unverified, open reset links are burned, linked Google identities are removed (they may belong to the
-        old address's holder; the rightful owner re-links by verified email) and every session is revoked. Nothing is
+        old address's holder; an ordinary user re-links by verified email, an administrator only through the operator, migration 0026) and every session is revoked. Nothing is
         written unless all of it is. `email` is already normalized. Returns ("ok" | "unchanged" | "not_found" |
         "email_taken" | "invite_pending", the user, the counts). Raises LastAdminError when removing the identities
         would leave no active admin who can sign in. The unique constraint decides races for one address. Lock order

@@ -141,6 +141,20 @@ The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
   - `AuthRepository.google_sign_in` re-checks under the user-row lock.
   - **Migration 0026** refuses every API role, `hyperchat_auth` included, a new identity for an administrator, or moving an identity onto one.
 - **Unchanged:** an identity linked to an administrator before (or by the operator) keeps working, and only that exact Google subject does. Non-admin email linking is unchanged.
+- **Self-service Google linking for administrators is permanently off.** That covers every lifecycle path:
+  - **Email change (D11):** the admin's identities are removed and **not** re-linked by the new email.
+  - **Admin invitation:** the new account starts without a link.
+  - **Passkey recovery** (`stepup_recover_admin`): ends sessions and passkeys but **keeps** an existing link. Google alone never restores aal2.
+  - **Deactivation and reactivation:** keep the link (no sign-in while deactivated).
+  - **Promotion:** stays impossible (0024).
+  - **Demotion:** turns the account into an ordinary user, with ordinary linking.
+- **Operator-approved relinking (migration 0026):**
+  1. A refused administrator Google sign-in records a **link request**: the administrator, that exact Google subject, and a reference code shown to the person (`?error=admin_google_not_linked&ref=XXXXX-XXXXX`).
+  2. The request grants nothing. There are at most 3 open per administrator, they last 24 hours, and each is decided once.
+  3. The API can only record requests (`hyperchat_auth`: INSERT and SELECT); no API role can approve one, link an identity to an admin, or delete a request.
+  4. The operator lists them (`google-requests`), confirms out of band that this administrator made the request and sees that code, then runs `link-google --email --code --verified-by --operator --confirm-database`, or `reject-google`.
+  5. `admin_link_google_identity()` (owner only) links exactly the requested subject. It refuses a code belonging to another administrator, a decided or expired request, an inactive or demoted account, and a Google account already linked elsewhere (never moved).
+  6. Every decision is audited in `stepup_events` (`identity_linked` / `identity_link_rejected`, with operator and verification).
 
 ### Deployment additions (each [APPROVAL])
 - **`HYPERCHAT_STEPUP_SOCKET`** in `api.env` (commented in the templates; set it only once the verifier is installed).

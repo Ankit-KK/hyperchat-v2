@@ -2,6 +2,9 @@
 that can create or change credentials, identities, invites or sessions runs as hyperchat_auth (migration 0024: the
 general role may not write an administrator's)."""
 
+import base64
+import hashlib
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -339,6 +342,25 @@ class AuthRepository:
         return User(**row) if row else None
 
     # ── rate limiting (fixed window in public.rate_limits) ─────────────────
+    # ── operator-approved Google links for administrators (migration 0026) ───────────────────────────────────
+    async def record_google_link_request(self, user_id: str, subject: str, email: str | None) -> str:
+        """An open request for this administrator and Google account (the same one again while it is open), recorded
+        on hyperchat_auth. It authorizes nothing: only the operator can turn it into a link. Returns its code."""
+        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT code FROM public.admin_identity_link_requests WHERE user_id = %s "
+                              "AND provider = 'google' AND provider_subject = %s AND decided_at IS NULL "
+                              "AND expires_at > now() LIMIT 1", (user_id, subject))
+            row = await cur.fetchone()
+            if row is not None:
+                return row["code"]
+            request_id = uuid.uuid4()
+            text = base64.b32encode(hashlib.sha256(request_id.bytes).digest()).decode()[:10]
+            code = f"{text[:5]}-{text[5:]}"
+            await cur.execute("INSERT INTO public.admin_identity_link_requests (id, user_id, provider, provider_subject, "
+                              "email, code, expires_at) VALUES (%s, %s, 'google', %s, %s, %s, now())",
+                              (request_id, user_id, subject, email, code))
+            return code
+
     # ── step-up (migration 0025; read-only for this role) ─────────────────────────────────────────────────────
     async def stepup_enforcement(self) -> str:
         row = await self._one("SELECT state FROM public.stepup_enforcement", ())

@@ -153,8 +153,9 @@ async def google_callback(request: Request, code: str | None = None, state: str 
     front = svc.settings.frontend_url.rstrip("/")
     payload = verify_payload(svc.secret, request.cookies.get(OAUTH_COOKIE))
 
-    def fail(reason: str) -> RedirectResponse:
-        resp = RedirectResponse(f"{front}/auth?error={quote(reason)}", status_code=302)
+    def fail(reason: str, ref: str | None = None) -> RedirectResponse:
+        extra = f"&ref={quote(ref)}" if ref else ""  # S2: the admin's Google link request code, for the operator
+        resp = RedirectResponse(f"{front}/auth?error={quote(reason)}{extra}", status_code=302)
         resp.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
         return resp
 
@@ -166,7 +167,7 @@ async def google_callback(request: Request, code: str | None = None, state: str 
         user, issued = await svc.google_login(code, payload["v"], payload["n"], client_ip(request),
                                               request.headers.get("user-agent"))
     except AuthError as exc:
-        return fail(exc.reason)
+        return fail(exc.reason, getattr(exc, "ref", None))
     resp = RedirectResponse(f"{front}{payload.get('r', '/dashboard')}", status_code=302)
     set_session_cookie(resp, svc, issued.token)
     resp.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")

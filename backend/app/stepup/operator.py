@@ -15,6 +15,13 @@ migration role (it acts as hyperchat_owner); the API, its database roles and the
   recover --email E --reason TEXT --operator NAME --confirm-database DB
                               lost every authenticator: revokes all of the administrator's passkeys and ends all of
                               their sessions; they then register new passkeys, approved with `approve`
+  google-requests [--email E] read-only: open Google link requests (an administrator's Google sign-in was refused;
+                              the person was shown the request's code)
+  link-google --email E --code C --verified-by TEXT --operator NAME --confirm-database DB
+                              link that request's exact Google account to that administrator. Only after confirming,
+                              independently of the API, that this administrator made the request and sees code C.
+                              Administrators never link Google themselves (migration 0026).
+  reject-google --email E --code C --reason TEXT --operator NAME --confirm-database DB
 Every change is a single audited database function (public.stepup_*); exit codes: 0 done, 2 refused.
 """
 
@@ -44,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list").add_argument("--email")
     sub.add_parser("readiness")
-    for name in ("approve", "revoke", "recover"):
+    sub.add_parser("google-requests").add_argument("--email")
+    for name in ("approve", "revoke", "recover", "link-google", "reject-google"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--email", required=True)
         cmd.add_argument("--operator", required=True)
@@ -53,8 +61,12 @@ def main(argv: list[str] | None = None) -> int:
         sub.choices[name].add_argument("--fingerprint", required=True)
     sub.choices["approve"].add_argument("--verified-by", required=True,
                                         help="how the administrator's identity and fingerprint were confirmed")
-    for name in ("revoke", "recover"):
+    for name in ("revoke", "recover", "reject-google"):
         sub.choices[name].add_argument("--reason", required=True)
+    for name in ("link-google", "reject-google"):
+        sub.choices[name].add_argument("--code", required=True)
+    sub.choices["link-google"].add_argument("--verified-by", required=True,
+                                            help="how the administrator confirmed this request was theirs")
     args = parser.parse_args(argv)
 
     with _connect() as conn:
@@ -70,6 +82,18 @@ def main(argv: list[str] | None = None) -> int:
             for r in rows:
                 print(f"{r['email']:<40} {r['fingerprint']}  {r['status']:<8} created {r['created_at']:%Y-%m-%d %H:%M}"
                       f"  approved_by={r['approved_by'] or '-'}  last_used={r['last_used_at'] or '-'}")
+            return 0
+        if args.command == "google-requests":
+            rows = conn.execute("""
+                SELECT u.email::text AS admin, r.code, r.email AS google_email, r.created_at, r.expires_at
+                FROM public.admin_identity_link_requests r JOIN public.users u ON u.id = r.user_id
+                WHERE r.decided_at IS NULL AND r.expires_at > now()
+                  AND (%(email)s::citext IS NULL OR u.email = %(email)s::citext)
+                ORDER BY r.created_at
+            """, {"email": args.email}).fetchall()
+            for r in rows:
+                print(f"{r['admin']:<40} {r['code']}  google={r['google_email'] or '-'}  "
+                      f"requested {r['created_at']:%Y-%m-%d %H:%M}  expires {r['expires_at']:%Y-%m-%d %H:%M}")
             return 0
         if args.command == "readiness":
             state = conn.execute("SELECT state, changed_at, changed_by FROM public.stepup_enforcement").fetchone()
@@ -88,6 +112,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "approve":
                 outcome = conn.execute("SELECT public.stepup_approve_credential(%s, %s, %s, %s) AS r",
                                        (args.email, args.fingerprint, args.operator, args.verified_by)).fetchone()["r"]
+            elif args.command == "link-google":
+                outcome = conn.execute("SELECT public.admin_link_google_identity(%s, %s, %s, %s) AS r",
+                                       (args.email, args.code, args.operator, args.verified_by)).fetchone()["r"]
+            elif args.command == "reject-google":
+                outcome = conn.execute("SELECT public.admin_reject_google_link(%s, %s, %s, %s) AS r",
+                                       (args.email, args.code, args.operator, args.reason)).fetchone()["r"]
             elif args.command == "revoke":
                 outcome = conn.execute("SELECT public.stepup_revoke_credential(%s, %s, %s, %s) AS r",
                                        (args.email, args.fingerprint, args.operator, args.reason)).fetchone()["r"]
@@ -101,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             return _refuse(exc.diag.message_primary or exc.sqlstate or "database error")
         if outcome != "ok":
             return _refuse(outcome)
-        print(f"{args.command}: done for {args.email} ({args.fingerprint.upper()}).")
+        print(f"{args.command}: done for {args.email} ({(getattr(args, 'fingerprint', None) or args.code).upper()}).")
         return 0
 
 
