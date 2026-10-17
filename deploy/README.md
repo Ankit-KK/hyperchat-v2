@@ -41,6 +41,9 @@ check_isolation.sh              read-only server audit of one environment (dev|p
                                 account, pg_hba coverage AND rule order, pg_ident; needs namei (util-linux)
 postgres/pg_ident.production.conf    ident map of the PRODUCTION cluster only (hyperchat-prod; no DEV user)
 backup/                         nightly pg_dump of production (02:30 UTC, 14-day retention)
+systemd/hyperchat[-prod]-stepup.{socket,service}  step-up (passkey) verifier, S1: its own OS user, no network,
+                                a socket only the API user reaches (docs/admin-stepup.md; not installed yet)
+stepup.env[.production].example template for /etc/hyperchat[-prod]-stepup/stepup.env (verifier settings only, no secrets)
 api.env.example                 template for /etc/hyperchat/api.env (DEV; no secrets)
 api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUCTION; no secrets)
 ```
@@ -234,6 +237,11 @@ yet; each step below needs approval.**
    The release tree must stay unwritable by the service users: S1 runs the step-up verifier from the same
    release under its own user.
 5. Re-run the audit; it must print only `OK`.
+
+## Step-up verifier (S1, not deployed)
+Install order, prerequisites (roles, pg_hba, pg_ident, migrations 0020-0025 on DEV and 0010-0025 on production,
+PostgreSQL 15 verification) and the operator tool are in [`docs/admin-stepup.md`](../docs/admin-stepup.md)
+("Deployment sequence"). Every step needs approval; `check_isolation.sh` audits the verifier once installed.
 
 ## Rules
 - Firewall (UFW): SSH (rate-limited), 80 and 443 only. PostgreSQL listens on localhost / Unix socket only.

@@ -181,7 +181,10 @@ def cleanup_synthetic_rows() -> None:
             owner.execute(f"DELETE FROM public.kyc_sessions WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
             owner.execute("DELETE FROM public.kyc_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
         with fixture_db() as owner:  # synthetic admins are not deletable by the runtime role (migration 0024)
-            owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions
+            owner.execute("DELETE FROM public.stepup_rate_limits WHERE key IN (SELECT 'user:' || id FROM public.users "
+                          "WHERE email::text LIKE %s)", ("%" + DOMAIN,))  # the verifier's own counters (0025)
+            # cascades sessions and every step-up row (passkeys, challenges, grants, assurance; 0025)
+            owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
         conn.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.partner_signups WHERE partner_slug LIKE %s", (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.rate_limits WHERE ip_address LIKE %s", ("partner:" + SLUG_PREFIX + "%",))

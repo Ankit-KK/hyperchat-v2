@@ -14,7 +14,8 @@ BEGIN
       ('hyperchat_worker',   true),
       ('hyperchat_readonly', true),
       ('hyperchat_lifecycle', true),
-      ('hyperchat_auth',     true)) AS t(name, can_login)
+      ('hyperchat_auth',     true),
+      ('hyperchat_stepup',   true)) AS t(name, can_login)
   LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.name) THEN
       EXECUTE format('CREATE ROLE %I %s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',
@@ -35,6 +36,8 @@ ALTER ROLE hyperchat_lifecycle CONNECTION LIMIT 5;
 ALTER ROLE hyperchat_lifecycle SET statement_timeout = '15s';
 ALTER ROLE hyperchat_auth CONNECTION LIMIT 10;
 ALTER ROLE hyperchat_auth SET statement_timeout = '15s';
+ALTER ROLE hyperchat_stepup CONNECTION LIMIT 5;
+ALTER ROLE hyperchat_stepup SET statement_timeout = '5s';
 ALTER ROLE hyperchat_readonly SET default_transaction_read_only = on;
 ALTER ROLE hyperchat_app      SET statement_timeout = '15s';
 ALTER ROLE hyperchat_worker   SET statement_timeout = '5min';
@@ -46,3 +49,4 @@ COMMENT ON ROLE hyperchat_worker   IS 'Background worker runtime: DML only.';
 COMMENT ON ROLE hyperchat_readonly IS 'Read-only reporting and verification.';
 COMMENT ON ROLE hyperchat_auth IS 'Authentication flows only: sign-in, sessions, password change / reset, invites, identities, admin user management (migration 0024).';
 COMMENT ON ROLE hyperchat_lifecycle IS 'Admin creator status transitions only (EXECUTE on kyc_change_creator_status; no table access).';
+COMMENT ON ROLE hyperchat_stepup IS 'Step-up (passkey) verifier only: records verified WebAuthn ceremonies, challenges, grants and session assurance (migration 0025). Mapped only to its own OS user.';

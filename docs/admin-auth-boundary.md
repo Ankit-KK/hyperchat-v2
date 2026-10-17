@@ -77,6 +77,8 @@ A sixth path was found during the assessment: **credentials prepared on an ordin
 
 ## Remaining limitations and the next stage
 **Stage 2, required before production launch: an admin step-up factor verified outside the API process.**
+Approved design: WebAuthn passkeys verified by a separate verifier service. S1 (the verifier, migration 0025, the
+operator tool) is described in [`admin-stepup.md`](admin-stepup.md); S2 (API) and S3 (database enforcement) follow.
 - **Option A:** TOTP or WebAuthn secrets stored in a table only a separate service, or `hyperchat_auth` functions with the secret never in the API's memory, can verify.
 - **Option B:** admin sign-in through an external identity provider (Google Workspace / OIDC with MFA) whose assertion the API verifies with a key the database role can't forge.
 

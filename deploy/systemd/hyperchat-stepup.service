@@ -1,0 +1,49 @@
+# DEV step-up (passkey) verifier (docs/admin-stepup.md). Its own OS user (hyperchat-stepup), its own database role
+# (hyperchat_stepup, peer-mapped to hyperchat-stepup only), its own release tree (/opt/hyperchat-stepup, root-owned) and environment file
+# (/etc/hyperchat-stepup/stepup.env: no secrets). No network: only the systemd socket and PostgreSQL's Unix socket.
+[Unit]
+Description=HyperChat v2 step-up verifier (DEV)
+Requires=hyperchat-stepup.socket
+After=hyperchat-stepup.socket network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+User=hyperchat-stepup
+Group=hyperchat-stepup
+WorkingDirectory=/opt/hyperchat-stepup/current/backend
+EnvironmentFile=/etc/hyperchat-stepup/stepup.env
+ExecStart=/opt/hyperchat-stepup/current/venv/bin/uvicorn app.stepup.server:create_app --factory \
+    --fd 3 --workers 1 --no-access-log --no-server-header
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

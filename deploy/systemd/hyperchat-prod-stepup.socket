@@ -1,0 +1,14 @@
+# PRODUCTION step-up (passkey) verifier socket. Created by systemd as hyperchat-prod-stepup:hyperchat-prod 0660: only the API's OS user (hyperchat-prod) and
+# root can connect; the verifier receives it as fd 3 (uvicorn --fd 3). Nothing listens on the network.
+[Unit]
+Description=HyperChat v2 step-up verifier socket (PRODUCTION)
+
+[Socket]
+ListenStream=/run/hyperchat-prod-stepup.sock
+SocketUser=hyperchat-prod-stepup
+SocketGroup=hyperchat-prod
+SocketMode=0660
+Accept=no
+
+[Install]
+WantedBy=sockets.target

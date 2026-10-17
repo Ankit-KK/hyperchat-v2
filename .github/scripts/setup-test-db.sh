@@ -22,7 +22,7 @@ PSQL=(psql -X -q -v ON_ERROR_STOP=1 -d postgres)
 "${PSQL[@]}" -c "DROP DATABASE IF EXISTS \"$DB\""
 "${PSQL[@]}" -c "CREATE DATABASE \"$DB\" OWNER hyperchat_owner"
 "${PSQL[@]}" -c "REVOKE ALL ON DATABASE \"$DB\" FROM PUBLIC"
-"${PSQL[@]}" -c "GRANT CONNECT ON DATABASE \"$DB\" TO hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, hyperchat_auth"
+"${PSQL[@]}" -c "GRANT CONNECT ON DATABASE \"$DB\" TO hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, hyperchat_auth, hyperchat_stepup"
 
 cd "$ROOT/database"
 HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@${PGHOST}:${PGPORT:-5432}/${DB}" \

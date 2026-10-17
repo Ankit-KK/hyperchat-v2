@@ -181,7 +181,8 @@ def test_production_ident_map_excludes_the_dev_user():
                     ("hyperchat", "root", "hyperchat_worker"), ("hyperchat", "root", "hyperchat_readonly"),
                     ("hyperchat", "hyperchat-prod", "hyperchat_app"), ("hyperchat", "hyperchat-prod", "hyperchat_worker"),
                     ("hyperchat", "hyperchat-prod", "hyperchat_lifecycle"),  # KYC PR4: creator status transitions
-                    ("hyperchat", "root", "hyperchat_auth"), ("hyperchat", "hyperchat-prod", "hyperchat_auth")}  # 0024
+                    ("hyperchat", "root", "hyperchat_auth"), ("hyperchat", "hyperchat-prod", "hyperchat_auth"),  # 0024
+                    ("hyperchat", "hyperchat-prod-stepup", "hyperchat_stepup")}  # 0025: the verifier's own user
     assert not any(system == "hyperchat" for _, system, _ in prod)
     dev = _map("postgres/pg_ident.conf")  # DEV cluster template: unchanged, no production user
     assert ("hyperchat", "hyperchat", "hyperchat_app") in dev and not any("hyperchat-prod" in e for e in dev)
