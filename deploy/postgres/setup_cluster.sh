@@ -45,7 +45,7 @@ for DB in "$@"; do
     "${PSQL[@]}" -d postgres -c "CREATE DATABASE \"$DB\" OWNER hyperchat_owner"
   fi
   "${PSQL[@]}" -d postgres -c "REVOKE ALL ON DATABASE \"$DB\" FROM PUBLIC"
-  "${PSQL[@]}" -d postgres -c "GRANT CONNECT ON DATABASE \"$DB\" TO hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, hyperchat_auth"
+  "${PSQL[@]}" -d postgres -c "GRANT CONNECT ON DATABASE \"$DB\" TO hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, hyperchat_auth, hyperchat_stepup"
 done
 
 pg_lsclusters | awk -v v="$VER" -v c="$CLUSTER" 'NR==1 || ($1==v && $2==c)'

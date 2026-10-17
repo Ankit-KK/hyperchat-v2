@@ -30,7 +30,9 @@ EXPECTED_TABLES = {
     "user_invites", "payment_webhook_events", "jobs", "donation_transcripts", "realtime_outbox", "moderator_notifications",
     "d1_hash_import_ledger", "creator_status_events", "application_events", "kyc_sessions", "kyc_webhook_events",
     "kyc_events", "kyc_provider_config", "kyc_enforcement", "kyc_grace_grants", "kyc_restrictions",
-    "kyc_enforcement_events",
+    "kyc_enforcement_events", "webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
+    "session_assurance",
+    "stepup_events", "stepup_rate_limits", "stepup_enforcement",
 }
 
 
@@ -591,6 +593,62 @@ def test_0024_admin_auth_boundary_round_trip(monkeypatch):
     finally:
         command.upgrade(cfg, "head")
     assert _auth_guards() == guards
+
+
+STEPUP_TABLES = {"webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
+                 "session_assurance", "stepup_events", "stepup_rate_limits", "stepup_enforcement"}
+
+
+def _stepup_privileges() -> dict:
+    """{(role, table): privileges} on the step-up tables, and the enforcement state (None when absent)."""
+    with _owner() as conn:
+        rows = conn.execute("""
+            SELECT r.rolname, c.relname, string_agg(p.priv, ',' ORDER BY p.priv)
+            FROM pg_class c CROSS JOIN pg_roles r
+            CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p(priv)
+            WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' AND c.relname = ANY(%s)
+              AND r.rolname IN ('hyperchat_app', 'hyperchat_worker', 'hyperchat_auth', 'hyperchat_lifecycle',
+                                'hyperchat_readonly', 'hyperchat_stepup')
+              AND (has_table_privilege(r.oid, c.oid, p.priv) OR (p.priv IN ('INSERT', 'UPDATE', 'SELECT')
+                   AND has_any_column_privilege(r.oid, c.oid, p.priv)))
+            GROUP BY 1, 2
+        """, (list(STEPUP_TABLES),)).fetchall()
+        state = conn.execute("SELECT to_regclass('public.stepup_enforcement') IS NOT NULL").fetchone()[0] and             conn.execute("SELECT state FROM public.stepup_enforcement").fetchone()[0]
+    return {(r[0], r[1]): r[2] for r in rows}, state
+
+
+def test_0025_stepup_core_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    privileges, state = _stepup_privileges()
+    assert state == "draft"
+    assert {role for role, _ in privileges} <= {"hyperchat_stepup", "hyperchat_app", "hyperchat_worker", "hyperchat_auth",
+                                               "hyperchat_lifecycle"}
+    # The API's roles read the enforcement state and nothing else (0007's default DML grants were revoked).
+    assert {k: v for k, v in privileges.items() if k[0] != "hyperchat_stepup"} == {
+        (role, "stepup_enforcement"): "SELECT"
+        for role in ("hyperchat_app", "hyperchat_worker", "hyperchat_auth", "hyperchat_lifecycle")}
+    assert {t: v for (r, t), v in privileges.items() if r == "hyperchat_stepup"} == {
+        "webauthn_credentials": "INSERT,SELECT,UPDATE", "stepup_challenges": "INSERT,SELECT,UPDATE",
+        "stepup_grants": "INSERT,SELECT", "session_assurance": "INSERT,SELECT,UPDATE", "stepup_events": "INSERT,SELECT",
+        "stepup_rate_limits": "DELETE,INSERT,SELECT,UPDATE", "stepup_enforcement": "SELECT"}
+    with _owner() as conn:  # only the sign count and last use of a passkey are updatable by the verifier
+        assert conn.execute("SELECT has_column_privilege('hyperchat_stepup', 'public.webauthn_credentials', 'status', "
+                            "'UPDATE'), has_column_privilege('hyperchat_stepup', 'public.webauthn_credentials', "
+                            "'sign_count', 'UPDATE'), has_column_privilege('hyperchat_stepup', 'public.users', "
+                            "'password_hash', 'SELECT')").fetchone() == (False, True, False)
+    command.downgrade(cfg, "0024")
+    try:
+        assert not STEPUP_TABLES & _tables()
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*) FROM pg_proc WHERE proname LIKE 'stepup%%'").fetchone()[0] == 0
+            assert conn.execute("SELECT has_schema_privilege('hyperchat_stepup', 'public', 'USAGE'), "
+                                "has_any_column_privilege('hyperchat_stepup', 'public.users', 'SELECT')"
+                                ).fetchone() == (False, False)
+    finally:
+        command.upgrade(cfg, "head")
+    assert STEPUP_TABLES <= _tables() and _stepup_privileges()[1] == "draft"
 
 
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):

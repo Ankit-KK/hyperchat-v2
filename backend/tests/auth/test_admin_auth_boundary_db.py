@@ -331,7 +331,8 @@ def test_role_grants_are_exactly_the_boundary(app):
     assert dict(rows) == {"password_reset_tokens": "INSERT,SELECT,UPDATE", "sessions": "INSERT,SELECT,UPDATE",
                           "streamers": "SELECT", "user_identities": "DELETE,INSERT,SELECT,UPDATE",
                           "user_invites": "INSERT,SELECT,UPDATE", "user_signups": "SELECT",
-                          "users": "INSERT,SELECT,UPDATE"}
+                          "users": "INSERT,SELECT,UPDATE",
+                          "stepup_enforcement": "SELECT"}  # 0025: reads the MFA enforcement state, nothing else
     assert exposed == 0 and guards == 0
 
 

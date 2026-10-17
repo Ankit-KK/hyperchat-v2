@@ -1,0 +1,81 @@
+{
+  "domain": "hyperchat-stepup-v1\n",
+  "vectors": [
+    {
+      "name": "session ceremony",
+      "action": "session.aal2",
+      "target": "session",
+      "params": {},
+      "rp_id": "hyperchat.space",
+      "admin": "6f1c2d3e-4a5b-4c6d-8e7f-001122334455",
+      "session_id": "0a0b0c0d-1e1f-4a2b-8c3d-445566778899",
+      "now": 1800000000,
+      "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "canonical": "{\"action\":\"session.aal2\",\"admin\":\"6f1c2d3e-4a5b-4c6d-8e7f-001122334455\",\"expires_at\":1800000180,\"issued_at\":1800000000,\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"params\":{},\"params_hash\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"purpose\":\"session\",\"rp_id\":\"hyperchat.space\",\"session\":\"bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27\",\"target\":\"session\",\"v\":1}",
+      "params_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "challenge_b64url": "P9t-3QMlU9TYV-L3M6kqcg8IdPA2BfShAvSHP8KBZj0",
+      "session_ref": "bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27"
+    },
+    {
+      "name": "register",
+      "action": "mfa.register",
+      "target": "self",
+      "params": {},
+      "rp_id": "hyperchat.space",
+      "admin": "6f1c2d3e-4a5b-4c6d-8e7f-001122334455",
+      "session_id": "0a0b0c0d-1e1f-4a2b-8c3d-445566778899",
+      "now": 1800000000,
+      "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "canonical": "{\"action\":\"mfa.register\",\"admin\":\"6f1c2d3e-4a5b-4c6d-8e7f-001122334455\",\"expires_at\":1800000180,\"issued_at\":1800000000,\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"params\":{},\"params_hash\":\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\",\"purpose\":\"register\",\"rp_id\":\"hyperchat.space\",\"session\":\"bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27\",\"target\":\"self\",\"v\":1}",
+      "params_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "challenge_b64url": "MSAgzv7EYOMQ8u7Kpc5mO1eSVFbcfU5t_0DTzFutTQg",
+      "session_ref": "bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27"
+    },
+    {
+      "name": "creator activation",
+      "action": "creator.activate",
+      "target": "creator:3f2b9a10-0c1d-4e5f-9a8b-7c6d5e4f3a2b",
+      "params": {
+        "expected_status": "pending",
+        "reason": "KYC approved"
+      },
+      "rp_id": "hyperchat.space",
+      "admin": "6f1c2d3e-4a5b-4c6d-8e7f-001122334455",
+      "session_id": "0a0b0c0d-1e1f-4a2b-8c3d-445566778899",
+      "now": 1800000000,
+      "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "canonical": "{\"action\":\"creator.activate\",\"admin\":\"6f1c2d3e-4a5b-4c6d-8e7f-001122334455\",\"expires_at\":1800000180,\"issued_at\":1800000000,\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"params\":{\"expected_status\":\"pending\",\"reason\":\"KYC approved\"},\"params_hash\":\"2e3211da0806d29927dba0e0be376c865a2bdeb282679126fd964cfd8cce85d3\",\"purpose\":\"action\",\"rp_id\":\"hyperchat.space\",\"session\":\"bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27\",\"target\":\"creator:3f2b9a10-0c1d-4e5f-9a8b-7c6d5e4f3a2b\",\"v\":1}",
+      "params_hash": "2e3211da0806d29927dba0e0be376c865a2bdeb282679126fd964cfd8cce85d3",
+      "challenge_b64url": "DdZgafOGVbl_7MoS0O3cYCu3V9aM1fQJNjxmnJYX_qY",
+      "session_ref": "bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27"
+    },
+    {
+      "name": "unicode and nesting",
+      "action": "admin.user.change",
+      "target": "user:9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a",
+      "params": {
+        "changes": {
+          "role": "streamer",
+          "is_active": false
+        },
+        "note": "Grüße — 日本 ✓",
+        "count": 9007199254740991,
+        "list": [
+          1,
+          null,
+          true,
+          "a\"b\\c"
+        ]
+      },
+      "rp_id": "hyperchat.space",
+      "admin": "6f1c2d3e-4a5b-4c6d-8e7f-001122334455",
+      "session_id": "0a0b0c0d-1e1f-4a2b-8c3d-445566778899",
+      "now": 1800000000,
+      "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "canonical": "{\"action\":\"admin.user.change\",\"admin\":\"6f1c2d3e-4a5b-4c6d-8e7f-001122334455\",\"expires_at\":1800000180,\"issued_at\":1800000000,\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"params\":{\"changes\":{\"is_active\":false,\"role\":\"streamer\"},\"count\":9007199254740991,\"list\":[1,null,true,\"a\\\"b\\\\c\"],\"note\":\"Grüße — 日本 ✓\"},\"params_hash\":\"1f92d8cb3bc9094310735b7254cf1696fdd787e1bfc9f513b8ce781aea41cbcf\",\"purpose\":\"action\",\"rp_id\":\"hyperchat.space\",\"session\":\"bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27\",\"target\":\"user:9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a\",\"v\":1}",
+      "params_hash": "1f92d8cb3bc9094310735b7254cf1696fdd787e1bfc9f513b8ce781aea41cbcf",
+      "challenge_b64url": "I9B6Fx1Y6Hn7i79-gsSbovb0nUxNnE1n0v6nwS4SQ2o",
+      "session_ref": "bf2b999a250f4d2da5424c2f087fe5ca0386bd33227064f762d63e1b86ffbf27"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-"""Process and database-role isolation of the deployment files (S0, before the step-up verifier).
+"""Process and database-role isolation of the deployment files (S0; the step-up verifier from S1).
 
 Static: every login role of roles.sql is reachable through the HyperChat pg_hba line (a missing role falls
 through to the generic peer rule, which has no map, and cannot connect); each API OS user maps to exactly its
@@ -20,7 +20,12 @@ from tests.test_deploy_production import DEPLOY, REPO, read, unit
 SVC_ROLES = {"hyperchat_app", "hyperchat_worker", "hyperchat_lifecycle", "hyperchat_auth"}
 UNITS = {"systemd/hyperchat-api.service": "hyperchat", "systemd/hyperchat-worker.service": "hyperchat",
          "systemd/hyperchat-cleanup.service": "hyperchat", "systemd/hyperchat-prod-api.service": "hyperchat-prod",
-         "systemd/hyperchat-prod-cleanup.service": "hyperchat-prod"}
+         "systemd/hyperchat-prod-cleanup.service": "hyperchat-prod",
+         "systemd/hyperchat-stepup.service": "hyperchat-stepup",
+         "systemd/hyperchat-prod-stepup.service": "hyperchat-prod-stepup"}
+# environment -> (API user, verifier user, ident map)
+ENVS = {"dev": ("hyperchat", "hyperchat-stepup", "postgres/pg_ident.conf"),
+        "prod": ("hyperchat-prod", "hyperchat-prod-stepup", "postgres/pg_ident.production.conf")}
 needs_bash = pytest.mark.skipif(sys.platform == "win32" or not shutil.which("bash"), reason="needs bash (Linux)")
 
 
@@ -49,7 +54,7 @@ def ident(rel: str) -> dict[str, set[str]]:
 def test_every_login_role_has_a_pg_hba_rule_and_connect():
     roles = login_roles()
     assert roles == {"hyperchat_migrator", "hyperchat_app", "hyperchat_worker", "hyperchat_readonly",
-                     "hyperchat_lifecycle", "hyperchat_auth"}
+                     "hyperchat_lifecycle", "hyperchat_auth", "hyperchat_stepup"}
     assert hba_roles(read("postgres/pg_hba.conf")) == roles
     for script in (DEPLOY / "postgres/setup_cluster.sh", REPO / ".github/scripts/setup-test-db.sh"):
         grant = re.search(r"GRANT CONNECT ON DATABASE .*? TO ([\w, ]+)", script.read_text()).group(1)
@@ -58,16 +63,54 @@ def test_every_login_role_has_a_pg_hba_rule_and_connect():
     assert set(audit.split()) == roles
 
 
-@pytest.mark.parametrize("rel,user,other", [("postgres/pg_ident.conf", "hyperchat", "hyperchat-prod"),
-                                            ("postgres/pg_ident.production.conf", "hyperchat-prod", "hyperchat")])
-def test_each_api_user_maps_to_exactly_its_roles(rel, user, other):
+@pytest.mark.parametrize("env", ENVS)
+def test_each_os_user_maps_to_exactly_its_roles(env):
+    user, verifier, rel = ENVS[env]
+    other = ENVS["prod" if env == "dev" else "dev"]
     maps = ident(rel)
-    assert maps[user] == SVC_ROLES and other not in maps
-    assert set(maps) == {"root", user}  # no third OS user can reach the database
+    assert maps[user] == SVC_ROLES and other[0] not in maps and other[1] not in maps
+    assert maps[verifier] == {"hyperchat_stepup"}  # the verifier's user reaches its own role and nothing else
+    assert [u for u, roles in maps.items() if "hyperchat_stepup" in roles] == [verifier]  # nobody else, not root
+    assert set(maps) == {"root", user, verifier}  # no other OS user can reach the database
     assert "hyperchat_migrator" not in maps[user] and "hyperchat_readonly" not in maps[user]
     assert set().union(*maps.values()) <= hba_roles(read("postgres/pg_hba.conf"))
     audit = re.search(r'SVC_ROLES="([^"]+)"', read("check_isolation.sh")).group(1)
     assert set(audit.split()) == SVC_ROLES
+
+
+@pytest.mark.parametrize("env", ENVS)
+def test_the_verifier_has_no_network_and_a_socket_only_the_api_user_reaches(env):
+    user, verifier, _ = ENVS[env]
+    service, sock = unit(f"systemd/{verifier}.service"), read(f"systemd/{verifier}.socket")
+    assert (service["User"], service["Group"]) == (verifier, verifier)
+    assert (service["PrivateNetwork"], service["RestrictAddressFamilies"], service["IPAddressDeny"])         == ("yes", "AF_UNIX", "any")
+    assert " ".join(service["ExecStart"].split()) == (f"/opt/{verifier}/current/venv/bin/uvicorn app.stepup.server:create_app "
+                                    "--factory --fd 3 --workers 1 --no-access-log --no-server-header")
+    assert service["EnvironmentFile"] == f"/etc/{verifier}/stepup.env" and "api.env" not in read(
+        f"systemd/{verifier}.service")
+    assert re.search(rf"^Requires={verifier}\.socket$", read(f"systemd/{verifier}.service"), re.M)
+    socket = dict(line.split("=", 1) for line in sock.splitlines() if "=" in line and not line.startswith("#"))
+    assert {k: socket[k] for k in ("ListenStream", "SocketUser", "SocketGroup", "SocketMode", "Accept")} == {
+        "ListenStream": f"/run/{verifier}.sock", "SocketUser": verifier, "SocketGroup": user, "SocketMode": "0660",
+        "Accept": "no"}
+
+
+@pytest.mark.parametrize("rel", ["stepup.env.example", "stepup.env.production.example"])
+def test_the_verifier_environment_templates_hold_only_verifier_settings(rel):
+    from app.stepup.config import ALLOWED_KEYS, StepupSettings
+    env = dict(line.split("=", 1) for line in read(rel).splitlines() if line and not line.startswith("#"))
+    assert set(env) == ALLOWED_KEYS
+    audit = re.search(r'STEPUP_KEYS="([^"]+)"', read("check_isolation.sh")).group(1)
+    assert set(audit.split()) == ALLOWED_KEYS
+    settings = StepupSettings(**{k[len("HYPERCHAT_"):].lower(): v for k, v in env.items()})
+    production = rel == "stepup.env.production.example"
+    assert (settings.webauthn_rp_id, settings.origins) == (
+        ("hyperchat.space", ["https://hyperchat.space"]) if production
+        else ("quicktestspace.site", ["https://app.quicktestspace.site"]))
+    api = dict(line.split("=", 1) for line in read("api.env.production.example" if production else "api.env.example")
+               .splitlines() if line and not line.startswith("#"))
+    assert api["HYPERCHAT_FRONTEND_URL"] in settings.origins  # passkeys are used on the frontend the API trusts
+    assert (env["HYPERCHAT_DB_NAME"], env["HYPERCHAT_DB_PORT"]) == (api["HYPERCHAT_DB_NAME"], api["HYPERCHAT_DB_PORT"])
 
 
 @pytest.mark.parametrize("rel,user", UNITS.items())
@@ -78,7 +121,7 @@ def test_every_unit_runs_hardened_as_its_own_user(rel, user):
                        "PrivateTmp": "yes", "CapabilityBoundingSet": "", "AmbientCapabilities": "",
                        "UMask": "0077"}.items():
         assert u.get(key) == value, (rel, key)
-    root = "/opt/hyperchat-prod/" if user == "hyperchat-prod" else "/opt/hyperchat/"
+    root = f"/opt/{user}/"
     assert u["ExecStart"].startswith(root) and u["WorkingDirectory"].startswith(root)
 
 
@@ -199,12 +242,108 @@ def fake_dev(root: Path) -> None:
 def audit(root: Path) -> subprocess.CompletedProcess:
     import grp
     import pwd
+    group = grp.getgrgid(os.getgid()).gr_name
     env = {**os.environ, "HYPERCHAT_CHECK_PREFIX": str(root),
            "HYPERCHAT_CHECK_OWNER": pwd.getpwuid(os.getuid()).pw_name,
-           "HYPERCHAT_CHECK_GROUP": grp.getgrgid(os.getgid()).gr_name,
+           "HYPERCHAT_CHECK_GROUP": group, "HYPERCHAT_CHECK_VGROUP": group,
            "HYPERCHAT_CHECK_MOUNTINFO": str(root / "mountinfo")}
     return subprocess.run(["bash", str(DEPLOY / "check_isolation.sh"), "dev"], capture_output=True, text=True, env=env,
                           timeout=60)  # a cycle must end the audit, never hang it
+
+
+def fake_verifier(root: Path) -> None:
+    """The step-up verifier installed next to the DEV API, correctly (S1)."""
+    release = root / "opt/hyperchat-stepup/releases/abc123"
+    (release / "backend/app/stepup").mkdir(parents=True)
+    (release / "backend/app/stepup/server.py").write_text("")
+    link(root / "opt/hyperchat-stepup/current", release)
+    (root / "etc/hyperchat-stepup").mkdir(parents=True)
+    shutil.copy(DEPLOY / "stepup.env.example", root / "etc/hyperchat-stepup/stepup.env")
+    for name in ("hyperchat-stepup.service", "hyperchat-stepup.socket"):
+        shutil.copy(DEPLOY / f"systemd/{name}", root / f"etc/systemd/system/{name}")
+    pg = root / "etc/postgresql/15/restoretest"
+    for path in [root / "opt/hyperchat-stepup", *(root / "opt/hyperchat-stepup").rglob("*"),
+                 root / "etc/hyperchat-stepup", root / "etc/hyperchat-stepup/stepup.env",
+                 root / "etc/systemd/system/hyperchat-stepup.service", root / "etc/systemd/system/hyperchat-stepup.socket",
+                 pg / "pg_ident.conf"]:
+        if not path.is_symlink():
+            path.chmod(0o750 if path.is_dir() else 0o640)
+
+
+@needs_bash
+def test_the_audit_passes_a_correctly_installed_verifier(tmp_path):
+    fake_dev(tmp_path)
+    fake_verifier(tmp_path)
+    out = audit(tmp_path)
+    assert out.returncode == 0, out.stdout + out.stderr
+    for line in ("OK    release tree /opt/hyperchat-stepup", "OK    stepup.env holds only verifier settings",
+                 "OK    verifier runs as hyperchat-stepup without network", "OK    verifier socket is hyperchat-stepup:hyperchat 0660",
+                 "OK    only hyperchat-stepup maps to hyperchat_stepup"):
+        assert any(o.startswith(line) for o in out.stdout.splitlines()), (line, out.stdout)
+
+
+def _secret_in_verifier_env(root):
+    with open(root / "etc/hyperchat-stepup/stepup.env", "a") as f:
+        f.write("HYPERCHAT_DIDIT_API_KEY=not-a-real-key\n")
+
+
+def _verifier_env_world_readable(root):
+    (root / "etc/hyperchat-stepup/stepup.env").chmod(0o644)
+
+
+def _verifier_code_group_writable(root):
+    (root / "opt/hyperchat-stepup/releases/abc123/backend/app/stepup/server.py").chmod(0o660)
+
+
+def _verifier_socket_open_to_its_own_group(root):
+    path = root / "etc/systemd/system/hyperchat-stepup.socket"
+    path.write_text(path.read_text().replace("SocketGroup=hyperchat\n", "SocketGroup=hyperchat-stepup\n"))
+
+
+def _verifier_socket_world_writable(root):
+    path = root / "etc/systemd/system/hyperchat-stepup.socket"
+    path.write_text(path.read_text().replace("SocketMode=0660", "SocketMode=0666"))
+
+
+def _verifier_with_network(root):
+    path = root / "etc/systemd/system/hyperchat-stepup.service"
+    path.write_text(path.read_text().replace("PrivateNetwork=yes\n", ""))
+
+
+def _verifier_as_the_api_user(root):
+    path = root / "etc/systemd/system/hyperchat-stepup.service"
+    path.write_text(path.read_text().replace("User=hyperchat-stepup", "User=hyperchat"))
+
+
+def _api_user_mapped_to_the_verifier_role(root):
+    path = root / "etc/postgresql/15/restoretest/pg_ident.conf"
+    path.write_text(path.read_text() + "hyperchat   hyperchat         hyperchat_stepup\n")
+
+
+def _verifier_user_mapped_to_an_api_role(root):
+    path = root / "etc/postgresql/15/restoretest/pg_ident.conf"
+    path.write_text(path.read_text() + "hyperchat   hyperchat-stepup  hyperchat_app\n")
+
+
+@needs_bash
+@pytest.mark.parametrize("break_it,expected", [
+    (_secret_in_verifier_env, "stepup.env holds only verifier settings"),
+    (_verifier_env_world_readable, "stepup.env is"),
+    (_verifier_code_group_writable, "release tree /opt/hyperchat-stepup"),
+    (_verifier_socket_open_to_its_own_group, "verifier socket"), (_verifier_socket_world_writable, "verifier socket"),
+    (_verifier_with_network, "verifier unit"), (_verifier_as_the_api_user, "verifier unit"),
+    (_api_user_mapped_to_the_verifier_role, "only hyperchat-stepup maps to hyperchat_stepup"),
+    (_verifier_user_mapped_to_an_api_role, "only hyperchat-stepup maps to hyperchat_stepup"),
+])
+def test_the_audit_fails_each_broken_verifier_boundary(tmp_path, break_it, expected):
+    fake_dev(tmp_path)
+    fake_verifier(tmp_path)
+    break_it(tmp_path)
+    out = audit(tmp_path)
+    assert out.returncode == 1
+    fails = [line for line in out.stdout.splitlines() if line.startswith("FAIL")]
+    assert any(expected in line for line in fails), out.stdout
+    assert "not-a-real-key" not in out.stdout + out.stderr  # names only, never values
 
 
 @needs_bash
