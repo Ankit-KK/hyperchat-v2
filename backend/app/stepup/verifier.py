@@ -198,6 +198,19 @@ class Verifier:
             await self._event(cur, event, caller.user_id, challenge_id=challenge_id, detail={"reason": code})
         security_event(f"stepup_{event}", user_id=caller.user_id, reason=code)
 
+    # ── listing (S2: the API's roles cannot read passkeys; fingerprints and states only, never key material) ──
+    async def list_credentials(self, user_id: str, session_id: str) -> dict:
+        caller = Caller.of(user_id, session_id)
+        async with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await self._require_admin_session(cur, caller)
+            await cur.execute("""
+                SELECT fingerprint, status, device_type, backed_up, created_at, approved_at, last_used_at, revoked_at
+                FROM public.webauthn_credentials WHERE user_id = %s ORDER BY created_at
+            """, (caller.user_id,))
+            rows = await cur.fetchall()
+        return {"credentials": [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in r.items()}
+                                for r in rows]}
+
     # ── registration ──────────────────────────────────────────────────────────────────────────────────────
     async def registration_options(self, user_id: str, session_id: str) -> dict:
         caller = Caller.of(user_id, session_id)

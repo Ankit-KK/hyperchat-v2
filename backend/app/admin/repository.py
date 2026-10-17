@@ -2,11 +2,13 @@
 
 from datetime import datetime
 
+import psycopg
 from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.auth.repository import burn_reset_tokens
+from app.stepup.grants import Grant, consume
 
 _ADMIN_USER_COLS = """id::text, email::text, username, role, streamer_id::text, is_active,
     password_hash IS NOT NULL AS has_password, (locked_until IS NOT NULL AND locked_until > now()) AS locked,
@@ -102,33 +104,53 @@ class AdminRepository:
         self._auth = auth_factory or connection_factory  # hyperchat_auth (role / activity / email / bootstrap)
 
     # ── creators ───────────────────────────────────────────────────────────
-    async def create_creator(self, fields: dict, pusher_groups: tuple[int, ...]) -> dict:
-        """Insert a new, unclaimed creator with the legacy launch defaults, in one transaction (insert_creator)."""
+    async def create_creator(self, fields: dict, pusher_groups: tuple[int, ...], grant: Grant | None = None) -> dict:
+        """Insert a new, unclaimed creator with the legacy launch defaults, in one transaction (insert_creator). A
+        step-up grant (S2) is consumed first, in the same transaction."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await consume(cur, grant)
             return await insert_creator(cur, fields, pusher_groups)
 
-    async def assign_owner(self, streamer_id: str, user_id: str) -> tuple[str, dict | None]:
+    async def assign_owner(self, streamer_id: str, user_id: str, grant: Grant | None = None) -> tuple[str, dict | None]:
+        async with self._conn() as conn:
+            async with conn.transaction() as tx, conn.cursor(row_factory=dict_row) as cur:
+                await consume(cur, grant)
+                result = await self._assign_owner(cur, streamer_id, user_id)
+                if grant is not None and result[0] != "ok":
+                    raise psycopg.Rollback(tx)  # a refused operation never spends its grant
+        return result
+
+    async def _assign_owner(self, cur, streamer_id: str, user_id: str) -> tuple[str, dict | None]:
         """Make an existing, active user the owner of an UNCLAIMED creator (streamers.user_id, which the access
         rules require: an unclaimed creator is admin-only). Never replaces an owner. One transaction with the creator
         row locked, so two concurrent assignments cannot both win. Returns ("ok" | "not_found" | "claimed" |
         "bad_user", the creator row)."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT user_id FROM public.streamers WHERE id = %s FOR UPDATE", (streamer_id,))
-            current = await cur.fetchone()
-            if current is None:
-                return "not_found", None
-            if current["user_id"] is not None:
-                await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
-                return "claimed", await cur.fetchone()
-            await cur.execute("SELECT 1 FROM public.users WHERE id = %s AND is_active", (user_id,))
-            if await cur.fetchone() is None:
-                return "bad_user", None
-            await cur.execute(f"UPDATE public.streamers SET user_id = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
-                              (user_id, streamer_id))
-            return "ok", await cur.fetchone()
+        await cur.execute("SELECT user_id FROM public.streamers WHERE id = %s FOR UPDATE", (streamer_id,))
+        current = await cur.fetchone()
+        if current is None:
+            return "not_found", None
+        if current["user_id"] is not None:
+            await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
+            return "claimed", await cur.fetchone()
+        await cur.execute("SELECT 1 FROM public.users WHERE id = %s AND is_active", (user_id,))
+        if await cur.fetchone() is None:
+            return "bad_user", None
+        await cur.execute(f"UPDATE public.streamers SET user_id = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
+                          (user_id, streamer_id))
+        return "ok", await cur.fetchone()
 
     async def transfer_owner(self, streamer_id: str, user_id: str, expected_owner_id: str,
-                             actor_id: str | None = None) -> tuple[str, dict | None, dict]:
+                             actor_id: str | None = None, grant: Grant | None = None) -> tuple[str, dict | None, dict]:
+        async with self._conn() as conn:
+            async with conn.transaction() as tx, conn.cursor(row_factory=dict_row) as cur:
+                await consume(cur, grant)
+                result = await self._transfer_owner(cur, streamer_id, user_id, expected_owner_id, actor_id)
+                if grant is not None and result[0] != "ok":
+                    raise psycopg.Rollback(tx)  # a refused operation never spends its grant
+        return result
+
+    async def _transfer_owner(self, cur, streamer_id: str, user_id: str, expected_owner_id: str,
+                              actor_id: str | None) -> tuple[str, dict | None, dict]:
         """D13: move a CLAIMED creator from its current owner (who must be `expected_owner_id`) to an active user, in
         one transaction. Locks: the creator row FOR NO KEY UPDATE (not FOR UPDATE: a concurrent users.streamer_id
         change takes a key-share lock on it for its foreign key, which this does not block), then both user rows FOR
@@ -138,39 +160,38 @@ class AdminRepository:
         payment account, settings, media, OBS tokens, soundboard rows) is untouched; the old owner's KYC grace is
         revoked (migration 0023: grace is bound to its owner). Returns ("ok" | "unchanged" |
         "not_found" | "unclaimed" | "owner_changed" | "bad_user", the creator, the counts)."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT user_id::text FROM public.streamers WHERE id = %s FOR NO KEY UPDATE",
-                              (streamer_id,))
-            current = await cur.fetchone()
-            if current is None:
-                return "not_found", None, {}
-            owner = current["user_id"]
-            if owner is None:
-                return "unclaimed", None, {}
-            if owner != expected_owner_id:
-                return "owner_changed", None, {}
-            if owner == user_id:
-                await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
-                return "unchanged", await cur.fetchone(), {}
-            await cur.execute("SELECT id::text, is_active FROM public.users WHERE id = ANY(%s::uuid[]) ORDER BY id "
-                              "FOR UPDATE", ([owner, user_id],))
-            target = {r["id"]: r for r in await cur.fetchall()}.get(user_id)
-            if target is None or not target["is_active"]:
-                return "bad_user", None, {}
-            await cur.execute(f"UPDATE public.streamers SET user_id = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
-                              (user_id, streamer_id))
-            row = await cur.fetchone()
-            await cur.execute("UPDATE public.users SET streamer_id = NULL WHERE id = %s AND streamer_id = %s",
-                              (owner, streamer_id))
-            unlinked = cur.rowcount == 1
-            await cur.execute("SELECT public.kyc_revoke_grace(%s, 'owner_changed', %s)", (streamer_id, actor_id))
-            revoked = await self._revoke_sessions(cur, owner)
-            await cur.execute("SELECT count(*) AS n FROM public.obs_tokens WHERE streamer_id = %s AND is_active IS TRUE "
-                              "AND (expires_at IS NULL OR expires_at > now()) "
-                              "AND (revoked_at IS NULL OR revoked_at > now())", (streamer_id,))
-            obs = (await cur.fetchone())["n"]
-            return "ok", row, {"previous_owner_id": owner, "sessions_revoked": revoked, "old_owner_unlinked": unlinked,
-                               "active_obs_tokens": obs}
+        await cur.execute("SELECT user_id::text FROM public.streamers WHERE id = %s FOR NO KEY UPDATE",
+                          (streamer_id,))
+        current = await cur.fetchone()
+        if current is None:
+            return "not_found", None, {}
+        owner = current["user_id"]
+        if owner is None:
+            return "unclaimed", None, {}
+        if owner != expected_owner_id:
+            return "owner_changed", None, {}
+        if owner == user_id:
+            await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
+            return "unchanged", await cur.fetchone(), {}
+        await cur.execute("SELECT id::text, is_active FROM public.users WHERE id = ANY(%s::uuid[]) ORDER BY id "
+                          "FOR UPDATE", ([owner, user_id],))
+        target = {r["id"]: r for r in await cur.fetchall()}.get(user_id)
+        if target is None or not target["is_active"]:
+            return "bad_user", None, {}
+        await cur.execute(f"UPDATE public.streamers SET user_id = %s WHERE id = %s RETURNING {_CREATOR_COLS}",
+                          (user_id, streamer_id))
+        row = await cur.fetchone()
+        await cur.execute("UPDATE public.users SET streamer_id = NULL WHERE id = %s AND streamer_id = %s",
+                          (owner, streamer_id))
+        unlinked = cur.rowcount == 1
+        await cur.execute("SELECT public.kyc_revoke_grace(%s, 'owner_changed', %s)", (streamer_id, actor_id))
+        revoked = await self._revoke_sessions(cur, owner)
+        await cur.execute("SELECT count(*) AS n FROM public.obs_tokens WHERE streamer_id = %s AND is_active IS TRUE "
+                          "AND (expires_at IS NULL OR expires_at > now()) "
+                          "AND (revoked_at IS NULL OR revoked_at > now())", (streamer_id,))
+        obs = (await cur.fetchone())["n"]
+        return "ok", row, {"previous_owner_id": owner, "sessions_revoked": revoked, "old_owner_unlinked": unlinked,
+                           "active_obs_tokens": obs}
 
     async def donation_block(self, streamer_id: str) -> str | None:
         """public.creator_donation_block (migration 0020): None when the creator may accept new donations."""
@@ -179,7 +200,7 @@ class AdminRepository:
             return (await cur.fetchone())[0]
 
     async def change_status(self, streamer_id: str, action: str, expected_status: str, actor_id: str,
-                            reason: str | None, accounts) -> tuple[str, dict | None]:
+                            reason: str | None, accounts, grant: Grant | None = None) -> tuple[str, dict | None]:
         """activate / suspend / reactivate through public.kyc_change_creator_status (migration 0023), on the
         dedicated hyperchat_lifecycle connection (the application role may not execute it): the compare-and-set, the
         checks (owner, the Razorpay account configured here, the owner's own KYC and no restriction to activate, the
@@ -196,10 +217,14 @@ class AdminRepository:
             if current is not None and current[0] not in accounts:
                 return "account_not_configured", None
             account = current[0] if current is not None else None
-        async with self._lifecycle() as conn, conn.cursor() as cur:
-            await cur.execute("SELECT public.kyc_change_creator_status(%s, %s, %s, %s, %s, %s)",
-                              (streamer_id, action, expected_status, actor_id, reason, account))
-            result = (await cur.fetchone())[0]
+        async with self._lifecycle() as conn:
+            async with conn.transaction() as tx, conn.cursor() as cur:  # the grant and the transition: one transaction
+                await consume(cur, grant)
+                await cur.execute("SELECT public.kyc_change_creator_status(%s, %s, %s, %s, %s, %s)",
+                                  (streamer_id, action, expected_status, actor_id, reason, account))
+                result = (await cur.fetchone())[0]
+                if grant is not None and result != "ok":
+                    raise psycopg.Rollback(tx)
         if result != "ok":
             return result, None
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -246,43 +271,52 @@ class AdminRepository:
             await cur.execute(f"SELECT {_ADMIN_USER_COLS} FROM public.users WHERE id = %s", (user_id,))
             return await cur.fetchone()
 
-    async def update_user(self, user_id: str, changes: dict) -> tuple[dict | None, list[str], int]:
+    async def update_user(self, user_id: str, changes: dict,
+                          grant: Grant | None = None) -> tuple[dict | None, list[str], int]:
+        async with self._auth() as conn:
+            async with conn.transaction() as tx, conn.cursor(row_factory=dict_row) as cur:
+                await consume(cur, grant)
+                result = await self._update_user(cur, user_id, changes)
+                if grant is not None and not result[1]:
+                    raise psycopg.Rollback(tx)  # a refused operation never spends its grant
+        return result
+
+    async def _update_user(self, cur, user_id: str, changes: dict) -> tuple[dict | None, list[str], int]:
         """Apply role / is_active / streamer_id changes atomically.
 
         Returns (user, changed_fields, sessions_revoked). Any change revokes the user's sessions, so
         new privileges (or their loss) take effect immediately.
         """
-        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT u.id::text, u.role, u.is_active, u.streamer_id::text, "
-                              "(u.password_hash IS NOT NULL OR EXISTS (SELECT 1 FROM public.user_identities i "
-                              "WHERE i.user_id = u.id)) AS can_sign_in FROM public.users u WHERE u.id = %s "
-                              "FOR UPDATE OF u", (user_id,))
-            current = await cur.fetchone()
-            if current is None:
-                return None, [], 0
-            changed = [k for k in ("role", "is_active", "streamer_id") if k in changes and changes[k] != current[k]]
-            if not changed:
-                return await self._fetch_user(cur, user_id), [], 0
+        await cur.execute("SELECT u.id::text, u.role, u.is_active, u.streamer_id::text, "
+                          "(u.password_hash IS NOT NULL OR EXISTS (SELECT 1 FROM public.user_identities i "
+                          "WHERE i.user_id = u.id)) AS can_sign_in FROM public.users u WHERE u.id = %s "
+                          "FOR UPDATE OF u", (user_id,))
+        current = await cur.fetchone()
+        if current is None:
+            return None, [], 0
+        changed = [k for k in ("role", "is_active", "streamer_id") if k in changes and changes[k] != current[k]]
+        if not changed:
+            return await self._fetch_user(cur, user_id), [], 0
 
-            loses_admin = (current["role"] == "admin" and current["is_active"] and current["can_sign_in"]
-                           and (changes.get("role", "admin") != "admin" or changes.get("is_active", True) is False))
-            if loses_admin:
-                await cur.execute(_SIGN_IN_ADMINS)
-                if not [r for r in await cur.fetchall() if r["id"] != user_id]:
-                    raise LastAdminError()
+        loses_admin = (current["role"] == "admin" and current["is_active"] and current["can_sign_in"]
+                       and (changes.get("role", "admin") != "admin" or changes.get("is_active", True) is False))
+        if loses_admin:
+            await cur.execute(_SIGN_IN_ADMINS)
+            if not [r for r in await cur.fetchall() if r["id"] != user_id]:
+                raise LastAdminError()
 
-            sets = ", ".join(f"{k} = %({k})s" for k in changed)
-            try:
-                await cur.execute(f"UPDATE public.users SET {sets} WHERE id = %(id)s",
-                                  {**{k: changes[k] for k in changed}, "id": user_id})
-            except pg_errors.ForeignKeyViolation:
-                raise UnknownStreamerError() from None
-            if changes.get("is_active") is False:  # security audit F10: deactivation also kills open reset links
-                await burn_reset_tokens(cur, user_id)
-            revoked = await self._revoke_sessions(cur, user_id)  # users -> reset tokens -> sessions (lock order)
-            return await self._fetch_user(cur, user_id), changed, revoked
+        sets = ", ".join(f"{k} = %({k})s" for k in changed)
+        try:
+            await cur.execute(f"UPDATE public.users SET {sets} WHERE id = %(id)s",
+                              {**{k: changes[k] for k in changed}, "id": user_id})
+        except pg_errors.ForeignKeyViolation:
+            raise UnknownStreamerError() from None
+        if changes.get("is_active") is False:  # security audit F10: deactivation also kills open reset links
+            await burn_reset_tokens(cur, user_id)
+        revoked = await self._revoke_sessions(cur, user_id)  # users -> reset tokens -> sessions (lock order)
+        return await self._fetch_user(cur, user_id), changed, revoked
 
-    async def change_email(self, user_id: str, email: str) -> tuple[str, dict | None, dict]:
+    async def change_email(self, user_id: str, email: str, grant: Grant | None = None) -> tuple[str, dict | None, dict]:
         """D11: correct a user's email (admin recovery). One transaction under the user-row lock: the new address
         becomes unverified, open reset links are burned, linked Google identities are removed (they may belong to the
         old address's holder; the rightful owner re-links by verified email) and every session is revoked. Nothing is
@@ -291,35 +325,43 @@ class AdminRepository:
         would leave no active admin who can sign in. The unique constraint decides races for one address. Lock order
         as update_user: users -> reset tokens / identities -> sessions."""
         try:
-            async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT u.role, u.is_active, u.password_hash IS NOT NULL AS has_password, "
-                                  "u.email = %s AS same FROM public.users u WHERE u.id = %s FOR UPDATE",
-                                  (email, user_id))
-                current = await cur.fetchone()
-                if current is None:
-                    return "not_found", None, {}
-                if current["same"]:  # citext: equal ignoring case
-                    return "unchanged", await self._fetch_user(cur, user_id), {}
-                await cur.execute("SELECT 1 FROM public.user_invites WHERE email = %s AND accepted_at IS NULL "
-                                  "AND revoked_at IS NULL AND expires_at > now()", (email,))
-                if await cur.fetchone():  # accepting it would upsert onto this account by email
-                    return "invite_pending", None, {}
-                await cur.execute("SELECT count(*) AS n FROM public.user_identities WHERE user_id = %s", (user_id,))
-                identities = (await cur.fetchone())["n"]
-                if (identities and current["role"] == "admin" and current["is_active"]
-                        and not current["has_password"]):  # Google was this admin's only way in
-                    await cur.execute(_SIGN_IN_ADMINS)
-                    if not [r for r in await cur.fetchall() if r["id"] != user_id]:
-                        raise LastAdminError()
-                await cur.execute("UPDATE public.users SET email = %s, email_verified_at = NULL WHERE id = %s",
-                                  (email, user_id))
-                burned = await burn_reset_tokens(cur, user_id)
-                await cur.execute("DELETE FROM public.user_identities WHERE user_id = %s", (user_id,))
-                revoked = await self._revoke_sessions(cur, user_id)
-                return "ok", await self._fetch_user(cur, user_id), {
-                    "sessions_revoked": revoked, "reset_tokens_burned": burned, "identities_removed": identities}
+            async with self._auth() as conn:
+                async with conn.transaction() as tx, conn.cursor(row_factory=dict_row) as cur:
+                    await consume(cur, grant)
+                    result = await self._change_email(cur, user_id, email)
+                    if grant is not None and result[0] != "ok":
+                        raise psycopg.Rollback(tx)  # a refused change never spends its grant
+            return result
         except pg_errors.UniqueViolation:
             return "email_taken", None, {}
+
+    async def _change_email(self, cur, user_id: str, email: str) -> tuple[str, dict | None, dict]:
+        await cur.execute("SELECT u.role, u.is_active, u.password_hash IS NOT NULL AS has_password, "
+                          "u.email = %s AS same FROM public.users u WHERE u.id = %s FOR UPDATE",
+                          (email, user_id))
+        current = await cur.fetchone()
+        if current is None:
+            return "not_found", None, {}
+        if current["same"]:  # citext: equal ignoring case
+            return "unchanged", await self._fetch_user(cur, user_id), {}
+        await cur.execute("SELECT 1 FROM public.user_invites WHERE email = %s AND accepted_at IS NULL "
+                          "AND revoked_at IS NULL AND expires_at > now()", (email,))
+        if await cur.fetchone():  # accepting it would upsert onto this account by email
+            return "invite_pending", None, {}
+        await cur.execute("SELECT count(*) AS n FROM public.user_identities WHERE user_id = %s", (user_id,))
+        identities = (await cur.fetchone())["n"]
+        if (identities and current["role"] == "admin" and current["is_active"]
+                and not current["has_password"]):  # Google was this admin's only way in
+            await cur.execute(_SIGN_IN_ADMINS)
+            if not [r for r in await cur.fetchall() if r["id"] != user_id]:
+                raise LastAdminError()
+        await cur.execute("UPDATE public.users SET email = %s, email_verified_at = NULL WHERE id = %s",
+                          (email, user_id))
+        burned = await burn_reset_tokens(cur, user_id)
+        await cur.execute("DELETE FROM public.user_identities WHERE user_id = %s", (user_id,))
+        revoked = await self._revoke_sessions(cur, user_id)
+        return "ok", await self._fetch_user(cur, user_id), {
+            "sessions_revoked": revoked, "reset_tokens_burned": burned, "identities_removed": identities}
 
     async def revoke_sessions(self, user_id: str) -> int:
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:

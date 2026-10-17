@@ -12,6 +12,7 @@ import pytest
 
 from app.auth.google import GoogleIdentity
 from app.auth.passwords import hash_password
+from app.auth.service import AuthError
 from app.auth.tokens import new_token
 from tests.integration import (
     DOMAIN,
@@ -206,11 +207,55 @@ def test_google_identities_cannot_be_bound_to_an_admin(app):
     svc.google.identity = GoogleIdentity("attacker-sub", "attacker@evil.invalid", True)
     user, _ = app.portal.call(svc.google_login, "code", "v", "n", "203.0.113.9", None)
     assert user.role == "user"  # the attacker's Google account is still only the ordinary user
-    svc.google.identity = GoogleIdentity("admin-real-sub", email, True)  # the admin's own Google address
+    # S2: the admin's own (verified) Google address no longer links or signs in: a matching email is not an identity.
+    svc.google.identity = GoogleIdentity("admin-real-sub", email, True)
+    with pytest.raises(AuthError) as refused:
+        app.portal.call(svc.google_login, "code", "v", "n", "203.0.113.9", None)
+    assert (refused.value.status, refused.value.reason) == (403, "admin_google_not_linked")
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.user_identities WHERE user_id = %s", (aid,)).fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM public.sessions WHERE user_id = %s", (aid,)).fetchone()[0] == 0
+
+
+def test_google_never_links_a_matching_email_to_an_admin_at_any_layer(app):
+    """S2 + migration 0026: the service refuses, the repository re-checks under the row lock, and the database
+    refuses every API role (hyperchat_auth included) a new identity for an admin; a linked identity keeps working."""
+    from app.auth.repository import GoogleLinkRefused
+    email = "ab-google-link" + DOMAIN
+    aid = make_user(email, role="admin")
+    svc = app.app_state.auth
+    session_row = svc._new_session(aid, "203.0.113.9", None)[2]
+    # The repository alone (a caller that skipped the service check, or a demotion racing it) refuses too.
+    with pytest.raises(GoogleLinkRefused):
+        app.portal.call(svc.repo.google_sign_in, aid, "new-sub", email, session_row)
+    with db("hyperchat_auth") as conn, pytest.raises(REFUSED):  # the database: even the authentication role
+        conn.execute("INSERT INTO public.user_identities (user_id, provider, provider_subject, email) "
+                     "VALUES (%s, 'google', 'auth-role-sub', %s)", (aid, email))
+    uid = make_user("ab-google-link-user" + DOMAIN, role="user")
+    with db("hyperchat_auth") as conn:
+        iid = conn.execute("INSERT INTO public.user_identities (user_id, provider, provider_subject) "
+                           "VALUES (%s, 'google', 'moved-sub') RETURNING id", (uid,)).fetchone()[0]
+        with pytest.raises(REFUSED):  # moving an ordinary identity onto the admin
+            conn.execute("UPDATE public.user_identities SET user_id = %s WHERE id = %s", (aid, iid))
+    # An identity linked to the admin before S2 (by the operator) still signs in, and only its own subject does.
+    with fixture_db() as conn:
+        conn.execute("INSERT INTO public.user_identities (user_id, provider, provider_subject, email) "
+                     "VALUES (%s, 'google', 'linked-sub', %s)", (aid, email))
+    svc.google.identity = GoogleIdentity("linked-sub", email, True)
     user, _ = app.portal.call(svc.google_login, "code", "v", "n", "203.0.113.9", None)
-    assert user.id == aid and user.role == "admin"  # legitimate Google sign-in links and signs in (hyperchat_auth)
+    assert user.id == aid
+    svc.google.identity = GoogleIdentity("other-sub", email, True)  # same email, another Google account
+    with pytest.raises(AuthError):
+        app.portal.call(svc.google_login, "code", "v", "n", "203.0.113.9", None)
+    with db() as conn:
+        assert {r[0] for r in conn.execute("SELECT provider_subject FROM public.user_identities WHERE user_id = %s",
+                                           (aid,))} == {"linked-sub"}
     with pytest.raises(REFUSED):
         app_sql("UPDATE public.user_identities SET provider_subject = 'attacker-sub-2' WHERE user_id = %s", (aid,))
+    # A non-admin keeps email-based linking (unchanged behaviour).
+    svc.google.identity = GoogleIdentity("user-sub", "ab-google-link-user" + DOMAIN, True)
+    user, _ = app.portal.call(svc.google_login, "code", "v", "n", "203.0.113.9", None)
+    assert user.id == uid
 
 
 # ── 6. legitimate flows ─────────────────────────────────────────────────────────

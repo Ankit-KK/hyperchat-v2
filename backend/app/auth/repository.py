@@ -7,6 +7,8 @@ from datetime import datetime
 
 from psycopg.rows import dict_row
 
+from app.stepup.grants import Grant, consume
+
 
 @dataclass(frozen=True)
 class User:
@@ -107,10 +109,15 @@ class AuthRepository:
         reset or change doesn't affect a Google sign-in, so this session is simply issued after it); one that commits
         after this revokes the session in its own transaction. Nothing is written unless the session is."""
         async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT is_active AS active FROM public.users WHERE id = %s FOR UPDATE", (user_id,))
+            await cur.execute("SELECT is_active AS active, role FROM public.users WHERE id = %s FOR UPDATE", (user_id,))
             row = await cur.fetchone()
             if row is None or not row["active"]:
                 return None
+            if row["role"] == "admin":  # S2: an administrator signs in with Google only through an identity already
+                await cur.execute("SELECT 1 FROM public.user_identities WHERE provider = 'google' "  # linked to them
+                                  "AND provider_subject = %s AND user_id = %s", (subject, user_id))
+                if await cur.fetchone() is None:  # never by a matching email (migration 0026 refuses it as well)
+                    raise GoogleLinkRefused()
             await cur.execute("""
                 INSERT INTO public.user_identities (user_id, provider, provider_subject, email, last_login_at)
                 VALUES (%s, 'google', %s, %s, now())
@@ -241,12 +248,16 @@ class AuthRepository:
 
     # ── invites ────────────────────────────────────────────────────────────
     async def create_invite(self, email: str, role: str, streamer_id: str | None, token_hash: str,
-                            invited_by: str, ttl_days: int) -> dict:
-        return await self._auth_one("""
-            INSERT INTO public.user_invites (email, role, streamer_id, token_hash, invited_by, expires_at)
-            VALUES (%s, %s, %s, %s, %s, now() + make_interval(days => %s))
-            RETURNING id::text, expires_at
-        """, (email, role, streamer_id, token_hash, invited_by, ttl_days))
+                            invited_by: str, ttl_days: int, grant: Grant | None = None) -> dict:
+        """A step-up grant (S2, admin invitations) is consumed in the same transaction as the insert."""
+        async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await consume(cur, grant)
+            await cur.execute("""
+                INSERT INTO public.user_invites (email, role, streamer_id, token_hash, invited_by, expires_at)
+                VALUES (%s, %s, %s, %s, %s, now() + make_interval(days => %s))
+                RETURNING id::text, expires_at
+            """, (email, role, streamer_id, token_hash, invited_by, ttl_days))
+            return await cur.fetchone()
 
     async def accept_invite(self, token_hash: str, password_hash: str, username: str | None,
                             session: tuple) -> tuple[User, Session] | None:
@@ -328,6 +339,17 @@ class AuthRepository:
         return User(**row) if row else None
 
     # ── rate limiting (fixed window in public.rate_limits) ─────────────────
+    # ── step-up (migration 0025; read-only for this role) ─────────────────────────────────────────────────────
+    async def stepup_enforcement(self) -> str:
+        row = await self._one("SELECT state FROM public.stepup_enforcement", ())
+        return row["state"]
+
+    async def stepup_session(self, session_id: str) -> tuple[str, int]:
+        """(enforcement state, the session's assurance level: 2 only while its passkey ceremony still holds)."""
+        row = await self._one("SELECT (SELECT state FROM public.stepup_enforcement) AS state, "
+                              "public.stepup_session_aal(%s) AS aal", (session_id,))
+        return row["state"], row["aal"]
+
     async def hit_rate_limit(self, key: str, bucket: str, limit: int, window_seconds: int) -> bool:
         """Count one request; True while within the limit."""
         row = await self._one("""
@@ -352,6 +374,10 @@ class InviteCreatorClaimed(Exception):
 
 class InviteNotApplicable(Exception):
     """An application invite no longer matches its approved application, creator and applicant email."""
+
+
+class GoogleLinkRefused(Exception):
+    """S2: a Google sign-in for an administrator whose identity is not already linked (never linked by email)."""
 
 
 class InviteConflict(Exception):

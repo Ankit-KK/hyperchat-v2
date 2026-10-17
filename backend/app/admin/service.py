@@ -7,6 +7,7 @@ from app.admin.repository import AdminRepository, CreatorConflict, LastAdminErro
 from app.auth.repository import User
 from app.auth.service import AuthError
 from app.security.audit import security_event
+from app.stepup.grants import Grant
 
 ROLES = ("streamer", "admin", "user")
 
@@ -54,13 +55,13 @@ class AdminService:
         self.enforcement = None  # app.kyc.enforcement.EnforcementService (set by app.main): records grace revocations
 
     # ── creators ───────────────────────────────────────────────────────────
-    async def create_creator(self, admin: User, body: dict) -> dict:
+    async def create_creator(self, admin: User, body: dict, grant: Grant | None = None) -> dict:
         """Onboard a creator (legacy: a manual SQL insert, docs/ADD_NEW_STREAMER.md step 3). The new creator is
         unclaimed: only admins can manage it until an invite with its streamer_id is accepted (step 16). The
         Razorpay account is never defaulted (owner decision D12): the admin names it, and it must be configured."""
         fields = self.creator_fields(body)
         try:
-            row = await self.repo.create_creator(fields, self.pusher_groups)
+            row = await self.repo.create_creator(fields, self.pusher_groups, grant)
         except CreatorConflict as exc:
             raise creator_conflict(exc) from None
         security_event("creator_created", level=20, user_id=admin.id, streamer_id=row["id"],
@@ -94,7 +95,7 @@ class AdminService:
             fields["order_prefix"] = body["order_prefix"]
         return fields
 
-    async def assign_creator_owner(self, admin: User, streamer_id: str, user_id: str) -> dict:
+    async def assign_creator_owner(self, admin: User, streamer_id: str, user_id: str, grant: Grant | None = None) -> dict:
         """Hand an unclaimed creator to its owner (legacy step 16 set streamers.user_id by hand). Ownership is never
         transferred here: a claimed creator answers 409 (a transfer is an owner policy decision)."""
         streamer_id = _uuid_or_404(streamer_id, "Creator")
@@ -102,7 +103,7 @@ class AdminService:
             user_id = str(uuid.UUID(user_id))
         except (ValueError, AttributeError, TypeError):
             raise AuthError(400, "Unknown or inactive user", "bad_user") from None
-        result, row = await self.repo.assign_owner(streamer_id, user_id)
+        result, row = await self.repo.assign_owner(streamer_id, user_id, grant)
         if result == "not_found":
             raise AuthError(404, "Creator not found", "creator_not_found")
         if result == "claimed":
@@ -116,7 +117,7 @@ class AdminService:
                 "donation_block": await self.repo.donation_block(streamer_id)}
 
     async def transfer_creator_owner(self, admin: User, streamer_id: str, user_id: str, expected_owner_id: str,
-                                     ip: str | None) -> dict:
+                                     ip: str | None, grant: Grant | None = None) -> dict:
         """D13: move a claimed creator to another active user (admin correction / recovery, never self-service). The
         caller names the owner they expect, so a stale or mistaken request changes nothing. OBS tokens are kept (the
         same person's live overlays keep working); the count is returned so a wrong-owner case can rotate them."""
@@ -125,7 +126,8 @@ class AdminService:
             user_id, expected_owner_id = str(uuid.UUID(user_id)), str(uuid.UUID(expected_owner_id))
         except (ValueError, AttributeError, TypeError):
             raise AuthError(400, "user_id and expected_owner_id must be user ids", "bad_user") from None
-        result, row, counts = await self.repo.transfer_owner(streamer_id, user_id, expected_owner_id, admin.id)
+        result, row, counts = await self.repo.transfer_owner(streamer_id, user_id, expected_owner_id, admin.id,
+                                                             grant)
         if result == "not_found":
             raise AuthError(404, "Creator not found", "creator_not_found")
         if result == "unclaimed":
@@ -147,7 +149,7 @@ class AdminService:
                 **counts, "donation_block": await self.repo.donation_block(streamer_id)}
 
     async def change_creator_status(self, admin: User, streamer_id: str, action: str, expected_status: str,
-                                    reason: str | None, ip: str | None) -> dict:
+                                    reason: str | None, ip: str | None, grant: Grant | None = None) -> dict:
         """Admin-only creator lifecycle (owner decision 2026-10-15): activate (pending -> active: claimed, a configured
         payment account and the owner's approved KYC), suspend (active -> suspended: hidden, no new donations; the
         dashboard, OBS tokens and history stay) and reactivate (suspended -> active: only if the creator could accept
@@ -157,7 +159,7 @@ class AdminService:
         if action == "suspend" and reason is None:
             raise AuthError(400, "A reason is required to suspend a creator", "reason_required")
         result, row = await self.repo.change_status(streamer_id, action, expected_status, admin.id, reason,
-                                                    self.payment_accounts)
+                                                    self.payment_accounts, grant)
         refusals = {
             "not_found": (404, "Creator not found"),
             "status_changed": (409, "The creator's status is not expected_status"),
@@ -202,7 +204,7 @@ class AdminService:
                                                  limit=limit, offset=offset)
         return {"total": total, "limit": limit, "offset": offset, "users": [public_admin_user(r) for r in rows]}
 
-    async def update_user(self, admin: User, user_id: str, changes: dict) -> dict:
+    async def update_user(self, admin: User, user_id: str, changes: dict, grant: Grant | None = None) -> dict:
         user_id = _uuid_or_404(user_id, "User")
         if "role" in changes and changes["role"] not in ROLES:
             raise AuthError(400, "Invalid role", "bad_role")
@@ -221,7 +223,7 @@ class AdminService:
         if user_id == admin.id and ("role" in changes or "is_active" in changes):
             raise AuthError(403, "You cannot change your own role or status", "self_change")
         try:
-            row, changed, revoked = await self.repo.update_user(user_id, changes)
+            row, changed, revoked = await self.repo.update_user(user_id, changes, grant)
         except LastAdminError:
             raise AuthError(409, "At least one active admin must remain", "last_admin") from None
         except UnknownStreamerError:
@@ -233,7 +235,7 @@ class AdminService:
                            reason=",".join(changed), count=revoked)
         return {"user": public_admin_user(row), "changed": changed, "sessions_revoked": revoked}
 
-    async def change_email(self, admin: User, user_id: str, email: str, ip: str | None) -> dict:
+    async def change_email(self, admin: User, user_id: str, email: str, ip: str | None, grant: Grant | None = None) -> dict:
         """D11: admin recovery / correction of a user's email (not self-service). Sends no email (D8)."""
         user_id = _uuid_or_404(user_id, "User")
         email = email.strip().lower()
@@ -242,7 +244,7 @@ class AdminService:
         if user_id == admin.id:
             raise AuthError(403, "You cannot change your own email", "self_change")
         try:
-            result, row, counts = await self.repo.change_email(user_id, email)
+            result, row, counts = await self.repo.change_email(user_id, email, grant)
         except LastAdminError:
             raise AuthError(409, "At least one active admin must remain", "last_admin") from None
         if result == "not_found":

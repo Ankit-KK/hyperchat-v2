@@ -27,6 +27,7 @@ from app.partners.repository import PartnerRepository
 from app.security.audit import security_event
 from app.security.crypto import sha256_hex
 from app.security.dependencies import PartnerKey, require_partner_key
+from app.stepup.actions import StepUp, step_up
 
 router = APIRouter(prefix="/api/v1/partner", tags=["partner"])
 admin_router = APIRouter(prefix="/api/v1/admin/partner-keys", tags=["admin"])
@@ -127,15 +128,17 @@ async def list_partner_keys(request: Request, current: CurrentUser = Depends(req
 
 
 @admin_router.post("", status_code=201)
-async def create_partner_key(body: KeyCreate, request: Request, current: CurrentUser = Depends(require_admin)):
+async def create_partner_key(body: KeyCreate, request: Request, current: CurrentUser = Depends(require_admin),
+                             stepup: StepUp = Depends(step_up("partner_key.create"))):
     """A new key for a partner: hc_<partner_slug>_<64 hex>, returned ONCE; only its SHA-256 is stored. Existing keys
     of the partner stay valid (rotate = create, switch the partner over, then revoke the old one)."""
     slug = body.partner_slug.strip().lower()
     if not PARTNER_SLUG.fullmatch(slug):
         raise ApiError(400, "partner_slug must be 2-50 characters: lowercase letters, digits, - or _",
                        "bad_partner_slug")
+    grant = stepup.bind("partner_key", body.model_dump())
     api_key = f"hc_{slug}_{secrets.token_hex(32)}"
-    row = await _repo(request).create_key(slug, sha256_hex(api_key), api_key[:12])
+    row = await _repo(request).create_key(slug, sha256_hex(api_key), api_key[:12], grant)
     security_event("partner_key_created", level=logging.INFO, user_id=current.user.id, partner_slug=slug)
     return _reply({"api_key": api_key, "key": _key(row)}, 201)  # no-store: the only time the key is ever shown
 
