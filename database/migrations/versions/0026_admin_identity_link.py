@@ -1,4 +1,4 @@
-"""No new external identity for an administrator from any API role; operator-approved Google links (admin MFA, S2).
+"""No new external identity for an administrator from any API role; operator-verified Google links (admin MFA, S2).
 
 Revision ID: 0026
 Revises: 0025
@@ -15,18 +15,21 @@ guard makes it hold in the database for every role the API connects as, hypercha
     is refused.
 Identities already linked to administrators keep working; the owner (migrations, the operator) is unaffected.
 
-Policy: an administrator NEVER links Google self-service (not by email, not after an email change, a recovery or an
-invitation). The one way is operator-approved:
-  admin_identity_link_requests  a refused administrator Google sign-in records (through hyperchat_auth) WHO
-                                (the administrator), WHICH Google account (subject) and a reference code shown to the
-                                person. A request grants nothing: at most 3 open per administrator, 24 hours, decided
-                                once, only by the operator.
-  admin_link_google_identity()  operator only (hyperchat_owner): links the request's exact subject to the request's
-  admin_reject_google_link()    administrator, after confirming out of band that this administrator made it
-                                (--verified-by), or rejects it; audited in stepup_events.
+Policy: an administrator NEVER links Google self-service, and nothing the API records or displays can lead to a link
+(a compromised API or hyperchat_auth could fabricate it). The one way is admin_link_google_identity(), callable by the
+operator only (hyperchat_owner, i.e. the migrator, root on the server), from `python -m app.stepup.operator
+link-google`, which establishes BOTH facts outside the API (docs/admin-stepup.md):
+  * the administrator's identity: confirmed out of band by the operator (recorded as verified_by);
+  * control of the exact Google account: the administrator completes Google's device sign-in on their own device for
+    the OPERATOR's OAuth client; the tool receives the ID token directly from Google, verifies it (signature,
+    issuer, the operator client as audience, freshness, verified email equal to the address the administrator
+    stated out of band) and passes its subject here. The database cannot check a Google signature: this function
+    trusts its caller, which is why only the owner may call it.
+It links exactly that subject, never one linked to any account (never moved), only to an active administrator, and
+audits it in stepup_events (identity_linked).
 
-Downgrade drops the requests, the functions, the trigger and its function, and restores 0025's event list NOT VALID
-(the audit history is append-only, so rows of the new types stay).
+Downgrade drops the function, the trigger and its function, and restores 0025's event list NOT VALID (the audit
+history is append-only, so rows of the new type stay).
 """
 
 from alembic import op
@@ -41,9 +44,8 @@ REFUSE = "USING ERRCODE = 'insufficient_privilege'"
 EVENTS_0025 = ("challenge_issued", "registration_ok", "registration_failed", "assertion_ok", "assertion_failed",
                "grant_issued", "grant_consumed", "grant_claimed", "session_assured", "credential_approved",
                "credential_revoked", "admin_recovered", "enforcement_changed", "rate_limited")
-EVENTS = EVENTS_0025 + ("identity_linked", "identity_link_rejected")
-OPERATOR_FUNCTIONS = ("public.admin_link_google_identity(text, text, text, text)",
-                      "public.admin_reject_google_link(text, text, text, text)")
+EVENTS = EVENTS_0025 + ("identity_linked",)
+LINK_FUNCTION = "public.admin_link_google_identity(text, text, text, text, text, jsonb)"
 
 
 def _events_check(events, not_valid: bool = False) -> None:
@@ -81,70 +83,12 @@ def upgrade() -> None:
     op.execute("CREATE TRIGGER aab_auth_guard_admin_identity_link BEFORE INSERT OR UPDATE ON public.user_identities "
                "FOR EACH ROW EXECUTE FUNCTION public.auth_guard_admin_identity_link()")
 
-    # ── operator-approved Google links ─────────────────────────────────────────────────────────────────────
-    op.execute("""
-        CREATE TABLE public.admin_identity_link_requests (
-            id uuid PRIMARY KEY,
-            user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-            provider text NOT NULL CHECK (provider = 'google'),
-            provider_subject text NOT NULL CHECK (length(provider_subject) BETWEEN 1 AND 255),
-            email text CHECK (length(email) <= 320),
-            code text NOT NULL UNIQUE CHECK (code ~ '^[A-Z2-7]{5}-[A-Z2-7]{5}$'),
-            created_at timestamptz NOT NULL DEFAULT now(),
-            expires_at timestamptz NOT NULL,
-            decided_at timestamptz,
-            decision text CHECK (decision IN ('linked', 'rejected')),
-            decided_by text,
-            CHECK ((decided_at IS NULL) = (decision IS NULL) AND (decided_at IS NULL) = (decided_by IS NULL))
-        )
-    """)
-    op.execute("CREATE INDEX admin_identity_link_requests_open_idx ON public.admin_identity_link_requests "
-               "(user_id, provider_subject) WHERE decided_at IS NULL")
-    op.execute(f"""
-        CREATE FUNCTION public.admin_link_requests_guard() RETURNS trigger LANGUAGE plpgsql
-        SET search_path = pg_catalog, public AS $$
-        BEGIN
-            IF TG_OP = 'DELETE' THEN
-                IF current_user <> 'hyperchat_owner' THEN
-                    RAISE EXCEPTION 'link requests are kept' {REFUSE};
-                END IF;
-                RETURN OLD;
-            END IF;
-            IF TG_OP = 'INSERT' THEN
-                NEW.created_at := now();
-                NEW.expires_at := now() + interval '24 hours';
-                IF NEW.decided_at IS NOT NULL OR NEW.decision IS NOT NULL OR NEW.decided_by IS NOT NULL THEN
-                    RAISE EXCEPTION 'a link request is recorded undecided' {REFUSE};
-                END IF;
-                IF NOT COALESCE((SELECT u.role = 'admin' AND u.is_active FROM public.users u WHERE u.id = NEW.user_id),
-                                false) THEN
-                    RAISE EXCEPTION 'link requests are for active administrators' {REFUSE};
-                END IF;
-                IF (SELECT count(*) FROM public.admin_identity_link_requests r WHERE r.user_id = NEW.user_id
-                    AND r.decided_at IS NULL AND r.expires_at > now()) >= 3 THEN
-                    RAISE EXCEPTION 'too many open link requests' {REFUSE};
-                END IF;
-                RETURN NEW;
-            END IF;
-            -- UPDATE: decided once, by the operator, nothing else changes
-            IF current_user <> 'hyperchat_owner' OR OLD.decided_at IS NOT NULL OR NEW.decided_at IS NULL
-               OR (to_jsonb(NEW) - 'decided_at' - 'decision' - 'decided_by')
-                  <> (to_jsonb(OLD) - 'decided_at' - 'decision' - 'decided_by') THEN
-                RAISE EXCEPTION 'a link request is decided once, by the operator' {REFUSE};
-            END IF;
-            RETURN NEW;
-        END $$
-    """)
-    op.execute("REVOKE ALL ON FUNCTION public.admin_link_requests_guard() FROM PUBLIC")
-    op.execute("CREATE TRIGGER aaa_admin_link_requests_guard BEFORE INSERT OR UPDATE OR DELETE "
-               "ON public.admin_identity_link_requests FOR EACH ROW EXECUTE FUNCTION public.admin_link_requests_guard()")
-
     _events_check(EVENTS)
     op.execute(f"""
-        CREATE FUNCTION public.admin_link_google_identity(p_email text, p_code text, p_operator text,
-                                                          p_verified_by text)
+        CREATE FUNCTION public.admin_link_google_identity(p_email text, p_subject text, p_google_email text,
+                                                          p_operator text, p_verified_by text, p_evidence jsonb)
         RETURNS text LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
-        DECLARE r public.admin_identity_link_requests;
+        DECLARE uid uuid;
         BEGIN
             IF current_user <> 'hyperchat_owner' THEN
                 RAISE EXCEPTION 'operator only' {REFUSE};
@@ -152,67 +96,33 @@ def upgrade() -> None:
             IF btrim(coalesce(p_operator, '')) = '' OR btrim(coalesce(p_verified_by, '')) = '' THEN
                 RETURN 'operator_and_verification_required';
             END IF;
-            SELECT q.* INTO r FROM public.admin_identity_link_requests q JOIN public.users u ON u.id = q.user_id
-            WHERE q.code = upper(btrim(p_code)) AND u.email = p_email::citext FOR UPDATE OF q;
-            IF NOT FOUND THEN RETURN 'not_found'; END IF;  -- the code must belong to THIS administrator
-            IF r.decided_at IS NOT NULL THEN RETURN 'decided'; END IF;
-            IF r.expires_at <= now() THEN RETURN 'expired'; END IF;
-            IF NOT COALESCE((SELECT u.role = 'admin' AND u.is_active FROM public.users u WHERE u.id = r.user_id
-                             FOR UPDATE OF u), false) THEN
-                RETURN 'not_admin';
+            IF btrim(coalesce(p_subject, '')) = '' OR length(p_subject) > 255 OR p_evidence IS NULL
+               OR jsonb_typeof(p_evidence) <> 'object' OR p_evidence->>'method' IS DISTINCT FROM 'google_device_flow' THEN
+                RETURN 'verified_google_subject_required';
             END IF;
-            IF EXISTS (SELECT 1 FROM public.user_identities i WHERE i.provider = r.provider
-                       AND i.provider_subject = r.provider_subject) THEN
+            SELECT u.id INTO uid FROM public.users u WHERE u.email = p_email::citext AND u.role = 'admin' AND u.is_active
+            FOR UPDATE;
+            IF uid IS NULL THEN RETURN 'not_admin'; END IF;
+            IF EXISTS (SELECT 1 FROM public.user_identities i WHERE i.provider = 'google'
+                       AND i.provider_subject = p_subject) THEN
                 RETURN 'subject_in_use';  -- that Google account already belongs to an account: never moved
             END IF;
             INSERT INTO public.user_identities (user_id, provider, provider_subject, email)
-            VALUES (r.user_id, r.provider, r.provider_subject, r.email);
-            UPDATE public.admin_identity_link_requests SET decided_at = now(), decision = 'linked',
-                   decided_by = p_operator WHERE id = r.id;
+            VALUES (uid, 'google', p_subject, p_google_email);
             INSERT INTO public.stepup_events (event, user_id, operator, detail)
-            VALUES ('identity_linked', r.user_id, p_operator,
-                    jsonb_build_object('provider', r.provider, 'code', r.code, 'verified_by', p_verified_by));
-            RETURN 'ok';
-        END $$
-    """)
-    op.execute(f"""
-        CREATE FUNCTION public.admin_reject_google_link(p_email text, p_code text, p_operator text, p_reason text)
-        RETURNS text LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
-        DECLARE r public.admin_identity_link_requests;
-        BEGIN
-            IF current_user <> 'hyperchat_owner' THEN
-                RAISE EXCEPTION 'operator only' {REFUSE};
-            END IF;
-            IF btrim(coalesce(p_operator, '')) = '' OR btrim(coalesce(p_reason, '')) = '' THEN
-                RETURN 'operator_and_reason_required';
-            END IF;
-            SELECT q.* INTO r FROM public.admin_identity_link_requests q JOIN public.users u ON u.id = q.user_id
-            WHERE q.code = upper(btrim(p_code)) AND u.email = p_email::citext FOR UPDATE OF q;
-            IF NOT FOUND THEN RETURN 'not_found'; END IF;
-            IF r.decided_at IS NOT NULL THEN RETURN 'decided'; END IF;
-            UPDATE public.admin_identity_link_requests SET decided_at = now(), decision = 'rejected',
-                   decided_by = p_operator WHERE id = r.id;
-            INSERT INTO public.stepup_events (event, user_id, operator, detail)
-            VALUES ('identity_link_rejected', r.user_id, p_operator,
-                    jsonb_build_object('provider', r.provider, 'code', r.code, 'reason', p_reason));
+            VALUES ('identity_linked', uid, p_operator,
+                    jsonb_build_object('provider', 'google', 'google_email', p_google_email,
+                                       'verified_by', p_verified_by) || p_evidence);
             RETURN 'ok';
         END $$
     """)
     everyone = "hyperchat_app, hyperchat_worker, hyperchat_auth, hyperchat_lifecycle, hyperchat_readonly, " \
                "hyperchat_stepup, PUBLIC"
-    op.execute(f"REVOKE ALL ON public.admin_identity_link_requests FROM {everyone}")  # 0007's default grants
-    for fn in OPERATOR_FUNCTIONS:
-        op.execute(f"REVOKE ALL ON FUNCTION {fn} FROM {everyone}")
-    # The authentication role records a refused administrator's request and finds an open one again (same code).
-    op.execute("GRANT SELECT, INSERT ON public.admin_identity_link_requests TO hyperchat_auth")
+    op.execute(f"REVOKE ALL ON FUNCTION {LINK_FUNCTION} FROM {everyone}")
 
 
 def downgrade() -> None:
-    for fn in OPERATOR_FUNCTIONS:
-        op.execute(f"DROP FUNCTION {fn}")
-    op.execute("DROP TABLE public.admin_identity_link_requests")
-    op.execute("DROP FUNCTION public.admin_link_requests_guard()")
-    # The audit history is append-only: rows of the new types may exist, so the old list is restored NOT VALID.
+    op.execute(f"DROP FUNCTION {LINK_FUNCTION}")
     _events_check(EVENTS_0025, not_valid=True)
     op.execute("DROP TRIGGER aab_auth_guard_admin_identity_link ON public.user_identities")
     op.execute("DROP FUNCTION public.auth_guard_admin_identity_link()")

@@ -148,16 +148,37 @@ The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
   - **Deactivation and reactivation:** keep the link (no sign-in while deactivated).
   - **Promotion:** stays impossible (0024).
   - **Demotion:** turns the account into an ordinary user, with ordinary linking.
-- **Operator-approved relinking (migration 0026):**
-  1. A refused administrator Google sign-in records a **link request**: the administrator, that exact Google subject, and a reference code shown to the person (`?error=admin_google_not_linked&ref=XXXXX-XXXXX`).
-  2. The request grants nothing. There are at most 3 open per administrator, they last 24 hours, and each is decided once.
-  3. The API can only record requests (`hyperchat_auth`: INSERT and SELECT); no API role can approve one, link an identity to an admin, or delete a request.
-  4. The operator lists them (`google-requests`), confirms out of band that this administrator made the request and sees that code, then runs `link-google --email --code --verified-by --operator --confirm-database`, or `reject-google`.
-  5. `admin_link_google_identity()` (owner only) links exactly the requested subject. It refuses a code belonging to another administrator, a decided or expired request, an inactive or demoted account, and a Google account already linked elsewhere (never moved).
-  6. Every decision is audited in `stepup_events` (`identity_linked` / `identity_link_rejected`, with operator and verification).
+- **Operator-verified linking (migration 0026): the only way an administrator gets a Google link.**
+  - **Why nothing from the API counts.** A first version recorded "link requests" through `hyperchat_auth` and showed the person a reference code. Review showed a compromised API or `hyperchat_auth` can fabricate such a request, for any administrator and an attacker's Google subject. A code shown by the API proves nothing about which Google account the person controls. That table and the codes were removed: **the API records and shows nothing about linking**, and no API role can link an administrator's identity (0026 guard) or call the link function (owner only).
+  - **What the operator verifies, both required:**
+
+    | Fact | How |
+    |---|---|
+    | **Administrator's identity** | Out of band, by the operator: in person, or a call to a number the operator already had. Never a channel the API supplied. The administrator also states which Google address they will use. `--verified-by` records how this was done. |
+    | **Control of that exact Google account** | `python -m app.stepup.operator link-google --email ADMIN --expect-google-email GOOGLE --verified-by TEXT --operator NAME --confirm-database DB` starts Google's **device sign-in** for the **operator's own OAuth client** (`HYPERCHAT_OPERATOR_GOOGLE_CLIENT_ID` / `_SECRET`, a "TVs and limited input devices" client, kept outside `api.env`; the tool refuses the API's client id). It prints a Google URL and a code. **The administrator completes the sign-in on their own device while the operator is in contact.** The ID token comes **directly from Google to the tool over TLS**, never through the API. |
+
+  - **What the tool checks on the ID token:**
+    - its signature against Google's published keys
+    - the issuer
+    - the audience (the operator's client, so a token minted for the API's client is useless)
+    - issued within 10 minutes
+    - a verified email equal to `--expect-google-email`
+  - **What gets linked:** the token's **subject**, which nobody types or relays.
+  - **`admin_link_google_identity()` (owner only)** links only to an **active administrator** and requires the verification record. It never moves a Google account already linked to any account (`subject_in_use`). It is audited in `stepup_events` (`identity_linked`, with operator, `verified_by`, Google email and method).
+  - **What the database cannot do:** it cannot check a Google signature. That is why the function trusts only the owner, i.e. the operator's tool on the server, with the same trust as passkey approval.
+  - **Refused, linking nothing (tests):**
+    - a wrong Google account (email), or a token for the API's client
+    - a wrong issuer, an unverified email, a stale token
+    - another signing key
+    - the person declining, the code expiring
+    - an empty `--verified-by`, the wrong database
+    - a non-administrator target (refused before anyone is asked to sign in)
+    - a Google account in use
+  - **Deployment ([APPROVAL]):** create the operator's device-flow OAuth client in Google Cloud. Its id and secret live only in the operator's root-only environment on the server. The server must be able to reach `oauth2.googleapis.com` and `www.googleapis.com` while the operator runs the command.
 
 ### Deployment additions (each [APPROVAL])
 - **`HYPERCHAT_STEPUP_SOCKET`** in `api.env` (commented in the templates; set it only once the verifier is installed).
+- **Operator Google client** for `link-google` (only if administrators need Google sign-in): `HYPERCHAT_OPERATOR_GOOGLE_CLIENT_ID` / `_SECRET` in the operator's root-only environment, never in `api.env`.
 - **Migration 0026** after 0025.
 - **No new roles or grants.** The API's existing unit can connect to the socket: AF_UNIX is allowed, and a read-only `/run` does not block connecting to a socket.
 - **PostgreSQL 15:** 0026 uses only a row trigger, `FOR SHARE` and `pg_catalog` functions (PostgreSQL 11+). The same postgres:15 CI job proposed for 0025 would cover it.

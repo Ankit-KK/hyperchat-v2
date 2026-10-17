@@ -377,8 +377,7 @@ def test_role_grants_are_exactly_the_boundary(app):
                           "streamers": "SELECT", "user_identities": "DELETE,INSERT,SELECT,UPDATE",
                           "user_invites": "INSERT,SELECT,UPDATE", "user_signups": "SELECT",
                           "users": "INSERT,SELECT,UPDATE",
-                          "stepup_enforcement": "SELECT",  # 0025: reads the MFA enforcement state, nothing else
-                          "admin_identity_link_requests": "INSERT,SELECT"}  # 0026: records requests, never decides
+                          "stepup_enforcement": "SELECT"}  # 0025: reads the MFA enforcement state, nothing else
     assert exposed == 0 and guards == 0
 
 

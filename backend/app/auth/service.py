@@ -5,8 +5,6 @@ import ipaddress
 import uuid
 from dataclasses import dataclass
 
-import psycopg
-
 from app.auth.email import DisabledSender, EmailSender, ResendSender, render
 from app.auth.google import GoogleAuthError, GoogleOAuth
 from app.auth.passwords import hash_password, needs_rehash, validate_new_password, verify_password
@@ -57,13 +55,12 @@ class AuthError(Exception):
 
 
 class AdminGoogleNotLinked(AuthError):
-    """S2: an administrator's Google account is not linked and never links itself. `ref` is the reference code of the
-    recorded link request (or None), which the person quotes to the operator (python -m app.stepup.operator)."""
+    """S2: an administrator's Google account is not linked and never links itself. Nothing is recorded: a link is made
+    only by the operator, who verifies the Google account independently of the API (app.stepup.operator link-google)."""
 
-    def __init__(self, ref: str | None) -> None:
+    def __init__(self) -> None:
         super().__init__(403, "Administrators sign in with their password and passkey; ask the operator to link "
                               "this Google account", "admin_google_not_linked")
-        self.ref = ref
 
 
 @dataclass(frozen=True)
@@ -321,17 +318,9 @@ class AuthService:
         return user, IssuedSession(token=session_token, csrf_token=csrf, session=session)
 
     # ── Google ─────────────────────────────────────────────────────────────
-    async def _admin_google_not_linked(self, user: User, identity, ip: str | None):
-        """Refuse; for an active administrator, record (or find) an open link request the operator may approve. The
-        request grants nothing by itself. Recording failures (e.g. too many open requests) never change the answer."""
-        ref = None
-        if user.is_active:
-            try:
-                ref = await self.repo.record_google_link_request(user.id, identity.subject, identity.email)
-            except psycopg.Error:  # e.g. too many open requests: the refusal stands, nothing more is reported
-                security_event("admin_link_request_not_recorded", user_id=user.id, client_ip=ip)
+    async def _admin_google_not_linked(self, user: User, ip: str | None):
         security_event("google_login_rejected", reason="admin_not_linked", user_id=user.id, client_ip=ip)
-        raise AdminGoogleNotLinked(ref)
+        raise AdminGoogleNotLinked()
 
     async def google_login(self, code: str, code_verifier: str, nonce: str, ip: str | None,
                            user_agent: str | None) -> tuple[User, IssuedSession]:
@@ -349,14 +338,14 @@ class AuthService:
                 security_event("google_login_rejected", reason="no_account", client_ip=ip)
                 raise AuthError(403, "No HyperChat account uses this Google address", "no_account")
             if user.role == "admin":  # S2: a matching (even verified) Google email never links to an administrator
-                await self._admin_google_not_linked(user, identity, ip)
+                await self._admin_google_not_linked(user, ip)
         if not user.is_active:
             raise AuthError(403, "This account is disabled", "account_disabled")
         token, csrf, row = self._new_session(user.id, ip, user_agent)
         try:
             session = await self.repo.google_sign_in(user.id, identity.subject, identity.email, row)
         except GoogleLinkRefused:  # became an admin, or the identity was never linked: re-checked under the row lock
-            await self._admin_google_not_linked(user, identity, ip)
+            await self._admin_google_not_linked(user, ip)
         if session is None:  # deactivated after the check above: same answer, nothing written
             security_event("google_login_rejected", reason="account_disabled_meanwhile", user_id=user.id, client_ip=ip)
             raise AuthError(403, "This account is disabled", "account_disabled")

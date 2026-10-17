@@ -32,7 +32,7 @@ EXPECTED_TABLES = {
     "kyc_events", "kyc_provider_config", "kyc_enforcement", "kyc_grace_grants", "kyc_restrictions",
     "kyc_enforcement_events", "webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
     "session_assurance",
-    "stepup_events", "stepup_rate_limits", "stepup_enforcement", "admin_identity_link_requests",
+    "stepup_events", "stepup_rate_limits", "stepup_enforcement",
 }
 
 
@@ -665,11 +665,9 @@ def test_0026_admin_identity_link_round_trip(monkeypatch):
     command.downgrade(cfg, "0025")
     try:
         assert not _identity_guard()
-        assert "admin_identity_link_requests" not in _tables()
         with _owner() as conn:
             assert conn.execute("SELECT count(*) FROM pg_proc WHERE proname IN ('auth_guard_admin_identity_link', "
-                                "'admin_link_google_identity', 'admin_reject_google_link', "
-                                "'admin_link_requests_guard')").fetchone()[0] == 0
+                                "'admin_link_google_identity')").fetchone()[0] == 0
     finally:
         command.upgrade(cfg, "head")
     assert _identity_guard()
