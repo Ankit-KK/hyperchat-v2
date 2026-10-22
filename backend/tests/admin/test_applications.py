@@ -282,8 +282,8 @@ def test_an_application_invite_refuses_a_claimed_creator_or_a_mismatch(app):
                             ("apps-claimed" + DOMAIN,)).fetchone()[0] == 0
         assert conn.execute("SELECT accepted_at FROM public.user_invites WHERE signup_id = %s",
                             (sid,)).fetchone()[0] is None
-        conn.execute("UPDATE public.streamers SET user_id = NULL WHERE id = %s", (cid,))
-    with fixture_db() as conn:  # the invite's address changed (the runtime role cannot do that: migration 0024)
+    with fixture_db() as conn:  # the owner removed (no API role can: migration 0027) and the invite's address
+        conn.execute("UPDATE public.streamers SET user_id = NULL WHERE id = %s", (cid,))  # changed (0024)
         conn.execute("UPDATE public.user_invites SET email = %s WHERE signup_id = %s", ("apps-other" + DOMAIN, sid))
     assert _accept(app, token).status_code == 400  # bound to the applicant's email: no longer valid
 

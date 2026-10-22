@@ -13,7 +13,7 @@ from app.auth.dependencies import CurrentUser, client_ip, require_admin
 from app.auth.service import AuthError
 from app.payments.accounts import health_report
 from app.security.audit import security_event
-from app.stepup.actions import StepUp, step_up
+from app.stepup.actions import StepUp, step_up, uid
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -75,6 +75,13 @@ class OwnerAssign(BaseModel):
     user_id: StrictStr = Field(max_length=64)
 
 
+def _creator_params(svc: AdminService, body: CreatorCreate) -> dict:
+    """The step-up parameters of a new creator (S3: what the database reads back from the inserted row)."""
+    fields = svc.creator_fields(body.model_dump())
+    return {"slug": fields["streamer_slug"], "name": fields["streamer_name"],
+            "razorpay_account": fields["razorpay_account"]}
+
+
 def admin_service(request: Request) -> AdminService:
     service = getattr(request.app.state, "admin", None)
     if service is None:
@@ -99,8 +106,13 @@ async def update_user(user_id: str, body: UserPatch, request: Request,
         raise AuthError(400, "Nothing to change", "empty_patch")
     if ("role" in changes and changes["role"] is None) or ("is_active" in changes and changes["is_active"] is None):
         raise AuthError(400, "role and is_active cannot be null", "null_field")
-    grant = stepup.bind(f"user:{user_id}", dict(changes))  # the exact fields sent, as approved
-    return await admin_service(request).update_user(current.user, user_id, changes, grant)
+    svc, key, grant = admin_service(request), uid(user_id), None
+    if stepup.presented is not None or stepup.enforcement == "active":  # S3: the account's resulting privileges
+        before = (await svc.repo.user(key) if key else None) or {}
+        after = {k: before.get(k) for k in ("role", "is_active", "streamer_id")}
+        after.update({k: uid(v) if k == "streamer_id" else v for k, v in changes.items()})
+        grant = stepup.bind(f"user:{key or user_id}", after)
+    return await svc.update_user(current.user, user_id, changes, grant)
 
 
 @router.put("/users/{user_id}/email")
@@ -108,7 +120,7 @@ async def change_user_email(user_id: str, body: EmailChange, request: Request,
                             current: CurrentUser = Depends(require_admin),
                             stepup: StepUp = Depends(step_up("admin.user.email"))) -> dict:
     """D11: correct a user's email (admin recovery). Revokes sessions, burns reset links, removes Google links."""
-    grant = stepup.bind(f"user:{user_id}", {"email": body.email})
+    grant = stepup.bind(f"user:{uid(user_id) or user_id}", {"email": body.email.strip().lower()})  # as stored
     return await admin_service(request).change_email(current.user, user_id, body.email, client_ip(request), grant)
 
 
@@ -120,15 +132,16 @@ async def revoke_user_sessions(user_id: str, request: Request, current: CurrentU
 @router.post("/creators", status_code=201)
 async def create_creator(body: CreatorCreate, request: Request, current: CurrentUser = Depends(require_admin),
                          stepup: StepUp = Depends(step_up("creator.create"))) -> dict:
-    grant = stepup.bind("creator:new", body.model_dump())
-    return await admin_service(request).create_creator(current.user, body.model_dump(), grant)
+    svc = admin_service(request)
+    grant = stepup.bind("creator:new", _creator_params(svc, body))
+    return await svc.create_creator(current.user, body.model_dump(), grant)
 
 
 @router.post("/creators/{streamer_id}/owner")
 async def assign_creator_owner(streamer_id: str, body: OwnerAssign, request: Request,
                                current: CurrentUser = Depends(require_admin),
                                stepup: StepUp = Depends(step_up("creator.owner.assign"))) -> dict:
-    grant = stepup.bind(f"creator:{streamer_id}", body.model_dump())
+    grant = stepup.bind(f"creator:{uid(streamer_id) or streamer_id}", {"user_id": uid(body.user_id)})
     return await admin_service(request).assign_creator_owner(current.user, streamer_id, body.user_id, grant)
 
 
@@ -137,14 +150,16 @@ async def transfer_creator_owner(streamer_id: str, body: OwnerTransfer, request:
                                  current: CurrentUser = Depends(require_admin),
                                  stepup: StepUp = Depends(step_up("creator.owner.transfer"))) -> dict:
     """D13: move a claimed creator to another active user; the previous owner is unlinked and signed out."""
-    grant = stepup.bind(f"creator:{streamer_id}", body.model_dump())
+    grant = stepup.bind(f"creator:{uid(streamer_id) or streamer_id}",
+                        {"user_id": uid(body.user_id), "expected_owner_id": uid(body.expected_owner_id)})
     return await admin_service(request).transfer_creator_owner(current.user, streamer_id, body.user_id,
                                                                body.expected_owner_id, client_ip(request), grant)
 
 
 async def _status(action: str, streamer_id: str, body: CreatorStatusChange, request: Request, current: CurrentUser,
                   stepup: StepUp | None = None):
-    grant = stepup.bind(f"creator:{streamer_id}", body.model_dump()) if stepup is not None else None
+    grant = (stepup.bind(f"creator:{uid(streamer_id) or streamer_id}", {"expected_status": body.expected_status})
+             if stepup is not None else None)
     return await admin_service(request).change_creator_status(current.user, streamer_id, action, body.expected_status,
                                                               body.reason, client_ip(request), grant)
 
@@ -199,9 +214,9 @@ async def approve_application(signup_id: str, body: ApplicationApprove, request:
                               current: CurrentUser = Depends(require_admin),
                               stepup: StepUp = Depends(step_up("application.approve"))) -> dict:
     """Approve and create the creator, PENDING (never active), in one transaction; a repeat approval is 409."""
-    grant = stepup.bind(f"application:{signup_id}", body.model_dump())
-    return await application_service(request).approve(current.user, signup_id, body.model_dump(), client_ip(request),
-                                                      grant)
+    svc = application_service(request)
+    grant = stepup.bind(f"application:{uid(signup_id) or signup_id}", _creator_params(svc.admin, body))
+    return await svc.approve(current.user, signup_id, body.model_dump(), client_ip(request), grant)
 
 
 @router.post("/applications/{signup_id}/reject")
@@ -229,7 +244,7 @@ async def invite_application(signup_id: str, request: Request, current: CurrentU
                              stepup: StepUp = Depends(step_up("application.invite"))) -> dict:
     """Send (or resend: the previous open link is revoked) the applicant's account invitation; accepting it makes
     them the owner of the application's still-unclaimed creator."""
-    grant = stepup.bind(f"application:{signup_id}", {})
+    grant = stepup.bind(f"application:{uid(signup_id) or signup_id}", {})
     return await application_service(request).invite(current.user, signup_id, client_ip(request), grant)
 
 

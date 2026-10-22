@@ -13,8 +13,11 @@ Enforcement (stepup_enforcement):
     route WITH a grant consumes it and fails closed when it is invalid.
   * 'active' (after S3 is approved and the operator activates it): a sensitive route without a grant answers
     403 step_up_required with the exact action, target and params to approve.
-The database guards that make a grant mandatory for these writes whatever the caller (stepup_claim / stepup_effect
-on each anchor write) are S3. Until then this is API-level authorization only.
+S3 (migration 0027): the database guards each anchor write itself, whatever the caller. It derives the target and
+the parameters FROM THE ROW BEING WRITTEN and claims the consumed grant whose hash matches; so the parameters bound
+here are exactly what the database will see, normalized as stored (canonical UUIDs, the service's normalization):
+the table in docs/admin-stepup.md ("S3"). A grant bound to anything else is consumed, never claimed, and the write
+is refused (in draft too), so the grant is not spent.
 """
 
 import uuid
@@ -67,6 +70,14 @@ class StepUp:
         except (ValueError, CanonicalError):
             raise StepUpRefused("malformed") from None
         return Grant(grant_id, self.user_id, self.session_id, self.action, target, params_hash)
+
+
+def uid(value: str | None) -> str | None:
+    """A UUID as the database renders it (lowercase, hyphenated); None for anything else (the operation refuses it)."""
+    try:
+        return str(uuid.UUID(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def step_up(action: str):

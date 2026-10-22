@@ -18,7 +18,7 @@ from app.auth.dependencies import (
 )
 from app.auth.service import AuthError, public_user
 from app.auth.tokens import new_token, sign_payload, verify_payload
-from app.stepup.actions import StepUp, step_up
+from app.stepup.actions import StepUp, step_up, uid
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 OAUTH_COOKIE = "__Host-hc_oauth"
@@ -115,8 +115,12 @@ async def change(body: ChangeIn, request: Request, current: CurrentUser = Depend
 @router.post("/invites", status_code=201)
 async def create_invite(body: InviteIn, request: Request, current: CurrentUser = Depends(require_admin),
                         stepup: StepUp = Depends(step_up("admin.invite"))) -> dict:
-    # Step-up applies to ADMIN invitations only (ordinary and creator-staff invites are not admin authority).
-    grant = stepup.bind("invite", body.model_dump()) if body.role == "admin" else None
+    # Step-up applies to invitations that carry authority: an admin, or an account linked to a creator (S3: the
+    # database guards both; an ordinary invitation needs none). Parameters as the database stores them.
+    grant = None
+    if body.role == "admin" or body.streamer_id is not None:
+        grant = stepup.bind("invite", {"email": (body.email or "").strip().lower(), "role": body.role,
+                                       "streamer_id": uid(body.streamer_id)})
     return await auth_service(request).create_invite(current.user, body.email, body.role, body.streamer_id, grant)
 
 
