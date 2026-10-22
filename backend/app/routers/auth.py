@@ -56,7 +56,7 @@ class AcceptIn(BaseModel):
 
 
 def _signed_in(response: Response, request: Request, user, issued) -> dict:
-    set_session_cookie(response, auth_service(request), issued.token)
+    set_session_cookie(response, auth_service(request), issued.token, issued.session)
     return {"user": public_user(user), "csrf_token": issued.csrf_token}
 
 
@@ -172,7 +172,7 @@ async def google_callback(request: Request, code: str | None = None, state: str 
     except AuthError as exc:
         return fail(exc.reason)
     resp = RedirectResponse(f"{front}{payload.get('r', '/dashboard')}", status_code=302)
-    set_session_cookie(resp, svc, issued.token)
+    set_session_cookie(resp, svc, issued.token, issued.session)
     resp.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
     return resp
 

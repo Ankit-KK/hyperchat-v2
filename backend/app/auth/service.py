@@ -131,7 +131,7 @@ class AuthService:
         s = self.settings
         return token, csrf, (session_id, user_id, sha256_hex(token), sha256_hex(csrf),
                              sha256_hex(user_agent) if user_agent else None, _valid_ip(ip), s.session_idle_days,
-                             s.session_absolute_days)
+                             s.session_absolute_days, s.admin_session_idle_hours, s.admin_session_absolute_hours)
 
     async def issue_session(self, user: User, ip: str | None, user_agent: str | None) -> IssuedSession:
         """A session outside any sign-in flow (tests and tooling). Password sign-in, Google sign-in and invite
@@ -143,7 +143,9 @@ class AuthService:
     async def resolve(self, token: str | None) -> tuple[Session, User] | None:
         if not token:
             return None
-        session = await self.repo.active_session(sha256_hex(token), self.settings.session_idle_days)
+        s = self.settings
+        session = await self.repo.active_session(sha256_hex(token), s.session_idle_days, s.admin_session_idle_hours,
+                                                 s.admin_session_absolute_hours)
         if session is None:
             return None
         user = await self.repo.user_by_id(session.user_id)

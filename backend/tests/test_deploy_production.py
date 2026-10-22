@@ -204,7 +204,8 @@ def test_production_env_template_values():
         "HYPERCHAT_DB_LABEL": "PROD hyperchat (HyperChat v2 production)", "HYPERCHAT_DB_POOL_MIN": "1",
         "HYPERCHAT_DB_POOL_MAX": "4", "HYPERCHAT_FRONTEND_URL": "https://hyperchat.space",
         "HYPERCHAT_ALLOWED_ORIGINS": "", "HYPERCHAT_SESSION_COOKIE_SAMESITE": "lax", "HYPERCHAT_SESSION_IDLE_DAYS": "7",
-        "HYPERCHAT_SESSION_ABSOLUTE_DAYS": "30", "HYPERCHAT_AUTH_RETURN_INVITE_LINKS": "false",
+        "HYPERCHAT_SESSION_ABSOLUTE_DAYS": "30", "HYPERCHAT_ADMIN_SESSION_IDLE_HOURS": "2",
+        "HYPERCHAT_ADMIN_SESSION_ABSOLUTE_HOURS": "12", "HYPERCHAT_AUTH_RETURN_INVITE_LINKS": "false",
         "HYPERCHAT_EMAIL_BACKEND": "disabled", "HYPERCHAT_EMAIL_FROM": "HyperChat <no-reply@hyperchat.space>"}
 
 

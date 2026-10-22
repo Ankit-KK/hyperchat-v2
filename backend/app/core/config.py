@@ -13,7 +13,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from psycopg.conninfo import make_conninfo
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.origins import OriginError, is_development_origin, normalize_origin, parse_origins
@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     session_idle_days: int = 7
     session_absolute_days: int = 30
+    # Administrators (post-S3 A4, the approved MFA plan): enforced in the database on every request, not by the cookie.
+    admin_session_idle_hours: int = Field(default=2, ge=1, le=24)
+    admin_session_absolute_hours: int = Field(default=12, ge=1, le=24)
     password_min_length: int = 8  # new passwords only; existing ones (min 6 before) still log in
     password_max_length: int = 128
     reset_token_ttl_minutes: int = 60

@@ -52,10 +52,17 @@ async def revoke_sessions(cur, user_id: str, except_session_id: str | None = Non
     return cur.rowcount
 
 
+# Parameters: id, user id, token hash, CSRF hash, UA hash, IP, idle days, absolute days, admin idle hours, admin
+# absolute hours. An administrator's session gets the admin limits (post-S3 A4), decided here from the account's role.
 _INSERT_SESSION = """
     INSERT INTO public.sessions (id, user_id, token_hash, csrf_token_hash, ua_hash, ip_address,
                                  idle_expires_at, absolute_expires_at)
-    VALUES (%s, %s, %s, %s, %s, %s::inet, now() + make_interval(days => %s), now() + make_interval(days => %s))
+    SELECT v.id, u.id, v.th, v.ch, v.ua, v.ip::inet,
+           now() + CASE WHEN u.role = 'admin' THEN make_interval(hours => v.admin_idle) ELSE make_interval(days => v.idle) END,
+           now() + CASE WHEN u.role = 'admin' THEN make_interval(hours => v.admin_abs) ELSE make_interval(days => v.abs) END
+    FROM (VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s::int, %s::int, %s::int, %s::int))
+         AS v(id, uid, th, ch, ua, ip, idle, abs, admin_idle, admin_abs)
+    JOIN public.users u ON u.id = v.uid
     RETURNING id::text, user_id::text, idle_expires_at, absolute_expires_at
 """
 
@@ -182,20 +189,29 @@ class AuthRepository:
             return await cur.fetchone()
 
     async def create_session(self, session_id: str, user_id: str, token_hash: str, csrf_hash: str,
-                             ua_hash: str | None, ip: str | None, idle_days: int, absolute_days: int) -> Session:
-        row = await self._auth_one(_INSERT_SESSION,
-                                   (session_id, user_id, token_hash, csrf_hash, ua_hash, ip, idle_days, absolute_days))
+                             ua_hash: str | None, ip: str | None, idle_days: int, absolute_days: int,
+                             admin_idle_hours: int, admin_absolute_hours: int) -> Session:
+        row = await self._auth_one(_INSERT_SESSION, (session_id, user_id, token_hash, csrf_hash, ua_hash, ip, idle_days,
+                                                     absolute_days, admin_idle_hours, admin_absolute_hours))
         return Session(**row)
 
-    async def active_session(self, token_hash: str, idle_days: int) -> Session | None:
-        """Valid, unexpired, unrevoked session; slides the idle expiry (never past the absolute expiry)."""
+    async def active_session(self, token_hash: str, idle_days: int, admin_idle_hours: int,
+                             admin_absolute_hours: int) -> Session | None:
+        """Valid, unexpired, unrevoked session; slides the idle expiry (never past the absolute expiry). An
+        administrator's session slides by the admin idle limit and also ends at the admin limits counted from its
+        creation and last use, so a session issued before those limits existed is held to them too (post-S3 A4)."""
         row = await self._one("""
-            UPDATE public.sessions SET last_seen_at = now(),
-                   idle_expires_at = LEAST(now() + make_interval(days => %s), absolute_expires_at)
-            WHERE token_hash = %s AND revoked_at IS NULL
-              AND idle_expires_at > now() AND absolute_expires_at > now()
-            RETURNING id::text, user_id::text, idle_expires_at, absolute_expires_at
-        """, (idle_days, token_hash))
+            UPDATE public.sessions s SET last_seen_at = now(),
+                   idle_expires_at = LEAST(now() + CASE WHEN u.role = 'admin' THEN make_interval(hours => %(ai)s)
+                                                        ELSE make_interval(days => %(idle)s) END,
+                                           s.absolute_expires_at)
+            FROM public.users u
+            WHERE u.id = s.user_id AND s.token_hash = %(th)s AND s.revoked_at IS NULL
+              AND s.idle_expires_at > now() AND s.absolute_expires_at > now()
+              AND (u.role <> 'admin' OR (s.created_at > now() - make_interval(hours => %(aa)s)
+                                         AND s.last_seen_at > now() - make_interval(hours => %(ai)s)))
+            RETURNING s.id::text, s.user_id::text, s.idle_expires_at, s.absolute_expires_at
+        """, {"ai": admin_idle_hours, "idle": idle_days, "th": token_hash, "aa": admin_absolute_hours})
         return Session(**row) if row else None
 
     async def revoke_session(self, session_id: str) -> None:

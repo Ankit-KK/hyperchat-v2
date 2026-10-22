@@ -79,7 +79,10 @@ class RealtimeService:
             raise SecurityError(403, "Forbidden", "channel_not_allowed")
         return self._sign(streamer["pusher_group"], socket_id, channel)
 
-    async def authorize_session(self, user, socket_id: str, channel: str, slug: str, suffix: str) -> dict:
+    async def authorize_session(self, user, socket_id: str, channel: str, slug: str, suffix: str,
+                                assure_admin=None) -> dict:
+        """`assure_admin` (async, no arguments) runs when the access is an administrator's: the admin assurance rule
+        (app.auth.dependencies.require_admin_assurance)."""
         await self.limit(f"user:{user.id}", RATE_CREDENTIAL)
         if suffix != "dashboard":
             raise SecurityError(403, "Forbidden", "channel_not_allowed")
@@ -87,10 +90,15 @@ class RealtimeService:
         if streamer is None:
             raise SecurityError(403, "Forbidden", "channel_not_allowed")
         ref = StreamerRef(id=streamer["id"], slug=streamer["slug"], name=streamer["name"], user_id=streamer["user_id"])
-        if access_via(user, ref) is None:
+        via = access_via(user, ref)
+        if via is None:
             reason = denial_reason(user, ref)
             security_event("realtime_channel_denied", reason=reason, user_id=user.id, streamer_id=ref.id)
             raise SecurityError(403, "Forbidden", reason)
+        if via == "admin":
+            if assure_admin is None:  # fail closed: a caller that cannot check assurance never signs for an admin
+                raise SecurityError(403, "Forbidden", "assurance_unchecked")
+            await assure_admin()
         return self._sign(streamer["pusher_group"], socket_id, channel)
 
     async def config(self, streamer: str) -> dict:

@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.auth.dependencies import auth_service, client_ip, enforce_csrf, optional_user
+from app.auth.dependencies import auth_service, client_ip, enforce_csrf, optional_user, require_admin_assurance
 from app.realtime.auth import RATE_CONFIG, RATE_IP, RealtimeService
 from app.security.dependencies import SecurityError
 from app.security.obs_token import is_obs_origin_allowed, own_origin, validate_obs_token
@@ -70,7 +70,8 @@ async def pusher_auth(request: Request):
         if current is None:
             raise SecurityError(401, "Not signed in", "no_session")
         enforce_csrf(request, auth_service(request), current.session)  # AuthError 403 (bad_origin / bad_csrf)
-        body = await svc.authorize_session(current.user, socket_id, channel, slug, suffix)
+        body = await svc.authorize_session(current.user, socket_id, channel, slug, suffix,
+                                           assure_admin=lambda: require_admin_assurance(request, current.session))
     return JSONResponse(body, headers=NO_STORE)
 
 

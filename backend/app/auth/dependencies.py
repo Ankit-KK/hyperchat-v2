@@ -1,6 +1,7 @@
 """Request-level auth: session cookie, CSRF + Origin checks, admin role."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from fastapi import Request, Response
 
@@ -52,13 +53,19 @@ async def require_admin_enrolling(request: Request) -> CurrentUser:
     return current
 
 
-async def require_admin(request: Request) -> CurrentUser:
-    """An admin session. While MFA enforcement is 'draft' (S2) that is all; once it is 'active' the session must also
-    hold passkey assurance (aal2, migration 0025), or the answer is 403 mfa_required."""
-    current = await require_admin_enrolling(request)
-    state, aal = await auth_service(request).repo.stepup_session(current.session.id)
+async def require_admin_assurance(request: Request, session: Session) -> None:
+    """The one rule for acting AS an administrator, on any route (admin routes, creator routes reached through admin
+    access, the realtime dashboard channel): while MFA enforcement is 'draft' nothing more is needed; once it is
+    'active' the session must hold passkey assurance (aal2, migration 0025), or the answer is 403 mfa_required."""
+    state, aal = await auth_service(request).repo.stepup_session(session.id)
     if state == "active" and aal < 2:
         raise MfaRequired()
+
+
+async def require_admin(request: Request) -> CurrentUser:
+    """An admin session with the assurance enforcement demands (require_admin_assurance)."""
+    current = await require_admin_enrolling(request)
+    await require_admin_assurance(request, current.session)
     return current
 
 
@@ -71,10 +78,13 @@ def enforce_csrf(request: Request, svc: AuthService, session: Session) -> None:
         raise AuthError(403, "Invalid CSRF token", "bad_csrf")
 
 
-def set_session_cookie(response: Response, svc: AuthService, token: str) -> None:
+def set_session_cookie(response: Response, svc: AuthService, token: str, session: Session) -> None:
+    """The cookie lives as long as the session's own absolute expiry (shorter for administrators). Convenience only:
+    the database decides on every request whether the session is still valid."""
     s = svc.settings
+    max_age = max(0, int((session.absolute_expires_at - datetime.now(UTC)).total_seconds()))
     response.set_cookie(
-        s.session_cookie_name, token, max_age=s.session_absolute_days * 86400, path="/",
+        s.session_cookie_name, token, max_age=max_age, path="/",
         secure=True, httponly=True, samesite=s.session_cookie_samesite,
     )
 

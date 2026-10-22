@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from fastapi import Depends, Request
 
-from app.auth.dependencies import CurrentUser, require_user
+from app.auth.dependencies import CurrentUser, require_admin_assurance, require_user
 from app.auth.service import AuthError
 from app.authz.access import AccessVia, StreamerRef, access_via, denial_reason, parse_streamer_ref
 from app.authz.repository import AuthzRepository
@@ -44,4 +44,6 @@ async def require_streamer_access(streamer: str, request: Request,
                        path=request.url.path, method=request.method)
         message = "This creator account is not claimed yet" if reason == "unclaimed_streamer" else "Forbidden"
         raise AuthError(403, message, reason)
+    if via == "admin":  # an administrator's access is admin authority: the same assurance as the admin routes
+        await require_admin_assurance(request, current.session)
     return StreamerAccess(current=current, streamer=found, via=via)
