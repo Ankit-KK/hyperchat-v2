@@ -205,12 +205,14 @@ answer carries the exact `{action, target, params}` to approve.
   accepted it only for the API's authenticated administrator and session, so nothing the caller passes to the guard
   names them.
   - none, enforcement `active`: refused;
-  - none, `draft`, but this transaction consumed some other grant: refused (a presented grant must authorize the
-    write it accompanies);
-  - none, `draft`, no grant presented: allowed (the legacy path).
-- **Effect** (`stepup_effect_or_legacy(action, target, effect)`): needs the grant that action claimed in this
-  transaction; each named effect once per grant (`stepup_effect`). In `draft` with no grant in the transaction it is
-  the legacy path.
+  - none, `draft`, but this transaction consumed **any** grant, claimed by its own anchor or not: refused. A
+    presented grant authorizes its own write and never lets a second sensitive write through the legacy path
+    (review of PR #76; `test_a_claimed_grant_never_carries_a_second_sensitive_write`, draft and active);
+  - none, `draft`, no grant presented at all: allowed (the legacy path). A consumption rolled back with its
+    savepoint left no trace, so it counts as not presented.
+- **Effect** (`stepup_effect_or_legacy(action, target, params, effect)`): needs the grant that action claimed in
+  this transaction **for exactly these parameters**; each named effect once per grant (`stepup_effect`). Its legacy
+  path has the same rule: only in `draft`, only when no grant was presented.
 - **Fail closed.** No branch allows a write because data is missing: an unreadable enforcement state, a missing
   creator row or a malformed parameter all end in the refusing branches. A failed, refused or no-op operation rolls
   its transaction (or savepoint) back, and the consumption and claim with it: the grant is not spent.
@@ -239,16 +241,24 @@ cover):
 - removing a creator's owner (`streamers.user_id` → NULL, also through the `ON DELETE SET NULL` cascade of deleting
   the owner's account);
 - changing `streamers.created_at` (an approval relies on it);
-- changing an approved application's status, address or creator;
+- changing an approved application's status, address or creator, or inserting an application that is already
+  approved or linked to a creator or invitation;
 - changing an invitation in any way except accepting it (now, once, only while unrevoked and unexpired, with the
-  accepting account) or revoking it (now, once);
+  accepting account, by `hyperchat_auth`, **with the invitation's own token**) or revoking it (now, once); inserting
+  an invitation that is already accepted or revoked;
+- changing a partner key except recording its use or revoking it (no new hash, partner, or un-revoking);
 - inserting an account with role admin or a creator link, except through the two internal paths below.
 
 **Internal paths (no administrator action; authorized by what they carry):**
 - **Invitation acceptance** (`hyperchat_auth`, `AuthRepository.accept_invite`): the account an invitation accepted
-  **in this transaction** creates or upgrades (same address, role and creator), and the unclaimed creator an
-  application invitation accepted in this transaction claims for that account. The invitation's issue was the
-  guarded anchor; its token is the user's authorization.
+  **in this transaction** creates or upgrades (same address, role and creator; never to admin by update), and the
+  unclaimed creator an application invitation accepted in this transaction claims for that account. The
+  invitation's issue was the guarded anchor; its token is the user's authorization, and the database checks it:
+  `accept_invite` presents the raw token for its transaction only (`set_config('hyperchat.invite_token', …, true)`)
+  and the guard accepts the invitation only when its SHA-256 equals `token_hash`. A database role alone (an
+  injection, a leaked connection) never sees a token, so it cannot fabricate the acceptance these exceptions trust.
+  The token is a bound parameter; keep PostgreSQL statement logging off (the default) so it never reaches server
+  logs.
 - **Bootstrap** (`hyperchat_auth`, `AdminRepository.bootstrap_admin`): an admin row only while no active
   administrator can sign in (as 0024).
 
@@ -288,8 +298,10 @@ compromised identity can and cannot do" above; ordinary-user account takeover (s
 `kyc_change_creator_status`'s `p_actor` is recorded as given (the grant, not `p_actor`, is the authority).
 
 ### Limits
-- `hyperchat_auth` can still accept any open invitation without its token (as before 0027); every such invitation
-  was issued through a guarded anchor, so this gives no authority an administrator did not approve.
+- A compromised API **process** (not just a database role) sees invitation tokens when it issues them and could
+  accept those; every such invitation was issued through a guarded anchor an administrator approved.
+- Guards cannot be switched off by the API roles: `session_replication_role` and `ALTER TABLE … DISABLE TRIGGER`
+  need superuser or ownership; `SET CONSTRAINTS … IMMEDIATE` only runs the deferred creator check earlier.
 - The first activation (`creator.activate`) is covered by the same guard branch as reactivation and by the
   DB tests, but the end-to-end API test drives reactivation (first activation needs a KYC-approved owner fixture).
 - Verified on PostgreSQL 16 locally and 17 in CI. **PostgreSQL 15 (DEV) is not tested**: 0027 uses only PL/pgSQL

@@ -298,7 +298,7 @@ class AuthService:
         password_hash = await _hash(password)  # Argon2 before any row lock
         session_token, csrf, row = self._new_session(None, ip, user_agent)
         try:
-            accepted = await self.repo.accept_invite(sha256_hex(token or ""), password_hash, username, row)
+            accepted = await self.repo.accept_invite(token or "", password_hash, username, row)
         except InviteConflict:
             raise AuthError(409, "This account already exists. Please sign in.", "account_exists") from None
         except InviteAccountDisabled:  # same answer as a disabled account's Google sign-in; nothing was changed

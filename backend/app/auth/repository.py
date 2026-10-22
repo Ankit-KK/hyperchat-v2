@@ -7,6 +7,7 @@ from datetime import datetime
 
 from psycopg.rows import dict_row
 
+from app.auth.tokens import sha256_hex
 from app.stepup.grants import Grant, consume
 
 
@@ -259,7 +260,7 @@ class AuthRepository:
             """, (email, role, streamer_id, token_hash, invited_by, ttl_days))
             return await cur.fetchone()
 
-    async def accept_invite(self, token_hash: str, password_hash: str, username: str | None,
+    async def accept_invite(self, token: str, password_hash: str, username: str | None,
                             session: tuple) -> tuple[User, Session] | None:
         """Consume the invite, create (or give a password to) the account, burn its reset links and insert its session,
         all in ONE transaction (security audit F10 follow-up). The account's row is locked from the upsert on, so a
@@ -279,13 +280,17 @@ class AuthRepository:
         An invite issued for an approved application (KYC PR2, signup_id set) also makes the new account the OWNER of
         the application's creator, atomically and only while that creator is unclaimed: an owner already there is
         refused (InviteCreatorClaimed: nothing consumed, never a transfer), and such an invite never takes over an
-        existing account (InviteConflict). It never activates the creator (it stays pending until an admin does)."""
+        existing account (InviteConflict). It never activates the creator (it stays pending until an admin does).
+
+        The raw token is presented to the database for this transaction only (migration 0027 accepts an invitation
+        only when it hashes to the invitation's token_hash), so a database role alone cannot accept one."""
         async with self._auth() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT set_config('hyperchat.invite_token', %s, true)", (token,))
             await cur.execute("""
                 UPDATE public.user_invites SET accepted_at = now()
                 WHERE token_hash = %s AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()
                 RETURNING id, email::text, role, streamer_id, signup_id
-            """, (token_hash,))
+            """, (sha256_hex(token),))
             invite = await cur.fetchone()
             if not invite:
                 return None

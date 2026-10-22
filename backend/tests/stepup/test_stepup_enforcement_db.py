@@ -12,7 +12,8 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from app.stepup.canonical import canonical_json, sha256_hex
+from app.auth.tokens import sha256_hex
+from app.stepup.canonical import canonical_json
 from tests.integration import DOMAIN, db, fixture_db, make_streamer, make_user, requires_db, update_streamer
 from tests.stepup.test_stepup_db import (  # noqa: F401  (verifier: the fixture)
     CONSUME,
@@ -47,6 +48,16 @@ def active(verifier):  # noqa: F811
 def draft(verifier):  # noqa: F811
     set_enforcement("draft")
     return verifier
+
+
+@pytest.fixture(params=["draft", "active"])
+def mode(request, verifier):  # noqa: F811
+    """The same rule in both states: a presented grant authorizes its own write and nothing else."""
+    set_enforcement(request.param)
+    try:
+        yield verifier
+    finally:
+        set_enforcement("draft")
 
 
 def approved(v, name: str, action: str, target: str, params: dict) -> tuple[dict, tuple]:
@@ -115,6 +126,59 @@ def test_draft_keeps_the_legacy_path_but_a_presented_grant_must_match_its_write(
     with db() as conn, conn.transaction():
         assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
         conn.execute(KEY, ("authtest-s3-a", key_hash()))
+    assert grant_row(g["grant_id"]) == (True, "partner_api_keys")
+
+
+@pytest.mark.parametrize("second", ["same action again", "another action"])
+def test_a_claimed_grant_never_carries_a_second_sensitive_write(mode, second):
+    """Review of PR #76 (reproduced first, then fixed): after a grant was consumed and claimed by its anchor, a second
+    sensitive write in the same transaction must not fall back to draft's legacy path: one grant, one action."""
+    g, args = approved(mode, "s3-draft-reuse-" + second[0], "partner_key.create", "partner_key",
+                       {"partner_slug": "authtest-s3-reuse"})
+    unclaimed, user = make_streamer("authtest-s3-reuse-" + second[0]), make_user(f"s3-reuse-{second[0]}" + DOMAIN)
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.streamers SET user_id = NULL WHERE id = %s", (unclaimed,))
+    with refused_tx("hyperchat_app") as conn:
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(KEY, ("authtest-s3-reuse", key_hash()))  # its own anchor: claims it
+        if second == "same action again":
+            conn.execute(KEY, ("authtest-s3-reuse-2", key_hash()))
+        else:
+            conn.execute(OWNER, (user, unclaimed))
+    assert grant_row(g["grant_id"]) == (False, None)
+    with fixture_db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-s3-reuse%%'"
+                            ).fetchone()[0] == 0
+        assert conn.execute("SELECT user_id FROM public.streamers WHERE id = %s", (unclaimed,)).fetchone()[0] is None
+
+
+def test_several_correctly_bound_grants_each_authorize_their_own_write(mode):
+    uid, sid, auth = enrolled(mode, "s3-many")
+    specs = [("partner_key.create", "partner_key", {"partner_slug": f"authtest-s3-many-{i}"}) for i in range(2)]
+    grants = [grant(mode, uid, sid, auth, {"action": a, "target": t, "params": p}) for a, t, p in specs]
+    with db() as conn, conn.transaction():
+        for g in grants:
+            assert conn.execute(CONSUME, (g["grant_id"], uid, sid, g["action"], g["target"], g["params_hash"])
+                                ).fetchone()[0] == "ok"
+        for i in (1, 0):  # in any order: each write claims exactly its own grant
+            conn.execute(KEY, (f"authtest-s3-many-{i}", key_hash()))
+    assert [grant_row(g["grant_id"]) for g in grants] == [(True, "partner_api_keys")] * 2
+
+
+def test_a_rolled_back_claim_is_reusable_only_by_the_same_write(mode):
+    g, args = approved(mode, "s3-rollback", "partner_key.create", "partner_key", {"partner_slug": "authtest-s3-rb"})
+    with refused_tx("hyperchat_app") as conn:
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        with pytest.raises(psycopg.errors.DivisionByZero), conn.transaction():
+            conn.execute(KEY, ("authtest-s3-rb", key_hash()))
+            conn.execute("SELECT 1/0")
+        conn.execute(KEY, ("authtest-s3-rb", key_hash()))  # the rolled-back claim is available to its write again
+        conn.execute(KEY, ("authtest-s3-rb-2", key_hash()))  # but never to a second one
+    with db() as conn, conn.transaction():
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        with pytest.raises(REFUSED), conn.transaction():  # a mismatched write in a savepoint enables nothing
+            conn.execute(KEY, ("authtest-s3-rb-other", key_hash()))
+        conn.execute(KEY, ("authtest-s3-rb", key_hash()))
     assert grant_row(g["grant_id"]) == (True, "partner_api_keys")
 
 
@@ -268,17 +332,22 @@ def test_a_reactivation_through_the_lifecycle_function_claims_its_grant(active):
     assert grant_row(g["grant_id"]) == (True, "streamers.status")
 
 
-def test_a_transfer_unlinks_only_the_previous_owner_once(active):
+def test_a_transfer_unlinks_only_the_previous_owner_once(mode):
     old, new = make_user("s3-tr-old" + DOMAIN), make_user("s3-tr-new" + DOMAIN)
     sid = make_streamer("authtest-s3-transfer", old)
     staff = make_user("s3-tr-staff" + DOMAIN, streamer_id=sid)
     with fixture_db() as conn:
         conn.execute("UPDATE public.users SET streamer_id = %s WHERE id = %s", (sid, old))
-    g, args = approved(active, "s3-transfer", "creator.owner.transfer", f"creator:{sid}",
+    g, args = approved(mode, "s3-transfer", "creator.owner.transfer", f"creator:{sid}",
                        {"user_id": new, "expected_owner_id": old})
     with refused_tx("hyperchat_app") as conn:  # the grant does not unlink anyone else (here: a staff account)
         assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
         conn.execute(OWNER, (new, sid))
+        conn.execute("UPDATE public.users SET streamer_id = NULL WHERE id = %s", (staff,))
+    with refused_tx("hyperchat_app") as conn:  # nor the previous owner AND someone else
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(OWNER, (new, sid))
+        conn.execute("UPDATE public.users SET streamer_id = NULL WHERE id = %s", (old,))
         conn.execute("UPDATE public.users SET streamer_id = NULL WHERE id = %s", (staff,))
     with db() as conn, conn.transaction():
         assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
@@ -290,10 +359,11 @@ def test_a_transfer_unlinks_only_the_previous_owner_once(active):
                             (g["grant_id"],)).fetchall() == [("old_owner_unlinked",)]
 
 
-def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(active):
+def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(mode):
+    active = mode
     params = {"slug": "authtest-s3-approved", "name": "Approved", "razorpay_account": "primary"}
     app = signup("s3-approve")
-    g, args = approved(active, "s3-approve", "application.approve", f"application:{app}", params)
+    g, args = approved(active,"s3-approve", "application.approve", f"application:{app}", params)
     old = make_streamer("authtest-s3-old-creator", name="Old")
     with fixture_db() as conn:
         slug, name, account = conn.execute("SELECT streamer_slug, streamer_name, razorpay_account FROM public.streamers "
@@ -331,17 +401,35 @@ def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(active)
     assert grant_row(g2["grant_id"]) == (True, "user_invites.insert")
 
 
-def test_invite_acceptance_stays_internal_but_cannot_be_forged(active):
+def test_invite_acceptance_stays_internal_but_cannot_be_forged(mode):
     sid = make_streamer("authtest-s3-accept")
-    with fixture_db() as conn:  # an invitation issued earlier (its issue was the guarded anchor)
-        open_, revoked = (conn.execute(
+    tokens = {n: secrets.token_hex(32) for n in ("o", "r", "a")}
+    with fixture_db() as conn:  # invitations issued earlier (their issue was the guarded anchor)
+        open_, revoked, admin_inv = (conn.execute(
             "INSERT INTO public.user_invites (email, role, streamer_id, token_hash, expires_at, revoked_at) VALUES "
-            "(%s, 'streamer', %s, %s, now() + interval '1 day', " + r + ") RETURNING id::text",
-            (f"s3-acc-{n}" + DOMAIN, sid, key_hash())).fetchone()[0] for n, r in (("o", "NULL"), ("r", "now()")))
+            "(%s, %s, %s, %s, now() + interval '1 day', " + r + ") RETURNING id::text",
+            (f"s3-acc-{n}" + DOMAIN, role, None if role == "admin" else sid, sha256_hex(tokens[n]))).fetchone()[0]
+            for n, r, role in (("o", "NULL", "streamer"), ("r", "now()", "streamer"), ("a", "NULL", "admin")))
     accept = "UPDATE public.user_invites SET accepted_at = now() WHERE id = %s"
+    present = "SELECT set_config('hyperchat.invite_token', %s, true)"
     insert = ("INSERT INTO public.users (email, role, streamer_id) VALUES (%s, 'streamer', %s) RETURNING id::text")
-    with refused_tx("hyperchat_auth") as conn:  # a revoked invitation is never accepted
+    with refused_tx("hyperchat_auth") as conn:  # a revoked invitation is never accepted, even with its token
+        conn.execute(present, (tokens["r"],))
         conn.execute(accept, (revoked,))
+    for role, token in (("hyperchat_auth", None), ("hyperchat_auth", tokens["a"]), ("hyperchat_auth", "0" * 64),
+                        ("hyperchat_app", tokens["o"])):
+        with refused_tx(role) as conn:  # no acceptance without ITS token, and only by the auth role
+            if token:
+                conn.execute(present, (token,))
+            conn.execute(accept, (open_,))
+    with refused_tx("hyperchat_auth") as conn:  # the forged path of review: accept an admin invitation and insert
+        conn.execute(accept, (admin_inv,))  # an admin of one's own (the token is never seen by a database role)
+        conn.execute("INSERT INTO public.users (email, role, password_hash) VALUES (%s, 'admin', 'x')",
+                     ("s3-acc-a" + DOMAIN,))
+    for role in ("hyperchat_auth", "hyperchat_app"):  # nor an invitation inserted already accepted
+        with refused_tx(role) as conn:
+            conn.execute("INSERT INTO public.user_invites (email, role, token_hash, expires_at, accepted_at) VALUES "
+                         "(%s, 'user', %s, now() + interval '1 day', now())", ("s3-acc-pre" + DOMAIN, key_hash()))
     with refused_tx("hyperchat_auth") as conn:  # no creator-linked account without an invitation accepted now
         conn.execute(insert, ("s3-acc-x" + DOMAIN, sid))
     with refused_tx("hyperchat_auth") as conn:  # an invitation's terms never change
@@ -350,13 +438,39 @@ def test_invite_acceptance_stays_internal_but_cannot_be_forged(active):
     with refused_tx("hyperchat_auth") as conn:  # so no new admin row (bootstrap only)
         conn.execute("INSERT INTO public.users (email, role, password_hash) VALUES (%s, 'admin', 'x')",
                      ("s3-acc-boot" + DOMAIN,))
-    with db("hyperchat_auth") as conn, conn.transaction():  # the genuine acceptance needs no grant
+    with db("hyperchat_auth") as conn, conn.transaction():  # the genuine acceptance needs no grant, only its token
+        conn.execute(present, (tokens["o"],))
         conn.execute(accept, (open_,))
         uid = conn.execute(insert, ("s3-acc-o" + DOMAIN, sid)).fetchone()[0]
         conn.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s", (uid, open_))
     with refused_tx("hyperchat_auth") as conn:  # and happens once
         conn.execute("UPDATE public.user_invites SET accepted_at = now(), accepted_user_id = NULL WHERE id = %s",
                      (open_,))
+
+
+def test_no_sensitive_state_is_written_around_its_anchor(mode):
+    """Found while auditing 0027: an approved application inserted directly, or a partner key's hash, partner or
+    revocation rewritten, would have side-stepped application.approve and partner_key.create."""
+    old = make_streamer("authtest-s3-around")
+    for sql, args in (("INSERT INTO public.user_signups (name, email, mobile_number, review_status, streamer_id) "
+                       "VALUES ('S', %s, '+91 90000 00010', 'approved', %s)", ("s3-around" + DOMAIN, old)),
+                      ("INSERT INTO public.user_signups (name, email, mobile_number, streamer_id) "
+                       "VALUES ('S', %s, '+91 90000 00011', %s)", ("s3-around-2" + DOMAIN, old))):
+        with refused_tx("hyperchat_app") as conn:
+            conn.execute(sql, args)
+    with fixture_db() as conn:
+        kid = conn.execute("INSERT INTO public.partner_api_keys (partner_slug, key_hash, key_prefix, revoked) VALUES "
+                           "('authtest-s3-around', %s, 'hc_x', true) RETURNING id::text", (key_hash(),)).fetchone()[0]
+        live = conn.execute("INSERT INTO public.partner_api_keys (partner_slug, key_hash, key_prefix) VALUES "
+                            "('authtest-s3-around', %s, 'hc_x') RETURNING id::text", (key_hash(),)).fetchone()[0]
+    for sql in ("UPDATE public.partner_api_keys SET revoked = false WHERE id = %s",
+                "UPDATE public.partner_api_keys SET key_hash = 'attacker-known' WHERE id = %s",
+                "UPDATE public.partner_api_keys SET partner_slug = 'authtest-s3-other' WHERE id = %s"):
+        with refused_tx("hyperchat_app") as conn:
+            conn.execute(sql, (kid if "false" in sql else live,))
+    with db() as conn:  # using and revoking a key stay ordinary
+        conn.execute("UPDATE public.partner_api_keys SET last_used_at = now() WHERE id = %s", (live,))
+        conn.execute("UPDATE public.partner_api_keys SET revoked = true WHERE id = %s", (live,))
 
 
 # ── the guards' own surface ─────────────────────────────────────────────────────

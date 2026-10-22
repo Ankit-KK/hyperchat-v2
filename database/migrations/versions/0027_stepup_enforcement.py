@@ -14,11 +14,13 @@ One grant -> one logical action. The ANCHOR write of an action calls stepup_auth
     hash is computed here (stepup_params_hash: the same canonical JSON as app.stepup.canonical, byte for byte);
   * it claims exactly one grant consumed IN THIS TRANSACTION (stepup_consume bound it to the API's authenticated
     administrator and session) for exactly this action, target and hash (stepup_claim: once, never later);
-  * no such grant: refused unless enforcement is exactly 'draft'; refused in 'draft' too when the transaction consumed any
-    other grant (a presented grant must authorize the write it accompanies); allowed in 'draft' otherwise (the legacy
-    path, so administrators are not locked out before enrolling).
-A legitimate secondary EFFECT of the same action calls stepup_effect_or_legacy(action, target, effect): it needs the
-grant that action claimed in this transaction and records the named effect once per grant (stepup_effect).
+  * no such grant: refused unless enforcement is exactly 'draft'; refused in 'draft' too when the transaction consumed
+    ANY grant, claimed or not (a presented grant authorizes only its own write, never a second one through the legacy
+    path); allowed in 'draft' only for a transaction that presented no grant at all (the legacy path, so
+    administrators are not locked out before enrolling).
+A legitimate secondary EFFECT of the same action calls stepup_effect_or_legacy(action, target, params, effect): it
+needs the grant that action claimed in this transaction for exactly these parameters and records the named effect
+once per grant (stepup_effect); its legacy path has the same rule.
 
 Anchors (S2 action, target, parameters derived from the write):
   streamers.status -> active from pending      creator.activate     creator:<id>     {expected_status}
@@ -63,13 +65,13 @@ API_ROLES = "('hyperchat_app', 'hyperchat_worker', 'hyperchat_auth', 'hyperchat_
 DEFINER = "SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp"
 REFUSE = "USING ERRCODE = 'insufficient_privilege'"
 HELPERS = ("public.stepup_canonical_json(jsonb)", "public.stepup_params_hash(jsonb)",
-           "public.stepup_authorize(text, text, jsonb, text)", "public.stepup_effect_or_legacy(text, text, text)")
+           "public.stepup_authorize(text, text, jsonb, text)", "public.stepup_effect_or_legacy(text, text, jsonb, text)")
 GUARDS = (  # (trigger, table, timing, function)
     ("aac_stepup_guard_streamers", "streamers", "BEFORE UPDATE", "stepup_guard_streamers"),
-    ("aac_stepup_guard_user_signups", "user_signups", "BEFORE UPDATE", "stepup_guard_user_signups"),
+    ("aac_stepup_guard_user_signups", "user_signups", "BEFORE INSERT OR UPDATE", "stepup_guard_user_signups"),
     ("aac_stepup_guard_user_invites", "user_invites", "BEFORE INSERT OR UPDATE", "stepup_guard_user_invites"),
     ("aac_stepup_guard_users", "users", "BEFORE INSERT OR UPDATE", "stepup_guard_users"),
-    ("aac_stepup_guard_partner_keys", "partner_api_keys", "BEFORE INSERT", "stepup_guard_partner_keys"),
+    ("aac_stepup_guard_partner_keys", "partner_api_keys", "BEFORE INSERT OR UPDATE", "stepup_guard_partner_keys"),
 )
 
 
@@ -125,26 +127,30 @@ def upgrade() -> None:
                 RAISE EXCEPTION 'step-up required: % on % needs a passkey grant for exactly these parameters',
                     p_action, p_target {REFUSE};
             END IF;
-            IF EXISTS (SELECT 1 FROM public.stepup_grants WHERE consumed_txid = pg_current_xact_id_if_assigned()
-                       AND claimed_at IS NULL) THEN
-                RAISE EXCEPTION 'the presented step-up grant does not authorize % on %', p_action, p_target {REFUSE};
+            -- Draft's legacy path is only for a transaction that presented NO grant at all. Once any grant was
+            -- consumed here (claimed by its own anchor or not), every further sensitive write needs its own grant:
+            -- one grant, one action, in draft too. (A consumption rolled back with its savepoint left no trace and
+            -- presented nothing.)
+            IF EXISTS (SELECT 1 FROM public.stepup_grants WHERE consumed_txid = pg_current_xact_id_if_assigned()) THEN
+                RAISE EXCEPTION 'this transaction presented a step-up grant: % on % needs its own', p_action, p_target
+                    {REFUSE};
             END IF;
             RETURN NULL;  -- draft, no grant presented: the legacy path
         END $$
     """)
     op.execute(f"""
-        CREATE FUNCTION public.stepup_effect_or_legacy(p_action text, p_target text, p_effect text)
+        CREATE FUNCTION public.stepup_effect_or_legacy(p_action text, p_target text, p_params jsonb, p_effect text)
         RETURNS uuid LANGUAGE plpgsql {DEFINER} AS $$
-        DECLARE g public.stepup_grants;
+        DECLARE h text := public.stepup_params_hash(p_params); g public.stepup_grants;
         BEGIN
-            SELECT * INTO g FROM public.stepup_grants gr
+            SELECT * INTO g FROM public.stepup_grants gr  -- the claimed grant of exactly this action
             WHERE consumed_txid = pg_current_xact_id_if_assigned() AND claimed_at IS NOT NULL
-              AND action = p_action AND target = p_target
+              AND action = p_action AND target = p_target AND params_hash = h
               AND NOT EXISTS (SELECT 1 FROM public.stepup_grant_effects e WHERE e.grant_id = gr.id
                               AND e.effect = p_effect)
             ORDER BY claimed_at, id LIMIT 1;
             IF FOUND THEN
-                RETURN public.stepup_effect(g.user_id, g.session_id, p_action, p_target, g.params_hash, p_effect);
+                RETURN public.stepup_effect(g.user_id, g.session_id, p_action, p_target, h, p_effect);
             END IF;
             IF (SELECT state FROM public.stepup_enforcement) IS DISTINCT FROM 'draft' OR EXISTS (
                     SELECT 1 FROM public.stepup_grants WHERE consumed_txid = pg_current_xact_id_if_assigned()) THEN
@@ -202,7 +208,9 @@ def upgrade() -> None:
             END IF;
             SELECT a.id INTO signup FROM public.user_signups a WHERE a.streamer_id = s.id AND a.review_status = 'approved';
             IF signup IS NOT NULL THEN
-                PERFORM public.stepup_effect_or_legacy('application.approve', 'application:' || signup, 'creator_created');
+                PERFORM public.stepup_effect_or_legacy('application.approve', 'application:' || signup,
+                    jsonb_build_object('slug', s.streamer_slug, 'name', s.streamer_name,
+                                       'razorpay_account', s.razorpay_account), 'creator_created');
             ELSE
                 PERFORM public.stepup_authorize('creator.create', 'creator:new',
                     jsonb_build_object('slug', s.streamer_slug, 'name', s.streamer_name,
@@ -216,6 +224,12 @@ def upgrade() -> None:
         DECLARE s public.streamers;
         BEGIN
             IF session_user NOT IN {API_ROLES} THEN
+                RETURN NEW;
+            END IF;
+            IF TG_OP = 'INSERT' THEN  -- an application is approved only by the guarded update below
+                IF NEW.review_status = 'approved' OR NEW.streamer_id IS NOT NULL OR NEW.invite_id IS NOT NULL THEN
+                    RAISE EXCEPTION 'an application starts unreviewed' {REFUSE};
+                END IF;
                 RETURN NEW;
             END IF;
             IF OLD.review_status = 'approved' THEN  -- final: its creator and address are what invitations rely on
@@ -253,7 +267,18 @@ def upgrade() -> None:
                    OR (NEW.accepted_user_id IS DISTINCT FROM OLD.accepted_user_id AND NEW.accepted_at IS NULL) THEN
                     RAISE EXCEPTION 'an invitation is only accepted (while open) or revoked, once' {REFUSE};
                 END IF;
+                -- Accepting needs the invitation's own token (AuthRepository.accept_invite presents it for this
+                -- transaction only): the acceptance is what the internal exceptions below trust, so no role can
+                -- fabricate one for an invitation it merely sees.
+                IF OLD.accepted_at IS NULL AND NEW.accepted_at IS NOT NULL AND (session_user <> 'hyperchat_auth'
+                       OR encode(public.digest(coalesce(current_setting('hyperchat.invite_token', true), ''), 'sha256'),
+                                 'hex') IS DISTINCT FROM OLD.token_hash) THEN
+                    RAISE EXCEPTION 'an invitation is accepted only with its token' {REFUSE};
+                END IF;
                 RETURN NEW;
+            END IF;
+            IF NEW.accepted_at IS NOT NULL OR NEW.accepted_user_id IS NOT NULL OR NEW.revoked_at IS NOT NULL THEN
+                RAISE EXCEPTION 'an invitation starts open' {REFUSE};
             END IF;
             IF NEW.signup_id IS NOT NULL THEN  -- exactly the approved application's address and creator
                 IF NEW.role <> 'streamer' OR NOT EXISTS (
@@ -299,7 +324,7 @@ def upgrade() -> None:
                                                 jsonb_build_object('email', lower(NEW.email::text)), 'users.email');
             END IF;
             IF (NEW.role, NEW.is_active, NEW.streamer_id) IS DISTINCT FROM (OLD.role, OLD.is_active, OLD.streamer_id) THEN
-                IF session_user = 'hyperchat_auth' AND NEW.is_active = OLD.is_active AND EXISTS (
+                IF session_user = 'hyperchat_auth' AND NEW.is_active = OLD.is_active AND NEW.role <> 'admin' AND EXISTS (
                         SELECT 1 FROM public.user_invites i WHERE i.email = NEW.email AND i.accepted_at = now()
                           AND i.role = NEW.role AND NEW.streamer_id IS NOT DISTINCT FROM COALESCE(i.streamer_id,
                                                                                                     OLD.streamer_id)) THEN
@@ -313,7 +338,8 @@ def upgrade() -> None:
                           AND g.params_hash = public.stepup_params_hash(
                                 jsonb_build_object('user_id', s.user_id, 'expected_owner_id', NEW.id))) THEN
                     PERFORM public.stepup_effect_or_legacy('creator.owner.transfer', 'creator:' || OLD.streamer_id,
-                                                           'old_owner_unlinked');
+                        jsonb_build_object('user_id', (SELECT user_id FROM public.streamers WHERE id = OLD.streamer_id),
+                                           'expected_owner_id', NEW.id), 'old_owner_unlinked');
                     RETURN NEW;
                 END IF;
                 PERFORM public.stepup_authorize('admin.user.change', 'user:' || NEW.id,
@@ -326,10 +352,19 @@ def upgrade() -> None:
     op.execute(f"""
         CREATE FUNCTION public.stepup_guard_partner_keys() RETURNS trigger LANGUAGE plpgsql {DEFINER} AS $$
         BEGIN
-            IF session_user IN {API_ROLES} THEN
-                PERFORM public.stepup_authorize('partner_key.create', 'partner_key',
-                                                jsonb_build_object('partner_slug', NEW.partner_slug), 'partner_api_keys');
+            IF session_user NOT IN {API_ROLES} THEN
+                RETURN NEW;
             END IF;
+            IF TG_OP = 'UPDATE' THEN  -- a key is only used or revoked; a new key or partner is a new grant's job
+                IF (to_jsonb(NEW) - 'revoked' - 'last_used_at' - 'updated_at')
+                       <> (to_jsonb(OLD) - 'revoked' - 'last_used_at' - 'updated_at')
+                   OR (OLD.revoked AND NOT NEW.revoked) THEN
+                    RAISE EXCEPTION 'a partner key is only used or revoked' {REFUSE};
+                END IF;
+                RETURN NEW;
+            END IF;
+            PERFORM public.stepup_authorize('partner_key.create', 'partner_key',
+                                            jsonb_build_object('partner_slug', NEW.partner_slug), 'partner_api_keys');
             RETURN NEW;
         END $$
     """)
