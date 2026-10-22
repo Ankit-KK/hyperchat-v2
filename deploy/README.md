@@ -20,6 +20,7 @@ systemd/hyperchat-api.service   API unit (runs as user hyperchat, hardened, neve
 systemd/hyperchat-cleanup.{service,timer}  daily cleanup of expired auth/security rows (03:15 UTC)
 systemd/hyperchat-worker.service  DEV background worker (Phase 8: donation audio, voice transcription)
 systemd/hyperchat-prod-api.service, hyperchat-prod-cleanup.{service,timer}  PRODUCTION API + cleanup (03:45 UTC)
+systemd/hyperchat-prod-worker.service  PRODUCTION background worker (jobs, realtime outbox, notifications; not installed yet)
 nginx/00-catchall.conf          drops unknown hostnames / bare-IP requests
 nginx/api.quicktestspace.site.conf   v2 development API vhost (TLS via Let's Encrypt)
 nginx/api.hyperchat.space.acme.conf  PRODUCTION vhost, bootstrap phase (port 80 only, for the first certificate)
@@ -126,7 +127,7 @@ next to DEV on the same VPS, fully separated:
 | OS user | `hyperchat` | `hyperchat-prod` |
 | Releases / current | `/opt/hyperchat/releases/<commit>`, `/opt/hyperchat/current` | `/opt/hyperchat-prod/releases/<commit>`, `/opt/hyperchat-prod/current` |
 | Environment file | `/etc/hyperchat/api.env` | `/etc/hyperchat-prod/api.env` (root:hyperchat-prod 0640) |
-| systemd | `hyperchat-api`, `hyperchat-worker` (Phase 8), `hyperchat-cleanup.timer` | `hyperchat-prod-api`, `hyperchat-prod-cleanup.timer` |
+| systemd | `hyperchat-api`, `hyperchat-worker` (Phase 8), `hyperchat-cleanup.timer` | `hyperchat-prod-api`, `hyperchat-prod-worker` (not installed yet, below), `hyperchat-prod-cleanup.timer` |
 | Database | `hyperchat_dev`, cluster `15/restoretest` :5433 | `hyperchat`, cluster `17/hyperchat` :5432 |
 | Ident map | `pg_ident.conf` | `pg_ident.production.conf` (the DEV user has no mapping) |
 | Rate-limit zone | `hyperchat_public` | `hyperchat_public_prod` |
@@ -182,7 +183,8 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
    → `0009`. Verify `moderation_actions.actor_user_id` (uuid, nullable, no default, FK `users` ON DELETE
    SET NULL, validated) and that every table count is unchanged.
 10. **systemd** — `install -o root -g root -m 644 deploy/systemd/hyperchat-prod-*.{service,timer} /etc/systemd/system/`
-    (the glob covers the API service, the cleanup service and its timer);
+    (the glob covers the API service, the cleanup service and its timer, and also copies the worker and verifier
+    unit files, which this step does not enable: they have their own approved steps);
     `ln -sfn /opt/hyperchat-prod/releases/<commit> /opt/hyperchat-prod/current`;
     `systemctl daemon-reload && systemctl enable --now hyperchat-prod-api hyperchat-prod-cleanup.timer`.
     Check: `curl -fsS http://127.0.0.1:8001/health` → `"environment":"production"`, the PROD label,
@@ -213,6 +215,103 @@ Production rollback (no step is automatic):
   explicit decision; restoring the backup over production only with explicit approval;
 - PostgreSQL map: restore `/root/pg_ident.17.bak-<commit>`, `pg_ctlcluster 17 hyperchat reload`;
 - environment: remove the production units, `/etc/hyperchat-prod`, `/opt/hyperchat-prod` and the user.
+
+## Production worker (`hyperchat-prod-worker`, not installed; every step needs approval)
+`deploy/systemd/hyperchat-prod-worker.service` runs `python -m app.worker` for production: the job queue (donation
+audio / TTS, voice transcription, moderator notifications) and the realtime outbox publisher (Pusher). It is the DEV
+worker unit with only the user, paths and environment file changed (a test keeps the two identical otherwise).
+
+| | |
+|---|---|
+| OS user / group | `hyperchat-prod` (the production API's user; never root, never `hyperchat`) |
+| Release | `/opt/hyperchat-prod/current`: the **same** release as `hyperchat-prod-api`, switched together |
+| Environment | `/etc/hyperchat-prod/api.env` (root:hyperchat-prod 0640): the API's file; no separate worker file |
+| Database role | `HYPERCHAT_DB_USER=hyperchat_app` (DML only) over the Unix socket, peer-mapped by `pg_ident.production.conf` (`hyperchat-prod → hyperchat_app`). No password, no migrator, owner, step-up or DEV mapping. The DEV user has no mapping on this cluster. |
+| Network | No listening port or socket. Outbound HTTPS only: R2, Pusher, Telegram / Discord, and the paid audio providers only when enabled. `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` |
+| Hardening | DEV's: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, kernel / cgroup / clock / hostname protection, `RestrictNamespaces`, `RestrictSUIDSGID`, `LockPersonality`, `SystemCallArchitectures=native`, empty `CapabilityBoundingSet` and `AmbientCapabilities`, `UMask=0077`, `MemoryMax=1G`; writes nothing on disk (R2 and PostgreSQL only) |
+| Stop / restart | `KillSignal=SIGTERM`, `TimeoutStopSec=60`; `Restart=always` after 3 s, at most 10 starts per 5 minutes |
+
+### What it depends on
+- **Migrations:** the release's schema (jobs 0011, realtime outbox 0012/0013, bots 0014/0015). Production is recorded
+  at 0009, so the worker comes **with or after** the production migration to the release's head, never before.
+- **Credentials** (all production-only, set on the server, never copied from DEV; each enabled only with approval;
+  `api.env.production.example`):
+  - R2 bucket and custom media domain: donation audio needs them (without R2 the worker does not take
+    donation-audio jobs at all).
+  - Pusher app(s) + `HYPERCHAT_REALTIME_ENABLED=true`: OBS alerts and live dashboard updates.
+  - `HYPERCHAT_TTS_MODERATION_HASH_KEY` + `HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true` + MiniMax / ElevenLabs / Sarvam keys:
+    spoken alerts, sound effects, transcription.
+  - Telegram / Discord bots + `HYPERCHAT_BOTS_ENABLED=true`: moderator notifications.
+
+  With everything off (the template's defaults) the worker starts, logs what is not configured, marks realtime
+  events `skipped` and finishes notifications as `bots_disabled`; it sends nothing anywhere.
+
+### If the worker is stopped while the API runs
+Nothing is lost; work waits in PostgreSQL:
+- **Donations and payments** complete as usual (the API and webhooks do that).
+- **Realtime (OBS alerts, dashboard live updates)** is not published. Events stay in `realtime_outbox`. An event
+  older than its maximum age when the worker returns (10 minutes; `audio-now-playing` 30 s) is marked `expired`, not
+  sent: a stale alert is never shown late.
+- **Donation audio / TTS** is not generated; the jobs wait in `jobs` and run when the worker returns.
+- **Moderator notifications** wait likewise and are sent once when the worker returns.
+- **Transcription** requests are queued and answered later.
+
+### Install (later, approved; nothing here was run)
+1. Production API deployed on the target release, migrations at its head, `check_isolation.sh prod` all `OK`.
+2. Credentials set in `/etc/hyperchat-prod/api.env` as approved (root, mode 0640 kept); everything else stays off.
+3. `install -o root -g root -m 644 deploy/systemd/hyperchat-prod-worker.service /etc/systemd/system/` (from the
+   same reviewed `<commit>` as the release); `systemctl daemon-reload`.
+4. Import check as the service user: `sudo -u hyperchat-prod /opt/hyperchat-prod/current/venv/bin/python -c
+   "import app.worker"`.
+5. `systemctl enable --now hyperchat-prod-worker`.
+
+### Release switches (API and worker together)
+Same sequence as DEV ("Deploy a commit"): build the release; migrate; `ln -sfn` the new release to `current`; then
+`systemctl restart hyperchat-prod-api hyperchat-prod-worker`. The worker always runs the release `current` points
+to, so after a restart both run the same code; never restart one without the other after a switch.
+- **Stopping:** `systemctl stop hyperchat-prod-worker` sends SIGTERM. The worker stops claiming; running jobs get up
+  to 50 s to finish, then are released (status `queued`, the interrupted attempt not counted). A claimed realtime
+  batch is released at once. Everything stays in PostgreSQL.
+- **A crash or kill:** jobs and outbox rows keep their lease (jobs 3 minutes, outbox 30 s) and are
+  claimed again after it expires; that counts as an attempt.
+
+### Verification and logs
+- `systemctl status hyperchat-prod-worker` (active, `NRestarts` 0); `journalctl -u hyperchat-prod-worker -n 100`.
+- The first lines are `worker configuration` and `realtime configuration`: release, database label (must be the
+  `PROD` label), concurrency, which providers / Pusher groups / bots are configured (names and booleans only, never
+  keys), and `pusher_invalid` problems. Logs carry job and event ids, kinds, attempts and reason codes; never
+  payloads, donor data, tokens or secrets.
+- In the database (read-only, as `hyperchat_readonly`): `SELECT kind, status, count(*) FROM public.jobs GROUP BY 1, 2`
+  and `SELECT status, count(*) FROM public.realtime_outbox WHERE created_at > now() - interval '1 hour' GROUP BY 1`:
+  nothing `running` / `publishing` for long, `failed` only with a reason.
+- **Troubleshooting:**
+  - `database_disabled` at start: the environment file or the peer mapping is wrong.
+  - Restarts every 3 s: the journal names the cause (a settings refusal, e.g. a test Razorpay key in production).
+  - Realtime `skipped` with `pusher_not_configured`: a creator's Pusher group has no app.
+  - Jobs never claimed: their handler is not built (no R2 means no donation audio).
+
+### Rollback
+- **Code:** point `current` back and `systemctl restart hyperchat-prod-api hyperchat-prod-worker` (same as the API).
+- **Stop the worker only:** `systemctl disable --now hyperchat-prod-worker`. Safe at any time (above); nothing is
+  lost, realtime alerts stop.
+- **First install:** `systemctl disable --now hyperchat-prod-worker && rm /etc/systemd/system/hyperchat-prod-worker.service
+  && systemctl daemon-reload`.
+- **An integration that misbehaves:** set its switch back to `false` in `api.env` and restart **both** units (the API
+  reads the same switches).
+
+### Isolation checks
+- `check_isolation.sh prod` now also checks `hyperchat-prod-worker.service`: root-owned, not group/other-writable,
+  `User=hyperchat-prod`.
+- The DEV files are never edited. Record their fingerprints before and compare after, as in the production section
+  above.
+
+### Idempotency
+- **Jobs:** a job is finished, retried or released only by the worker holding its lease (fenced on `locked_by`), so a
+  restart never completes a job twice.
+- **Moderator notifications:** recorded per donation and recipient (`ON CONFLICT DO NOTHING`), so a retry never
+  re-sends one that was already sent.
+- **Realtime:** delivery is at-least-once. A publish whose `published` write was lost is sent again with the same
+  `event_id`, which the overlays deduplicate.
 
 ## Isolation audit and the pg_hba fix (S0)
 `pg_hba.conf` in this repository listed only migrator / app / worker / readonly until S0, and `setup_cluster.sh`

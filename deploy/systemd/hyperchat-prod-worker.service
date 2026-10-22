@@ -1,0 +1,51 @@
+# PRODUCTION background worker: donation audio / TTS, voice transcription, moderator notifications and the realtime
+# outbox (Pusher). Same unit as hyperchat-worker.service (DEV); only the user, paths and environment file differ.
+# Runs the SAME release as hyperchat-prod-api (/opt/hyperchat-prod/current) with the same environment file, OS user
+# and database role (HYPERCHAT_DB_USER=hyperchat_app via pg_ident.production.conf). No listening port; outbound
+# HTTPS only (R2, Pusher, Telegram / Discord, and the paid audio providers only when explicitly enabled).
+# deploy/README.md "Production worker".
+[Unit]
+Description=HyperChat v2 background worker - PRODUCTION (jobs, realtime outbox, notifications)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=exec
+User=hyperchat-prod
+Group=hyperchat-prod
+WorkingDirectory=/opt/hyperchat-prod/current/backend
+EnvironmentFile=/etc/hyperchat-prod/api.env
+ExecStart=/opt/hyperchat-prod/current/venv/bin/python -m app.worker
+Restart=always
+RestartSec=3
+# On SIGTERM running jobs get up to 50 s to finish (app.jobs.runner), then are released for another claim.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
