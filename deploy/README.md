@@ -243,17 +243,21 @@ worker unit with only the user, paths and environment file changed (a test keeps
     spoken alerts, sound effects, transcription.
   - Telegram / Discord bots + `HYPERCHAT_BOTS_ENABLED=true`: moderator notifications.
 
-  With everything off (the template's defaults) the worker starts, logs what is not configured, marks realtime
-  events `skipped` and finishes notifications as `bots_disabled`; it sends nothing anywhere.
+  With everything off (the template's defaults) the worker starts, logs what is not configured, and sends nothing
+  anywhere. That is a final outcome, not a queue: pending realtime events are marked `skipped` and notification jobs
+  finish as skipped (`bots_disabled`). Neither is delivered later when Pusher or the bots are enabled; only events
+  and notifications created after enabling are sent.
 
 ### If the worker is stopped while the API runs
-Nothing is lost; work waits in PostgreSQL:
+Work waits in PostgreSQL, within limits:
 - **Donations and payments** complete as usual (the API and webhooks do that).
-- **Realtime (OBS alerts, dashboard live updates)** is not published. Events stay in `realtime_outbox`. An event
-  older than its maximum age when the worker returns (10 minutes; `audio-now-playing` 30 s) is marked `expired`, not
-  sent: a stale alert is never shown late.
+- **Realtime (OBS alerts, dashboard live updates)** is not published. Events stay `pending` in `realtime_outbox`
+  until the worker returns; one older than its maximum age by then (10 minutes; `audio-now-playing` 30 s) is marked
+  `expired` and never sent, so a stale alert is never shown late, but it is also never shown. This differs from
+  realtime being **disabled** while the worker runs: then pending events are marked `skipped` at once and are not
+  kept for later delivery.
 - **Donation audio / TTS** is not generated; the jobs wait in `jobs` and run when the worker returns.
-- **Moderator notifications** wait likewise and are sent once when the worker returns.
+- **Moderator notifications** wait likewise and are sent when the worker returns (at least once: see Idempotency).
 - **Transcription** requests are queued and answered later.
 
 ### Install (later, approved; nothing here was run)
@@ -271,7 +275,7 @@ Same sequence as DEV ("Deploy a commit"): build the release; migrate; `ln -sfn` 
 to, so after a restart both run the same code; never restart one without the other after a switch.
 - **Stopping:** `systemctl stop hyperchat-prod-worker` sends SIGTERM. The worker stops claiming; running jobs get up
   to 50 s to finish, then are released (status `queued`, the interrupted attempt not counted). A claimed realtime
-  batch is released at once. Everything stays in PostgreSQL.
+  batch is released at once. Unfinished work stays in PostgreSQL (subject to the realtime expiry above).
 - **A crash or kill:** jobs and outbox rows keep their lease (jobs 3 minutes, outbox 30 s) and are
   claimed again after it expires; that counts as an attempt.
 
@@ -292,8 +296,8 @@ to, so after a restart both run the same code; never restart one without the oth
 
 ### Rollback
 - **Code:** point `current` back and `systemctl restart hyperchat-prod-api hyperchat-prod-worker` (same as the API).
-- **Stop the worker only:** `systemctl disable --now hyperchat-prod-worker`. Safe at any time (above); nothing is
-  lost, realtime alerts stop.
+- **Stop the worker only:** `systemctl disable --now hyperchat-prod-worker`. Safe at any time (above): jobs wait,
+  realtime alerts stop, and alerts older than their maximum age when it returns are expired, not shown.
 - **First install:** `systemctl disable --now hyperchat-prod-worker && rm /etc/systemd/system/hyperchat-prod-worker.service
   && systemctl daemon-reload`.
 - **An integration that misbehaves:** set its switch back to `false` in `api.env` and restart **both** units (the API
@@ -305,13 +309,17 @@ to, so after a restart both run the same code; never restart one without the oth
 - The DEV files are never edited. Record their fingerprints before and compare after, as in the production section
   above.
 
-### Idempotency
-- **Jobs:** a job is finished, retried or released only by the worker holding its lease (fenced on `locked_by`), so a
-  restart never completes a job twice.
-- **Moderator notifications:** recorded per donation and recipient (`ON CONFLICT DO NOTHING`), so a retry never
-  re-sends one that was already sent.
-- **Realtime:** delivery is at-least-once. A publish whose `published` write was lost is sent again with the same
-  `event_id`, which the overlays deduplicate.
+### Idempotency (what a restart or crash can repeat)
+- **Jobs:** a job is finished, retried or released only by the worker holding its lease (fenced on `locked_by`), so
+  its result is never recorded twice. Its external work is not exactly-once: a crash after a provider call but
+  before the result is recorded repeats the call on the next claim (e.g. a second TTS generation).
+- **Moderator notifications:** at least once, not exactly once. Deliveries are recorded per donation and recipient
+  (`ON CONFLICT DO NOTHING`, created `pending`, marked `sent` after the platform accepts the message), which
+  prevents duplicate records and never re-sends a delivery already marked `sent`. A crash after Telegram / Discord
+  accepted a message but before PostgreSQL marked it `sent` leaves it `pending`, and the retry sends it again: a
+  moderator can see a duplicate.
+- **Realtime:** at least once. A publish whose `published` write was lost is sent again with the same `event_id`,
+  which the overlays deduplicate.
 
 ## Isolation audit and the pg_hba fix (S0)
 `pg_hba.conf` in this repository listed only migrator / app / worker / readonly until S0, and `setup_cluster.sh`
