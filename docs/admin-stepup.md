@@ -314,17 +314,74 @@ compromised identity can and cannot do" above; ordinary-user account takeover (s
 ### S3: activation prerequisites (each separately approved; nothing here was run)
 Activation stays the operator's (`stepup_enforcement` changes only as `hyperchat_owner`, and 0025 refuses it while
 any active administrator has fewer than two active passkeys). Before it is even requested:
-1. 0025, 0026 and 0027 deployed and the API on the matching release, on the target environment.
+1. 0025, 0026, 0027 and 0028 deployed and the API on the matching release (with the post-S3 closure below), on the
+   target environment.
 2. The verifier installed and healthy on its own OS user, socket and role; `check_isolation.sh` all `OK`; the API's
    OS user not mapped to `hyperchat_migrator`, `hyperchat_owner` or `hyperchat_stepup`.
 3. Every active administrator has **at least two approved passkeys** (`readiness` reports ready).
 4. Operator access tested: the migrator login from root works, `app.stepup.operator list/readiness` runs, and the
    recovery path (`recover`, re-registration, `approve`) has been rehearsed with a test administrator.
-5. Rollback and lockout recovery written down and rehearsed: the operator sets the state back to `draft` (owner
-   only; immediate, no deploy), and `downgrade 0026` removes the guards entirely if ever needed.
+5. Rollback and lockout recovery rehearsed: `python -m app.stepup.operator enforcement-draft --reason … --operator …
+   --confirm-database …` (post-S3 A5; immediate, no deploy, audited); `downgrade 0026` removes the guards entirely if
+   ever needed.
 6. A full rehearsal on DEV first: activate, perform each sensitive action from the frontend with a passkey, confirm
    a write without a grant is refused, return to `draft`.
 7. The frontend's ceremony UI exists (phase 13): without it no administrator can produce a grant.
+
+## Post-S3 closure: admin assurance everywhere, admin session limits, audited rollback (migration 0028)
+
+Findings A1, A4 and A5 of the post-S3 audit (main `ff9fc2d`).
+
+### A1: one assurance rule for acting as an administrator
+`app.auth.dependencies.require_admin_assurance(request, session)` is the single rule: while enforcement is `draft`
+nothing more is needed; once it is `active` the session must hold aal2, or the answer is `403 mfa_required`. It is
+applied wherever administrator authority is used, not only under `/api/v1/admin`:
+
+| Path | How an administrator reaches it | Check |
+|---|---|---|
+| `/api/v1/admin/**` (incl. KYC admin and partner keys) | `require_admin` | `require_admin_assurance` |
+| 31 creator routes (dashboard settings, donations and CSV export, moderation, moderators, OBS tokens, replay, soundboard, transcriptions, `GET /streamers/{s}/access`) | `require_streamer_access` → `access_via() == "admin"` | `require_admin_assurance` when the access is an administrator's |
+| `POST /api/v1/realtime/pusher/auth`, dashboard channel | `RealtimeService.authorize_session` → `access_via() == "admin"` | the same rule, passed in by the route; a caller that cannot check assurance never gets an admin signature (fails closed) |
+
+- **Unchanged:** owners and linked staff (their access is not administrator authority); CSRF and Origin (checked
+  first); the passkey endpoints (`require_admin_enrolling`: enrollment and ceremonies at any assurance level);
+  `GET /me/streamers` (only the caller's own creators plus the `is_admin` flag); OBS-token routes and overlay
+  channels (a token, not a session).
+- **Tests:** `tests/stepup/test_admin_assurance_db.py` with real `active` and `draft` enforcement: an aal1
+  administrator is refused on every creator area, read and write, and on the dashboard channel; owners and linked
+  staff are not; a ceremony restores access; expired assurance removes it although the session lives on.
+
+### A4: administrator sessions
+| | Administrators | Everyone else (unchanged) |
+|---|---|---|
+| Idle | 2 hours (`HYPERCHAT_ADMIN_SESSION_IDLE_HOURS`) | 7 days |
+| Absolute | 12 hours (`HYPERCHAT_ADMIN_SESSION_ABSOLUTE_HOURS`) | 30 days |
+
+- **Where:** in the database, on every request. The session insert (password, Google, invitation acceptance) sets
+  the admin limits from the account's role; the per-request validation slides an admin's idle expiry by 2 hours,
+  never past the absolute one, and also ends an admin session 12 hours after its creation or 2 hours after its last
+  use, so sessions issued before this change are held to the limits too. The cookie's lifetime follows the
+  session's own expiry (convenience only).
+- **Assurance:** aal2 lasts at most 12 hours and never past its session (the verifier clamps it), so an admin
+  session never outlives its sign-in by more than 12 hours, and lost assurance is never regained by the session
+  alone: a new ceremony is needed (A1 makes that true on creator routes too).
+- **Conflict check:** no recorded product decision fixes administrator session lengths; 7 / 30 days are the
+  general defaults (`session_idle_days` / `session_absolute_days`) and stay so for everyone else. The admin limits
+  are the values proposed in the approved MFA plan.
+
+### A5: emergency rollback to draft
+`python -m app.stepup.operator enforcement-draft --reason TEXT --operator NAME --confirm-database DB`
+
+- **Boundary:** the operator's migration role acting as `hyperchat_owner`, as every other operator command. The
+  database function `stepup_enforcement_draft(operator, reason)` (migration 0028) refuses any other role, and no
+  API role may execute it or write the enforcement row.
+- **What it does:** locks the row, `active` → `draft` once, recorded by the existing append-only
+  `enforcement_changed` event with the operator and now the reason. Already `draft`: changes and records nothing,
+  exit 0. Missing or empty reason / operator, an over-long reason or the wrong database: exit 2, nothing changed.
+  Passkeys, grants, assurance and the audit history are untouched.
+- **Reason storage:** `stepup_enforcement.change_reason` carries the reason given with a change into that change's
+  event; the guard stores NULL afterwards, so no later change inherits it.
+- **Not here:** activation stays a separately approved step.
 
 ## Canonical actions (`app/stepup/canonical.py`)
 
@@ -375,4 +432,6 @@ Real state from the S0 audit (2026-10-17):
    - `check_isolation.sh` must print only `OK`
 5. **S2 (API endpoints) and enrollment.** Each administrator registers two passkeys; the operator approves each after verifying its fingerprint; `readiness` must report ready.
 6. **S3:** migration 0027 after 0026 (no new roles, grants or settings; inert for callers without a grant while
-   `draft`). Activation is a separate approval: "S3: activation prerequisites".
+   `draft`), then 0028 (the rollback function and the reason column; no grants). With this release administrator
+   sessions become 2 h idle / 12 h absolute, existing ones included. Activation is a separate approval:
+   "S3: activation prerequisites".

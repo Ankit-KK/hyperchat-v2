@@ -32,6 +32,12 @@ cannot do any of this.
                                    verified email equal to G); its subject is what gets linked.
                               Never read the code to anyone you have not verified; abort if the person did not
                               expect it.
+  enforcement-draft --reason TEXT --operator NAME --confirm-database DB
+                              EMERGENCY ROLLBACK (e.g. administrators locked out): MFA enforcement active -> draft.
+                              Admin routes then work without passkey assurance again; passkeys, grants and the audit
+                              history are untouched. Recorded as an enforcement_changed event with the operator and
+                              reason. Already draft: changes and records nothing (exit 0). Activation is NOT a command
+                              here: it stays a separately approved step.
 Every change is a single audited database function; exit codes: 0 done, 2 refused.
 """
 
@@ -102,6 +108,9 @@ def main(argv: list[str] | None = None, *, google: GoogleOAuth | None = None, sl
         sub.choices[name].add_argument("--reason", required=True)
     sub.choices["link-google"].add_argument("--expect-google-email", required=True,
                                             help="the Google address the verified administrator said they will use")
+    draft = sub.add_parser("enforcement-draft")
+    for flag in ("--reason", "--operator", "--confirm-database"):
+        draft.add_argument(flag, required=True)
     args = parser.parse_args(argv)
 
     with _connect() as conn:
@@ -131,6 +140,19 @@ def main(argv: list[str] | None = None, *, google: GoogleOAuth | None = None, sl
 
         if args.confirm_database != database:
             return _refuse(f"--confirm-database does not name this database ({database})")
+        if args.command == "enforcement-draft":
+            try:
+                outcome = conn.execute("SELECT public.stepup_enforcement_draft(%s, %s) AS r",
+                                       (args.operator, args.reason)).fetchone()["r"]
+            except psycopg.errors.Error as exc:
+                return _refuse(exc.diag.message_primary or exc.sqlstate or "database error")
+            if outcome == "already_draft":
+                print(f"enforcement-draft: {database} is already draft; nothing changed.")
+                return 0
+            if outcome != "ok":
+                return _refuse(outcome)
+            print(f"enforcement-draft: {database} is now draft (administrator MFA no longer enforced).")
+            return 0
         if args.command == "link-google":
             if not args.verified_by.strip():
                 return _refuse("--verified-by must say how the administrator was verified")

@@ -716,6 +716,36 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
     assert _stepup_guards() == (6, 10) and _api_role_privileges() == with_guards
 
 
+def _rollback_function() -> tuple[bool, bool]:
+    """(stepup_enforcement_draft exists, stepup_enforcement.change_reason exists)."""
+    with _owner() as conn:
+        return conn.execute("""
+            SELECT to_regprocedure('public.stepup_enforcement_draft(text, text)') IS NOT NULL,
+                   EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
+                           AND table_name = 'stepup_enforcement' AND column_name = 'change_reason')
+        """).fetchone()
+
+
+def test_0028_stepup_enforcement_rollback_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    assert _rollback_function() == (True, True)
+    with_function = _api_role_privileges()
+    assert not any("stepup_enforcement_draft" in name for _, name, _ in with_function)  # no API role may call it
+    command.downgrade(cfg, "0027")
+    try:
+        assert _rollback_function() == (False, False)
+        assert _stepup_privileges()[1] == "draft"
+        with _owner() as conn:  # 0025's guard is back: an owner change still records its event
+            conn.execute("UPDATE public.stepup_enforcement SET changed_by = 'migtest-0028'")
+            assert conn.execute("SELECT detail FROM public.stepup_events WHERE operator = 'migtest-0028' "
+                                "ORDER BY id DESC LIMIT 1").fetchone()[0] == {"from": "draft", "to": "draft"}
+    finally:
+        command.upgrade(cfg, "head")
+    assert _rollback_function() == (True, True) and _api_role_privileges() == with_function
+
+
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):
     monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
     cfg = _cfg()
