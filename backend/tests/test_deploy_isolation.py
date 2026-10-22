@@ -21,6 +21,7 @@ SVC_ROLES = {"hyperchat_app", "hyperchat_worker", "hyperchat_lifecycle", "hyperc
 UNITS = {"systemd/hyperchat-api.service": "hyperchat", "systemd/hyperchat-worker.service": "hyperchat",
          "systemd/hyperchat-cleanup.service": "hyperchat", "systemd/hyperchat-prod-api.service": "hyperchat-prod",
          "systemd/hyperchat-prod-cleanup.service": "hyperchat-prod",
+         "systemd/hyperchat-prod-worker.service": "hyperchat-prod",
          "systemd/hyperchat-stepup.service": "hyperchat-stepup",
          "systemd/hyperchat-prod-stepup.service": "hyperchat-prod-stepup"}
 # environment -> (API user, verifier user, ident map)
@@ -111,6 +112,15 @@ def test_the_verifier_environment_templates_hold_only_verifier_settings(rel):
                .splitlines() if line and not line.startswith("#"))
     assert api["HYPERCHAT_FRONTEND_URL"] in settings.origins  # passkeys are used on the frontend the API trusts
     assert (env["HYPERCHAT_DB_NAME"], env["HYPERCHAT_DB_PORT"]) == (api["HYPERCHAT_DB_NAME"], api["HYPERCHAT_DB_PORT"])
+
+
+def test_the_isolation_audit_covers_the_api_worker_and_cleanup_of_each_environment():
+    script = (DEPLOY / "check_isolation.sh").read_text()
+    units = dict(re.findall(r'UNITS="([^"]+)";\s+PGCONF=/etc/postgresql/(\S+)', script)[i][::-1] for i in range(2))
+    assert set(units["15/restoretest"].split()) == {"hyperchat-api", "hyperchat-worker", "hyperchat-cleanup"}
+    assert set(units["17/hyperchat"].split()) == {"hyperchat-prod-api", "hyperchat-prod-worker", "hyperchat-prod-cleanup"}
+    for name in units["17/hyperchat"].split():
+        assert (DEPLOY / f"systemd/{name}.service").is_file(), name
 
 
 @pytest.mark.parametrize("rel,user", UNITS.items())

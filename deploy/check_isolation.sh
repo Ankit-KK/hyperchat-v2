@@ -21,7 +21,7 @@ case "${1:-}" in
         UNITS="hyperchat-api hyperchat-worker hyperchat-cleanup"; PGCONF=/etc/postgresql/15/restoretest
         VSVC=hyperchat-stepup;      VAPP=/opt/hyperchat-stepup;      VETC=/etc/hyperchat-stepup ;;
   prod) SVC=hyperchat-prod; OTHER=hyperchat;      APP=/opt/hyperchat-prod; ETC=/etc/hyperchat-prod
-        UNITS="hyperchat-prod-api hyperchat-prod-cleanup";        PGCONF=/etc/postgresql/17/hyperchat
+        UNITS="hyperchat-prod-api hyperchat-prod-worker hyperchat-prod-cleanup"; PGCONF=/etc/postgresql/17/hyperchat
         VSVC=hyperchat-prod-stepup; VAPP=/opt/hyperchat-prod-stepup; VETC=/etc/hyperchat-prod-stepup ;;
   *) echo "usage: $0 dev|prod" >&2; exit 2 ;;
 esac

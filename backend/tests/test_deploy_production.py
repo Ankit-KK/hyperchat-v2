@@ -13,12 +13,14 @@ from app.core.config import Settings
 
 REPO = Path(__file__).resolve().parents[2]
 DEPLOY = REPO / "deploy"
-PROD_FILES = ["systemd/hyperchat-prod-api.service", "systemd/hyperchat-prod-cleanup.service",
+PROD_FILES = ["systemd/hyperchat-prod-api.service", "systemd/hyperchat-prod-worker.service",
+              "systemd/hyperchat-prod-cleanup.service",
               "systemd/hyperchat-prod-cleanup.timer", "nginx/api.hyperchat.space.conf",
               "nginx/api.hyperchat.space.acme.conf", "nginx/snippets/hyperchat-prod-public-limit-zone.conf",
               "nginx/snippets/hyperchat-prod-public-limit.conf", "postgres/pg_ident.production.conf",
               "api.env.production.example"]
-DEV_FILES = ["systemd/hyperchat-api.service", "systemd/hyperchat-cleanup.service", "systemd/hyperchat-cleanup.timer",
+DEV_FILES = ["systemd/hyperchat-api.service", "systemd/hyperchat-worker.service", "systemd/hyperchat-cleanup.service",
+             "systemd/hyperchat-cleanup.timer",
              "nginx/api.quicktestspace.site.conf", "nginx/snippets/hyperchat-public-limit-zone.conf",
              "nginx/snippets/hyperchat-public-limit.conf", "postgres/pg_ident.conf", "api.env.example"]
 
@@ -47,6 +49,7 @@ CHANGED = {"User", "Group", "WorkingDirectory", "EnvironmentFile", "ExecStart"}
 
 
 @pytest.mark.parametrize("prod,dev", [("systemd/hyperchat-prod-api.service", "systemd/hyperchat-api.service"),
+                                      ("systemd/hyperchat-prod-worker.service", "systemd/hyperchat-worker.service"),
                                       ("systemd/hyperchat-prod-cleanup.service", "systemd/hyperchat-cleanup.service")])
 def test_production_units_differ_from_dev_only_in_user_paths_env_and_port(prod, dev):
     p, d = unit(prod), unit(dev)
@@ -62,12 +65,40 @@ def test_production_units_differ_from_dev_only_in_user_paths_env_and_port(prod, 
         == d["ExecStart"]
 
 
-def test_hardening_is_kept():
-    p = unit("systemd/hyperchat-prod-api.service")
+@pytest.mark.parametrize("rel", ["systemd/hyperchat-prod-api.service", "systemd/hyperchat-prod-worker.service"])
+def test_hardening_is_kept(rel):
+    p = unit(rel)
     for key, value in {"NoNewPrivileges": "yes", "ProtectSystem": "strict", "ProtectHome": "yes", "PrivateTmp": "yes",
                        "PrivateDevices": "yes", "CapabilityBoundingSet": "", "AmbientCapabilities": "",
-                       "RestrictNamespaces": "yes", "UMask": "0077", "MemoryMax": "1G"}.items():
-        assert p[key] == value, key
+                       "RestrictNamespaces": "yes", "RestrictSUIDSGID": "yes", "ProtectKernelModules": "yes",
+                       "ProtectKernelTunables": "yes", "SystemCallArchitectures": "native", "UMask": "0077",
+                       "MemoryMax": "1G"}.items():
+        assert p[key] == value, (rel, key)
+    assert set(p["RestrictAddressFamilies"].split()) == {"AF_INET", "AF_INET6", "AF_UNIX"}, rel
+
+
+def test_production_worker_runs_the_api_release_as_the_api_user_and_listens_nowhere():
+    from app.jobs.runner import Worker
+    import inspect
+    w, api = unit("systemd/hyperchat-prod-worker.service"), unit("systemd/hyperchat-prod-api.service")
+    assert w["ExecStart"] == "/opt/hyperchat-prod/current/venv/bin/python -m app.worker"
+    # the same release (current), environment file, OS user and working directory as the production API
+    for key in ("User", "Group", "WorkingDirectory", "EnvironmentFile"):
+        assert w[key] == api[key], key
+    assert w["User"] not in ("root", "hyperchat", "hyperchat-prod-stepup")
+    assert w["ExecStart"].split()[0].startswith("/opt/hyperchat-prod/current/venv/")
+    assert api["ExecStart"].split()[0].startswith("/opt/hyperchat-prod/current/venv/")
+    # no port, no socket activation, no extra privileges
+    text = _directives("systemd/hyperchat-prod-worker.service")
+    for forbidden in ("--port", "--host", "ListenStream", "Sockets=", "CAP_", "User=root", "PermissionsStartOnly",
+                      "stepup", "migrator", "ExecStartPre=+", "ExecStart=+", "ExecStart=!"):
+        assert forbidden not in text, forbidden
+    # graceful stop: running jobs get the runner's grace period before systemd kills the process
+    grace = inspect.signature(Worker.__init__).parameters["shutdown_grace"].default
+    assert w["KillSignal"] == "SIGTERM" and int(w["TimeoutStopSec"]) > grace
+    assert (w["Restart"], w["RestartSec"]) == ("always", "3")
+    assert (DEPLOY / "systemd/hyperchat-prod-worker.service").read_text().count("[Install]") == 1
+    assert "WantedBy=multi-user.target" in read("systemd/hyperchat-prod-worker.service")
 
 
 def test_ports_and_workers():
@@ -206,7 +237,10 @@ def test_production_env_template_values():
         "HYPERCHAT_ALLOWED_ORIGINS": "", "HYPERCHAT_SESSION_COOKIE_SAMESITE": "lax", "HYPERCHAT_SESSION_IDLE_DAYS": "7",
         "HYPERCHAT_SESSION_ABSOLUTE_DAYS": "30", "HYPERCHAT_ADMIN_SESSION_IDLE_HOURS": "2",
         "HYPERCHAT_ADMIN_SESSION_ABSOLUTE_HOURS": "12", "HYPERCHAT_AUTH_RETURN_INVITE_LINKS": "false",
-        "HYPERCHAT_EMAIL_BACKEND": "disabled", "HYPERCHAT_EMAIL_FROM": "HyperChat <no-reply@hyperchat.space>"}
+        "HYPERCHAT_EMAIL_BACKEND": "disabled", "HYPERCHAT_EMAIL_FROM": "HyperChat <no-reply@hyperchat.space>",
+        # the worker (hyperchat-prod-worker.service): every integration explicitly off until approved
+        "HYPERCHAT_WORKER_CONCURRENCY": "2", "HYPERCHAT_AUDIO_PROVIDERS_ENABLED": "false",
+        "HYPERCHAT_REALTIME_ENABLED": "false", "HYPERCHAT_BOTS_ENABLED": "false"}
 
 
 def test_production_env_template_passes_the_production_guards(monkeypatch):
@@ -217,6 +251,27 @@ def test_production_env_template_passes_the_production_guards(monkeypatch):
     assert s.app_env == "production" and s.db_name == "hyperchat" and s.db_port == 5432
     assert s.session_cookie_samesite == "lax" and s.browser_origins == frozenset({"https://hyperchat.space"})
     assert s.auth_secret is None and s.google_enabled is False and s.resend_api_key is None
+    # the worker's integrations: all off, nothing configured, until set on the server with approval
+    assert s.worker_concurrency == 2 and s.audio_providers_enabled is False and s.realtime_enabled is False
+    assert s.bots_enabled is False and not s.telegram_configured and not s.discord_configured
+    assert s.audio_provider_names() == [] and not s.pusher_groups_configured
+    assert s.r2_public_base is None and s.tts_moderation_hash_key is None
+    assert s.db_user == "hyperchat_app"  # the worker's role: the API's DML-only role, never migrator / owner / stepup
+
+
+def test_every_worker_setting_in_the_production_template_is_a_real_setting():
+    """No invented keys: every HYPERCHAT_ key named in the template, set or commented, is a Settings field."""
+    fields = {name.upper() for name in Settings.model_fields}
+    named = set(re.findall(r"(?m)^#?\s*HYPERCHAT_([A-Z0-9_]+)=", read("api.env.production.example")))
+    assert named and named <= fields, sorted(named - fields)
+    for key in ("WORKER_CONCURRENCY", "AUDIO_PROVIDERS_ENABLED", "MINIMAX_API_KEY", "ELEVENLABS_API_KEY",
+                "SARVAM_API_KEY", "TTS_MODERATION_HASH_KEY", "REALTIME_ENABLED", "PUSHER_APP_ID_1", "PUSHER_KEY_1",
+                "PUSHER_SECRET_1", "PUSHER_CLUSTER_1", "REALTIME_PUBLISH_RATE", "R2_ACCOUNT_ID", "R2_BUCKET",
+                "R2_PUBLIC_BASE_URL", "BOTS_ENABLED", "TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET",
+                "DISCORD_BOT_TOKEN", "DISCORD_PUBLIC_KEY", "DISCORD_APPLICATION_ID"):
+        assert key in named, key
+    # the allow-lists are DEV-only (ignored in production): not offered in the production template
+    assert not {"BOT_RECIPIENT_ALLOWLIST", "BOT_CREATOR_ALLOWLIST"} & named
 
 
 SECRET_KEYS = ("SECRET", "PASSWORD", "API_KEY", "CLIENT_ID", "TOKEN")
