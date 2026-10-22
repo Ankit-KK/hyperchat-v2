@@ -232,6 +232,13 @@ def upgrade() -> None:
                 END IF;
                 RETURN NEW;
             END IF;
+            IF NEW.invite_id IS DISTINCT FROM OLD.invite_id AND NOT EXISTS (  -- only to its invitation issued now
+                    SELECT 1 FROM public.user_invites i WHERE i.id = NEW.invite_id AND i.signup_id = NEW.id
+                      AND i.created_at = now())
+               AND NOT (NEW.invite_id IS NULL AND NOT EXISTS (  -- or cleared because that invitation was deleted
+                    SELECT 1 FROM public.user_invites i WHERE i.id = OLD.invite_id)) THEN  -- (FK ON DELETE SET NULL)
+                RAISE EXCEPTION 'an application points only at the invitation issued for it' {REFUSE};
+            END IF;
             IF OLD.review_status = 'approved' THEN  -- final: its creator and address are what invitations rely on
                 IF (NEW.review_status, NEW.streamer_id, NEW.email) IS DISTINCT FROM
                    (OLD.review_status, OLD.streamer_id, OLD.email) THEN
@@ -264,7 +271,9 @@ def upgrade() -> None:
                    OR (NEW.accepted_at IS DISTINCT FROM OLD.accepted_at  -- accepted now, only while it is open
                        AND (NEW.accepted_at <> now() OR OLD.revoked_at IS NOT NULL OR OLD.expires_at <= now()))
                    OR (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at AND NEW.revoked_at <> now())
-                   OR (NEW.accepted_user_id IS DISTINCT FROM OLD.accepted_user_id AND NEW.accepted_at IS NULL) THEN
+                   OR (NEW.accepted_user_id IS DISTINCT FROM OLD.accepted_user_id  -- in the acceptance's own
+                       AND (NEW.accepted_at IS DISTINCT FROM now() OR NOT EXISTS (  -- transaction, to its address
+                            SELECT 1 FROM public.users u WHERE u.id = NEW.accepted_user_id AND u.email = NEW.email))) THEN
                     RAISE EXCEPTION 'an invitation is only accepted (while open) or revoked, once' {REFUSE};
                 END IF;
                 -- Accepting needs the invitation's own token (AuthRepository.accept_invite presents it for this

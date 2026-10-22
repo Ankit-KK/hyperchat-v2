@@ -245,7 +245,10 @@ cover):
   approved or linked to a creator or invitation;
 - changing an invitation in any way except accepting it (now, once, only while unrevoked and unexpired, with the
   accepting account, by `hyperchat_auth`, **with the invitation's own token**) or revoking it (now, once); inserting
-  an invitation that is already accepted or revoked;
+  an invitation that is already accepted or revoked; recording who accepted it (`accepted_user_id`) anywhere but in
+  the acceptance's own transaction, or for an account without the invitation's address;
+- pointing an application's `invite_id` anywhere but at an invitation issued for it in the same transaction
+  (clearing it is allowed only when that invitation was deleted: the cleanup's `ON DELETE SET NULL`);
 - changing a partner key except recording its use or revoking it (no new hash, partner, or un-revoking);
 - inserting an account with role admin or a creator link, except through the two internal paths below.
 

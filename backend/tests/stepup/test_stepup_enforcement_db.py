@@ -473,6 +473,52 @@ def test_no_sensitive_state_is_written_around_its_anchor(mode):
         conn.execute("UPDATE public.partner_api_keys SET revoked = true WHERE id = %s", (live,))
 
 
+def test_an_acceptance_and_an_applications_invitation_are_never_rewritten_later(mode):
+    """Final review of PR #76: an invitation accepted (with its token) but with accepted_user_id still NULL, and an
+    approved application's invite_id, must not be pointed elsewhere in a later transaction."""
+    sid = make_streamer("authtest-s3-late")
+    token, stranger = secrets.token_hex(32), make_user("s3-late-stranger" + DOMAIN, role="user")
+    with fixture_db() as conn:
+        inv = conn.execute("INSERT INTO public.user_invites (email, role, streamer_id, token_hash, expires_at) VALUES "
+                           "(%s, 'streamer', %s, %s, now() + interval '1 day') RETURNING id::text",
+                           ("s3-late" + DOMAIN, sid, sha256_hex(token))).fetchone()[0]
+    with refused_tx("hyperchat_auth") as conn:  # even in the acceptance's own transaction: only its address's account
+        conn.execute("SELECT set_config('hyperchat.invite_token', %s, true)", (token,))
+        conn.execute("UPDATE public.user_invites SET accepted_at = now() WHERE id = %s", (inv,))
+        conn.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s", (stranger, inv))
+    with db("hyperchat_auth") as conn, conn.transaction():  # accepted legitimately, accepted_user_id left NULL
+        conn.execute("SELECT set_config('hyperchat.invite_token', %s, true)", (token,))
+        conn.execute("UPDATE public.user_invites SET accepted_at = now() WHERE id = %s", (inv,))
+    holder = make_user("s3-late" + DOMAIN, role="user")  # the invitation's own address, created afterwards
+    with refused_tx("hyperchat_auth") as conn:  # later: not even to the account with its address
+        conn.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s", (holder, inv))
+    with refused_tx("hyperchat_auth") as conn:  # later, without the token: never attributed to an unrelated account
+        conn.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s", (stranger, inv))
+    with refused_tx("hyperchat_auth") as conn:  # not even with the token, after its acceptance transaction
+        conn.execute("SELECT set_config('hyperchat.invite_token', %s, true)", (token,))
+        conn.execute("UPDATE public.user_invites SET accepted_user_id = %s WHERE id = %s", (stranger, inv))
+    with fixture_db() as conn:
+        assert conn.execute("SELECT accepted_user_id FROM public.user_invites WHERE id = %s", (inv,)).fetchone()[0] is None
+    # An approved application's invitation pointer moves only to an invitation issued for it, now.
+    app = signup("s3-late-app")
+    issue = ("INSERT INTO public.user_invites (email, role, streamer_id, token_hash, expires_at, signup_id) "
+             "VALUES (%s, 'streamer', %s, %s, now() + interval '1 day', %s) RETURNING id::text")
+    with fixture_db() as conn:
+        cid = conn.execute(NEW_CREATOR, ("authtest-s3-late-app", "Late")).fetchone()[0]
+        conn.execute("UPDATE public.user_signups SET review_status = 'approved', streamer_id = %s WHERE id = %s",
+                     (cid, app))
+        old = conn.execute(issue, ("s3-late-app" + DOMAIN, cid, key_hash(), app)).fetchone()[0]
+    with fixture_db() as conn:  # a later reissue: the application points at the current invitation
+        current = conn.execute(issue, ("s3-late-app" + DOMAIN, cid, key_hash(), app)).fetchone()[0]
+        conn.execute("UPDATE public.user_signups SET invite_id = %s WHERE id = %s", (current, app))
+    for target in (inv, old, None):  # an unrelated invitation, its own older one, or nothing (while it exists)
+        with refused_tx("hyperchat_app") as conn:
+            conn.execute("UPDATE public.user_signups SET invite_id = %s WHERE id = %s", (target, app))
+    with db() as conn:  # deleting the invitation (maintenance cleanup) still clears the pointer
+        conn.execute("DELETE FROM public.user_invites WHERE id = %s", (current,))
+        assert conn.execute("SELECT invite_id FROM public.user_signups WHERE id = %s", (app,)).fetchone()[0] is None
+
+
 # ── the guards' own surface ─────────────────────────────────────────────────────
 
 def test_no_api_role_can_call_the_guards_and_every_guard_pins_its_search_path():
