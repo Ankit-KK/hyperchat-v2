@@ -14,7 +14,7 @@ pytestmark = requires_db
 def _seed() -> dict[str, list[str]]:
     """One expired and one live row per table; returns {table: [expired_marker, live_marker]}."""
     uid = make_user("cleanup" + DOMAIN)
-    with db() as conn:
+    with fixture_db() as conn:  # historical rows (e.g. invitations accepted long ago): no API role writes those
         def ins(sql, *params):
             return conn.execute(sql, params).fetchone()[0]
 

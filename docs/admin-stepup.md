@@ -1,13 +1,16 @@
-# Administrator step-up authentication (passkeys): S1 and S2
+# Administrator step-up authentication (passkeys): S1, S2 and S3
 
 S1 is the foundation of administrator MFA (approved design: WebAuthn only, a separate verifier, operator-approved
 passkeys, single-use action-bound grants). S2 connects the API to it (endpoints, action-bound grants on the sensitive
-admin routes, no Google auto-linking for administrators).
+admin routes, no Google auto-linking for administrators). S3 (migration 0027) makes PostgreSQL itself require the
+grant on every sensitive administrator write, whatever code issues it.
 
-**Still not enforced:**
-- The enforcement state is `draft`.
-- No database write *requires* a grant: that is S3.
-- Nothing here is deployed.
+**Status:**
+- **Code ready** (S3 merged): the guards exist and are tested; nothing changes for a caller without a grant while
+  the state is `draft`.
+- **Not deployed:** no environment has 0025, 0026 or 0027.
+- **Not activated:** the enforcement state is `draft` everywhere. Activation is a separate, explicitly approved
+  operator step (see "S3: activation prerequisites"); this document gives no command for it.
 
 ## The trust boundary
 
@@ -52,7 +55,7 @@ browser (frontend origin) ──▶ API  (OS user hyperchat; roles app / auth / 
 **Honest limits of S1.**
 - The frontend origin is part of the trusted base. A script injected there could show a misleading action, so S2 and the frontend phase need a strict CSP and a separate admin origin.
 - A compromised API process can still read whatever its roles read, act as any non-admin user, and use the third-party keys in `api.env`.
-- Nothing is enforced until S2 and S3.
+- Nothing is enforced until the operator activates it (S3 provides the database guards).
 
 ## One grant, one action (the interface S3 enforces)
 
@@ -97,17 +100,22 @@ The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
 - **Fail closed:** with no verifier (setting unset, socket down), no registration, assurance or grant is possible: those endpoints answer 503. Admin access is unchanged while enforcement is `draft`.
 
 ### Routes bound to actions (`app/stepup/actions.py`, `ROUTES`)
-| Route | Action | Target | Params (exactly as sent) |
+S3 changed the parameters: they are now **exactly what the database reads back from the row it writes**, normalized
+as stored (UUIDs lowercase and hyphenated, addresses trimmed and lowercased, the creator fields as
+`AdminService.creator_fields` stores them). The frontend never has to guess: the route's `403 step_up_required`
+answer carries the exact `{action, target, params}` to approve.
+
+| Route | Action | Target | Params (as the database derives them) |
 |---|---|---|---|
-| `POST /api/v1/admin/creators/{id}/activate` | `creator.activate` | `creator:{id}` | `{expected_status, reason}` |
-| `POST /api/v1/admin/creators/{id}/reactivate` | `creator.reactivate` | `creator:{id}` | `{expected_status, reason}` |
-| `POST /api/v1/admin/creators` | `creator.create` | `creator:new` | the full body |
+| `POST /api/v1/admin/creators/{id}/activate` | `creator.activate` | `creator:{id}` | `{expected_status}` |
+| `POST /api/v1/admin/creators/{id}/reactivate` | `creator.reactivate` | `creator:{id}` | `{expected_status}` |
+| `POST /api/v1/admin/creators` | `creator.create` | `creator:new` | `{slug, name, razorpay_account}` |
 | `POST /api/v1/admin/creators/{id}/owner` | `creator.owner.assign` | `creator:{id}` | `{user_id}` |
 | `POST /api/v1/admin/creators/{id}/owner/transfer` | `creator.owner.transfer` | `creator:{id}` | `{user_id, expected_owner_id}` |
-| `POST /api/v1/admin/applications/{id}/approve` | `application.approve` | `application:{id}` | the full body |
-| `POST /api/v1/admin/applications/{id}/invite` | `application.invite` | `application:{id}` | `{}` |
-| `POST /api/v1/auth/invites` **with `role: admin`** | `admin.invite` | `invite` | `{email, role, streamer_id}` |
-| `PATCH /api/v1/admin/users/{id}` | `admin.user.change` | `user:{id}` | exactly the fields sent |
+| `POST /api/v1/admin/applications/{id}/approve` | `application.approve` | `application:{id}` | `{slug, name, razorpay_account}` |
+| `POST /api/v1/admin/applications/{id}/invite` | `application.invite` | `application:{id}` | `{}` (the application's own address and creator: the database checks both) |
+| `POST /api/v1/auth/invites` **with `role: admin` or a `streamer_id`** | `admin.invite` | `invite` | `{email, role, streamer_id}` |
+| `PATCH /api/v1/admin/users/{id}` | `admin.user.change` | `user:{id}` | the account's **resulting** `{role, is_active, streamer_id}` |
 | `PUT /api/v1/admin/users/{id}/email` | `admin.user.email` | `user:{id}` | `{email}` |
 | `POST /api/v1/admin/partner-keys` | `partner_key.create` | `partner_key` | `{partner_slug}` |
 
@@ -116,8 +124,9 @@ The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
   - defensive actions: suspend, restrict, revoke grace, revoke sessions, revoke a partner key
   - reads
   - soundboard eligibility
-  - ordinary (non-admin) invitations
-- **Params come from the request body as the browser sent it, before the service normalizes anything.** The frontend therefore asks for a ceremony with the same body it will send. A grant never authorizes "this action in general": its parameter hash binds the exact values.
+  - ordinary invitations (no admin role, no creator link)
+- **Not bound (cosmetic, set at creation):** a new creator's `brand_color` and `order_prefix`. A grant never
+  authorizes "this action in general": its parameter hash binds the values above.
 
 ### Transaction boundaries
 - **The consumption is inside the operation's transaction.** Each bound route's repository method calls `public.stepup_consume(grant, admin, session, action, target, params_hash)` **first inside the same transaction as the operation**, on the role that performs it:
@@ -130,10 +139,9 @@ The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
 - **A refused operation** (a stale compare-and-set, a claimed creator, an unknown user, nothing changed, an exception) rolls the **consumption** back too (`psycopg.Rollback`). A grant is spent only by the operation it approved, and stays usable for a retry within its 2 minutes.
 - **Concurrency:** two requests with one grant serialize on the grant's row, and exactly one succeeds.
 
-### Temporary compatibility (until S3; documented, no new privilege)
-- **`draft`:** a bound route without `X-Step-Up-Grant` still works, so existing admins are not locked out before enrolling. With a grant it is consumed and must be valid (fail closed).
-- **`active`** (only by the operator, after S3 and its approval): `require_admin` needs aal2 (passkey endpoints excepted), and a bound route without a grant answers `step_up_required`.
-- **What this rests on:** both behaviours are API checks. A process that skips them is stopped only by S3's database guards (`stepup_claim` and `stepup_effect` on each anchor write). **S2 does not claim those guards are active.**
+### Compatibility while `draft`
+- **`draft`:** a bound route without `X-Step-Up-Grant` still works, so existing admins are not locked out before enrolling. With a grant it is consumed and must be valid (fail closed): since S3 the database also refuses the write when the presented grant does not match it.
+- **`active`** (only by the operator, after its separate approval): `require_admin` needs aal2 (passkey endpoints excepted), a bound route without a grant answers `step_up_required`, and **the database refuses the write itself** without a matching grant (S3), whatever the caller.
 
 ### Google sign-in for administrators
 - **Never by email:** a Google account whose (even verified) email matches an administrator **no longer links or signs in**, at three layers:
@@ -183,6 +191,141 @@ The tests are in `tests/stepup/test_stepup_db.py` ("S3's interface").
 - **No new roles or grants.** The API's existing unit can connect to the socket: AF_UNIX is allowed, and a read-only `/run` does not block connecting to a socket.
 - **PostgreSQL 15:** 0026 uses only a row trigger, `FOR SHARE` and `pg_catalog` functions (PostgreSQL 11+). The same postgres:15 CI job proposed for 0025 would cover it.
 
+## S3: database enforcement (migration 0027)
+
+### How a guard decides
+- **Who is guarded.** A guard fires when the **login** role (`session_user`) is one the API connects as:
+  `hyperchat_app`, `hyperchat_worker`, `hyperchat_auth`, `hyperchat_lifecycle` or `hyperchat_stepup`. Keying on the
+  login role, not `current_user`, means a SECURITY DEFINER function those roles call (`kyc_change_creator_status`)
+  is guarded too, and so are writes from foreign-key cascades and other triggers in their transactions.
+- **Anchor** (`stepup_authorize(action, target, params, anchor)`): the target and the parameters are derived **from
+  the row being written**, the hash is computed in SQL (`stepup_params_hash`: byte for byte the API's canonical JSON,
+  tested against the shared vectors), and exactly one grant **consumed in this transaction** for exactly that action,
+  target and hash is claimed (`stepup_claim`). The administrator and session are the grant's: `stepup_consume`
+  accepted it only for the API's authenticated administrator and session, so nothing the caller passes to the guard
+  names them.
+  - none, enforcement `active`: refused;
+  - none, `draft`, but this transaction consumed **any** grant, claimed by its own anchor or not: refused. A
+    presented grant authorizes its own write and never lets a second sensitive write through the legacy path
+    (review of PR #76; `test_a_claimed_grant_never_carries_a_second_sensitive_write`, draft and active);
+  - none, `draft`, no grant presented at all: allowed (the legacy path). A consumption rolled back with its
+    savepoint left no trace, so it counts as not presented.
+- **Effect** (`stepup_effect_or_legacy(action, target, params, effect)`): needs the grant that action claimed in
+  this transaction **for exactly these parameters**; each named effect once per grant (`stepup_effect`). Its legacy
+  path has the same rule: only in `draft`, only when no grant was presented.
+- **Fail closed.** No branch allows a write because data is missing: an unreadable enforcement state, a missing
+  creator row or a malformed parameter all end in the refusing branches. A failed, refused or no-op operation rolls
+  its transaction (or savepoint) back, and the consumption and claim with it: the grant is not spent.
+
+### Inventory and guard matrix
+Every write path to the tables below was traced (repositories, services, definer functions, triggers, cascades).
+
+| Sensitive write | Path (role) | Anchor / effect | Action, target, params derived from the row |
+|---|---|---|---|
+| `streamers.status` pending → active | `kyc_change_creator_status` (definer, `hyperchat_lifecycle`) | anchor `streamers.status` | `creator.activate`, `creator:<id>`, `{expected_status: OLD.status}` |
+| `streamers.status` suspended → active | same | anchor `streamers.status` | `creator.reactivate`, same |
+| `streamers.user_id` NULL → u | `AdminRepository.assign_owner` (`app`) | anchor `streamers.user_id` | `creator.owner.assign`, `creator:<id>`, `{user_id}` |
+| `streamers.user_id` u → v | `AdminRepository.transfer_owner` (`app`) | anchor `streamers.user_id` | `creator.owner.transfer`, `creator:<id>`, `{user_id, expected_owner_id: OLD.user_id}` |
+| old owner's `users.streamer_id` → NULL | same transaction | effect `old_owner_unlinked` | only the account the claimed transfer names as previous owner |
+| `INSERT streamers` | `AdminRepository.create_creator` (`app`) | anchor `streamers.insert` (checked at commit) | `creator.create`, `creator:new`, `{slug, name, razorpay_account}` |
+| `INSERT streamers` for an approval | `ApplicationRepository.approve` (`app`) | effect `creator_created` (checked at commit) | of the approval that references it |
+| `user_signups.review_status` → approved | same | anchor `user_signups.review_status` | `application.approve`, `application:<id>`, `{slug, name, razorpay_account}` of the referenced creator, which must have been created in this transaction and be unclaimed |
+| `INSERT user_invites` with `signup_id` | `ApplicationRepository.issue_invite` (`app`) | anchor `user_invites.insert` | `application.invite`, `application:<signup>`, `{}`; the row must carry the approved application's own address and creator, role `streamer` |
+| `INSERT user_invites` role admin or with `streamer_id` | `AuthRepository.create_invite` (`auth`) | anchor `user_invites.insert` | `admin.invite`, `invite`, `{email (lowercase), role, streamer_id}` |
+| `users.role` / `is_active` / `streamer_id` | `AdminRepository.update_user` (`auth`); `transfer_owner` (`app`) | anchor `users.privileges` | `admin.user.change`, `user:<id>`, the resulting `{role, is_active, streamer_id}` |
+| `users.email` | `AdminRepository.change_email` (`auth`) | anchor `users.email` | `admin.user.email`, `user:<id>`, `{email (lowercase)}` |
+| `INSERT partner_api_keys` | `PartnerRepository.create_key` (`app`) | anchor `partner_api_keys` | `partner_key.create`, `partner_key`, `{partner_slug}` |
+
+**Closed outright for every API role** (no grant makes them possible; `hyperchat_auth` included, which 0024 did not
+cover):
+- removing a creator's owner (`streamers.user_id` → NULL, also through the `ON DELETE SET NULL` cascade of deleting
+  the owner's account);
+- changing `streamers.created_at` (an approval relies on it);
+- changing an approved application's status, address or creator, or inserting an application that is already
+  approved or linked to a creator or invitation;
+- changing an invitation in any way except accepting it (now, once, only while unrevoked and unexpired, with the
+  accepting account, by `hyperchat_auth`, **with the invitation's own token**) or revoking it (now, once); inserting
+  an invitation that is already accepted or revoked; recording who accepted it (`accepted_user_id`) anywhere but in
+  the acceptance's own transaction, or for an account without the invitation's address;
+- pointing an application's `invite_id` anywhere but at an invitation issued for it in the same transaction
+  (clearing it is allowed only when that invitation was deleted: the cleanup's `ON DELETE SET NULL`);
+- changing a partner key except recording its use or revoking it (no new hash, partner, or un-revoking);
+- inserting an account with role admin or a creator link, except through the two internal paths below.
+
+**Internal paths (no administrator action; authorized by what they carry):**
+- **Invitation acceptance** (`hyperchat_auth`, `AuthRepository.accept_invite`): the account an invitation accepted
+  **in this transaction** creates or upgrades (same address, role and creator; never to admin by update), and the
+  unclaimed creator an application invitation accepted in this transaction claims for that account. The
+  invitation's issue was the guarded anchor; its token is the user's authorization, and the database checks it:
+  `accept_invite` presents the raw token for its transaction only (`set_config('hyperchat.invite_token', …, true)`)
+  and the guard accepts the invitation only when its SHA-256 equals `token_hash`. A database role alone (an
+  injection, a leaked connection) never sees a token, so it cannot fabricate the acceptance these exceptions trust.
+  The token is a bound parameter; keep PostgreSQL statement logging off (the default) so it never reaches server
+  logs.
+- **Bootstrap** (`hyperchat_auth`, `AdminRepository.bootstrap_admin`): an admin row only while no active
+  administrator can sign in (as 0024).
+
+**Not guarded, by design** (no new authority): suspension, KYC restrictions, grace revocation, session revocation,
+partner-key revocation, rejecting or reopening an application, notes, `user_signups.invite_id` bookkeeping,
+ordinary invitations, the creator dashboard's own settings (`WRITABLE_SETTINGS` excludes owner, status and
+account columns), soundboard eligibility, the Razorpay account column (only `primary` is allowed by 0018 and the
+lifecycle function compare-and-sets it at activation). Payouts and wallet are out of scope.
+
+### Privileged exceptions (the trusted boundary)
+- **The operator** (logged in as `hyperchat_migrator`, acting as `hyperchat_owner`): migrations, the legacy import,
+  `app.stepup.operator`, `app.kyc.operator` and test fixtures. Not guarded: whoever holds it can already change the
+  guards themselves. It must stay out of reach of every API process (S0's `pg_ident` and file-ownership checks).
+- **Root on the server**: everything (host hardening).
+- No other exception exists: there is no permissive fallback when the verifier, a grant or the enforcement state is
+  unavailable.
+
+### Role and privilege changes
+- None granted. Every new function (`stepup_canonical_json`, `stepup_params_hash`, `stepup_authorize`,
+  `stepup_effect_or_legacy`, the six guard functions) is owned by `hyperchat_owner`, SECURITY DEFINER where it
+  must call the owner-only `stepup_claim`/`stepup_effect`, pins `search_path = pg_catalog, public, pg_temp`, and
+  has EXECUTE revoked from PUBLIC and every runtime role (tested). 0027 neither grants nor restores any table or
+  function privilege revoked by 0024–0026 (the migration test compares every runtime privilege before and after).
+- Guard triggers are named `aac_…` so they run after 0024's `aaa_…` and 0026's `aab_…` guards.
+
+### What a compromised API role can no longer do (tests: `tests/stepup/test_stepup_enforcement_db.py`)
+With enforcement `active`, connecting as the API's own roles and issuing the SQL directly (no grant): every row of
+the matrix above is refused, including through the lifecycle definer function. A grant from a real ceremony
+authorizes exactly its own write, once, in its own transaction: not a second write, not another action, target,
+parameter set, administrator or session, not in a later transaction, not twice under concurrency; a rolled-back
+savepoint returns the claim and a rolled-back consumption returns the grant. `test_mfa_api.py` drives every route
+end to end with real `active` enforcement and deliberately un-normalized input.
+
+**Still possible for a compromised API process** (unchanged by S3): waiting for a genuine ceremony and then
+performing exactly what it approved (the administrator saw and signed that action); everything in "What each
+compromised identity can and cannot do" above; ordinary-user account takeover (stage 3); and, as before,
+`kyc_change_creator_status`'s `p_actor` is recorded as given (the grant, not `p_actor`, is the authority).
+
+### Limits
+- A compromised API **process** (not just a database role) sees invitation tokens when it issues them and could
+  accept those; every such invitation was issued through a guarded anchor an administrator approved.
+- Guards cannot be switched off by the API roles: `session_replication_role` and `ALTER TABLE … DISABLE TRIGGER`
+  need superuser or ownership; `SET CONSTRAINTS … IMMEDIATE` only runs the deferred creator check earlier.
+- The first activation (`creator.activate`) is covered by the same guard branch as reactivation and by the
+  DB tests, but the end-to-end API test drives reactivation (first activation needs a KYC-approved owner fixture).
+- Verified on PostgreSQL 16 locally and 17 in CI. **PostgreSQL 15 (DEV) is not tested**: 0027 uses only PL/pgSQL
+  row and deferred constraint triggers, `jsonb`, `to_json`, pgcrypto `digest` and `pg_current_xact_id_if_assigned`
+  (PostgreSQL 13+); the postgres:15 CI job proposed for 0025 would cover it.
+
+### S3: activation prerequisites (each separately approved; nothing here was run)
+Activation stays the operator's (`stepup_enforcement` changes only as `hyperchat_owner`, and 0025 refuses it while
+any active administrator has fewer than two active passkeys). Before it is even requested:
+1. 0025, 0026 and 0027 deployed and the API on the matching release, on the target environment.
+2. The verifier installed and healthy on its own OS user, socket and role; `check_isolation.sh` all `OK`; the API's
+   OS user not mapped to `hyperchat_migrator`, `hyperchat_owner` or `hyperchat_stepup`.
+3. Every active administrator has **at least two approved passkeys** (`readiness` reports ready).
+4. Operator access tested: the migrator login from root works, `app.stepup.operator list/readiness` runs, and the
+   recovery path (`recover`, re-registration, `approve`) has been rehearsed with a test administrator.
+5. Rollback and lockout recovery written down and rehearsed: the operator sets the state back to `draft` (owner
+   only; immediate, no deploy), and `downgrade 0026` removes the guards entirely if ever needed.
+6. A full rehearsal on DEV first: activate, perform each sensitive action from the frontend with a passkey, confirm
+   a write without a grant is refused, return to `draft`.
+7. The frontend's ceremony UI exists (phase 13): without it no administrator can produce a grant.
+
 ## Canonical actions (`app/stepup/canonical.py`)
 
 `challenge = SHA-256("hyperchat-stepup-v1\n" ‖ canonical JSON)`, where the canonical JSON object is:
@@ -231,4 +374,5 @@ Real state from the S0 audit (2026-10-17):
    - units from `deploy/systemd/hyperchat[-prod]-stepup.{socket,service}`; `systemctl enable --now` the **socket**
    - `check_isolation.sh` must print only `OK`
 5. **S2 (API endpoints) and enrollment.** Each administrator registers two passkeys; the operator approves each after verifying its fingerprint; `readiness` must report ready.
-6. **S3** (database enforcement) and its activation, separately authorized.
+6. **S3:** migration 0027 after 0026 (no new roles, grants or settings; inert for callers without a grant while
+   `draft`). Activation is a separate approval: "S3: activation prerequisites".

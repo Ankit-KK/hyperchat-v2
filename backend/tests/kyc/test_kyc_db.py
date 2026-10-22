@@ -772,7 +772,8 @@ def test_the_runtime_role_cannot_forge_an_approval_or_erase_history(kyc):
         with pytest.raises(psycopg.errors.FeatureNotSupported), conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             conn.execute("SELECT public.kyc_create_session(%s, gen_random_uuid(), %s, 1, 'sandbox')", (uid, WF))
-        with pytest.raises(psycopg.errors.ForeignKeyViolation):  # KYC history keeps its user
+        with pytest.raises((psycopg.errors.ForeignKeyViolation,  # KYC history keeps its user (and a creator
+                            psycopg.errors.InsufficientPrivilege)):  # its owner: migration 0027)
             conn.execute("DELETE FROM public.users WHERE id = %s", (uid,))
     assert not approved(uid) and session_row(sid)[0] == "Not Started"
     # The genuine path still works, and a captured delivery replayed through the function is a duplicate.

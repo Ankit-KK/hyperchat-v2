@@ -138,6 +138,11 @@ def key_grant(b, headers, auth, slug: str) -> str:
     return ceremony(b, headers, auth, "partner_key.create", "partner_key", {"partner_slug": slug})["grant_id"]
 
 
+def resulting(role: str, is_active: bool = True, streamer_id: str | None = None) -> dict:
+    """admin.user.change parameters (S3): the account's privileges after the change."""
+    return {"role": role, "is_active": is_active, "streamer_id": streamer_id}
+
+
 def consumed(grant_id: str) -> bool:
     with fixture_db() as conn:
         return conn.execute("SELECT consumed_at IS NOT NULL FROM public.stepup_grants WHERE id = %s",
@@ -264,7 +269,7 @@ def test_a_grant_for_one_action_does_not_authorize_another(api):
     b, headers = admin_browser(api, "mfa-other-action")
     auth = enroll(api, b, headers, "mfa-other-action" + DOMAIN)
     uid = make_user("mfa-other-target" + DOMAIN, role="user")
-    grant = ceremony(b, headers, auth, "admin.user.change", f"user:{uid}", {"role": "streamer"})["grant_id"]
+    grant = ceremony(b, headers, auth, "admin.user.change", f"user:{uid}", resulting("streamer"))["grant_id"]
     r = b.post(KEYS, headers={**headers, "x-step-up-grant": grant}, json={"partner_slug": "authtest-mfa-x"})
     assert (r.status_code, r.json()["detail"]) == (403, "mismatch")  # another action (partner key)
     r = b.patch(f"/api/v1/admin/users/{uid}", headers={**headers, "x-step-up-grant": grant}, json={"role": "user"})
@@ -281,7 +286,8 @@ def test_a_refused_operation_never_spends_its_grant(api):
     auth = enroll(api, b, headers, "mfa-refused" + DOMAIN)
     sid = make_streamer("authtest-mfa-refused")  # active
     body = {"expected_status": "suspended", "reason": None}
-    grant = ceremony(b, headers, auth, "creator.reactivate", f"creator:{sid}", body)["grant_id"]
+    grant = ceremony(b, headers, auth, "creator.reactivate", f"creator:{sid}",
+                     {"expected_status": "suspended"})["grant_id"]
     r = b.post(f"/api/v1/admin/creators/{sid}/reactivate", headers={**headers, "x-step-up-grant": grant}, json=body)
     assert r.status_code == 409 and "reason" not in r.json()  # the operation's own refusal, not the grant's
     assert not consumed(grant)
@@ -293,7 +299,7 @@ def test_a_change_that_changes_nothing_never_spends_its_grant(api):
     b, headers = admin_browser(api, "mfa-noop")
     auth = enroll(api, b, headers, "mfa-noop" + DOMAIN)
     uid = make_user("mfa-noop-target" + DOMAIN, role="streamer")  # already a streamer
-    grant = ceremony(b, headers, auth, "admin.user.change", f"user:{uid}", {"role": "streamer"})["grant_id"]
+    grant = ceremony(b, headers, auth, "admin.user.change", f"user:{uid}", resulting("streamer"))["grant_id"]
     r = b.patch(f"/api/v1/admin/users/{uid}", headers={**headers, "x-step-up-grant": grant}, json={"role": "streamer"})
     assert r.status_code == 200 and r.json()["changed"] == []
     assert not consumed(grant)
@@ -347,6 +353,61 @@ def test_active_enforcement_requires_assurance_and_a_grant_for_exactly_this_acti
     grant = key_grant(b, headers, auth, "authtest-mfa-active")
     assert b.post(KEYS, headers={**headers, "x-step-up-grant": grant},
                   json={"partner_slug": "authtest-mfa-active"}).status_code == 201
+
+
+def test_with_the_database_enforcing_every_route_works_with_the_grant_it_asks_for(api):
+    """S3, end to end with REAL 'active' enforcement (this disposable database only): each sensitive route first
+    answers 403 step_up_required with the exact parameters, a ceremony for exactly those yields a grant, and the
+    database guard (which re-derives action, target and parameters from the row written) accepts it. Inputs are
+    deliberately un-normalized (case, spaces): what the route binds must be what the database stores."""
+    from tests.integration import make_streamer, update_streamer
+    from tests.stepup.test_stepup_enforcement_db import set_enforcement
+    api.app_state.admin.payment_accounts = frozenset({"primary"})
+    b, headers = admin_browser(api, "mfa-s3-e2e")
+    auth = enroll(api, b, headers, "mfa-s3-e2e" + DOMAIN)
+    admin_id = b.get("/api/v1/auth/session").json()["user"]["id"]
+    u, v =make_user("mfa-s3-e2e-u" + DOMAIN, role="user"), make_user("mfa-s3-e2e-v" + DOMAIN, role="user")
+    suspended = make_streamer("authtest-mfa-s3-susp", make_user("mfa-s3-e2e-o" + DOMAIN))
+    update_streamer(suspended, status="suspended")
+    with db() as conn:
+        app = conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES ('A', %s, "
+                           "'+91 90000 00008') RETURNING id::text", ("mfa-s3-e2e-app" + DOMAIN,)).fetchone()[0]
+    creator = {"slug": " AuthTest-MFA-S3-New ", "name": "  S3   Creator ", "razorpay_account": "primary"}
+
+    def approved(method: str, path: str, body: dict | None = None):
+        call = getattr(b, method)
+        kwargs = {} if body is None else {"json": body}
+        r = call(path, headers=headers, **kwargs)
+        assert (r.status_code, r.json().get("reason")) == (403, "step_up_required"), (path, r.text)
+        step = r.json()["step_up"]
+        with fixture_db() as conn:  # a dozen ceremonies in a row: not the rate limit's subject here
+            conn.execute("DELETE FROM public.stepup_rate_limits WHERE key LIKE %s", (f"%{admin_id}%",))
+        grant = ceremony(b, headers, auth, step["action"], step["target"], step["params"])["grant_id"]
+        r = call(path, headers={**headers, "x-step-up-grant": grant}, **kwargs)
+        assert r.status_code in (200, 201), (path, r.text)
+        with fixture_db() as conn:
+            assert conn.execute("SELECT claimed_anchor IS NOT NULL FROM public.stepup_grants WHERE id = %s",
+                                (grant,)).fetchone()[0], path
+        return r.json()
+
+    set_enforcement("active")
+    try:
+        ceremony(b, headers, auth, "session.aal2", "session", {})
+        approved("post", KEYS, {"partner_slug": " AuthTest-MFA-S3 "})
+        cid = approved("post", "/api/v1/admin/creators", creator)["creator"]["id"]
+        approved("post", f"/api/v1/admin/creators/{cid.upper()}/owner", {"user_id": u.upper()})
+        approved("post", f"/api/v1/admin/creators/{cid}/owner/transfer", {"user_id": v, "expected_owner_id": u.upper()})
+        approved("post", f"/api/v1/admin/creators/{suspended}/reactivate", {"expected_status": "suspended"})
+        approved("patch", f"/api/v1/admin/users/{u}", {"role": "streamer", "streamer_id": suspended.upper()})
+        approved("put", f"/api/v1/admin/users/{u.upper()}/email", {"email": " MFA-S3-E2E-New@AuthTest.invalid "})
+        approved("post", "/api/v1/auth/invites", {"email": " MFA-S3-E2E-Inv@AuthTest.invalid", "role": "admin"})
+        approved("post", "/api/v1/auth/invites", {"email": "mfa-s3-e2e-staff" + DOMAIN, "streamer_id": cid.upper()})
+        approved("post", f"/api/v1/admin/applications/{app}/approve", {**creator, "slug": "authtest-mfa-s3-app"})
+        approved("post", f"/api/v1/admin/applications/{app.upper()}/invite")
+        r = b.post("/api/v1/auth/invites", headers=headers, json={"email": "mfa-s3-e2e-plain" + DOMAIN, "role": "user"})
+        assert r.status_code == 201  # an ordinary invitation carries no authority: no step-up
+    finally:
+        set_enforcement("draft")
 
 
 def test_revoked_passkeys_end_their_grants_and_assurance(api):

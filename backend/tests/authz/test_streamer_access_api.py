@@ -1,6 +1,6 @@
 """Creator access through the real app against a scratch database (see tests/integration.py)."""
 
-from tests.integration import DOMAIN, db, login, make_streamer, make_user, new_browser, requires_db, signed_in
+from tests.integration import DOMAIN, db, fixture_db, login, make_streamer, make_user, new_browser, requires_db, signed_in
 
 pytestmark = requires_db
 
@@ -57,7 +57,7 @@ def test_access_is_lost_when_ownership_or_account_changes(app):
     sid = make_streamer("authtest-beta", user_id=owner)
     login(app, "owner" + DOMAIN)
     assert _access(app, sid).status_code == 200
-    with db() as conn:
+    with fixture_db() as conn:  # no API role may remove an owner (migration 0027)
         conn.execute("UPDATE public.streamers SET user_id = NULL WHERE id = %s", (sid,))
     assert _access(app, sid).status_code == 403
     with db() as conn:

@@ -673,6 +673,49 @@ def test_0026_admin_identity_link_round_trip(monkeypatch):
     assert _identity_guard()
 
 
+def _stepup_guards() -> tuple[int, int]:
+    """(0027's guard triggers, its functions)."""
+    with _owner() as conn:
+        return conn.execute("""
+            SELECT (SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'aac_stepup_guard_%%'),
+                   (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN (
+                        'stepup_canonical_json', 'stepup_params_hash', 'stepup_authorize', 'stepup_effect_or_legacy',
+                        'stepup_guard_streamers', 'stepup_guard_streamer_insert', 'stepup_guard_user_signups',
+                        'stepup_guard_user_invites', 'stepup_guard_users', 'stepup_guard_partner_keys'))
+        """).fetchone()
+
+
+def _api_role_privileges() -> set:
+    """Every table and function privilege the runtime roles hold in public (0027 must grant none)."""
+    with _owner() as conn:
+        return set(conn.execute("""
+            SELECT r.rolname, c.relname, p.priv FROM pg_class c CROSS JOIN pg_roles r
+            CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p(priv)
+            WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' AND r.rolname LIKE 'hyperchat\\_%%'
+              AND r.rolname NOT IN ('hyperchat_owner', 'hyperchat_migrator') AND has_table_privilege(r.oid, c.oid, p.priv)
+            UNION ALL
+            SELECT r.rolname, f.oid::regprocedure::text, 'EXECUTE' FROM pg_proc f CROSS JOIN pg_roles r
+            WHERE f.pronamespace = 'public'::regnamespace AND r.rolname LIKE 'hyperchat\\_%%'
+              AND r.rolname NOT IN ('hyperchat_owner', 'hyperchat_migrator') AND has_function_privilege(r.oid, f.oid, 'EXECUTE')
+        """).fetchall())
+
+
+def test_0027_stepup_enforcement_round_trip(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    assert _stepup_guards() == (6, 10)
+    with_guards = _api_role_privileges()
+    command.downgrade(cfg, "0026")
+    try:
+        assert _stepup_guards() == (0, 0)
+        assert _api_role_privileges() == with_guards  # 0027 neither granted nor restored anything to any API role
+        assert _stepup_privileges()[1] == "draft"  # the enforcement state is 0025's and survives
+    finally:
+        command.upgrade(cfg, "head")
+    assert _stepup_guards() == (6, 10) and _api_role_privileges() == with_guards
+
+
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):
     monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
     cfg = _cfg()

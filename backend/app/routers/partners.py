@@ -136,7 +136,7 @@ async def create_partner_key(body: KeyCreate, request: Request, current: Current
     if not PARTNER_SLUG.fullmatch(slug):
         raise ApiError(400, "partner_slug must be 2-50 characters: lowercase letters, digits, - or _",
                        "bad_partner_slug")
-    grant = stepup.bind("partner_key", body.model_dump())
+    grant = stepup.bind("partner_key", {"partner_slug": slug})  # as stored (S3: the database reads it back)
     api_key = f"hc_{slug}_{secrets.token_hex(32)}"
     row = await _repo(request).create_key(slug, sha256_hex(api_key), api_key[:12], grant)
     security_event("partner_key_created", level=logging.INFO, user_id=current.user.id, partner_slug=slug)
