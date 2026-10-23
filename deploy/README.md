@@ -349,10 +349,33 @@ yet; each step below needs approval.**
    release under its own user.
 5. Re-run the audit; it must print only `OK`.
 
+## DEV migration rehearsal 0019 → 0028 (not run; every phase needs approval)
+State verified read-only on 2026-10-23:
+- **DEV:** release `229fe42381e2` at migration 0019.
+- **Production:** release `940137070657` at 0009.
+- **Not on any server:** the new roles, the KYC witness, the step-up verifier and the A3 backup changes.
+
+The rehearsal runs in separately approved phases, with stop conditions and rollback by restore:
+- **0:** inspection gaps;
+- **A:** staging copy, release build (not switched), DEV witness. Nothing under `/usr/local/sbin`: that path is production's backup script;
+- **B:** a DEV backup run from the staging copy with the DEV profile, and a disposable restore test;
+- **C:** roles, pg_hba, pg_ident, `api.env`;
+- **D:** migrations one revision at a time, fail-stop, and the gated release switch; on failure, only a stopped state and escalation;
+- **E:** smoke, after a separate test-only PR brings the smoke suite to 0028;
+- **F:** rollback by restore into a new database and a two-step rename.
+
+The procedure is [`docs/operations/dev-rehearsal-0020-0028.md`](../docs/operations/dev-rehearsal-0020-0028.md). The
+"Deploy a commit" steps above stay the building blocks; for 0020–0028 the rehearsal document governs, because the 0019
+release cannot run on a 0024+ schema (code and schema switch together).
+
 ## Step-up verifier (S1, not deployed)
-Install order, prerequisites (roles, pg_hba, pg_ident, migrations 0020-0025 on DEV and 0010-0025 on production,
-PostgreSQL 15 verification) and the operator tool are in [`docs/admin-stepup.md`](../docs/admin-stepup.md)
-("Deployment sequence"). Every step needs approval; `check_isolation.sh` audits the verifier once installed.
+Install order, prerequisites and the operator tool are in [`docs/admin-stepup.md`](../docs/admin-stepup.md)
+("Deployment sequence"):
+- roles, pg_hba, pg_ident;
+- migrations 0020–0028 on DEV (the rehearsal above) and 0010–0028 on production;
+- PostgreSQL 15 verification, done in CI since #80.
+
+Every step needs approval; `check_isolation.sh` audits the verifier once installed.
 
 ## Rules
 - Firewall (UFW): SSH (rate-limited), 80 and 443 only. PostgreSQL listens on localhost / Unix socket only.
