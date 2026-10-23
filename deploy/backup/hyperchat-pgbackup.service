@@ -1,12 +1,15 @@
 [Unit]
-Description=HyperChat PostgreSQL logical backup
+Description=HyperChat PostgreSQL logical backup (PRODUCTION: hyperchat on 17/hyperchat)
 After=postgresql@17-hyperchat.service
 Requires=postgresql@17-hyperchat.service
 
 [Service]
 Type=oneshot
 # Installed copy (install -m 750 hyperchat-pgbackup.sh /usr/local/sbin/hyperchat-pgbackup),
-# so backups do not depend on which API release is current.
+# so backups do not depend on which API release is current. docs/backup-recovery.md.
+Environment=HYPERCHAT_BACKUP_ENV=prod
 ExecStart=/usr/local/sbin/hyperchat-pgbackup
+# 3 = the set was written but the KYC witness is missing: the unit fails visibly (docs/backup-recovery.md).
 Nice=10
 IOSchedulingClass=idle
+UMask=0077

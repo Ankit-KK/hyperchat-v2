@@ -200,4 +200,5 @@ chattr +a /var/lib/hyperchat-kyc/<env>.witness   # append-only: not even its own
 
 **Backups:**
 - **Backup and enforcement state:** nightly backups include the enforcement tables, but a backup is only a database snapshot. Restoring one is what the witness detects.
+- **Witness copies in backup sets** (`docs/backup-recovery.md`): each set carries a copy of the witness taken after its dump, for disaster recovery when the server itself is lost. After any recovery keep the **newest** copy that exists anywhere (`python -m app.backup.witness select`), never the copy paired with an older database: that pair would look consistent and undo later restrictions. Nothing installs a witness or acknowledges a restore automatically.
 - **Rollback:** after activation, roll back by restoring forward (re-apply), never by downgrading. The 0023 downgrade refuses.
