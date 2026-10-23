@@ -75,7 +75,10 @@ cd ../database && ../backend/.venv/bin/pytest
 ```
 Database-backed tests are opt-in via environment variables and only ever use scratch databases;
 see `backend/README.md` and `database/README.md`. GitHub Actions (`.github/workflows/ci.yml`) runs
-the unit tests and the full database + integration suites against PostgreSQL 17 on every push.
+the unit tests and the full database + integration suites against PostgreSQL 17 on every pull request and every
+merge to `main` (branch pushes without a pull request run nothing; start the workflow by hand if needed). Changes
+to migrations, roles, auth, KYC, step-up, admin, backup or CI also run the migration and permission suites against
+PostgreSQL 15 (DEV's version).
 
 ## Documentation
 - [`docs/architecture.md`](docs/architecture.md) — components, trust boundaries, environments

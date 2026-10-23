@@ -1,15 +1,21 @@
 name: CI
 
 on:
+  # Pull requests run on open, new commits and reopen; main runs on every merge. A branch push without a pull request
+  # runs nothing (open a draft PR, or start the workflow by hand with workflow_dispatch).
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # One group per pull request: a new commit cancels its superseded run. Every main commit and manual run has a group
+  # of its own (its SHA), so main checks are never cancelled or queued behind each other and PRs never cancel each other.
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   unit:
@@ -79,6 +85,55 @@ jobs:
             echo "control (un-isolated nginx -t as root): /var/lib/nginx/body -> $control"
             [ "$control" != "www-data 700" ] || { echo "FAIL control did not reproduce the bug"; exit 1; }
             echo "isolation check: PASS"'
+
+  postgres15:
+    # DEV runs PostgreSQL 15. Migrations and the role / permission suites run there too, but only when a change can
+    # affect them (otherwise this job ends after the scope check, ~15 s). The PostgreSQL-17-only D1 importer tests
+    # (MAINTAIN privilege) are excluded; production stays covered by the PostgreSQL 17 job.
+    name: PostgreSQL 15 compatibility (migrations + permissions)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      HYPERCHAT_CI_DB_SETUP: "1"
+      HYPERCHAT_TEST_PG_HOST: localhost
+      HYPERCHAT_TEST_MIGRATION_DSN: postgresql+psycopg://hyperchat_migrator@localhost:5432/hyperchat_ci
+      HYPERCHAT_TEST_ROLE_DB: hyperchat_ci:5432
+      HYPERCHAT_TEST_AUTH_DB: hyperchat_ci:5432
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scope (database, roles, auth, KYC, step-up or CI changes)
+        id: scope
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: bash .github/scripts/pg15-scope.sh "$BASE"
+      - name: Start PostgreSQL 15 (throwaway container, trust auth)
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          docker run -d --name pg15 -e POSTGRES_HOST_AUTH_METHOD=trust -p 5432:5432 mirror.gcr.io/library/postgres:15
+          for i in $(seq 1 60); do docker exec pg15 pg_isready -U postgres -q && break; sleep 1; done
+          docker exec pg15 psql -U postgres -tAc "SHOW server_version" | grep -q '^15\.'
+      - uses: actions/setup-python@v5
+        if: steps.scope.outputs.run == 'true'
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - if: steps.scope.outputs.run == 'true'
+        run: pip install -r backend/requirements-dev.txt
+      - name: Create roles and the test database, migrate to head
+        if: steps.scope.outputs.run == 'true'
+        run: bash .github/scripts/setup-test-db.sh hyperchat_ci python
+      - name: Database tests (migration round trip, role privileges) without the PostgreSQL-17-only importer
+        if: steps.scope.outputs.run == 'true'
+        working-directory: database
+        run: python -m pytest -q --deselect tests/test_auth_hash_import.py
+      - name: Backend permission suites (auth, KYC, step-up, admin, backup)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: backend
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup
 
   integration:
     name: Database + integration tests (PostgreSQL 17)
