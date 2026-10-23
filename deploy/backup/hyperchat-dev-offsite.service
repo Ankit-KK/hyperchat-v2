@@ -1,0 +1,27 @@
+[Unit]
+Description=HyperChat off-site copy of the newest verified backup set (DEV; disabled until approved)
+After=hyperchat-dev-pgbackup.service
+ConditionPathExists=/etc/hyperchat-backup/offsite-dev.env
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hyperchat/current/backend
+ExecStart=/opt/hyperchat/current/venv/bin/python -m app.backup.offsite upload --config /etc/hyperchat-backup/offsite-dev.env --latest
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077

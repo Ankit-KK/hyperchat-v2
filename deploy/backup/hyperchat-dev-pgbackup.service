@@ -1,0 +1,14 @@
+[Unit]
+Description=HyperChat PostgreSQL logical backup (DEV: hyperchat_dev on 15/restoretest)
+After=postgresql@15-restoretest.service
+Requires=postgresql@15-restoretest.service
+
+[Service]
+Type=oneshot
+# The same installed script as production, DEV profile: its own database, cluster tools (15), directory
+# (/var/backups/hyperchat-dev) and witness. docs/backup-recovery.md.
+Environment=HYPERCHAT_BACKUP_ENV=dev
+ExecStart=/usr/local/sbin/hyperchat-pgbackup
+Nice=10
+IOSchedulingClass=idle
+UMask=0077

@@ -93,6 +93,7 @@ the unit tests and the full database + integration suites against PostgreSQL 17 
 - [`docs/migration-audit.md`](docs/migration-audit.md) — Supabase-exit audit and phase plan
 - [`docs/backend-completion-checklist.md`](docs/backend-completion-checklist.md) — remaining backend gaps, owner decisions, verification status
 - [`docs/history.md`](docs/history.md) — relationship to the legacy repository
+- [`docs/backup-recovery.md`](docs/backup-recovery.md) — backups of both environments, restore verification, KYC witness recovery, off-site design, recovery runbooks
 - [`deploy/README.md`](deploy/README.md) — VPS layout, deployment and rollback
 
 ## Rules

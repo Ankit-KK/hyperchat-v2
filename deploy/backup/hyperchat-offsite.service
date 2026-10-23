@@ -1,0 +1,30 @@
+[Unit]
+Description=HyperChat off-site copy of the newest verified backup set (PRODUCTION; disabled until approved)
+After=hyperchat-pgbackup.service
+# Installed and enabled only after the owner approved the destination and credentials (docs/backup-recovery.md).
+ConditionPathExists=/etc/hyperchat-backup/offsite-prod.env
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hyperchat-prod/current/backend
+# Root reads the root-only backup directory; the config (root 0600) holds the BACKUP storage credential, which is
+# never the API's media credential and is never in api.env.
+ExecStart=/opt/hyperchat-prod/current/venv/bin/python -m app.backup.offsite upload --config /etc/hyperchat-backup/offsite-prod.env --latest
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077

@@ -41,7 +41,9 @@ check_isolation.sh              read-only server audit of one environment (dev|p
                                 symlink hop and ancestor directory of the code, mount points, units, service
                                 account, pg_hba coverage AND rule order, pg_ident; needs namei (util-linux)
 postgres/pg_ident.production.conf    ident map of the PRODUCTION cluster only (hyperchat-prod; no DEV user)
-backup/                         nightly pg_dump of production (02:30 UTC, 14-day retention)
+backup/                         nightly verified backup sets: production (02:30 UTC) and DEV (02:00 UTC), 14-day
+                                retention keeping the newest 3; optional encrypted off-site copies (disabled);
+                                restore verification and recovery runbooks: docs/backup-recovery.md
 systemd/hyperchat[-prod]-stepup.{socket,service}  step-up (passkey) verifier, S1: its own OS user, no network,
                                 a socket only the API user reaches (docs/admin-stepup.md; not installed yet)
 stepup.env[.production].example template for /etc/hyperchat[-prod]-stepup/stepup.env (verifier settings only, no secrets)
@@ -174,7 +176,9 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
    is unchanged. `setup_cluster.sh` does not re-add the DEV lines later (it only appends when no
    `hyperchat` map line exists); on a rebuilt production cluster repeat this step.
 7. **Backup** — `systemctl start hyperchat-pgbackup.service`; record the new
-   `/var/backups/hyperchat/hyperchat_<UTC>.dump`, `sha256sum -c` its `.sha256`, and `pg_restore -l` it.
+   `/var/backups/hyperchat/hyperchat_<UTC>.dump`, `sha256sum -c` its `.sha256`, and `pg_restore -l` it. With the
+   current script the set also has a `.manifest.json` (written last); verify it by restoring it into a scratch cluster:
+   `python -m app.backup.restore_check --env prod ... --scratch --scratch-user postgres` (docs/backup-recovery.md).
 8. **Release build** — as in "Deploy a commit" steps 1–3, under `/opt/hyperchat-prod/releases/<commit>`,
    owned `root:hyperchat-prod`; import check as `hyperchat-prod`
    (`sudo -u hyperchat-prod .../venv/bin/python -c "import app.main"`).
