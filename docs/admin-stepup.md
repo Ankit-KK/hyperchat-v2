@@ -411,18 +411,31 @@ Password reset, email change and Google sign-in never touch passkeys or give ass
 
 ## Deployment sequence (later, each step **[APPROVAL]**; nothing here was run)
 
-Real state from the S0 audit (2026-10-17):
-- **DEV:** PostgreSQL **15.19**, database at **0019**.
-- **Production:** PostgreSQL **17.11**, database at **0009**.
-- **Both:** the old `pg_hba` and `pg_ident` (no lifecycle, auth or stepup roles); none of the roles exist.
+Real state from the read-only inspection (2026-10-23; the S0 audit of 2026-10-17 found the same):
+- **DEV:** PostgreSQL 15 (`15/restoretest`), database at **0019**, release `229fe42381e2`.
+- **Production:** PostgreSQL 17 (`17/hyperchat`), database at **0009**, release `940137070657`.
+- **Both:**
+  - the old `pg_hba` and `pg_ident` (no lifecycle, auth or stepup roles); none of those roles exist;
+  - no `hyperchat-stepup` unit, no KYC witness;
+  - DEV also has an unexplained role named `hyperchat`, to be investigated before any role change.
 
-1. **PostgreSQL 15 verification first.** CI tests PostgreSQL 17 only. Add a CI job against the disposable `postgres:15` image (its use still needs approval) that runs the migration round trips (`database/tests`) and `tests/stepup`, `tests/auth` and `tests/kyc`. The features 0025 uses all exist in PostgreSQL 13+: `xid8`, `pg_current_xact_id[_if_assigned]`, identity columns, `to_jsonb`, pgcrypto `digest`, column privileges and statement triggers.
+Steps 1–3 and the S3 migrations (step 6) for DEV are written out, with approval gates, stop conditions and rollback, in
+[`docs/operations/dev-rehearsal-0020-0028.md`](operations/dev-rehearsal-0020-0028.md). Steps 4–5 follow only after
+that rehearsal.
+
+1. **PostgreSQL 15 verification: done.** The CI job "PostgreSQL 15 compatibility (migrations + permissions)" (#80) runs
+   on `postgres:15` whenever migrations, roles, auth, KYC, step-up, admin, backup or CI files change:
+   - the migration round trips and role privileges (`database/tests`, without the PostgreSQL-17-only D1 importer tests);
+   - `tests/auth`, `tests/kyc`, `tests/stepup`, `tests/admin` and `tests/backup`.
+
+   It passes on `main`. The whole backend suite also passed locally on PostgreSQL 15.19.
 2. **Roles and authentication rules**, per cluster (DEV `15/restoretest`, then production `17/hyperchat`):
    - Re-run `roles.sql` (creates `hyperchat_lifecycle`, `hyperchat_auth`, `hyperchat_stepup`).
    - Re-run `setup_cluster.sh` (`sync_pg_hba.sh` puts the rule with all login roles above the generic rule, with a backup).
    - Add the `pg_ident` lines (API user → lifecycle and auth; `hyperchat[-prod]-stepup` → `hyperchat_stepup`) and reload.
    - Then `bash deploy/check_isolation.sh dev|prod` must pass its PostgreSQL section.
-3. **Migrations in order.** DEV goes 0020 → 0025; production goes 0010 → 0025, after its own approvals for every intermediate phase. Set `HYPERCHAT_DB_LIFECYCLE_USER` and `HYPERCHAT_DB_AUTH_USER` in `api.env` **before** restarting onto 0023 and 0024. KYC enforcement stays `draft`; MFA enforcement stays `draft`.
+3. **Migrations in order.** DEV goes 0020 → 0028 in one rehearsal (the 0019 release cannot run on 0024+, so code and
+   schema switch together); production goes 0010 → 0028, after its own approvals for every intermediate phase. Set `HYPERCHAT_DB_LIFECYCLE_USER` and `HYPERCHAT_DB_AUTH_USER` in `api.env` **before** restarting onto 0023 and 0024. KYC enforcement stays `draft`; MFA enforcement stays `draft`.
 4. **Verifier install:**
    - `useradd --system --no-create-home --shell /usr/sbin/nologin hyperchat-stepup` (no supplementary groups)
    - `/opt/hyperchat-stepup` and `/etc/hyperchat-stepup` as `root:hyperchat-stepup 750`
