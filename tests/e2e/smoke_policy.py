@@ -8,6 +8,7 @@ Strict rehearsal mode (HYPERCHAT_SMOKE_EXPECT_HEAD, e.g. 0028; docs/operations/d
 Without it the suite keeps its earlier behaviour: any known head passes, undeployed features report BLOCKED.
 """
 
+import hashlib
 from datetime import datetime
 
 # Every Alembic revision a DEV database may legitimately be at; anything else FAILs.
@@ -41,6 +42,21 @@ def refusal(db_name: str, api: str, local_health: dict, local: str = "") -> str 
     if local_health.get("environment") != "development":
         return "the API is not the development environment"
     return None
+
+
+# Sections gated on the schema: the revision that brought each feature (database/migrations/versions). A gate is
+# always "at or after" that revision, so the features stay tested at every later head (0028 included).
+FEATURE_HEADS = {
+    "payments-account": "0018",  # D6: 0018_retire_secondary_razorpay
+    "owner-transfer": "0019",    # D13: 0019_owner_specific_soundboard_terms
+    "mfa": "0025",               # admin step-up: 0025_stepup_core .. 0028
+}
+
+
+def head_at_least(head: str, revision: str) -> bool:
+    """True when the database is at a known head at or after `revision` (Alembic order, not string order). A feature
+    that arrived with a revision is present at every later one: never test for an exact older head."""
+    return head in KNOWN_HEADS and KNOWN_HEADS.index(head) >= KNOWN_HEADS.index(revision)
 
 
 def head_check(head: str, expect: str | None) -> tuple[bool, str]:
@@ -106,6 +122,50 @@ def enforcement_draft(kyc_row: str, mfa_row: str) -> tuple[bool, str]:
     return kyc_row == "draft|0" and mfa_row == "draft", f"kyc={kyc_row!r} mfa={mfa_row!r}"
 
 
+# ── this run's own rate-limit state ───────────────────────────────────────────────────────────────────────
+# public.rate_limits is keyed by (ip_address, endpoint), where ip_address holds the limiter key (app.auth.service,
+# app.obs, app.realtime, app.kyc, app.stepup, app.payments, app.uploads, app.routers): ip:<addr>,
+# acct:<sha256(email)>:ip:<addr>, email:<sha256(email)>, user:<id>, admin:<id>, streamer:<id>, obs:<sha256(token)[:32]>,
+# order:<order id>, partner:<slug>. The suite only ever deletes keys that belong to this run: its synthetic emails,
+# users, creators, OBS tokens, orders and partners, and ip:<the suite host's address>, which it learns from its own
+# probe row (acct:<sha256(probe email)>:ip:<addr>). Real users' counters are never cleared.
+
+def _sha(value: str) -> str:
+    return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()  # as app.auth.service hashes emails
+
+
+def rate_limit_keys(emails, suite_ip: str | None) -> dict:
+    """Parameters for OWNED_RATE_LIMITS / reset_login_counters: exact keys and LIKE prefixes of this run."""
+    hashes = sorted({_sha(e) for e in emails})
+    exact = [f"email:{h}" for h in hashes] + ([f"ip:{suite_ip}"] if suite_ip else [])
+    return {"exact": exact, "prefixes": [f"acct:{h}:ip:%" for h in hashes]}
+
+
+def suite_ip(conn, probe_email: str) -> str | None:
+    """The address the API saw for this run: from the account-at-IP row of the run's own failed probe login."""
+    row = conn.execute("SELECT ip_address FROM public.rate_limits WHERE ip_address LIKE %s ORDER BY created_at DESC "
+                       "LIMIT 1", (f"acct:{_sha(probe_email)}:ip:%",)).fetchone()
+    return row[0].split(":ip:", 1)[1] if row and ":ip:" in row[0] else None
+
+
+def reset_login_counters(conn, keys: dict) -> int:
+    """Clear the sign-in counters this run consumed (its host's IP and its synthetic accounts), nothing else."""
+    return conn.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:login%%' "
+                        "AND (ip_address = ANY(%(exact)s) OR ip_address LIKE ANY(%(prefixes)s))", keys).rowcount
+
+
+OWNED_RATE_LIMITS = """(
+    rl.ip_address = ANY(%(exact)s) OR rl.ip_address LIKE ANY(%(prefixes)s)
+    OR rl.ip_address LIKE 'order:authtest-%%' OR rl.ip_address LIKE 'partner:authtest-%%'
+    OR rl.ip_address IN (SELECT 'user:' || u.id FROM public.users u WHERE u.email::text LIKE %(d)s
+                         UNION ALL SELECT 'admin:' || u.id FROM public.users u WHERE u.email::text LIKE %(d)s
+                         UNION ALL SELECT 'streamer:' || s.id FROM public.streamers s
+                                   WHERE s.streamer_slug LIKE 'authtest-%%'
+                         UNION ALL SELECT 'obs:' || left(o.token_hash, 32) FROM public.obs_tokens o
+                                   JOIN public.streamers s ON s.id = o.streamer_id
+                                   WHERE s.streamer_slug LIKE 'authtest-%%'))"""
+
+
 # ── synthetic fixtures and cleanup ─────────────────────────────────────────────────────────────────────────
 
 ADMIN_INSERT = ("INSERT INTO public.users (email, password_hash, role, is_active) VALUES (%s, %s, 'admin', true) "
@@ -117,13 +177,14 @@ LEFTOVERS = """
     SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE %(d)s),
            (SELECT count(*) FROM public.sessions s JOIN public.users u ON u.id = s.user_id
              WHERE u.email::text LIKE %(d)s),
-           (SELECT count(*) FROM public.password_reset_tokens),
+           (SELECT count(*) FROM public.password_reset_tokens t JOIN public.users u ON u.id = t.user_id
+             WHERE u.email::text LIKE %(d)s),
            (SELECT count(*) FROM public.user_invites WHERE email::text LIKE %(d)s),
            (SELECT count(*) FROM public.user_signups WHERE email LIKE %(d)s),
            (SELECT count(*) FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'),
            (SELECT count(*) FROM public.donations WHERE order_id LIKE 'authtest-%%'),
-           (SELECT count(*) FROM public.streamers_moderators WHERE mod_name = 'Smoke Mod'),
-           (SELECT count(*) FROM public.banned_donors WHERE donor_name LIKE 'Smoke %%'),
+           (SELECT count(*) FROM public.streamers_moderators WHERE mod_name = 'Smoke Mod' AND created_at >= %(t)s),
+           (SELECT count(*) FROM public.banned_donors WHERE donor_name LIKE 'Smoke %%' AND created_at >= %(t)s),
            (SELECT count(*) FROM public.obs_tokens o LEFT JOIN public.streamers s ON s.id = o.streamer_id
              WHERE s.id IS NULL),
            (SELECT count(*) FROM public.jobs j LEFT JOIN public.donations d ON d.id::text = j.dedupe_key
@@ -131,19 +192,26 @@ LEFTOVERS = """
            (SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_slug LIKE 'authtest-%%'),
            (SELECT count(*) FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'),
            (SELECT count(*) FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'
-             OR email LIKE %(d)s)
+             OR email LIKE %(d)s),
+           (SELECT count(*) FROM public.rate_limits rl WHERE rl.ip_address = ANY(%(exact)s)
+             OR rl.ip_address LIKE ANY(%(prefixes)s) OR rl.ip_address LIKE 'order:authtest-%%'
+             OR rl.ip_address LIKE 'partner:authtest-%%')
 """
-LEFTOVER_LABELS = ("users", "sessions", "reset tokens (all)", "invites", "signups", "creators", "donations",
+LEFTOVER_LABELS = ("users", "sessions", "reset tokens", "invites", "signups", "creators", "donations",
                    "moderators", "bans", "orphan OBS tokens", "jobs", "soundboard terms acceptances", "partner keys",
-                   "partner signups")
+                   "partner signups", "rate limits (this run)")
 
 
-def cleanup(app, owner, domain: str, started: datetime) -> dict[str, int]:
-    """Remove every synthetic row (users @<domain>, creators / orders / partners authtest-*) and return what is left.
-    Each statement runs on its own (autocommit) so one failure cannot skip the rest; a failure is re-raised at the end
-    after the leftover count, which then reports what stayed. Real rows never match the synthetic patterns."""
+def cleanup(app, owner, domain: str, started: datetime, keys: dict | None = None) -> dict[str, int]:
+    """Remove every synthetic row (users @<domain>, creators / orders / partners authtest-*) and this run's own
+    rate-limit rows (keys: rate_limit_keys()), and return what is left. Each statement runs on its own (autocommit) so
+    one failure cannot skip the rest; a failure is re-raised at the end after the leftover count, which then reports
+    what stayed. Real rows never match the synthetic patterns."""
     d = "%" + domain
+    rl = {"d": d, "exact": [], "prefixes": [], **(keys or {})}
     steps = [
+        # first, while the synthetic users / creators / tokens that identify the run's keys still exist
+        (app, f"DELETE FROM public.rate_limits rl WHERE {OWNED_RATE_LIMITS}", rl),
         (app, "DELETE FROM public.user_invites WHERE email::text LIKE %s", (d,)),
         # review history is append-only for the runtime roles (migration 0021)
         (owner, "DELETE FROM public.application_events WHERE signup_id IN "
@@ -161,10 +229,6 @@ def cleanup(app, owner, domain: str, started: datetime) -> dict[str, int]:
         (owner, "DELETE FROM public.users WHERE email::text LIKE %s", (d,)),
         (app, "DELETE FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'", ()),
         (app, "DELETE FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'", ()),
-        (app, "DELETE FROM public.rate_limits WHERE ip_address LIKE 'partner:authtest-%%'", ()),
-        (app, "DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%' OR endpoint LIKE 'admin:%%' "
-              "OR endpoint LIKE 'signup:%%' OR endpoint LIKE 'upload:%%' OR endpoint LIKE 'obs:%%' "
-              "OR endpoint LIKE 'realtime:%%' OR endpoint LIKE 'payment:%%' OR endpoint LIKE 'transcription:%%'", ()),
     ]
     errors = []
     for conn, sql, args in steps:
@@ -172,7 +236,7 @@ def cleanup(app, owner, domain: str, started: datetime) -> dict[str, int]:
             conn.execute(sql, args)
         except Exception as exc:  # noqa: BLE001 - keep cleaning; reported below
             errors.append(f"{sql.split(' WHERE')[0]}: {type(exc).__name__}")
-    left = dict(zip(LEFTOVER_LABELS, app.execute(LEFTOVERS, {"d": d, "t": started}).fetchone()))
+    left = dict(zip(LEFTOVER_LABELS, app.execute(LEFTOVERS, {**rl, "t": started}).fetchone()))
     if errors:
         raise RuntimeError("cleanup statements failed: " + "; ".join(errors) + f"; left {left}")
     return left

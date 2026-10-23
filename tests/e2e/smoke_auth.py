@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.auth.passwords import hash_password  # noqa: E402
 from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
-from smoke_policy import refusal  # noqa: E402
+from smoke_policy import rate_limit_keys, refusal, suite_ip  # noqa: E402
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
@@ -120,7 +120,11 @@ try:
 finally:
     with psycopg.connect(DSN, autocommit=True) as db:
         db.execute("DELETE FROM public.users WHERE email::text LIKE '%%@authtest.invalid'")
-        db.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%'")
+        # only this run's counters: its host address (learned from the failed probe for nobody@) and its two
+        # synthetic addresses; real users' counters are never cleared (smoke_policy)
+        keys = rate_limit_keys([EMAIL, "nobody@authtest.invalid"], suite_ip(db, "nobody@authtest.invalid"))
+        db.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%' "
+                   "AND (ip_address = ANY(%(exact)s) OR ip_address LIKE ANY(%(prefixes)s))", keys)
         left = db.execute("SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE '%%@authtest.invalid'),"
                           " (SELECT count(*) FROM public.sessions), (SELECT count(*) FROM public.password_reset_tokens)"
                           ).fetchone()

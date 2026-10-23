@@ -46,8 +46,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.auth.passwords import hash_password  # noqa: E402
 from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
-from smoke_policy import (ADMIN_INSERT, Results, SmokeError, ceremony_refused_safely, cleanup,  # noqa: E402
-                          enforcement_draft, head_check, mfa_status_ok, parse_expect_head, refusal)
+import smoke_policy  # noqa: E402
+from smoke_policy import (ADMIN_INSERT, FEATURE_HEADS, Results, SmokeError, ceremony_refused_safely,  # noqa: E402
+                          cleanup, enforcement_draft, head_at_least, head_check, mfa_status_ok, parse_expect_head,
+                          rate_limit_keys, refusal, suite_ip)
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
 LOCAL = os.environ.get("HYPERCHAT_SMOKE_LOCAL", "http://127.0.0.1:8000").rstrip("/")
@@ -62,6 +64,8 @@ SOCKET = "1234.5678"
 STARTED = datetime.now(UTC)
 
 secrets_seen: list[str] = []  # tokens and passwords that must never appear in a log
+EMAILS: set[str] = set()  # every synthetic address this run used: its rate-limit keys derive from them
+SUITE_IP: str | None = None  # the address the API sees for this host (from the run's own probe row)
 
 
 def refuse(why: str) -> None:
@@ -105,16 +109,18 @@ def make_user(name: str, pw: str | None, role: str = "streamer", streamer_id: st
               active: bool = True) -> str:
     if role == "admin":  # since 0024 only the owner may create an administrator (the runtime roles are refused)
         with fixture_db() as c:
-            return c.execute(ADMIN_INSERT, (f"{TAG}-{name}{DOMAIN}", hash_password(pw) if pw else None)).fetchone()[0]
+            return c.execute(ADMIN_INSERT, (email(name), hash_password(pw) if pw else None)).fetchone()[0]
     with db() as c:
         return c.execute("INSERT INTO public.users (email, password_hash, role, streamer_id, is_active) "
                          "VALUES (%s, %s, %s, %s, %s) RETURNING id::text",
-                         (f"{TAG}-{name}{DOMAIN}", hash_password(pw) if pw else None, role, streamer_id,
+                         (email(name), hash_password(pw) if pw else None, role, streamer_id,
                           active)).fetchone()[0]
 
 
 def email(name: str) -> str:
-    return f"{TAG}-{name}{DOMAIN}"
+    address = f"{TAG}-{name}{DOMAIN}"
+    EMAILS.add(address)
+    return address
 
 
 def make_creator(suffix: str, owner: str | None) -> str:
@@ -136,9 +142,10 @@ def make_donation(streamer_id: str, donor: str, amount: int, moderation: str = "
 
 
 def reset_login_counters() -> None:
-    """The suite signs in many times from one IP (the VPS); clear the login counters it consumed (auth:login*)."""
+    """The suite signs in many times from one IP (the VPS); clear the sign-in counters THIS run consumed: its host's
+    IP and its synthetic accounts only (smoke_policy.reset_login_counters). Real users' counters are never touched."""
     with db() as c:
-        c.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:login%'")
+        smoke_policy.reset_login_counters(c, rate_limit_keys(EMAILS, SUITE_IP))
 
 
 class Session:
@@ -227,6 +234,13 @@ try:
           str(sorted(cols)))
 
     # ── synthetic fixtures ──────────────────────────────────────────────────
+    # one failed sign-in for a synthetic address: its account-at-IP row tells which address the API sees for this host
+    probe = httpx.post(API + "/api/v1/auth/login", json={"email": email("probe"), "password": "not-the-password-1"},
+                       headers=ORIGIN, timeout=15)
+    with db() as c:
+        SUITE_IP = suite_ip(c, email("probe"))
+    check(S, "this host's own rate-limit key identified (only its and synthetic counters are ever reset)",
+          probe.status_code == 401 and bool(SUITE_IP), f"{probe.status_code} {SUITE_IP}")
     reset_login_counters()
     pw = {k: password() for k in ("owner_a", "owner_b", "linked", "plain", "admin", "throttle", "change",
                                   "change_limit", "reset", "deact", "owner_c")}
@@ -267,7 +281,7 @@ try:
     reset_login_counters()
     # IP throttle (F2/F9): 20 attempts from this IP, then a valid account is refused too
     for i in range(20):
-        httpx.post(API + "/api/v1/auth/login", json={"email": f"{TAG}-nobody{i}{DOMAIN}", "password": "x"},
+        httpx.post(API + "/api/v1/auth/login", json={"email": email(f"nobody{i}"), "password": "x"},
                    headers=ORIGIN, timeout=15)
     r = httpx.post(API + "/api/v1/auth/login", json={"email": email("throttle"), "password": pw["throttle"]},
                    headers=ORIGIN, timeout=15)
@@ -725,7 +739,7 @@ try:
         check(S, "goal: the public goal overlay's fields only (no goal_activated_at)", set(g) == {
             "active", "name", "target_amount_inr", "progress_inr", "brand_color", "goal_overlay_id"}, str(sorted(g)))
         pending = make_creator("pend", None)
-        with db() as c:
+        with fixture_db() as c:  # since 0023 a runtime role never writes a status (streamers_guard_activation)
             c.execute("UPDATE public.streamers SET status = 'pending' WHERE id = %s", (pending,))
             pslug = c.execute("SELECT streamer_slug FROM public.streamers WHERE id = %s", (pending,)).fetchone()[0]
         cfg = {ref: httpx.get(API + "/api/v1/realtime/config", params={"streamer": ref}, timeout=15)
@@ -743,7 +757,7 @@ try:
     for path in ("/api/v1/public/hypersounds", "/api/v1/metrics/platform", "/api/v1/metrics/showcase"):
         r = httpx.get(API + path, timeout=15)
         check(S, f"GET {path}", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
-    signup = {"name": "Smoke Signup", "email": f"{TAG}-signup{DOMAIN}", "mobile_number": "+91 90000 00000"}
+    signup = {"name": "Smoke Signup", "email": email("signup"), "mobile_number": "+91 90000 00000"}
     a = httpx.post(API + "/api/v1/public/signups", json=signup, headers=ORIGIN, timeout=15)
     b = httpx.post(API + "/api/v1/public/signups", json=signup, headers=ORIGIN, timeout=15)
     check(S, "signup form: repeated email gets the identical answer (D14)", a.status_code == b.status_code == 201
@@ -780,7 +794,7 @@ try:
 
     # ── admin MFA / step-up (0025-0028): no verifier on DEV, enforcement draft; nothing enrolled or activated ──
     S = "mfa"
-    if head < "0025":
+    if not head_at_least(head, FEATURE_HEADS["mfa"]):
         blocked(S, "Admin step-up MFA (S1-S3, migrations 0025-0028)", "not deployed on DEV yet")
     else:
         MFA = "/api/v1/auth/mfa"
@@ -830,7 +844,7 @@ try:
     else:
         with db() as c:
             app_id = c.execute("SELECT id::text FROM public.user_signups WHERE email = %s",
-                               (f"{TAG}-signup{DOMAIN}",)).fetchone()[0]
+                               (email("signup"),)).fetchone()[0]
         check(S3, "the signup form created a submitted application (no account)",
               admin.get(f"/api/v1/admin/applications/{app_id}").json()["application"]["review_status"] == "submitted")
         check(S3, "anonymous / non-admin cannot read applications",
@@ -902,7 +916,7 @@ try:
         check(S, "D4 creator check: missing creator -> not exists", r.status_code == 200
               and r.json().get("exists") is False, r.text)
         signup = {"channel_name": "Smoke Partner Creator", "mobile_number": "9000000000",
-                  "youtube_channel": "https://youtube.com/@smoke-partner", "email": f"{TAG}-partner{DOMAIN}"}
+                  "youtube_channel": "https://youtube.com/@smoke-partner", "email": email("partner")}
         r = httpx.post(signup_url, json={**signup, "partner_slug": "clipwave"}, headers=good, timeout=15)
         check(S, "D4 partner_slug cannot be supplied (spoofing refused)", r.status_code == 400
               and "partner_slug" in r.json().get("fields", {}), r.text)
@@ -924,7 +938,7 @@ try:
 
     # ── payments account model (D6): one 'primary' account; no Razorpay call, no order ──
     S = "payments-account"
-    if head not in ("0018", "0019"):  # the deployed release predates D6
+    if not head_at_least(head, FEATURE_HEADS["payments-account"]):  # D6 arrived with migration 0018
         blocked(S, "Razorpay secondary retired (D6)", "not deployed on DEV yet; needs an approved DEV deploy")
     else:
         with db() as c:
@@ -1041,7 +1055,8 @@ try:
         blocked(S, "Admin creator ownership transfer (D13)", "not deployed on DEV yet; needs an approved DEV deploy")
     else:
         check(S, "D13 needs a session -> 401", anon.status_code == 401, str(anon.status_code))
-        check(S, "D13 database at migration 0019 (owner-specific soundboard terms)", head == "0019", head)
+        check(S, "D13 database at migration 0019 or later (owner-specific soundboard terms)",
+              head_at_least(head, FEATURE_HEADS["owner-transfer"]), head)
         d13_pw = {k: password() for k in ("d13old", "d13new")}
         ids["d13old"] = make_user("d13old", d13_pw["d13old"])
         ids["d13new"] = make_user("d13new", d13_pw["d13new"], role="user")
@@ -1259,7 +1274,7 @@ finally:
     wait_for(_open_jobs, 60)
     try:
         with db() as c, fixture_db() as owner:
-            left = cleanup(c, owner, DOMAIN, STARTED)
+            left = cleanup(c, owner, DOMAIN, STARTED, rate_limit_keys(EMAILS, SUITE_IP))
         print("cleanup left: " + ", ".join(f"{k}={v}" for k, v in left.items()), flush=True)
         check("cleanup", "no synthetic row left", all(v == 0 for v in left.values()), str(left))
     except Exception as exc:  # noqa: BLE001 - a failed cleanup is a FAIL with what is left, never silent

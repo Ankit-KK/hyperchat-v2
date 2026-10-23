@@ -253,3 +253,194 @@ def test_a_failing_cleanup_statement_does_not_skip_the_rest_and_is_reported(stri
             _drop_real(owner)
             owner.execute("DELETE FROM public.streamers WHERE streamer_slug = 'authtest-smkharness'")
             owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
+
+
+
+# ── schema-gated sections: "at or after" the feature's revision, never an exact head ──
+
+VERSIONS = {p.name.split("_", 1)[0]: p.name for p in
+            (Path(__file__).resolve().parents[2] / "database/migrations/versions").glob("[0-9]*_*.py")}
+
+
+def test_each_gated_feature_names_the_migration_that_brought_it():
+    assert VERSIONS[sp.FEATURE_HEADS["payments-account"]].startswith("0018_retire_secondary_razorpay")
+    assert VERSIONS[sp.FEATURE_HEADS["owner-transfer"]].startswith("0019_owner_specific_soundboard_terms")
+    assert VERSIONS[sp.FEATURE_HEADS["mfa"]].startswith("0025_stepup_core")
+
+
+@pytest.mark.parametrize("section", sorted(sp.FEATURE_HEADS))
+def test_a_gated_section_runs_at_its_revision_and_every_later_head(section):
+    first = sp.KNOWN_HEADS.index(sp.FEATURE_HEADS[section])
+    for i, head in enumerate(sp.KNOWN_HEADS):
+        assert sp.head_at_least(head, sp.FEATURE_HEADS[section]) is (i >= first), head
+    assert sp.head_at_least("0028", sp.FEATURE_HEADS[section]) is True
+    assert sp.head_at_least("0029", sp.FEATURE_HEADS[section]) is False  # an unknown head never opens a gate
+
+
+def _d6_section(head, strict, gate):
+    """The suite's D6 branch, reported as the suite reports it."""
+    r = sp.Results(strict=strict, out=lambda _line: None)
+    if not gate(head):
+        r.blocked("payments-account", "Razorpay secondary retired (D6)", "not deployed on DEV yet")
+    else:
+        r.check("payments-account", "D6 section executed", True)
+    return r
+
+
+def test_the_d6_section_executes_at_0028_in_the_rehearsal_instead_of_being_blocked():
+    def gate(head):
+        return sp.head_at_least(head, sp.FEATURE_HEADS["payments-account"])
+
+    def old_gate(head):  # the previous rule
+        return head in ("0018", "0019")
+
+    assert _d6_section("0028", True, gate).counts() == (1, 0, 0)
+    assert _d6_section("0028", True, old_gate).exit_code() == 1  # it would have failed the rehearsal
+
+
+def test_the_suite_never_compares_heads_exactly_or_as_strings():
+    import re
+    src = SUITE.read_text(encoding="utf-8")
+    assert not re.search(r"\bhead\s*(==|!=|<=|>=|<|>|in\s|not\s+in\s)", src)
+    for section in sp.FEATURE_HEADS:
+        assert f'FEATURE_HEADS["{section}"]' in src, section
+
+
+def test_since_0023_the_suite_never_writes_a_creator_status_as_the_runtime_role():
+    import re
+    src = SUITE.read_text(encoding="utf-8")
+    writes = list(re.finditer(r"UPDATE public\.streamers SET status", src))
+    assert writes
+    for m in writes:
+        block = src[:m.start()].rsplit("with ", 1)[1]
+        assert block.startswith("fixture_db()"), block[:40]
+
+
+# ── rate limits: only this run's own counters are ever cleared ──────────────────
+
+SUITE_IP, OTHER_IP = "198.51.100.10", "203.0.113.7"
+REAL = "keep-real@realkeep.invalid"
+
+
+def _sha(value):
+    import hashlib
+    return hashlib.sha256(value.lower().encode()).hexdigest()
+
+
+def _seed_rate_limits(owner, app):
+    """Synthetic users / creator / OBS token and this run's counters, plus counters of a real-looking account, another
+    address, a real creator, token, order and partner. Returns (synthetic emails, synthetic pairs, unrelated pairs)."""
+    syn_user = owner.execute("INSERT INTO public.users (email, role) VALUES (%s, 'streamer') RETURNING id::text",
+                             ("smk-rl" + DOMAIN,)).fetchone()[0]
+    real_user = owner.execute("INSERT INTO public.users (email, role) VALUES (%s, 'streamer') RETURNING id::text",
+                              (REAL,)).fetchone()[0]
+    syn_c, real_c = (owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
+                                   "VALUES (%s, 'X', 'active', 'legacy') RETURNING id::text", (slug,)).fetchone()[0]
+                     for slug in ("authtest-smkrl", "realkeep-smkrl"))
+    owner.execute("INSERT INTO public.obs_tokens (streamer_id, token_hash) VALUES (%s, %s), (%s, %s)",
+                  (syn_c, _sha("syn-token"), real_c, _sha("real-token")))
+    emails = ["smk-rl" + DOMAIN, "smk-probe" + DOMAIN]
+    synthetic = [(f"ip:{SUITE_IP}", "auth:login"), (f"ip:{SUITE_IP}", "auth:login-day"),
+                 (f"acct:{_sha(emails[1])}:ip:{SUITE_IP}", "auth:login-account"),
+                 (f"acct:{_sha(emails[0])}:ip:{SUITE_IP}", "auth:login-account-day"),
+                 (f"email:{_sha(emails[0])}", "auth:reset-email"), (f"user:{syn_user}", "auth:password-change"),
+                 (f"streamer:{syn_c}", "obs:token-create"), (f"obs:{_sha('syn-token')[:32]}", "obs:session"),
+                 ("order:authtest-smkrl-1", "payment:poll"), ("partner:authtest-smkrl", "partner:check")]
+    unrelated = [(f"ip:{OTHER_IP}", "auth:login"), (f"ip:{OTHER_IP}", "signup:create"),
+                 (f"acct:{_sha(REAL)}:ip:{SUITE_IP}", "auth:login-account"),  # a real account, even from this host
+                 (f"acct:{_sha(REAL)}:ip:{OTHER_IP}", "auth:login-account"),
+                 (f"email:{_sha(REAL)}", "auth:reset-email"), (f"user:{real_user}", "auth:password-change"),
+                 (f"admin:{real_user}", "kyc:refresh"), (f"streamer:{real_c}", "obs:token-create"),
+                 (f"obs:{_sha('real-token')[:32]}", "obs:session"), ("order:realkeep-1", "payment:poll"),
+                 ("partner:realkeep", "partner:check")]
+    for key, endpoint in synthetic + unrelated:
+        app.execute("INSERT INTO public.rate_limits (ip_address, endpoint, request_count) VALUES (%s, %s, 3)",
+                    (key, endpoint))
+    return emails, synthetic, unrelated
+
+
+def _present(app, pairs):
+    rows = {(k, e) for k, e in app.execute("SELECT ip_address, endpoint FROM public.rate_limits").fetchall()}
+    return rows & set(pairs)
+
+
+def _drop_rate_limit_fixtures(owner, app, synthetic, unrelated):
+    for key, endpoint in synthetic + unrelated:
+        app.execute("DELETE FROM public.rate_limits WHERE ip_address = %s AND endpoint = %s", (key, endpoint))
+    owner.execute("DELETE FROM public.streamers WHERE streamer_slug IN ('authtest-smkrl', 'realkeep-smkrl')")
+    owner.execute("DELETE FROM public.users WHERE email::text IN (%s, %s)", ("smk-rl" + DOMAIN, REAL))
+
+
+@requires_db
+def test_setup_finds_this_hosts_key_and_resets_only_this_runs_sign_in_counters(strict_scratch_db):
+    with fixture_db() as owner, db() as app:
+        emails, synthetic, unrelated = _seed_rate_limits(owner, app)
+        try:
+            assert sp.suite_ip(app, emails[1]) == SUITE_IP  # from the run's own probe row
+            assert sp.suite_ip(app, "never-used" + DOMAIN) is None
+            sp.reset_login_counters(app, sp.rate_limit_keys(emails, SUITE_IP))
+            assert _present(app, unrelated) == set(unrelated)
+            login = [p for p in synthetic if p[1].startswith("auth:login")]
+            assert not _present(app, login) and _present(app, synthetic) == set(synthetic) - set(login)
+        finally:
+            _drop_rate_limit_fixtures(owner, app, synthetic, unrelated)
+
+
+@requires_db
+def test_repeated_sign_in_resets_never_touch_other_counters(strict_scratch_db):
+    with fixture_db() as owner, db() as app:
+        emails, synthetic, unrelated = _seed_rate_limits(owner, app)
+        try:
+            for _ in range(5):  # the suite resets after every block of sign-ins
+                app.execute("INSERT INTO public.rate_limits (ip_address, endpoint) VALUES (%s, 'auth:login') "
+                            "ON CONFLICT DO NOTHING", (f"ip:{SUITE_IP}",))
+                sp.reset_login_counters(app, sp.rate_limit_keys(emails, SUITE_IP))
+                assert _present(app, unrelated) == set(unrelated)
+            # without an identified host address no ip:* counter is ever cleared, only the synthetic accounts'
+            app.execute("INSERT INTO public.rate_limits (ip_address, endpoint) VALUES (%s, 'auth:login')",
+                        (f"ip:{SUITE_IP}",))
+            sp.reset_login_counters(app, sp.rate_limit_keys(emails, None))
+            assert (f"ip:{SUITE_IP}", "auth:login") in _present(app, synthetic)
+            assert _present(app, unrelated) == set(unrelated)
+        finally:
+            _drop_rate_limit_fixtures(owner, app, synthetic, unrelated)
+
+
+@requires_db
+def test_cleanup_removes_this_runs_rate_limits_and_keeps_every_other_counter(strict_scratch_db):
+    with fixture_db() as owner, db() as app:
+        emails, synthetic, unrelated = _seed_rate_limits(owner, app)
+        try:
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), sp.rate_limit_keys(emails, SUITE_IP))
+            assert left["rate limits (this run)"] == 0 and not _present(app, synthetic)
+            assert _present(app, unrelated) == set(unrelated)
+        finally:
+            _drop_rate_limit_fixtures(owner, app, synthetic, unrelated)
+
+
+@requires_db
+@pytest.mark.parametrize("fail_on", ["DELETE FROM public.streamers", "DELETE FROM public.rate_limits"])
+def test_a_partial_cleanup_failure_keeps_every_other_counter(strict_scratch_db, fail_on):
+    with fixture_db() as owner, db() as app:
+        emails, synthetic, unrelated = _seed_rate_limits(owner, app)
+        try:
+            with pytest.raises(RuntimeError) as exc:
+                sp.cleanup(FailingConn(app, fail_on), owner, DOMAIN, datetime.now(UTC),
+                           sp.rate_limit_keys(emails, SUITE_IP))
+            assert fail_on in str(exc.value)
+            assert _present(app, unrelated) == set(unrelated)
+            if fail_on.endswith("rate_limits"):  # reported as left over, never deleted more broadly elsewhere
+                assert "'rate limits (this run)': 0" not in str(exc.value)
+            else:
+                assert not _present(app, synthetic)
+        finally:
+            _drop_rate_limit_fixtures(owner, app, synthetic, unrelated)
+
+
+def test_no_smoke_script_deletes_rate_limits_without_this_runs_keys():
+    import re
+    for script in sorted(SUITE.parent.glob("*.py")):
+        src = script.read_text(encoding="utf-8")
+        for m in re.finditer(r"DELETE FROM public\.rate_limits", src):
+            statement = src[m.start():m.start() + 250]  # the statement and its scope, written on the next lines
+            assert "ANY(%(exact)s)" in statement or "OWNED_RATE_LIMITS" in statement, (script.name, statement[:120])
