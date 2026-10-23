@@ -357,12 +357,12 @@ State verified read-only on 2026-10-23:
 
 The rehearsal runs in separately approved phases, with stop conditions and rollback by restore:
 - **0:** inspection gaps;
-- **A:** backup tooling, release build, witness;
-- **B:** backup and disposable restore test;
+- **A:** staging copy, release build (not switched), DEV witness. Nothing under `/usr/local/sbin`: that path is production's backup script;
+- **B:** a DEV backup run from the staging copy with the DEV profile, and a disposable restore test;
 - **C:** roles, pg_hba, pg_ident, `api.env`;
-- **D:** migrations and release switch;
-- **E:** smoke;
-- **F:** rollback.
+- **D:** migrations one revision at a time, fail-stop, and the gated release switch; on failure, only a stopped state and escalation;
+- **E:** smoke, after a separate test-only PR brings the smoke suite to 0028;
+- **F:** rollback by restore into a new database and a two-step rename.
 
 The procedure is [`docs/operations/dev-rehearsal-0020-0028.md`](../docs/operations/dev-rehearsal-0020-0028.md). The
 "Deploy a commit" steps above stay the building blocks; for 0020–0028 the rehearsal document governs, because the 0019
