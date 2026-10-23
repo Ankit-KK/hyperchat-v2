@@ -27,11 +27,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.auth.passwords import hash_password  # noqa: E402
 from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
+from smoke_policy import refusal  # noqa: E402
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 if DB_NAME in ("hyperchat", "hyperchat_restore_test"):
     sys.exit("refusing to create test accounts in production or the restore source")
+if refusal(DB_NAME, API, {"environment": "development"}):  # the production API host, whatever the database
+    sys.exit("refusing the production API")
 SAMESITE = os.environ.get("HYPERCHAT_SMOKE_SAMESITE", "lax").strip().lower()
 if SAMESITE not in ("lax", "strict", "none"):
     sys.exit("HYPERCHAT_SMOKE_SAMESITE must be lax, strict or none")
