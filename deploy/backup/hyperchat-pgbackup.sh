@@ -11,10 +11,12 @@
 #   <db>_<UTC>.witness         a copy of the environment's KYC restore witness (when configured; never restored blindly)
 #   <db>_<UTC>.manifest.json   written LAST: the set is complete only when its manifest exists and its hashes match
 # Everything is built in a private .partial-* directory, validated (pg_restore -l, sha256), fsynced and renamed into
-# place; a failure leaves no set behind. flock refuses an overlapping run (exit 75). Retention removes only complete
-# sets of THIS database older than KEEP_DAYS and always keeps the newest KEEP_MIN complete sets (never fewer than 1).
-# Logs carry names, sizes, counts and hashes only. Exit: 0 ok; 2 refused configuration; 3 set written but the KYC
-# witness is missing or unreadable (the unit fails visibly); 75 another backup is running; other: the backup failed.
+# place; a failure leaves no set behind. flock refuses an overlapping run (exit 75). Retention counts only VERIFIED
+# sets of THIS database (manifest, every SHA-256, the witness when needed: python3 standard library), prunes a set
+# older than KEEP_DAYS only when KEEP_MIN verified sets are newer than it, and never prunes a set that does not
+# verify. Logs carry names, sizes, counts and hashes only. Exit: 0 ok; 2 refused configuration; 3 set written but
+# the KYC witness is missing or unreadable; 4 set written but older sets do not verify (kept; the unit fails
+# visibly); 75 another backup is running; 1 or other: the backup failed.
 set -euo pipefail
 umask 077
 export LC_ALL=C
@@ -143,33 +145,92 @@ sync -- "$DIR"
 [[ -f "$DIR/$BASE.manifest.json" && ! -e "$WORK/$BASE.manifest.json" ]] || fail "the set did not complete"
 echo "backup ok env=$ENV_NAME db=$DB set=$BASE bytes=$DUMP_BYTES toc_entries=$ENTRIES sha256=$DUMP_SHA alembic=$ALEMBIC witness=$WITNESS_STATUS"
 
-# ── retention: complete sets of THIS database only; the newest KEEP_MIN always stay ──────────────────────
+# ── retention: only VERIFIED sets of THIS database count; the newest KEEP_MIN verified sets always stay ──────
+# A set is verified only when its manifest parses and names this database, and its dump, checksum file and (when the
+# manifest names one, or the KYC history requires one) witness are plain files matching their SHA-256. Anything
+# uncertain is NOT verified: it never counts toward KEEP_MIN, is never pruned automatically, and is reported (exit 4).
+verified() {
+  python3 -I - "$DIR" "$1" "$DB" >/dev/null 2>&1 <<'PY'
+import hashlib, json, os, stat, sys
+d, base, db = sys.argv[1:4]
+def plain(name):
+    path = os.path.join(d, name)
+    if not stat.S_ISREG(os.lstat(path).st_mode):  # never a symlink, a directory or a device
+        raise ValueError(name)
+    return path
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+try:
+    with open(plain(base + ".manifest.json"), encoding="utf-8") as f:
+        m = json.load(f)
+    if m.get("format") != 1 or m.get("database") != db or base != f"{db}_{m.get('created_at')}":
+        sys.exit(1)
+    dump = m["dump"]
+    if dump.get("file") != base + ".dump" or sha(plain(base + ".dump")) != dump["sha256"]:
+        sys.exit(1)
+    with open(plain(base + ".dump.sha256"), encoding="utf-8") as f:
+        if f.read().split() != [dump["sha256"], base + ".dump"]:
+            sys.exit(1)
+    kyc = m.get("kyc_enforcement") or {}
+    witness_required = kyc.get("generation", 0) != 0 or kyc.get("state", "") not in ("", "draft")
+    w = m.get("witness")
+    if w is not None:
+        if w.get("file") != base + ".witness" or sha(plain(base + ".witness")) != w.get("sha256"):
+            sys.exit(1)
+    elif witness_required:  # a database with KYC history is not recoverable without its witness
+        sys.exit(1)
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+older_than_keep() { [[ -n "$(find "$1" -maxdepth 0 -mtime +"$KEEP_DAYS" -print)" ]]; }
+
 find "$DIR" -maxdepth 1 -mindepth 1 -type d -name '.partial-*' -mmin +1440 -user "$OWNER" -exec rm -rf -- {} + 2>/dev/null || true
 mapfile -t SETS < <(find "$DIR" -maxdepth 1 -type f -regextype posix-extended \
   -regex ".*/${DB}_[0-9]{8}T[0-9]{6}Z\.manifest\.json" -printf '%f\n' | sort -r)
-i=0
-for m in "${SETS[@]}"; do
-  i=$((i + 1))
-  if (( i <= KEEP_MIN )); then continue; fi
-  if [[ -z "$(find "$DIR/$m" -mtime +"$KEEP_DAYS" -print)" ]]; then continue; fi
-  set_base="${m%.manifest.json}"
-  for suffix in .dump .dump.sha256 .witness .manifest.json; do  # the manifest last: an interrupted prune is incomplete
-    if [[ -f "$DIR/$set_base$suffix" && ! -L "$DIR/$set_base$suffix" ]]; then
-      rm -f -- "$DIR/$set_base$suffix"; echo "pruned $set_base$suffix"
+VERIFIED=0; UNVERIFIED=(); PRUNE=()
+for m in "${SETS[@]}"; do  # newest first
+  b="${m%.manifest.json}"
+  if verified "$b"; then
+    VERIFIED=$((VERIFIED + 1))
+    # prunable only when at least KEEP_MIN verified sets are NEWER than it
+    if (( VERIFIED > KEEP_MIN )) && older_than_keep "$DIR/$m"; then PRUNE+=("$b"); fi
+  else
+    UNVERIFIED+=("$b")
+  fi
+done
+for b in "${PRUNE[@]}"; do
+  # the manifest FIRST: an interrupted prune leaves an incomplete set, which never counts and is cleaned below
+  for suffix in .manifest.json .dump .dump.sha256 .witness; do
+    if [[ -f "$DIR/$b$suffix" && ! -L "$DIR/$b$suffix" ]]; then
+      rm -f -- "$DIR/$b$suffix"; echo "pruned $b$suffix"
     fi
   done
 done
-# Files of the old layout (before manifests): only once KEEP_MIN complete sets exist.
-if (( ${#SETS[@]} >= KEEP_MIN )); then
+# Files without a manifest (the old layout before manifests, or what an interrupted prune left): only while KEEP_MIN
+# verified sets exist, and only when older than KEEP_DAYS.
+if (( VERIFIED >= KEEP_MIN )); then
   while read -r f; do
-    b="$(basename "$f")"; b="${b%.sha256}"; b="${b%.dump}"
-    if [[ ! -e "$DIR/$b.manifest.json" ]]; then rm -f -- "$f"; echo "pruned $(basename "$f")"; fi
+    b="$(basename "$f")"; b="${b%.sha256}"; b="${b%.dump}"; b="${b%.witness}"
+    if [[ ! -e "$DIR/$b.manifest.json" && ! -L "$DIR/$b.manifest.json" ]]; then
+      rm -f -- "$f"; echo "pruned $(basename "$f")"
+    fi
   done < <(find "$DIR" -maxdepth 1 -type f -regextype posix-extended \
-             -regex ".*/${DB}_[0-9]{8}T[0-9]{6}Z\.dump(\.sha256)?" -mtime +"$KEEP_DAYS")
+             -regex ".*/${DB}_[0-9]{8}T[0-9]{6}Z\.(dump|dump\.sha256|witness)" -mtime +"$KEEP_DAYS")
 fi
+echo "retention verified=$VERIFIED unverified=${#UNVERIFIED[@]} pruned_sets=${#PRUNE[@]} keep_min=$KEEP_MIN"
 
 if [[ "$WITNESS_STATUS" == missing ]]; then
   echo "backup WARNING: the KYC witness $WITNESS is missing or unreadable" >&2
   exit 3
+fi
+if (( ${#UNVERIFIED[@]} > 0 )); then
+  echo "backup WARNING: sets that do not verify (kept, never counted, never pruned automatically): ${UNVERIFIED[*]}" >&2
+  exit 4
 fi
 exit 0

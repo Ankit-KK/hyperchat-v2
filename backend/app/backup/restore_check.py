@@ -10,14 +10,20 @@
               disposable (--disposable-server); the database is dropped afterwards. Refused for the live clusters'
               socket directory and for the live database names.
 
-Two separate answers, never conflated:
-  backup_valid    the set is complete, its files match their SHA-256 and the archive is readable (pg_restore -l)
-  restore_valid   it restored completely into the same PostgreSQL major version, at the expected migration head, with
-                  the security invariants intact (ownership, guard triggers, runtime-role privileges, enforcement rows)
-Application recoverability needs more than either (credentials, media objects, external providers, the KYC witness:
-`witness` reports how the restored database compares with the newest witness copy given; restore_suspected is the
-EXPECTED result for an older backup and means new donations stay blocked until the operator re-applies lost changes
-and acknowledges). Output: one JSON object; exit 0 only when backup_valid and restore_valid.
+Three separate answers, never conflated:
+  structurally_valid  backup_valid (the set is complete, its files match their SHA-256, the archive is readable) AND
+                      restore_valid (it restored completely into the same PostgreSQL major version, at the expected
+                      migration head, with the security invariants intact: ownership, guard triggers, runtime-role
+                      privileges, enforcement rows)
+  kyc_witness         consistent | not_applicable (no KYC history to protect) | inconsistent (restore_suspected: the
+                      EXPECTED result for an older backup; new donations stay blocked) | missing (no usable witness
+                      for a database with KYC history) | not_checked -- judged against the newest witness copy given,
+                      exactly as the API would
+  live_operation_approved   always false: this tool never approves resuming live operation, never acknowledges and
+                      never replaces a witness. live_operation_blockers lists what the operator must still clear
+                      (docs/backup-recovery.md).
+Output: one JSON object. Exit 0: structurally valid and the witness consistent / not applicable; 3: structurally valid
+but the witness inconsistent, missing or not checked; 1: not structurally valid (or the check failed).
 """
 
 import argparse
@@ -193,16 +199,18 @@ def invariants(conn: psycopg.Connection, bset: BackupSet, head: str | None) -> d
 
 def witness_status(conn: psycopg.Connection, witness: Path | None) -> dict:
     """How the restored database compares with the given (newest) witness copy, exactly as the API would judge it."""
-    if witness is None:
-        return {"checked": False}
     if conn.execute("SELECT to_regclass('public.kyc_enforcement') IS NULL").fetchone()[0]:
-        return {"checked": False, "reason": "no_kyc_enforcement_table"}
-    w = KycWitness(str(witness))
+        return {"checked": False, "verdict": "not_applicable", "reason": "no_kyc_enforcement_table"}
+    w = KycWitness(str(witness) if witness else None)
     state, generation, anchor_chain = conn.execute(
         "SELECT e.state, e.generation, (SELECT ev.chain FROM public.kyc_enforcement_events ev WHERE ev.generation = %s)"
         " FROM public.kyc_enforcement e", (w.anchor_generation(),)).fetchone()
     problem = w.problem(state, generation, anchor_chain)
-    return {"checked": True, "problem": problem, "database_generation": generation,
+    if problem is None:
+        verdict = "consistent" if witness else "not_applicable"  # without a witness only the untouched draft passes
+    else:
+        verdict = "inconsistent" if problem == "restore_suspected" else "missing"
+    return {"checked": True, "verdict": verdict, "problem": problem, "database_generation": generation,
             "witness_generation": w.anchor_generation(),
             "meaning": ("consistent: new donations allowed" if problem is None else
                         "new donations stay blocked until the operator re-applies lost changes and runs "
@@ -294,12 +302,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output")
     args = parser.parse_args(argv)
     result = run(args)
-    result["ok"] = bool(result["backup_valid"] and result["restore_valid"])
+    structural = bool(result["backup_valid"] and result["restore_valid"])
+    verdict = result.get("witness", {}).get("verdict", "not_checked")
+    result["structurally_valid"] = structural
+    result["kyc_witness"] = verdict
+    result["live_operation_approved"] = False  # never decided here (see the docstring)
+    result["live_operation_blockers"] = (
+        ([] if structural else ["not_structurally_valid"])
+        + ([] if verdict in ("consistent", "not_applicable") else [f"kyc_witness_{verdict}"])
+        + ["external_reconciliation_required", "owner_approval_required"])
     text = json.dumps(result, default=str, sort_keys=True)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(text)
-    return 0 if result["ok"] else 1
+    if not structural:
+        return 1
+    return 0 if verdict in ("consistent", "not_applicable") else 3
 
 
 if __name__ == "__main__":

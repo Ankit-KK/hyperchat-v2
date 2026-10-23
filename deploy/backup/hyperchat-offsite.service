@@ -28,3 +28,6 @@ SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077
+# Ciphertext and binding records of an unfinished upload (resumable; removed once the off-site set is complete).
+StateDirectory=hyperchat-offsite/prod
+StateDirectoryMode=0700

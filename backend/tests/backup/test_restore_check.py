@@ -208,15 +208,18 @@ def test_a_real_set_restores_at_the_head_with_its_security_invariants(real_set, 
     out_file = tmp / "result.json"
     code, out = check("--dir", str(tmp / "backups"), "--set", base, "--env", "test", "--pg-bin", str(pg_bin),
                       "--server", dsn, "--disposable-server", "--output", str(out_file))
-    assert code == 0 and out["ok"] and out["backup_valid"] and out["restore_valid"], out
+    assert code == 0 and out["structurally_valid"] and out["backup_valid"] and out["restore_valid"], out
+    assert out["kyc_witness"] == "consistent" and "ok" not in out
+    assert out["live_operation_approved"] is False  # never approved by this tool
+    assert out["live_operation_blockers"] == ["external_reconciliation_required", "owner_approval_required"]
     inv = out["invariants"]
     assert inv["alembic_version"] == restore_check.expected_head() and inv["alembic_matches_manifest"]
     assert inv["objects_not_owned_by_hyperchat_owner"] == 0 and inv["public_table_privileges"] == 0
     assert inv["guard_triggers_enabled"] > 0 and inv["guard_triggers_disabled"] == 0
     assert inv["runtime_role_privilege_leaks"] == [] and inv["stepup_enforcement"] == "draft"
-    assert out["witness"] == {"checked": True, "problem": None, "database_generation": 0, "witness_generation": 0,
-                              "meaning": "consistent: new donations allowed"}
-    assert json.loads(out_file.read_text())["ok"] is True
+    assert out["witness"] == {"checked": True, "verdict": "consistent", "problem": None, "database_generation": 0,
+                              "witness_generation": 0, "meaning": "consistent: new donations allowed"}
+    assert json.loads(out_file.read_text())["structurally_valid"] is True
 
 
 @requires_db
@@ -225,11 +228,40 @@ def test_a_newer_witness_marks_the_restored_database_as_blocked_without_hiding_v
     tmp, pg_bin, base, dsn = real_set
     newer = tmp / "newest.witness"
     newer.write_text('{"at": "t", "chain": "c4", "generation": 4, "state": "active"}\n')
+    before = newer.read_bytes()
     code, out = check("--dir", str(tmp / "backups"), "--set", base, "--pg-bin", str(pg_bin), "--server", dsn,
                       "--disposable-server", "--witness", str(newer))
-    assert code == 0 and out["restore_valid"]  # the backup itself is fine ...
-    assert out["witness"]["problem"] == "restore_suspected"  # ... but donations stay blocked until acknowledged
+    assert code == 3 and out["structurally_valid"] and out["restore_valid"]  # the backup itself is fine ...
+    assert out["kyc_witness"] == "inconsistent" and out["witness"]["problem"] == "restore_suspected"  # ... blocked
+    assert out["live_operation_approved"] is False and "kyc_witness_inconsistent" in out["live_operation_blockers"]
     assert "never automatic" in out["witness"]["meaning"]
+    assert newer.read_bytes() == before  # never acknowledged, re-anchored or replaced
+
+
+@requires_db
+@needs_bash
+def test_without_a_witness_only_an_untouched_kyc_history_passes(real_set):
+    tmp, pg_bin, base, dsn = real_set
+    code, out = check("--dir", str(tmp / "backups"), "--set", base, "--pg-bin", str(pg_bin), "--server", dsn,
+                      "--disposable-server", "--witness", str(tmp / "absent.witness"))
+    assert code == 0 and out["kyc_witness"] == "consistent", out  # draft, generation 0: nothing to protect yet
+    assert out["live_operation_approved"] is False
+
+
+class _RestoredDb:
+    """A restored database with KYC history (active, generation 2), for witness_status without PostgreSQL."""
+
+    def execute(self, sql, *_):
+        row = (False,) if "to_regclass" in sql else ("active", 2, "c2")
+        return type("Row", (), {"fetchone": lambda self: row})()
+
+
+def test_the_verdict_names_a_missing_witness_for_a_database_with_kyc_history(tmp_path):
+    assert restore_check.witness_status(_RestoredDb(), None)["verdict"] == "missing"
+    assert restore_check.witness_status(_RestoredDb(), tmp_path / "gone.witness")["verdict"] == "missing"
+    same = tmp_path / "same.witness"
+    same.write_text('{"at": "t", "chain": "c2", "generation": 2, "state": "active"}\n')
+    assert restore_check.witness_status(_RestoredDb(), same)["verdict"] == "consistent"
 
 
 @requires_db
@@ -260,6 +292,6 @@ def test_a_scratch_cluster_restores_and_is_removed(real_set):
     if os.geteuid() == 0:
         argv += ["--scratch-user", "nobody"]
     code, out = check(*argv)
-    assert code == 0 and out["ok"] and out["target"] == {"mode": "scratch"}, out
+    assert code == 0 and out["structurally_valid"] and out["target"] == {"mode": "scratch"}, out
     assert {p.name for p in Path(os.environ.get("TMPDIR", "/tmp")).glob("hc-restorecheck-*")} == before
     assert load(tmp / "backups", base)  # the set itself is untouched

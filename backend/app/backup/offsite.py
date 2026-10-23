@@ -15,9 +15,17 @@ Guarantees:
     refusal) and never deletes: the tool has no delete code path. Retention is the bucket's lifecycle rule and its
     object lock (owner configuration), so a stolen upload credential cannot erase history;
   * Content-MD5 on every PUT (integrity in transit, TLS endpoint only), then every object is READ BACK and its SHA-256
-    compared; COMPLETE.json (hashes, sizes, no secrets) is written last: an off-site set without it is incomplete;
-  * a rerun after a partial upload resumes: objects already there with the expected hash are kept, nothing replaced.
-Exit: 0 ok, 2 refused (disabled / invalid configuration / wrong set), 1 failed.
+    compared; COMPLETE.json (hashes, sizes, recipient, no secrets) is written last: an off-site set without it is
+    incomplete;
+  * resumable without ever trusting the remote side: GPG encryption is randomized, so a retry must reuse the exact
+    ciphertext it already produced. Each file's ciphertext and a binding record (environment, database, set, file,
+    plaintext SHA-256, recipient key SHA-256, ciphertext SHA-256) are kept in a private local STATE directory until
+    the set is complete. An existing remote object is accepted only when its DOWNLOADED bytes hash to the recorded
+    ciphertext (object metadata is never trusted); anything else (another object, a corrupted one, one whose local
+    record is gone, a changed plaintext or recipient) is a refusal, never an overwrite;
+  * an already complete off-site set is verified against the local set (plaintext hashes, recipient, every object's
+    bytes) and reported as such; nothing is uploaded again.
+Exit: 0 ok, 2 refused (disabled / invalid configuration / wrong set / unverifiable remote state), 1 failed.
 """
 
 import argparse
@@ -39,7 +47,8 @@ from app.backup.sets import BackupSet, SetError, complete_sets, load, sha256_fil
 LOCAL_DIRS = {"prod": "/var/backups/hyperchat", "dev": "/var/backups/hyperchat-dev"}
 DATABASES = {"prod": "hyperchat", "dev": "hyperchat_dev"}
 KEYS = ("ENABLED", "ENVIRONMENT", "ENDPOINT", "BUCKET", "PREFIX", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY",
-        "GPG_RECIPIENT_FILE", "LOCAL_DIR", "DATABASE")
+        "GPG_RECIPIENT_FILE", "LOCAL_DIR", "DATABASE", "STATE_DIR")
+STATE_ROOT = "/var/lib/hyperchat-offsite"  # systemd StateDirectory=hyperchat-offsite/<env>, root 0700
 
 
 class Refused(Exception):
@@ -61,6 +70,7 @@ class Config:
     recipient_file: Path
     local_dir: Path
     database: str
+    state_dir: Path
 
     def __repr__(self) -> str:  # never print credentials
         return f"Config(environment={self.environment!r}, bucket={self.bucket!r}, prefix={self.prefix!r})"
@@ -108,8 +118,13 @@ def read_config(path: str) -> Config:
         raise Refused("config_local_dir_or_database_of_another_environment")
     if env == "test" and (str(local_dir).startswith("/var/backups") or not database.startswith("hc_backuptest_")):
         raise Refused("config_test_scope")
+    state_dir = Path(values.get("STATE_DIR") or f"{STATE_ROOT}/{env}")
+    if not state_dir.is_absolute() or ".." in state_dir.parts or state_dir.name != env:
+        raise Refused("config_state_dir")  # one state directory per environment, named after it
+    if env == "test" and str(state_dir).startswith(STATE_ROOT):
+        raise Refused("config_test_scope")
     return Config(env, endpoint.rstrip("/"), values["BUCKET"], env, values["ACCESS_KEY_ID"],
-                  values["SECRET_ACCESS_KEY"], recipient, local_dir, database)
+                  values["SECRET_ACCESS_KEY"], recipient, local_dir, database, state_dir)
 
 
 def s3_client(cfg: Config):
@@ -144,66 +159,140 @@ def _exists(client, bucket: str, key: str) -> dict | None:
         raise Failed("head_failed") from exc
 
 
-def _put_verified(client, cfg: Config, key: str, path: Path, sha: str) -> str:
-    """PUT once (never over another object), then read it back and compare. 'kept' when it was already there."""
-    existing = _exists(client, cfg.bucket, key)
-    if existing is not None:
-        if (existing.get("Metadata") or {}).get("sha256") != sha:
-            raise Refused("object_exists_with_other_content")
-        outcome = "kept"
-    else:
-        digest = hashlib.md5(usedforsecurity=False)
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                digest.update(chunk)
-        md5 = base64.b64encode(digest.digest()).decode()
-        with open(path, "rb") as body:
-            try:
-                client.put_object(Bucket=cfg.bucket, Key=key, Body=body, ContentMD5=md5, IfNoneMatch="*",
-                                  Metadata={"sha256": sha})
-            except Exception as exc:
-                raise Failed("put_failed") from exc
-        outcome = "uploaded"
+def _remote_sha(client, cfg: Config, key: str) -> str:
     try:
-        got = _sha256_stream(client.get_object(Bucket=cfg.bucket, Key=key)["Body"])
+        return _sha256_stream(client.get_object(Bucket=cfg.bucket, Key=key)["Body"])
     except Exception as exc:
         raise Failed("readback_failed") from exc
-    if got != sha:
+
+
+def _put_verified(client, cfg: Config, key: str, path: Path, sha: str) -> str:
+    """PUT once (never over another object), then read it back and compare. An object already there is 'kept' only
+    when its DOWNLOADED bytes hash to `sha` (this set's own recorded ciphertext); its metadata is never trusted."""
+    if _exists(client, cfg.bucket, key) is not None:
+        if _remote_sha(client, cfg, key) != sha:
+            raise Refused("remote_object_differs_from_this_sets_ciphertext")
+        return "kept"
+    digest = hashlib.md5(usedforsecurity=False)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    md5 = base64.b64encode(digest.digest()).decode()
+    with open(path, "rb") as body:
+        try:
+            client.put_object(Bucket=cfg.bucket, Key=key, Body=body, ContentMD5=md5, IfNoneMatch="*",
+                              Metadata={"sha256": sha})
+        except Exception as exc:
+            raise Failed("put_failed") from exc
+    if _remote_sha(client, cfg, key) != sha:
         raise Failed("readback_checksum_mismatch")
-    return outcome
+    return "uploaded"
+
+
+def _private_dir(path: Path) -> Path:
+    """Create (0700) or accept a directory only when it is ours, private and not a symlink."""
+    if not path.exists() and not path.is_symlink():
+        path.mkdir(mode=0o700)
+    st = path.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_mode & 0o077 or (hasattr(os, "geteuid") and st.st_uid != os.geteuid()):
+        raise Refused("state_dir_not_private")
+    return path
+
+
+def _write_atomically(path: Path, data: bytes) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _ciphertext(cfg: Config, bset: BackupSet, path: Path, state: Path, recipient_sha: str, encrypt, home: Path) -> dict:
+    """This file's ciphertext and its binding record: reused when recorded (a resume), created once otherwise."""
+    record_path, enc = state / f"{path.name}.json", state / f"{path.name}.gpg"
+    bound = {"environment": bset.environment, "database": bset.database, "set": bset.base, "file": path.name}
+    plain_sha = sha256_file(path)
+    if record_path.exists() or record_path.is_symlink():
+        try:
+            if record_path.is_symlink():
+                raise ValueError
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise Refused("local_state_unreadable") from exc
+        if {k: record.get(k) for k in bound} != bound:
+            raise Refused("local_state_of_another_set")
+        if record.get("plain_sha256") != plain_sha:
+            raise Refused("local_plaintext_changed")  # sets never change once written
+        if record.get("recipient_sha256") != recipient_sha:
+            raise Refused("recipient_changed")  # objects already off-site were encrypted to another key
+        if enc.is_symlink() or not enc.is_file() or sha256_file(enc) != record.get("ciphertext_sha256"):
+            raise Refused("local_ciphertext_changed")
+        return record
+    tmp = state / f"{path.name}.gpg.tmp"
+    tmp.unlink(missing_ok=True)
+    encrypt(path, tmp, cfg.recipient_file, home)
+    sha = sha256_file(tmp)
+    if sha == plain_sha:
+        raise Failed("encryption_did_not_change_the_data")
+    with open(tmp, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, enc)
+    record = {**bound, "plain_sha256": plain_sha, "recipient_sha256": recipient_sha, "ciphertext_sha256": sha,
+              "bytes": enc.stat().st_size}
+    _write_atomically(record_path, json.dumps(record, sort_keys=True).encode())  # only now may it be uploaded
+    return record
+
+
+def _already_complete(cfg: Config, bset: BackupSet, client, recipient_sha: str) -> dict:
+    """The off-site set exists: accept it only when it is exactly this local set (every object's bytes checked)."""
+    try:
+        marker = json.loads(client.get_object(Bucket=cfg.bucket,
+                                              Key=f"{cfg.prefix}/{bset.base}/COMPLETE.json")["Body"].read())
+    except Exception as exc:
+        raise Failed("marker_unreadable") from exc
+    local = {p.name: sha256_file(p) for p in bset.files}
+    offsite_plain = {o.get("plain_name"): o.get("plain_sha256") for o in marker.get("objects", [])}
+    if (marker.get("environment"), marker.get("database"), marker.get("set")) != (cfg.environment, cfg.database,
+                                                                                  bset.base):
+        raise Refused("offsite_set_of_another_environment_or_set")
+    if marker.get("recipient_sha256") != recipient_sha:
+        raise Refused("offsite_set_encrypted_to_another_recipient")
+    if offsite_plain != local:
+        raise Refused("offsite_set_differs_from_local")
+    verify(cfg, bset.base, client)
+    return {"ok": True, "set": bset.base, "already_complete": True, "objects": []}
 
 
 def upload(cfg: Config, bset: BackupSet, client, encrypt=gpg_encrypt) -> dict:
     if bset.environment != cfg.environment or bset.database != cfg.database:
         raise Refused("set_of_another_environment")
-    work = Path(tempfile.mkdtemp(prefix="hc-offsite-"))
+    recipient_sha = sha256_file(cfg.recipient_file)
+    if _exists(client, cfg.bucket, f"{cfg.prefix}/{bset.base}/COMPLETE.json") is not None:
+        return _already_complete(cfg, bset, client, recipient_sha)
+    state = _private_dir(_private_dir(cfg.state_dir) / bset.base)
+    home = Path(tempfile.mkdtemp(prefix="hc-offsite-gnupg-"))
     try:
-        os.chmod(work, 0o700)
-        home = work / "gnupg"
-        home.mkdir(mode=0o700)
+        os.chmod(home, 0o700)
         objects = []
         for path in bset.files:
-            enc = work / (path.name + ".gpg")
-            encrypt(path, enc, cfg.recipient_file, home)
-            sha, plain_sha = sha256_file(enc), sha256_file(path)
-            if sha == plain_sha:
-                raise Failed("encryption_did_not_change_the_data")
-            key = f"{cfg.prefix}/{bset.base}/{enc.name}"
-            outcome = _put_verified(client, cfg, key, enc, sha)
-            objects.append({"key": key, "sha256": sha, "bytes": enc.stat().st_size, "outcome": outcome,
-                            "plain_sha256": plain_sha, "plain_name": path.name})
-            enc.unlink()
+            record = _ciphertext(cfg, bset, path, state, recipient_sha, encrypt, home)
+            key = f"{cfg.prefix}/{bset.base}/{path.name}.gpg"
+            outcome = _put_verified(client, cfg, key, state / f"{path.name}.gpg", record["ciphertext_sha256"])
+            objects.append({"key": key, "sha256": record["ciphertext_sha256"], "bytes": record["bytes"],
+                            "outcome": outcome, "plain_sha256": record["plain_sha256"], "plain_name": path.name})
         complete = {"format": 1, "environment": bset.environment, "database": bset.database, "set": bset.base,
                     "created_at": bset.manifest["created_at"], "alembic_version": bset.manifest.get("alembic_version"),
-                    "encryption": "gpg-public-key", "objects": [{k: o[k] for k in ("key", "sha256", "bytes",
-                                                                                    "plain_sha256", "plain_name")}
-                                                                 for o in objects]}
-        marker = work / "COMPLETE.json"
-        marker.write_text(json.dumps(complete, sort_keys=True), encoding="utf-8")
+                    "encryption": "gpg-public-key", "recipient_sha256": recipient_sha,
+                    "objects": [{k: o[k] for k in ("key", "sha256", "bytes", "plain_sha256", "plain_name")}
+                                for o in objects]}
+        marker = state / "COMPLETE.json"  # deterministic from the records: a retried marker is the same bytes
+        _write_atomically(marker, json.dumps(complete, sort_keys=True).encode())
         _put_verified(client, cfg, f"{cfg.prefix}/{bset.base}/COMPLETE.json", marker, sha256_file(marker))
+        shutil.rmtree(state)  # local working copies only; the off-site set is complete and verified
         return {"ok": True, "set": bset.base, "objects": [{k: o[k] for k in ("key", "outcome", "bytes")} for o in objects]}
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def verify(cfg: Config, base: str, client) -> dict:

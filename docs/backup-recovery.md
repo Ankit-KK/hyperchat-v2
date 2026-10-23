@@ -53,11 +53,18 @@ Each run writes one set (`<db>_<UTC>`), all or nothing:
   - A failed run leaves no set. A set without a manifest is **incomplete** and is never used.
 - **Overlap:** `flock` refuses a second run on the same directory (exit 75).
 - **Permissions:** the directory and files are root-only (umask 077). A directory that is group/other-accessible or a symlink is refused.
-- **Retention:**
-  - Removes complete sets of **this** database older than 14 days.
-  - Always keeps the newest 3, however old (never the last verified one).
-  - Removes old-layout dumps only once 3 complete sets exist.
-  - Never follows a symlink and never touches other files.
+- **Retention (fail-closed):**
+  - Before pruning, every set of **this** database is **verified**: regular files only (no symlinks), the manifest is
+    readable and names this database and set, the dump matches the manifest's SHA-256 and its `.dump.sha256` file, the
+    witness matches when the manifest names one, and a witness is present whenever the set has KYC history (state
+    other than draft, or generation above 0).
+  - Only verified sets count toward the newest 3 (`KEEP_MIN`). A verified set older than 14 days is removed only while
+    more than 3 newer verified sets exist, so broken newer sets can never push out the last recoverable one.
+  - A set that fails verification is **never removed automatically**: it is reported, and the unit exits 4.
+  - If verification itself cannot run, nothing counts as verified and nothing is pruned.
+  - A set is removed manifest first. Leftovers of an interrupted removal (files without a manifest) and old-layout dumps
+    are removed only once 3 verified sets exist.
+  - Never follows a symlink and never touches other files or another database's sets.
 - **Exit codes:**
 
   | Code | Meaning |
@@ -66,6 +73,7 @@ Each run writes one set (`<db>_<UTC>`), all or nothing:
   | 2 | refused configuration |
   | 1 | backup failed |
   | 3 | set written, but the witness is missing or unreadable (the unit fails visibly) |
+  | 4 | set written, but an older set failed verification; it is kept for the operator (never pruned) |
   | 75 | another run is in progress |
 
 - **Logs:** names, sizes, counts and hashes only.
@@ -82,7 +90,8 @@ sudo python -m app.backup.restore_check --env prod --dir /var/backups/hyperchat 
 - `--server … --disposable-server` restores into a new database `hc_restorecheck_*` on a server the caller declares disposable, and drops it afterwards.
 - The live socket directory and the live database names are refused.
 
-**What it reports (two separate answers):**
+**What it reports (three separate answers, never one "ok"):**
+- **`structurally_valid`** = `backup_valid` and `restore_valid`:
 - **`backup_valid`:** the manifest, the SHA-256 of every file, a readable archive whose TOC matches the manifest, and restore tools of the source's major version.
 - **`restore_valid`:**
   - a complete single-transaction restore into the **same major version**;
@@ -93,9 +102,19 @@ sudo python -m app.backup.restore_check --env prod --dir /var/backups/hyperchat 
   - no runtime role can execute owner-only functions or rewrite step-up / KYC enforcement tables;
   - the enforcement rows are sane;
   - the KYC generation is not behind the manifest.
-- **`witness`:** how the restored database compares with the newest witness, exactly as the API would judge it. `restore_suspected` is the **expected** answer for an older backup.
+- **`kyc_witness`:** how the restored database compares with the newest witness given, exactly as the API would judge
+  it (details in `witness`):
+  - `consistent`, or `not_applicable` (no witness, and the database has no KYC history: draft, generation 0);
+  - `inconsistent` (`restore_suspected`): the **expected** answer for an older backup. New donations stay blocked;
+  - `missing`: the database has KYC history but no usable witness was given.
+- **`live_operation_approved`:** always `false`. The tool never approves resuming live operation, never acknowledges
+  a restore and never installs or replaces a witness. `live_operation_blockers` lists what remains, e.g.
+  `kyc_witness_inconsistent`, `external_reconciliation_required`, `owner_approval_required`.
 
-**Neither answer means the application is recoverable.** Also needed:
+**Exit codes:** 0 structurally valid with the witness consistent / not applicable; 3 structurally valid but the
+witness inconsistent, missing or not checked; 1 not structurally valid, or the check failed.
+
+**No answer means the application is recoverable.** Also needed:
 - the environment's credentials (`api.env`, the verifier, the operator's Google client);
 - the R2 media objects;
 - Razorpay, Didit, Pusher and bot state;
@@ -146,8 +165,18 @@ It protects only while it is **not** restored together with an older backup: an 
 - **In transit:** HTTPS, plus `Content-MD5` on every PUT.
 - **Verification:** each object is read back and its SHA-256 compared. `COMPLETE.json` is written last; an off-site set without it is incomplete.
 - **Namespaces:** objects go under `prod/<set>/` or `dev/<set>/`. The prefix must equal the environment.
-- **No overwrite:** HEAD first, then a conditional `If-None-Match: *` PUT. Existing objects with other content are refused.
-- **No deletion:** the tool has no delete call at all. A rerun after a partial upload resumes.
+- **No overwrite:** HEAD first, then a conditional `If-None-Match: *` PUT. An existing object is accepted only if its
+  **downloaded bytes** hash to the ciphertext this set recorded (object metadata alone never vouches for it); anything
+  else is refused.
+- **Resumable upload:** GPG encryption is randomized, so a retry must not re-encrypt. Each file is encrypted once into
+  the local state directory (`/var/lib/hyperchat-offsite/<env>`, root 0700, the unit's `StateDirectory`; never a
+  symlink), with a binding record: environment, database, set, file, plaintext SHA-256, recipient-key SHA-256 and
+  ciphertext SHA-256. A rerun reuses that ciphertext and refuses when the local plaintext, the recipient key, the record's
+  set or the stored ciphertext changed, or when remote objects exist but the local records are gone (nothing is
+  guessed). `COMPLETE.json` also carries the recipient-key hash. The state is removed once the set is complete.
+- **Already complete:** a rerun on a complete off-site set checks `COMPLETE.json` (environment, database, set,
+  recipient, plaintext hashes against the local set) and verifies every object; it uploads nothing.
+- **No deletion:** the tool has no delete call at all.
 - **Ransomware and stolen credentials:** deletion must be impossible for the uploader. Use **bucket object lock / retention** (R2 "bucket locks"), e.g. 35 days, plus a lifecycle rule for expiry. The upload token cannot shorten either.
 
 **Owner decisions needed before enabling [APPROVAL]:**

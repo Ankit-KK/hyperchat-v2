@@ -191,21 +191,13 @@ def test_a_witness_symlink_is_never_followed(box):
 
 # ── retention ───────────────────────────────────────────────────────────────────
 
-def _old_set(d: Path, db: str, stamp: str, days: int) -> None:
-    for suffix in (".dump", ".dump.sha256", ".witness", ".manifest.json"):
-        p = d / f"{db}_{stamp}{suffix}"
-        p.write_text("x")
-        t = time.time() - days * 86400
-        os.utime(p, (t, t))
-
-
 def test_retention_keeps_the_newest_sets_and_touches_nothing_else(box):
     tmp, bin_dir = box
     d = tmp / "backups"
     d.mkdir(mode=0o700)
     for i in range(1, 6):
-        _old_set(d, "hc_backuptest_a", f"2026010{i}T020000Z", 40)
-    _old_set(d, "hc_backuptest_other", "20260101T020000Z", 40)          # another database: never touched
+        _valid_set(d, "hc_backuptest_a", f"2026010{i}T020000Z", 40)
+    _valid_set(d, "hc_backuptest_other", "20260101T020000Z", 40)        # another database: never touched
     (d / "hc_backuptest_a_20251201T020000Z.dump").write_text("old layout")  # before manifests
     (d / "notes.txt").write_text("keep")
     (d / "hc_backuptest_a_20251101T020000Z.manifest.json").symlink_to(tmp / "test.witness")  # a symlink: never followed
@@ -227,11 +219,139 @@ def test_retention_keeps_the_newest_sets_and_touches_nothing_else(box):
     assert not stale.exists()
 
 
+def _valid_set(d: Path, db: str, stamp: str, days: int, *, kyc_generation: int = 0, witness: bool = True) -> str:
+    """A set exactly as the script writes it (hashes and manifest consistent), aged `days`."""
+    import json
+    base = f"{db}_{stamp}"
+    dump = b"PGDMP old valid archive " + stamp.encode()
+    (d / f"{base}.dump").write_bytes(dump)
+    sha = hashlib.sha256(dump).hexdigest()
+    (d / f"{base}.dump.sha256").write_text(f"{sha}  {base}.dump\n")
+    w = None
+    if witness:
+        (d / f"{base}.witness").write_text('{"chain": "c", "generation": 1, "state": "active"}\n')
+        w = {"file": f"{base}.witness", "sha256": hashlib.sha256((d / f"{base}.witness").read_bytes()).hexdigest(),
+             "bytes": 50}
+    (d / f"{base}.manifest.json").write_text(json.dumps({
+        "format": 1, "environment": "test", "database": db, "cluster": "17/test", "server_version_num": 170004,
+        "created_at": stamp, "alembic_version": "0028", "kyc_enforcement": {"state": "active" if kyc_generation else
+                                                                           "draft", "generation": kyc_generation},
+        "stepup_enforcement": "draft", "dump": {"file": f"{base}.dump", "sha256": sha, "bytes": len(dump),
+                                                "toc_entries": 2},
+        "witness_status": "copied" if witness else "missing", "witness": w}))
+    t = time.time() - days * 86400
+    for p in d.glob(f"{base}*"):
+        os.utime(p, (t, t))
+    return base
+
+
+def test_retention_counts_only_verified_sets_toward_the_minimum(box):
+    """Review of PR #79 (reproduced first): manifests whose sets are broken must not count, or they would let the
+    only recoverable older set be pruned."""
+    tmp, bin_dir = box
+    d = tmp / "backups"
+    d.mkdir(mode=0o700)
+    good = _valid_set(d, "hc_backuptest_a", "20260101T020000Z", 40)
+    missing = _valid_set(d, "hc_backuptest_a", "20260102T020000Z", 30)
+    (d / f"{missing}.dump").unlink()
+    corrupt = _valid_set(d, "hc_backuptest_a", "20260103T020000Z", 30)
+    (d / f"{corrupt}.dump").write_bytes(b"PGDMP changed")
+    unreadable = _valid_set(d, "hc_backuptest_a", "20260104T020000Z", 30)
+    (d / f"{unreadable}.manifest.json").write_text("{not json")
+    r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_KEEP_MIN=3))
+    assert (d / f"{good}.dump").exists() and (d / f"{good}.manifest.json").exists(), r.stdout + r.stderr
+    # the broken sets are kept (never pruned automatically), reported, and the unit fails visibly
+    assert r.returncode == 4 and all(b in r.stderr for b in (missing, corrupt, unreadable))
+    assert (d / f"{corrupt}.manifest.json").exists() and (d / f"{unreadable}.manifest.json").exists()
+    assert "verified=2 unverified=3 pruned_sets=0" in r.stdout
+
+
+@pytest.mark.parametrize("damage", ["checksum_file", "witness_required_but_missing", "witness_changed",
+                                    "dump_is_a_symlink", "manifest_of_another_database"])
+def test_every_kind_of_broken_set_is_never_counted(box, damage):
+    tmp, bin_dir = box
+    d = tmp / "backups"
+    d.mkdir(mode=0o700)
+    oldest = _valid_set(d, "hc_backuptest_a", "20260101T020000Z", 40)
+    for day in (2, 3):
+        _valid_set(d, "hc_backuptest_a", f"2026010{day}T020000Z", 30)
+    broken = _valid_set(d, "hc_backuptest_a", "20260104T020000Z", 20, kyc_generation=3,
+                        witness=damage != "witness_required_but_missing")
+    if damage == "checksum_file":
+        (d / f"{broken}.dump.sha256").write_text("0" * 64 + f"  {broken}.dump\n")
+    elif damage == "witness_changed":
+        (d / f"{broken}.witness").write_text('{"chain": "x", "generation": 9, "state": "active"}\n')
+    elif damage == "dump_is_a_symlink":
+        real = d / f"{broken}.dump"
+        (tmp / "outside.dump").write_bytes(real.read_bytes())
+        real.unlink()
+        real.symlink_to(tmp / "outside.dump")
+    elif damage == "manifest_of_another_database":
+        import json
+        m = json.loads((d / f"{broken}.manifest.json").read_text())
+        (d / f"{broken}.manifest.json").write_text(json.dumps({**m, "database": "hc_backuptest_other"}))
+    # new + 3 valid = 4 verified with KEEP_MIN 4: the oldest must stay, because the broken set does not count
+    r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_KEEP_MIN=4))
+    assert r.returncode == 4 and broken in r.stderr
+    assert (d / f"{oldest}.manifest.json").exists() and (d / f"{oldest}.dump").exists()
+    assert (tmp / "outside.dump").exists() if damage == "dump_is_a_symlink" else True
+
+
+def test_a_witness_is_not_required_for_an_untouched_kyc_history(box):
+    tmp, bin_dir = box
+    d = tmp / "backups"
+    d.mkdir(mode=0o700)
+    _valid_set(d, "hc_backuptest_a", "20260101T020000Z", 40, witness=False)  # draft / generation 0: recoverable
+    r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_KEEP_MIN=2))
+    assert r.returncode == 0 and "verified=2 unverified=0" in r.stdout
+
+
+def test_an_interrupted_prune_never_counts_and_its_leftovers_are_cleaned_safely(box):
+    tmp, bin_dir = box
+    d = tmp / "backups"
+    d.mkdir(mode=0o700)
+    half = _valid_set(d, "hc_backuptest_a", "20260101T020000Z", 60)
+    (d / f"{half}.manifest.json").unlink()  # a prune stopped after removing the manifest (it goes first)
+    for day in (2, 3):
+        _valid_set(d, "hc_backuptest_a", f"2026010{day}T020000Z", 30)
+    r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_KEEP_MIN=3))
+    assert r.returncode == 0, r.stderr
+    assert not list(d.glob(f"{half}*"))  # its leftovers went, once 3 verified sets exist
+    for day in (2, 3):
+        assert (d / f"hc_backuptest_a_2026010{day}T020000Z.manifest.json").exists()
+
+
+def test_leftovers_stay_while_too_few_sets_verify(box):
+    tmp, bin_dir = box
+    d = tmp / "backups"
+    d.mkdir(mode=0o700)
+    half = _valid_set(d, "hc_backuptest_a", "20260101T020000Z", 60)
+    (d / f"{half}.manifest.json").unlink()
+    r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_KEEP_MIN=3))
+    assert r.returncode == 0 and (d / f"{half}.dump").exists() and (d / f"{half}.witness").exists()
+
+
+def test_when_verification_itself_fails_nothing_is_pruned(box):
+    tmp, bin_dir = box
+    d = tmp / "backups"
+    d.mkdir(mode=0o700)
+    for day in range(1, 6):
+        _valid_set(d, "hc_backuptest_a", f"2026010{day}T020000Z", 40)
+    broken = tmp / "broken-python"
+    broken.mkdir()
+    (broken / "python3").write_text("#!/bin/sh\nexit 1\n")
+    (broken / "python3").chmod(0o755)
+    env = env_for(tmp, bin_dir, HYPERCHAT_BACKUP_KEEP_MIN=1)
+    env["PATH"] = f"{broken}:{env['PATH']}"
+    r = run_script(env)
+    assert r.returncode == 4 and len(sets_in(d)) == 6  # verification impossible: everything kept, reported
+
+
 def test_retention_never_removes_the_last_sets_however_old(box):
     tmp, bin_dir = box
     d = tmp / "backups"
     d.mkdir(mode=0o700)
     for i in range(1, 3):
-        _old_set(d, "hc_backuptest_a", f"2026010{i}T020000Z", 400)
+        _valid_set(d, "hc_backuptest_a", f"2026010{i}T020000Z", 400)
     r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_KEEP_MIN=3, HYPERCHAT_BACKUP_KEEP_DAYS=1))
     assert r.returncode == 0 and len(sets_in(d)) == 3
