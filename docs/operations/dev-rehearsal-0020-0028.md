@@ -300,13 +300,12 @@ The 2026-10-23 results therefore stand: releases, alembic versions, roles, pg_hb
 
 ### 0.3 Isolation audit: deferred to Phase A1
 - **Phase 0 result:** `check_isolation.sh` doesn't exist on the server (not in `/opt/hyperchat/current/deploy`, any release, or `/root/hyperchat-*`), because releases carry only `backend/` and `database/`. `namei` is installed (`/usr/bin/namei`).
-- **Why it waits:** Phase 0 copies nothing. The audit runs from the staging copy Phase A1 creates, right after A1:
-  ```
-  bash "$STAGE/deploy/check_isolation.sh" dev; echo "exit=$?"
-  bash "$STAGE/deploy/check_isolation.sh" prod; echo "exit=$?"
-  ```
-- **Expected:** exit 1, with `FAIL` lines for the pg_hba rule (lifecycle, auth and stepup not covered) and the pg_ident map (API user not mapped to lifecycle and auth), on both environments. File-ownership and unit lines should be `OK`.
-- **Before Phase C:** any FAIL outside pg_hba / pg_ident must be understood. The script is read-only.
+- **Why it waits:** Phase 0 copies nothing. The audit runs inside A1 (`audit_check dev A1` / `prod A1`), from the staging copy, and again in A2.
+- **Enforced:**
+  - **Output:** exactly the expected lines (`audit_expected`): every check OK except the two legacy pg_hba / pg_ident FAIL lines that Phase C fixes.
+  - **Run:** exit status 1, nothing on stderr.
+  - **Records:** full output kept in `$ST`.
+  - **Anything else is a STOP:** another FAIL, a missing or extra check, unexplained output, or another exit status. The script is read-only, and nothing is fixed automatically.
 
 ### 0.4 `hyperchat_dev` database-level configuration
 | Property | Value (2026-10-24) |
@@ -326,19 +325,19 @@ The 2026-10-23 results therefore stand: releases, alembic versions, roles, pg_hb
 Phase A prepares files only. It changes no database, no running service, no unit, and nothing under `/usr/local/sbin`.
 
 **How to run it:**
-- Every step is one root shell: the session setup first, then the step's block exactly as written here.
-- A step runs only after the previous one printed its `OK` line. A `STOP` ends Phase A (see "If a phase fails").
-- Steps that write anything are fail-closed functions.
+- Every step is one root shell: the session setup, then the Phase A helpers below, then the step's block exactly as written here.
+- **Step gates:** each step writes a marker in `$ST` only when everything in it succeeded, and the next step (including the remote side of each workstation transfer) refuses to start without it: A0 → `A0-passed` → A1 → `A1-passed` → A2 → `A2-passed` → A3 → `A3-passed` → A9.
+- **Failures:** any `STOP` ends Phase A (see "If a phase fails"). A marker is never written by hand.
 
 **Workstation pipes:** the transfer commands pipe a `git archive` into `ssh`. On Windows, run them through `cmd.exe /c "…"`, with `C:\Windows\System32\OpenSSH\ssh.exe` and the ssh-agent. A PowerShell pipe re-encodes binary data.
 
-**A0. Preconditions and snapshots (read-only).** It defines the helpers the later steps use; paste it in every Phase A shell, after the session setup. It must print `A0 OK`.
+### Phase A helpers (read-only definitions; paste in every Phase A shell, after the session setup)
 ```
 # Phase A helpers (read-only definitions)
 PRODSQL() { sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -v ON_ERROR_STOP=1 -p 5432 "$@"; }
 # a fingerprint of a tree's content: compared with the values computed from c2fe883 on a workstation
 fp() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
-# everything production-side that Phase A must not change (read-only); printed before and after, must be identical
+# production configuration and state Phase A must not change: exactly 9 lines, compared before (A0) and after (A9)
 prod_snapshot() {
   sha256sum /usr/local/sbin/hyperchat-pgbackup
   ls -l --time-style=+%FT%T /usr/local/sbin | sha256sum
@@ -350,11 +349,72 @@ prod_snapshot() {
   ls -l --time-style=+%FT%T /etc/hyperchat-prod/api.env | awk '{print $1, $3, $4, $5, $6}'
   if [ -e /var/lib/hyperchat-kyc/prod.witness ]; then echo "prod.witness PRESENT"; else echo "prod.witness absent"; fi
 }
+# DEV state Phase A must not change: exactly 3 lines, compared before and after
 dev_snapshot() {
   readlink -f /opt/hyperchat/current
   systemctl is-active hyperchat-api hyperchat-worker hyperchat-cleanup.timer | tr '\n' ' '; echo
   Q "SELECT 'dev alembic ' || version_num FROM alembic_version"
 }
+# observations that legitimately change with time (a nightly backup may run during Phase A): shown, never compared
+prod_observations() {
+  ls -t /var/backups/hyperchat/hyperchat_*.dump | head -n 1
+  systemctl show hyperchat-pgbackup.service -p Result -p ExecMainExitTimestamp | tr '\n' ' '; echo
+}
+# the exact lines check_isolation.sh must print before Phase C (one per check): every check OK except the two
+# legacy lines Phase C fixes (pg_hba lacks lifecycle / auth / stepup; pg_ident maps the API user to app and worker
+# only). Formats are the script's own: ok "OK    <label>", fail "FAIL  <label>: <output, lines joined>".
+audit_expected() {  # $1 = dev | prod
+  local svc other app etc rel units u mode
+  case "$1" in
+    dev)  svc=hyperchat; other=hyperchat-prod; app=/opt/hyperchat; etc=/etc/hyperchat; rel=229fe42381e2
+          units="hyperchat-api hyperchat-worker hyperchat-cleanup" ;;
+    prod) svc=hyperchat-prod; other=hyperchat; app=/opt/hyperchat-prod; etc=/etc/hyperchat-prod; rel=940137070657
+          units="hyperchat-prod-api hyperchat-prod-worker hyperchat-prod-cleanup" ;;
+    *) return 1 ;;
+  esac
+  mode="$(stat -c '%U:%G %a' "$etc/api.env")"
+  case "$mode" in "root:$svc 640" | "root:$svc 600" | "root:root 600") ;; *) mode="root:$svc 640" ;; esac
+  printf '%s\n' "OK    release tree $app owned by root, not writable by group/other, no access for other" \
+    "OK    no writable directory on the way to $app" \
+    "OK    every symlink under $app resolves only through root-owned, non-writable paths" \
+    "OK    every directory reached through a symlink is root's and not writable by group/other, recursively" \
+    "OK    no mount point inside $app or a directory it links to" \
+    "OK    current -> $app/releases/$rel" \
+    "OK    env directory $etc owned by root, not writable by group/other" \
+    "OK    no writable directory on the way to $etc/api.env" \
+    "OK    api.env is $mode"
+  for u in $units; do
+    if [ -f "/etc/systemd/system/$u.service" ]; then
+      printf '%s\n' "OK    $u.service owned by root, not writable by group/other" "OK    $u runs as $svc"
+    else
+      printf '%s\n' "OK    $u.service not installed (skipped)"
+    fi
+  done
+  printf '%s\n' "OK    $svc has no login shell" "OK    $svc is not in sudo/adm/wheel/root/$other" \
+    "FAIL  pg_hba HyperChat rule covers every login role: missing: hyperchat_auth missing: hyperchat_lifecycle missing: hyperchat_stepup" \
+    "OK    pg_hba HyperChat rule takes effect (no earlier local rule matches its roles)" \
+    "FAIL  pg_ident maps $svc to: 'hyperchat_app hyperchat_worker ' (want 'hyperchat_app hyperchat_auth hyperchat_lifecycle hyperchat_worker ')" \
+    "OK    pg_ident never maps $other" \
+    "OK    only $svc-stepup maps to hyperchat_stepup, and $svc-stepup to nothing else" \
+    "OK    step-up verifier not installed (skipped)"
+}
+# run the audit, keep its full output, stderr and exit status, and accept exactly the expected lines (read-only)
+audit_check() {  # $1 = dev | prod, $2 = record tag (A1 | A2)
+  local out="$ST/isolation-$2-$1" rc
+  bash "$STAGE/deploy/check_isolation.sh" "$1" > "$out.txt" 2> "$out.err"; rc=$?
+  echo "$rc" > "$out.exit"
+  [ "$rc" = 1 ] || { echo "STOP: $1 audit exited $rc (expected 1: the two legacy FAILs only)"; return 1; }
+  [ ! -s "$out.err" ] || { echo "STOP: $1 audit wrote to stderr:"; head -n 5 "$out.err"; return 1; }
+  audit_expected "$1" > "$out.expected" || { echo "STOP: cannot build the expected $1 lines"; return 1; }
+  diff <(LC_ALL=C sort "$out.expected") <(LC_ALL=C sort "$out.txt") > "$out.diff" \
+    || { echo "STOP: $1 audit differs from the expected lines (< expected / missing, > printed / unexpected):"; cat "$out.diff"; return 1; }
+  echo "audit $2 $1: exactly the expected lines ($(grep -c '^OK' "$out.txt") OK, 2 legacy FAIL)"
+}
+```
+
+### A0. Preconditions and the "before" snapshots
+A0 writes nothing unless every precondition holds. Only then does it create the records directory, save the snapshots in it, and write `A0-passed`. It must print `A0 OK`.
+```
 a0_preconditions() {
   [ ! -e "$STAGE" ] || { echo "STOP: $STAGE already exists"; return 1; }
   [ ! -e "$REL_NEW" ] || { echo "STOP: $REL_NEW already exists"; return 1; }
@@ -365,53 +425,62 @@ a0_preconditions() {
   api_healthy "$(cat "$REL_OLD/backend/RELEASE")" || return 1
   command -v python3.14 >/dev/null || { echo "STOP: python3.14 missing"; return 1; }
   id hyperchat >/dev/null || { echo "STOP: no hyperchat user"; return 1; }
-  echo "A0 OK"
+  local prod dev
+  prod="$(prod_snapshot 2>&1)" && dev="$(dev_snapshot 2>&1)" || { echo "STOP: a snapshot command failed"; return 1; }
+  [ "$(printf '%s\n' "$prod" | wc -l)" = 9 ] && [ "$(printf '%s\n' "$dev" | wc -l)" = 3 ] \
+    || { echo "STOP: incomplete snapshot"; printf '%s\n' "$prod" "$dev"; return 1; }
+  case "$prod" in c839856d30dbe62922907f633046d17e14a70f242061b2488d9ed20c3028fed3*) ;;
+    *) echo "STOP: /usr/local/sbin/hyperchat-pgbackup is not the script verified in Phase 0.2"; return 1 ;; esac
+  install -d -o root -g root -m 0700 "$ST" || { echo "STOP: cannot create $ST"; return 1; }
+  printf '%s\n' "$prod" > "$ST/A0-prod.snapshot" && printf '%s\n' "$dev" > "$ST/A0-dev.snapshot" \
+    || { echo "STOP: cannot save the snapshots"; return 1; }
+  date -u +%FT%TZ > "$ST/A0-passed"
+  echo "A0 OK: preconditions hold; snapshots saved in $ST"
 }
-```
-Run it, and record the two snapshots:
-```
-a0_preconditions; echo "--- production"; prod_snapshot; echo "--- DEV"; dev_snapshot
+a0_preconditions
 ```
 
-**A1. Staging copy and record directory.** The staging copy is root-only. It provides the scripts and the smoke suite, and is never run as a service. The copy refuses to write into an existing directory.
+### A1. Staging copy, records, isolation audit
+The staging copy is root-only. It provides the scripts and the smoke suite, and is never run as a service. The transfer runs only after A0 passed, and never into an existing directory.
 
 **(workstation)**
 ```
 git archive c2fe883be71d1a494232d4147ed4d6fbc4e70eef backend database deploy tests \
-  | ssh root@VPS "[ ! -e /root/hyperchat-c2fe883 ] && install -d -o root -g root -m 0700 /root/hyperchat-c2fe883 && tar -x -C /root/hyperchat-c2fe883"
+  | ssh root@VPS "[ -f /root/rehearsal-dev/A0-passed ] && [ ! -e /root/hyperchat-c2fe883 ] && install -d -o root -g root -m 0700 /root/hyperchat-c2fe883 && tar -x -C /root/hyperchat-c2fe883"
 ```
 **(VPS)**: must print `A1 OK`.
+- **Allowed FAILs:** the audit (0.3) may report only the two legacy FAIL lines that Phase C fixes.
+- **Everything else stops A1:** any other FAIL, a missing or extra check, other output, stderr, or an exit status other than 1. That covers release tree, `api.env`, units, service account, symlinks and mounts. Nothing is fixed automatically.
 ```
 a1_records() {
+  [ -f "$ST/A0-passed" ] || { echo "STOP: A0 has not passed"; return 1; }
+  [ ! -e "$ST/A1-passed" ] || { echo "STOP: A1 already passed once"; return 1; }
+  [ "$(stat -c '%U:%G %a' "$ST")" = "root:root 700" ] || { echo "STOP: $ST is not root:root 700"; return 1; }
   [ "$(fp "$STAGE")" = 83b9276f0484b72e1057e4698ec8d9a8c37a1fa4309d3e3116f2bad0dbac9e36 ] \
     && [ "$(find "$STAGE" -type f | wc -l)" = 381 ] || { echo "STOP: $STAGE is not the c2fe883 tree"; return 1; }
   [ "$(stat -c '%U:%G %a' "$STAGE")" = "root:root 700" ] || { echo "STOP: $STAGE is not root:root 700"; return 1; }
-  [ ! -e "$ST" ] && install -d -o root -g root -m 0700 "$ST" || { echo "STOP: cannot create $ST (or it exists)"; return 1; }
   cat "$REL_OLD/backend/RELEASE" > "$ST/old-release.id" && [ -s "$ST/old-release.id" ] || { echo "STOP: old release id"; return 1; }
   api_healthy "$(cat "$ST/old-release.id")" || return 1   # read-only: the running API reports exactly that id
-  echo "A1 OK: staging copy verified, records in $ST"
+  audit_check dev A1 && audit_check prod A1 || return 1
+  date -u +%FT%TZ > "$ST/A1-passed"
+  echo "A1 OK: staging copy verified; audits show only the two legacy FAILs"
 }
 a1_records
 ```
-Then run the isolation audit (0.3). It is read-only; its output goes to `$ST`.
-```
-bash "$STAGE/deploy/check_isolation.sh" dev > "$ST/isolation-A1-dev.txt" 2>&1; echo "dev exit=$?"
-bash "$STAGE/deploy/check_isolation.sh" prod > "$ST/isolation-A1-prod.txt" 2>&1; echo "prod exit=$?"
-grep -n FAIL "$ST/isolation-A1-dev.txt" "$ST/isolation-A1-prod.txt"
-```
-- **Allowed FAILs:** only the old pg_hba rule (lifecycle, auth and stepup not covered) and the old pg_ident map (API user not mapped to lifecycle and auth). Phase C fixes both.
-- **Any other FAIL is a STOP:** release tree, `api.env`, units, service account, symlinks or mounts. Nothing is fixed automatically.
 
-**A2. Build the target release**, without switching `current` ("Deploy a commit" steps 1–3; `deploy/README.md`). The directory name follows the 12-character convention of `229fe42381e2`. The copy refuses to write into an existing directory.
+### A2. Build the target release
+This follows "Deploy a commit" steps 1–3 (`deploy/README.md`), without switching `current`. The directory name follows the 12-character convention of `229fe42381e2`. The transfer runs only after A1 passed, and never into an existing directory.
 
 **(workstation)**
 ```
 git archive c2fe883be71d1a494232d4147ed4d6fbc4e70eef backend database \
-  | ssh root@VPS "[ ! -e /opt/hyperchat/releases/c2fe883be71d ] && mkdir -p /opt/hyperchat/releases/c2fe883be71d && tar -x -C /opt/hyperchat/releases/c2fe883be71d"
+  | ssh root@VPS "[ -f /root/rehearsal-dev/A1-passed ] && [ ! -e /opt/hyperchat/releases/c2fe883be71d ] && mkdir -p /opt/hyperchat/releases/c2fe883be71d && tar -x -C /opt/hyperchat/releases/c2fe883be71d"
 ```
 **(VPS)**: must print `A2 OK`.
 ```
 build_release() {
+  [ -f "$ST/A1-passed" ] || { echo "STOP: A1 has not passed"; return 1; }
+  [ ! -e "$ST/A2-passed" ] || { echo "STOP: A2 already passed once"; return 1; }
   [ "$(fp "$REL_NEW")" = 1ffdf1e5c931d4e67eb9e4be9f1c9a69284a63ec691efec4042c2293e7df1d78 ] \
     && [ "$(find "$REL_NEW" -type f | wc -l)" = 335 ] || { echo "STOP: $REL_NEW is not the c2fe883 tree"; return 1; }
   [ -d "$REL_NEW/backend" ] && [ ! -e "$REL_NEW/venv" ] || { echo "STOP: $REL_NEW missing, or a venv already exists"; return 1; }
@@ -430,23 +499,25 @@ build_release() {
   "$REL_NEW/venv/bin/pip" check >/dev/null || { echo "STOP: pip check"; return 1; }
   [ "$(readlink -f /opt/hyperchat/current)" = "$REL_OLD" ] || { echo "STOP: current is not $REL_OLD"; return 1; }
   api_healthy "$(cat "$ST/old-release.id")" || return 1   # the running API still serves the old release
-  echo "A2 OK: release built, nothing switched"
+  # the new release is now in the audited tree: the audits must be exactly as after A1 (no new failure)
+  audit_check dev A2 && audit_check prod A2 || return 1
+  cmp -s "$ST/isolation-A1-dev.txt" "$ST/isolation-A2-dev.txt" && cmp -s "$ST/isolation-A1-prod.txt" "$ST/isolation-A2-prod.txt" \
+    || { echo "STOP: the audit output changed between A1 and A2"; return 1; }
+  date -u +%FT%TZ > "$ST/A2-passed"
+  echo "A2 OK: release built, nothing switched, audits unchanged"
 }
 build_release
 ```
-- **If the build fails:** an unused directory is left, and nothing else. It is removed or rebuilt only by decision.
-- **Then the isolation audit again** (read-only), with the new release in the tree. Its FAIL lines must be identical to those after A1:
-  ```
-  bash "$STAGE/deploy/check_isolation.sh" dev > "$ST/isolation-A2-dev.txt" 2>&1; echo "dev exit=$?"
-  diff <(grep FAIL "$ST/isolation-A1-dev.txt") <(grep FAIL "$ST/isolation-A2-dev.txt") && echo "A2 audit: same FAIL set as after A1"
-  ```
+If the build fails, an unused directory is left, and nothing else. It is removed or rebuilt only by decision.
 
-**A3. Create the DEV KYC witness** (`docs/kyc-rollout.md` "Server setup"), so that every backup in Phases B and E carries it. It must print `A3 OK`.
+### A3. Create the DEV KYC witness
+The witness follows `docs/kyc-rollout.md` "Server setup", so that every backup in Phases B and E carries it. A3 runs only after A2 passed, and must print `A3 OK`.
 - **Fail-closed:** an existing witness (or anything at that path) is a STOP, and the function then touches nothing: no recreate, truncate or attribute change.
 - **The directory:** an existing directory is used only when it is a real `root:root 0755` directory; it is never re-moded.
 ```
 create_dev_witness() {
   local D=/var/lib/hyperchat-kyc
+  [ -f "$ST/A2-passed" ] || { echo "STOP: A2 has not passed"; return 1; }
   if [ -e "$W" ] || [ -L "$W" ]; then
     echo "STOP: $W already exists; it is never recreated, truncated or modified"
     stat -c '%U:%G %a %s bytes' "$W"; lsattr "$W"
@@ -465,6 +536,7 @@ create_dev_witness() {
   fi
   [ "$(stat -c '%U:%G %a %s' "$W")" = "hyperchat:hyperchat 600 0" ] && witness_ok >/dev/null \
     || { echo "STOP: $W is not an empty hyperchat:hyperchat 0600 append-only file"; return 1; }
+  date -u +%FT%TZ > "$ST/A3-passed"
   echo "A3 OK: $(stat -c '%U:%G %a %s bytes' "$W"), $(lsattr "$W" | awk '{print $1}')"
 }
 create_dev_witness
@@ -476,17 +548,31 @@ create_dev_witness
 
 **A4. No backup units, no `/usr/local/sbin` install.** See "The backup script and production".
 
-**A9. After (read-only).** The production snapshot must be identical to A0's. DEV must still run `229fe42381e2`, with its services active and the database at 0019.
+### A9. After: compare, don't just display
+- **Must be identical to A0's saved snapshots:** the production snapshot (backup script and its directory, backup units and timers, unit files, service states, release, alembic, `api.env`, no production witness) and the DEV snapshot (release, services, 0019).
+- **Shown but not compared:** observations that legitimately change with time (the newest production backup archive, its last result).
+
+It must print `A9 OK`.
 ```
-echo "--- production"; prod_snapshot; echo "--- DEV"; dev_snapshot
-api_healthy "$(cat "$ST/old-release.id")"; ls -la "$ST"
+a9_after() {
+  [ -f "$ST/A3-passed" ] || { echo "STOP: A3 has not passed"; return 1; }
+  prod_snapshot > "$ST/A9-prod.snapshot" 2>&1 && dev_snapshot > "$ST/A9-dev.snapshot" 2>&1 \
+    || { echo "STOP: a snapshot command failed"; return 1; }
+  diff "$ST/A0-prod.snapshot" "$ST/A9-prod.snapshot" || { echo "STOP: PRODUCTION CHANGED during Phase A (diff above)"; return 1; }
+  diff "$ST/A0-dev.snapshot" "$ST/A9-dev.snapshot" || { echo "STOP: DEV release, services or schema changed (diff above)"; return 1; }
+  api_healthy "$(cat "$ST/old-release.id")" || return 1
+  echo "observations (not compared):"; prod_observations
+  echo "A9 OK: production and DEV unchanged by Phase A"
+}
+a9_after; ls -la "$ST"
 ```
 
-**Record:**
-- A0's snapshots;
-- `A1 OK`, `A2 OK`, `A3 OK`;
-- both audit outputs;
-- A9's snapshots and their comparison with A0's.
+**Record:** the files in `$ST`:
+- the markers;
+- `old-release.id`;
+- the A0 and A9 snapshots;
+- each audit's `.txt`, `.err`, `.exit`, `.expected`, `.diff`;
+- and the printed `A0 OK` … `A9 OK` lines.
 
 ---
 
