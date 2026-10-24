@@ -62,11 +62,14 @@ api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUC
 ```
 
 ## Deploy a commit
-1. `git archive <commit> backend database | ssh root@VPS "mkdir -p /opt/hyperchat/releases/<commit> && tar -x -C /opt/hyperchat/releases/<commit>"`
+1. `git archive <commit> backend database | ssh root@VPS "[ -d /opt/hyperchat/releases ] && mkdir /opt/hyperchat/releases/<commit> && tar -x -C /opt/hyperchat/releases/<commit>"`
+   - **The application directories already exist,** as `root:hyperchat 0750`. On a fresh server, create them once: `install -d -o root -g hyperchat -m 750 /opt/hyperchat /opt/hyperchat/releases` (production: step 2 of its section).
+   - **Never `mkdir -p` them:** that creates `root:root 0755` parents, so the service user would reach its code only through "other" access, which `check_isolation.sh` refuses.
 2. `python3.14 -m venv .../venv && .../venv/bin/pip install -r .../backend/requirements.txt`
 3. `echo <commit> > .../backend/RELEASE`; `chown -R root:hyperchat .../<commit>`; `chmod -R g+rX,g-w,o-rwx .../<commit>`
 4. Migrations (as root, peer-mapped to hyperchat_migrator):
-   `cd .../database && HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<db>?host=/var/run/postgresql&port=<port>" ../venv/bin/alembic upgrade head`
+   `cd .../database && PYTHONDONTWRITEBYTECODE=1 HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<db>?host=/var/run/postgresql&port=<port>" ../venv/bin/alembic upgrade head`
+   (no bytecode from root: see "Rules")
    (Phase 5 brings `0009`: one nullable column, `moderation_actions.actor_user_id`; no table rewrite,
    its foreign key briefly locks `users` against writes (bounded by `lock_timeout` = 10 s).
    Apply it before step 5: the Phase 5 code writes the column, the previous release ignores it, so a
@@ -108,7 +111,7 @@ api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUC
    `nginx_ratelimit_check.sh` verifies the rate-limit snippets).
 
 First admin on a fresh environment (prompts for the password on the server, refuses once an admin
-can sign in): `cd .../current/backend && ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env
+can sign in): `cd .../current/backend && PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -m app.cli --env-file /etc/hyperchat/api.env
 bootstrap-admin --email <admin email>`.
 
 Cleanup timer: `install -m 644 deploy/systemd/hyperchat-cleanup.{service,timer} /etc/systemd/system/`,
@@ -178,12 +181,12 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
 7. **Backup** — `systemctl start hyperchat-pgbackup.service`; record the new
    `/var/backups/hyperchat/hyperchat_<UTC>.dump`, `sha256sum -c` its `.sha256`, and `pg_restore -l` it. With the
    current script the set also has a `.manifest.json` (written last); verify it by restoring it into a scratch cluster:
-   `python -m app.backup.restore_check --env prod ... --scratch --scratch-user postgres` (docs/backup-recovery.md).
+   `PYTHONDONTWRITEBYTECODE=1 python -m app.backup.restore_check --env prod ... --scratch --scratch-user postgres` (docs/backup-recovery.md).
 8. **Release build** — as in "Deploy a commit" steps 1–3, under `/opt/hyperchat-prod/releases/<commit>`,
    owned `root:hyperchat-prod`; import check as `hyperchat-prod`
    (`sudo -u hyperchat-prod .../venv/bin/python -c "import app.main"`).
 9. **Migration [APPROVAL]** — `alembic current` must be `0008`, then
-   `cd /opt/hyperchat-prod/releases/<commit>/database && HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/hyperchat?host=/var/run/postgresql&port=5432" ../venv/bin/alembic upgrade head`
+   `cd /opt/hyperchat-prod/releases/<commit>/database && PYTHONDONTWRITEBYTECODE=1 HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/hyperchat?host=/var/run/postgresql&port=5432" ../venv/bin/alembic upgrade head`
    → `0009`. Verify `moderation_actions.actor_user_id` (uuid, nullable, no default, FK `users` ON DELETE
    SET NULL, validated) and that every table count is unchanged.
 10. **systemd** — `install -o root -g root -m 644 deploy/systemd/hyperchat-prod-*.{service,timer} /etc/systemd/system/`
@@ -204,10 +207,10 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
     127.0.0.1; DEV fingerprints unchanged; journals and nginx error log clean.
 13. **Smoke tests** — read-only first (Phase 4 public endpoints, unauthenticated 401/403/CSRF/CORS
     checks). The first admin is created by you **[YOU]**:
-    `cd /opt/hyperchat-prod/current/backend && ../venv/bin/python -m app.cli --env-file /etc/hyperchat-prod/api.env bootstrap-admin --email <admin email>`.
+    `cd /opt/hyperchat-prod/current/backend && PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -m app.cli --env-file /etc/hyperchat-prod/api.env bootstrap-admin --email <admin email>`.
     Authenticated checks against production need an account you choose **[APPROVAL]**.
     Payments (after the live Razorpay keys are set **[APPROVAL]**): `cd /opt/hyperchat-prod/current/backend &&
-    ../venv/bin/python -m app.cli --env-file /etc/hyperchat-prod/api.env payment-health` must print `mode=live
+    PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -m app.cli --env-file /etc/hyperchat-prod/api.env payment-health` must print `mode=live
     status=ok` and exit 0 before any donor checkout (D7: one read-only probe, no order). On DEV the same command
     must print `mode=test`.
 
@@ -384,3 +387,8 @@ Every step needs approval; `check_isolation.sh` audits the verifier once install
   `postgres` superuser at runtime. The DEV user has no mapping on the production cluster.
 - Secrets are generated on the server into `/etc/hyperchat/api.env` (DEV) or
   `/etc/hyperchat-prod/api.env` (production, never copied from DEV); they never go into Git or logs.
+- **No bytecode from root inside a release:**
+  - **The rule:** Python run as root from a release directory always runs with `PYTHONDONTWRITEBYTECODE=1`. That covers migrations (`alembic`), `app.cli`, the operator tools (`app.kyc.operator`, `app.stepup.operator`) and `app.backup.restore_check`.
+  - **Why:** otherwise it writes root-owned `__pycache__` directories with mode 0755 after the release's `chmod`. Those give "other" access to the tree, and `check_isolation.sh` refuses them.
+  - **The service users can't write bytecode** (the tree isn't writable by them), so their runs need nothing.
+  - **Existing violations:** DEV (117 paths: the two application directories and 115 `__pycache__` directories) and production (5 `__pycache__` directories in the active release) were found read-only on 2026-10-24 (rehearsal Phase A). Correcting them is a separately approved change.
