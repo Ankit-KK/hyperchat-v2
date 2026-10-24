@@ -119,6 +119,22 @@ ST=/root/rehearsal-dev
 # the fixed backup script (PR #88), staged in B0 and pinned: dev_backup refuses any other content or owner
 BACKUP_SCRIPT=/root/hyperchat-backupfix/hyperchat-pgbackup.sh
 BACKUP_SHA=05509f5e915601169a37604067bd65f55f672ead9db6bb9a602489a2fd7ea854
+# fp: one SHA-256 over the sorted SHA-256 of every file in a tree (the staging and release fingerprints)
+fp() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
+# roles.sql for restore_check's scratch cluster (B2, E2): the built release holds only backend/ and database/, so the
+# tool's default <release>/deploy/postgres/roles.sql does not exist. The A1-verified staging copy's file is used,
+# pinned (c2fe883 and main: the same file); the release is never changed.
+ROLES_SQL="$STAGE/deploy/postgres/roles.sql"
+ROLES_SQL_SHA=fbb277d57be9eea95bdfd8ddf38f44c5aa47a3db12e5a7c487bc4867b1b65c3a
+roles_sql_ok() {
+  [ "$(readlink -f "$STAGE")" = "$STAGE" ] && [ "$(stat -c '%U:%G %a' "$STAGE")" = "root:root 700" ] \
+    || { echo "STOP: $STAGE is not the root-only staging directory"; return 1; }
+  [ "$(fp "$STAGE")" = 83b9276f0484b72e1057e4698ec8d9a8c37a1fa4309d3e3116f2bad0dbac9e36 ] \
+    && [ "$(find "$STAGE" -type f | wc -l)" = 381 ] || { echo "STOP: $STAGE is no longer the c2fe883 tree"; return 1; }
+  [ "$ROLES_SQL" = "$STAGE/deploy/postgres/roles.sql" ] && [ -f "$ROLES_SQL" ] && [ ! -L "$ROLES_SQL" ] \
+    && [ "$(readlink -f "$ROLES_SQL")" = "$ROLES_SQL" ] || { echo "STOP: $ROLES_SQL is not a regular file inside $STAGE"; return 1; }
+  [ "$(sha256sum "$ROLES_SQL" | cut -d' ' -f1)" = "$ROLES_SQL_SHA" ] || { echo "STOP: $ROLES_SQL is not the pinned c2fe883 file"; return 1; }
+}
 FAILED_DB=hyperchat_dev_failed_rehearsal
 RESTORE_DB=hyperchat_dev_rollback_restore
 # Q: one read-only query against the DEV database (port 5433 only; never production)
@@ -348,8 +364,7 @@ Phase A prepares files only. It changes no database, no running service, no unit
 ```
 # Phase A helpers (read-only definitions)
 PRODSQL() { sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -v ON_ERROR_STOP=1 -p 5432 "$@"; }
-# a fingerprint of a tree's content: compared with the values computed from c2fe883 on a workstation
-fp() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
+# fp (a tree's content fingerprint, compared with values computed from c2fe883): defined in the session setup
 # production configuration and state Phase A must not change: exactly 9 lines, compared before (A0) and after (A9)
 prod_snapshot() {
   sha256sum /usr/local/sbin/hyperchat-pgbackup
@@ -638,17 +653,22 @@ b1_backup
   - 75: another run in progress;
   - 1: failed (including a failed query, or an enforcement table without exactly one row: never recorded as absent).
 
-**B2. Restore it into a disposable PostgreSQL 15** (`docs/backup-recovery.md` "Verifying a set"). The set is at 0019, so pass its own head (the default would be this checkout's 0028). It fails closed:
+**B2. Restore it into a disposable PostgreSQL 15** (`docs/backup-recovery.md` "Verifying a set"). The set is at 0019, so pass its own head (the default would be this checkout's 0028). The scratch cluster gets its roles from the pinned staging `roles.sql` (`roles_sql_ok`, `--roles-sql`). It fails closed:
 - `B2-passed` is written only after `restore_check` exited 0, the scratch cluster is gone, and every required JSON field holds.
 - Any failure returns non-zero, with `STOP` and no marker.
 ```
 b2_restore() { local rc
   rm -f "$ST/B2-passed"
   test -s "$ST/phaseB.set" || { echo "STOP: no Phase B set recorded"; return 1; }
+  # the recorded B1 set, reused as it is: complete (manifest) and its dump matching its checksum file
+  [ -f "/var/backups/hyperchat-dev/$(cat "$ST/phaseB.set").manifest.json" ] \
+    && ( cd /var/backups/hyperchat-dev && sha256sum -c --quiet "$(cat "$ST/phaseB.set").dump.sha256" ) \
+    || { echo "STOP: the Phase B set is incomplete or its checksum does not match"; return 1; }
+  roles_sql_ok || return 1
   [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] || { echo "STOP: a scratch directory is left from an earlier run"; return 1; }
   ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
       --set "$(cat "$ST/phaseB.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
-      --expect-head 0019 --output "$ST/restorecheck-0019.json" ); rc=$?
+      --roles-sql "$ROLES_SQL" --expect-head 0019 --output "$ST/restorecheck-0019.json" ); rc=$?
   [ "$rc" = 0 ] || { echo "STOP: restore_check exited $rc (see $ST/restorecheck-0019.json)"; return 1; }
   [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] || { echo "STOP: the scratch cluster was not removed (do not delete it by hand)"; return 1; }
   python3 -I - "$ST/restorecheck-0019.json" "$(cat "$ST/phaseB.set")" <<'PY' || { echo "STOP: the restore check result is not as required"; return 1; }
@@ -678,6 +698,10 @@ b2_restore
   - `live_operation_approved: false` (always).
 
 The scratch cluster runs in a temporary directory (`/tmp/hc-restorecheck-*`) with no TCP and is deleted afterwards. A directory left behind is a STOP, never removed by hand. No live database is touched.
+
+**Re-running B2:** `b2_restore` may be run again on its own after a STOP. It reuses the recorded B1 set (`$ST/phaseB.set`) after checking its manifest and checksum, and never repeats B0 or B1.
+- **2026-10-24 stop:** B2 stopped with `restore_check` exit 1 (`CalledProcessError`). Before the explicit `--roles-sql`, the tool looked for `<release>/deploy/postgres/roles.sql`, which the built release doesn't have.
+- **What that run left:** the scratch cluster was removed, no `B2-passed` was written, and the B1 set `hyperchat_dev_20261024T140604Z` is intact.
 
 **B3. Fallback:** the older manual dump `hyperchat_dev_pre_main229fe42_20261015T045216Z.dump` stays where it is. Restoring it would lose 8 days of DEV changes. It is a fallback only if the B1 set turns out unusable, and only by separate decision.
 
@@ -945,9 +969,11 @@ baseline > "$ST/baseline-after.txt"; diff "$ST/baseline-before.txt" "$ST/baselin
 e2_restore() { local rc  # non-zero on any failure; $ST/E-restore-passed only after both succeeded
   rm -f "$ST/phaseE.set" "$ST/E-restore-passed"
   dev_backup phaseE.set || { rm -f "$ST/phaseE.set"; echo "STOP: backup failed"; return 1; }
+  roles_sql_ok || return 1
+  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] || { echo "STOP: a scratch directory is left from an earlier run"; return 1; }
   ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
       --set "$(cat "$ST/phaseE.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
-      --output "$ST/restorecheck-0028.json" ); rc=$?
+      --roles-sql "$ROLES_SQL" --output "$ST/restorecheck-0028.json" ); rc=$?
   [ "$rc" = 0 ] || { echo "STOP: restore check failed (restore_check exited $rc; see $ST/restorecheck-0028.json)"; return 1; }
   date -u +%FT%TZ > "$ST/E-restore-passed" && echo "E2 RESTORE OK"
 }
