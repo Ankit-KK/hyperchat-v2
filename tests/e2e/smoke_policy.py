@@ -172,6 +172,15 @@ ADMIN_INSERT = ("INSERT INTO public.users (email, password_hash, role, is_active
                 "RETURNING id::text")
 # Since migration 0024 the runtime roles may not create, change or delete an administrator: synthetic admins are
 # created and removed through the schema owner (smoke_dev_backend.fixture_db), like the integration tests do.
+USER_INSERT = ("INSERT INTO public.users (email, password_hash, role, streamer_id, is_active) VALUES (%s, %s, %s, %s, %s) "
+               "RETURNING id::text")
+
+
+def owner_creates_user(role: str, streamer_id: str | None) -> bool:
+    """Whether a synthetic account must be written by the schema owner instead of the runtime role: an administrator
+    (migration 0024) or a creator-linked account (0027: an API role creates one only by accepting its invitation,
+    with the token, in the same transaction; the fixture is not that flow, so the owner writes it, as for admins)."""
+    return role == "admin" or streamer_id is not None
 
 LEFTOVERS = """
     SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE %(d)s),

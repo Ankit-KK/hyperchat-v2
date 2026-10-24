@@ -221,6 +221,72 @@ def test_since_0024_the_runtime_role_cannot_create_or_delete_the_synthetic_admin
             owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
 
 
+@pytest.mark.parametrize("role,streamer_id,owner", [
+    ("admin", None, True), ("streamer", "a-creator-id", True), ("user", "a-creator-id", True),
+    ("streamer", None, False), ("user", None, False)])
+def test_only_admins_and_creator_linked_accounts_are_written_by_the_owner(role, streamer_id, owner):
+    assert sp.owner_creates_user(role, streamer_id) is owner
+
+
+def test_the_suite_creates_every_synthetic_user_through_owner_creates_user():
+    src = SUITE.read_text(encoding="utf-8")
+    body = src[src.index("def make_user("):src.index("def email(")]
+    assert "with (fixture_db() if owner_creates_user(role, streamer_id) else db()) as c:" in body
+    assert body.count("USER_INSERT") == 1 and "INSERT INTO public.users" not in body
+
+
+@requires_db
+def test_since_0027_a_creator_linked_account_is_written_by_the_owner_not_the_runtime_role(strict_scratch_db):
+    """The E1 failure of 2026-10-24: the runtime role inserting a creator-linked account is refused by
+    stepup_guard_users (no invitation accepted in this transaction); the schema owner writes the synthetic one, and the
+    cleanup removes it. An account without a creator is still written by the runtime role."""
+    with fixture_db() as owner, db() as app:
+        try:
+            creator = owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
+                                    "VALUES ('authtest-smk0027', 'Smoke', 'active', 'legacy') RETURNING id::text"
+                                    ).fetchone()[0]
+            with pytest.raises(psycopg.errors.InsufficientPrivilege, match="created only by an invitation"):
+                app.execute(sp.USER_INSERT, ("smk-linked-app" + DOMAIN, None, "streamer", creator, True))
+            linked = owner.execute(sp.USER_INSERT, ("smk-linked" + DOMAIN, None, "streamer", creator, True)).fetchone()[0]
+            plain = app.execute(sp.USER_INSERT, ("smk-plain" + DOMAIN, None, "user", None, True)).fetchone()[0]
+            assert owner.execute("SELECT count(*) FROM public.users WHERE id IN (%s, %s)", (linked, plain)).fetchone()[0] == 2
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC))
+            assert left["users"] == 0 and left["creators"] == 0, left
+        finally:
+            owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
+            owner.execute("DELETE FROM public.streamers WHERE streamer_slug = 'authtest-smk0027'")
+
+
+@requires_db
+def test_the_suites_other_runtime_role_fixture_writes_are_accepted_at_head_while_mfa_is_draft(strict_scratch_db):
+    """The runtime-role fixture writes smoke_dev_backend.py makes besides users (same statements): with MFA
+    enforcement draft, 0027's guards take their legacy path for them. If enforcement were active they would need
+    grants, which the rehearsal never activates (the suite itself requires draft)."""
+    with fixture_db() as owner, db() as app:
+        try:
+            assert owner.execute("SELECT state FROM public.stepup_enforcement").fetchone()[0] == "draft"
+            creator = owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
+                                    "VALUES ('authtest-smkfix', 'Smoke', 'active', 'legacy') RETURNING id::text"
+                                    ).fetchone()[0]
+            admin = owner.execute(sp.ADMIN_INSERT, ("smk-fix-admin" + DOMAIN, None)).fetchone()[0]
+            old = app.execute(sp.USER_INSERT, ("smk-fix-old" + DOMAIN, None, "streamer", None, True)).fetchone()[0]
+            app.execute("UPDATE public.users SET streamer_id = %s WHERE id = %s", (creator, old))  # D13 migrated shape
+            app.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (creator,))
+            app.execute("UPDATE public.users SET email_verified_at = now() WHERE id = %s", (old,))  # D11
+            app.execute("INSERT INTO public.user_invites (email, role, token_hash, invited_by, expires_at) VALUES "
+                        "(%s, 'streamer', %s, %s, now() + interval '1 day')", ("smk-fix-inv" + DOMAIN, "a" * 64, admin))
+            app.execute("INSERT INTO public.user_invites (email, token_hash, expires_at) VALUES "
+                        "(%s, %s, now() + interval '1 day')", ("smk-fix-inv2" + DOMAIN, "b" * 64))
+            app.execute("INSERT INTO public.partner_api_keys (partner_slug, key_hash, key_prefix) VALUES "
+                        "('authtest-smkfix-partner', %s, 'hc_smkfix')", ("c" * 64,))
+            app.execute("UPDATE public.partner_api_keys SET revoked = true WHERE key_hash = %s", ("c" * 64,))
+        finally:
+            owner.execute("DELETE FROM public.partner_api_keys WHERE key_hash = %s", ("c" * 64,))
+            owner.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
+            owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
+            owner.execute("DELETE FROM public.streamers WHERE streamer_slug = 'authtest-smkfix'")
+
+
 @requires_db
 def test_cleanup_removes_every_synthetic_row_and_nothing_real(strict_scratch_db):
     with fixture_db() as owner, db() as app:

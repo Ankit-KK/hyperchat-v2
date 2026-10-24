@@ -47,9 +47,9 @@ from app.auth.passwords import hash_password  # noqa: E402
 from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
 import smoke_policy  # noqa: E402
-from smoke_policy import (ADMIN_INSERT, FEATURE_HEADS, Results, SmokeError, ceremony_refused_safely,  # noqa: E402
+from smoke_policy import (ADMIN_INSERT, FEATURE_HEADS, USER_INSERT, Results, SmokeError, ceremony_refused_safely,  # noqa: E402
                           cleanup, enforcement_draft, head_at_least, head_check, mfa_status_ok, parse_expect_head,
-                          rate_limit_keys, refusal, suite_ip)
+                          owner_creates_user, rate_limit_keys, refusal, suite_ip)
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
 LOCAL = os.environ.get("HYPERCHAT_SMOKE_LOCAL", "http://127.0.0.1:8000").rstrip("/")
@@ -110,11 +110,11 @@ def make_user(name: str, pw: str | None, role: str = "streamer", streamer_id: st
     if role == "admin":  # since 0024 only the owner may create an administrator (the runtime roles are refused)
         with fixture_db() as c:
             return c.execute(ADMIN_INSERT, (email(name), hash_password(pw) if pw else None)).fetchone()[0]
-    with db() as c:
-        return c.execute("INSERT INTO public.users (email, password_hash, role, streamer_id, is_active) "
-                         "VALUES (%s, %s, %s, %s, %s) RETURNING id::text",
-                         (email(name), hash_password(pw) if pw else None, role, streamer_id,
-                          active)).fetchone()[0]
+    # since 0027 a creator-linked account comes only from an accepted invitation for the runtime roles: the owner
+    # writes the synthetic one (smoke_policy.owner_creates_user)
+    with (fixture_db() if owner_creates_user(role, streamer_id) else db()) as c:
+        return c.execute(USER_INSERT, (email(name), hash_password(pw) if pw else None, role, streamer_id,
+                                       active)).fetchone()[0]
 
 
 def email(name: str) -> str:
