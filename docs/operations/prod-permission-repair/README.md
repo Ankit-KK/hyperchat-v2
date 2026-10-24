@@ -7,7 +7,7 @@
 - Root-run Python wrote them on 2026-10-06 at 17:05, after the API started at 14:56 (see the `deploy/README.md` "Rules").
 - They also block A1 of [the DEV rehearsal](../dev-rehearsal-0020-0028.md), which runs `check_isolation.sh prod`.
 
-**Reference:** this follows the DEV repair ([`../dev-permission-repair/`](../dev-permission-repair/README.md)), which ran successfully on 2026-10-24.
+**Reference:** this follows the DEV repair (`docs/operations/dev-permission-repair/`, PR Ankit-KK/hyperchat-v2#86), which ran successfully on 2026-10-24.
 
 **Scope:** production only, and exactly these 5 directories. DEV is checked unchanged, never touched.
 
