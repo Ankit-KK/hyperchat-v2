@@ -822,27 +822,62 @@ c3_ident
 - **The `hyperchat-stepup` line is harmless** before that OS user exists. The isolation audit requires that only that user maps to `hyperchat_stepup`.
 - **Never add** a `hyperchat-prod` line here, or any DEV line on the production cluster.
 
-**C4. `api.env` settings** (names from `deploy/api.env.example`; no secret value):
-- **Everything is checked before anything is written:** the file's ownership and mode (`root:hyperchat` 600 or 640, as the isolation audit accepts), its final newline, no verifier socket or Didit setting, and no conflicting key.
-- **Then:** the keys are appended, and each must be present exactly once with the mode unchanged.
+**C4. `api.env` settings** (names from `deploy/api.env.example`; no secret value). The live file is replaced in one atomic step, never edited in place:
+- **Checked before anything is written:**
+  - the file's ownership and mode (`root:hyperchat` 600 or 640, as the isolation audit accepts);
+  - not a symlink, a final newline;
+  - no verifier socket or Didit setting;
+  - none of the five keys with another value or more than once;
+  - no staging file left from an earlier run;
+  - unchanged since C1 (its `.before-C` copy);
+  - a DEV path (never `/etc/hyperchat-prod/`).
+- **Staged:** the complete proposed file is written to `mktemp` in the same directory (same filesystem; root-owned, mode 0600 from creation). It holds the current file unchanged, followed by the missing keys.
+- **Validated:** the staged file must start with the current file byte-for-byte, add exactly the missing keys and nothing else, and hold each of the five settings exactly once with its value. It then takes the live file's owner, group and mode.
+- **Installed:** `mv -T` renames it over the live file (`rename(2)`: atomic; the live file is either the old one or the complete new one). Any failure before this removes the staged file and leaves the live file untouched.
+- **Verified after installation:** the content again, the owner and group, and the mode. A failure here leaves the complete new file installed, and C4 STOPs without a marker. Recovery: `c_undo_files` (below, owner approval) puts back the C1 copy; the running API doesn't read `api.env` until it restarts, and Phase C restarts nothing.
 ```
-c4_env() { local E="$API_ENV" kv k mode
+c4_env() { local E="$API_ENV" N kv k mode add
   local want="HYPERCHAT_DB_LIFECYCLE_USER=hyperchat_lifecycle HYPERCHAT_DB_AUTH_USER=hyperchat_auth HYPERCHAT_ADMIN_SESSION_IDLE_HOURS=2 HYPERCHAT_ADMIN_SESSION_ABSOLUTE_HOURS=12 HYPERCHAT_KYC_WITNESS_PATH=/var/lib/hyperchat-kyc/dev.witness"
   [ -f "$ST/C3-passed" ] || { echo "STOP: C3 has not passed"; return 1; }
   [ ! -e "$ST/C4-passed" ] || { echo "STOP: C4 already passed once"; return 1; }
+  case "$E" in /etc/hyperchat-prod/*) echo "STOP: $E is production's; never changed"; return 1 ;; esac
+  # 1. the live file, before anything is written
+  cmp -s "$E" "$ST/api.env.before-C" || { echo "STOP: $E changed since C1; nothing written"; return 1; }
   mode="$(stat -c '%U:%G %a' "$E")"
-  case "$mode" in "root:hyperchat 600" | "root:hyperchat 640") ;; *) echo "STOP: $E is $mode (want root:hyperchat 600 or 640); nothing appended"; return 1 ;; esac
-  [ ! -L "$E" ] && [ -z "$(tail -c1 "$E")" ] || { echo "STOP: $E is a symlink or does not end with a newline; nothing appended"; return 1; }
-  [ "$(grep -cE '^HYPERCHAT_(STEPUP_SOCKET|DIDIT_)' "$E")" = 0 ] || { echo "STOP: a verifier socket or Didit setting is present; nothing appended"; return 1; }
+  case "$mode" in "root:hyperchat 600" | "root:hyperchat 640") ;; *) echo "STOP: $E is $mode (want root:hyperchat 600 or 640); nothing written"; return 1 ;; esac
+  [ ! -L "$E" ] && [ -z "$(tail -c1 "$E")" ] || { echo "STOP: $E is a symlink or does not end with a newline; nothing written"; return 1; }
+  [ "$(grep -cE '^HYPERCHAT_(STEPUP_SOCKET|DIDIT_)' "$E")" = 0 ] || { echo "STOP: a verifier socket or Didit setting is present; nothing written"; return 1; }
+  add=""
   for kv in $want; do k="${kv%%=*}"
-    if grep -q "^$k=" "$E" && ! grep -qxF "$kv" "$E"; then echo "STOP: $k already set to another value; nothing appended"; return 1; fi
+    case "$(grep -c "^$k=" "$E")" in
+      0) add="$add$kv"$'\n' ;;
+      1) grep -qxF "$kv" "$E" || { echo "STOP: $k already set to another value; nothing written"; return 1; } ;;
+      *) echo "STOP: $k is set more than once; nothing written"; return 1 ;;
+    esac
   done
-  for kv in $want; do grep -qxF "$kv" "$E" || printf '%s\n' "$kv" >> "$E" || { echo "STOP: cannot append to $E"; return 1; }; done
+  [ -z "$(ls -A "${E%/*}" | grep '^\.api\.env\.C4\.')" ] || { echo "STOP: a staging file from an earlier run is in ${E%/*}; nothing written"; return 1; }
+  # 2. stage the complete proposed file next to it (same filesystem), root-only from creation
+  N="$(mktemp "${E%/*}/.api.env.C4.XXXXXX")" || { echo "STOP: cannot create a staging file; nothing written"; return 1; }
+  [ "$(stat -c '%U %a' "$N")" = "root 600" ] && [ ! -L "$N" ] || { rm -f -- "$N"; echo "STOP: the staging file is not root-only; nothing written"; return 1; }
+  { cat -- "$E" && printf '%s' "$add"; } > "$N" || { rm -f -- "$N"; echo "STOP: staging failed; nothing written"; return 1; }
+  # 3. validate the whole proposed file
+  cmp -s -n "$(stat -c %s "$E")" "$E" "$N" && [ "$(tail -c +"$(( $(stat -c %s "$E") + 1 ))" "$N")" = "${add%$'\n'}" ] \
+    || { rm -f -- "$N"; echo "STOP: the staged file is not the current file plus exactly the new keys; nothing written"; return 1; }
   for kv in $want; do k="${kv%%=*}"
-    [ "$(grep -c "^$k=" "$E")" = 1 ] && grep -qxF "$kv" "$E" || { echo "STOP: $k is not set exactly once"; return 1; }
+    [ "$(grep -c "^$k=" "$N")" = 1 ] && grep -qxF "$kv" "$N" || { rm -f -- "$N"; echo "STOP: $k is not set exactly once in the staged file; nothing written"; return 1; }
   done
-  [ "$(stat -c '%U:%G %a' "$E")" = "$mode" ] || { echo "STOP: the mode of $E changed"; return 1; }
-  date -u +%FT%TZ > "$ST/C4-passed" && echo "C4 OK: five settings, $E still $mode"
+  chown --reference="$E" -- "$N" && chmod --reference="$E" -- "$N" && [ "$(stat -c '%U:%G %a' "$N")" = "$mode" ] \
+    || { rm -f -- "$N"; echo "STOP: cannot give the staged file $mode; nothing written"; return 1; }
+  sync -- "$N"
+  # 4. install atomically
+  mv -T -- "$N" "$E" || { rm -f -- "$N"; echo "STOP: the atomic install failed; $E is unchanged"; return 1; }
+  # 5. verify the installed file
+  [ ! -L "$E" ] && [ "$(stat -c '%U:%G %a' "$E")" = "$mode" ] && cmp -s -n "$(stat -c %s "$ST/api.env.before-C")" "$ST/api.env.before-C" "$E" \
+    || { echo "STOP: the installed $E is not as staged (owner, mode or content); recover with c_undo_files (owner approval)"; return 1; }
+  for kv in $want; do k="${kv%%=*}"
+    [ "$(grep -c "^$k=" "$E")" = 1 ] && grep -qxF "$kv" "$E" || { echo "STOP: $k is not set exactly once in the installed $E; recover with c_undo_files (owner approval)"; return 1; }
+  done
+  date -u +%FT%TZ > "$ST/C4-passed" && echo "C4 OK: five settings, $E replaced atomically, still $mode"
 }
 c4_env
 ```
@@ -884,7 +919,8 @@ c5_verify
 | C2 before `setup_cluster.sh` | the preview files only | nothing to undo |
 | C2 inside or after `setup_cluster.sh` | possibly the new pg_hba rule (reloaded), the new roles, the CONNECT grants | restore pg_hba (below) |
 | C3 | possibly some of the four map lines (reloaded or not) | restore pg_ident (below) |
-| C4 | possibly some of the five keys; the running API never reads them (it reads `api.env` only at start) | restore `api.env` (below) |
+| C4 before the install | at most a staging file `.api.env.C4.*` (removed on every handled failure; one left by a killed shell is root 0600 and makes the next C4 STOP) | nothing to undo; remove a leftover staging file by hand after checking it |
+| C4 after the install | the complete new `api.env`; the running API never reads it (it reads `api.env` only at start) | restore `api.env` (below) |
 | C5 | nothing changed by C5 | as needed |
 
 ```
