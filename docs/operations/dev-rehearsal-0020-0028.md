@@ -1312,9 +1312,9 @@ e2_checks
 
 **Privilege isolation**, verified on a restored copy, never by probing the live database. `e2_restore` runs the following, and any failure returns non-zero without a marker:
 - **Backup:** a new backup set, whose manifest must record alembic `0028`, KYC `draft`/0, MFA `draft` and a copied witness, and whose dump must match its checksum.
-- **Before the restore:** the pinned staging `roles.sql`, and no scratch directory or process left over.
+- **Before the restore:** the pinned staging `roles.sql`, and no scratch directory or scratch postmaster (a `postgres`-owned `…/bin/postgres -D /tmp/hc-restorecheck-…`) left over.
 - **Restore check:** the release's `restore_check`, which must exit 0.
-- **After it:** the scratch directory gone and no scratch PostgreSQL process left.
+- **After it:** the scratch directory gone and no scratch postmaster left.
 - **JSON:** every required field checked explicitly.
 - **Marker:** `E-restore-passed`, written last.
 ```
@@ -1333,13 +1333,15 @@ print("manifest:", m.get("alembic_version"), m.get("kyc_enforcement"), m.get("st
 sys.exit(0 if ok else 1)
 PY
   roles_sql_ok || return 1
-  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] && ! pgrep -f 'hc-restorecheck-' >/dev/null \
+  # a scratch cluster's postmaster runs as the scratch user with its data directory under /tmp/hc-restorecheck-*
+  # (pg_ctl starts '<bin>/postgres -D <data> ...'); matching only that never matches a shell or an unrelated command
+  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] && ! pgrep -u postgres -f '/bin/postgres -D /tmp/hc-restorecheck-' >/dev/null \
     || { echo "STOP: a scratch directory or cluster is left from an earlier run"; return 1; }
   ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
       --set "$set" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
       --roles-sql "$ROLES_SQL" --expect-head 0028 --output "$ST/restorecheck-0028.json" ); rc=$?
   [ "$rc" = 0 ] || { echo "STOP: restore check failed (restore_check exited $rc; see $ST/restorecheck-0028.json)"; return 1; }
-  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] && ! pgrep -f 'hc-restorecheck-' >/dev/null \
+  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] && ! pgrep -u postgres -f '/bin/postgres -D /tmp/hc-restorecheck-' >/dev/null \
     || { echo "STOP: the scratch cluster was not removed (do not delete it by hand)"; return 1; }
   python3 -I - "$ST/restorecheck-0028.json" "$set" <<'PY' || { echo "STOP: the restore check result is not as required"; return 1; }
 import json, sys
