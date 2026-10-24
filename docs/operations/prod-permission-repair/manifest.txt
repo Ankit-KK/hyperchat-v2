@@ -1,0 +1,5 @@
+/opt/hyperchat-prod/releases/940137070657/backend/app/__pycache__
+/opt/hyperchat-prod/releases/940137070657/backend/app/admin/__pycache__
+/opt/hyperchat-prod/releases/940137070657/backend/app/auth/__pycache__
+/opt/hyperchat-prod/releases/940137070657/backend/app/core/__pycache__
+/opt/hyperchat-prod/releases/940137070657/backend/app/security/__pycache__
