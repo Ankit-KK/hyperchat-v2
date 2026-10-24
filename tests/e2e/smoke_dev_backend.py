@@ -23,7 +23,10 @@ public-config D5, ...) report BLOCKED while the deployed release predates them. 
 objects in the DEV R2 bucket, so it runs only with HYPERCHAT_SMOKE_R2=1 (an explicit approval) and otherwise reports
 BLOCKED; it runs the deployed cleanup on this run's keys only, with the clock moved 25 hours ahead. The owner-transfer section moves a synthetic creator between two synthetic
 users only; no real creator or account is touched.
-Exit code: 0 = every runnable check passed (BLOCKED checks do not fail the run), 1 = a check failed, 2 = refused.
+Rehearsal mode: HYPERCHAT_SMOKE_EXPECT_HEAD=0028 (docs/operations/dev-rehearsal-0020-0028.md) requires the database
+at exactly that head and turns every BLOCKED that is not an approved external integration (e.g. "not deployed on DEV
+yet") into a FAIL. Rules: smoke_policy.py (tested in backend/tests/test_smoke_harness.py).
+Exit code: 0 = every runnable check passed (only approved external BLOCKED remain), 1 = a check failed, 2 = refused.
 """
 
 import os
@@ -43,6 +46,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.auth.passwords import hash_password  # noqa: E402
 from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
+import smoke_policy  # noqa: E402
+from smoke_policy import (ADMIN_INSERT, FEATURE_HEADS, Results, SmokeError, ceremony_refused_safely,  # noqa: E402
+                          cleanup, enforcement_draft, head_at_least, head_check, mfa_status_ok, parse_expect_head,
+                          rate_limit_keys, refusal, suite_ip)
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
 LOCAL = os.environ.get("HYPERCHAT_SMOKE_LOCAL", "http://127.0.0.1:8000").rstrip("/")
@@ -50,32 +57,28 @@ FRONT = os.environ.get("HYPERCHAT_SMOKE_ORIGIN", "https://app.quicktestspace.sit
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
 ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
 DSN = f"host=/var/run/postgresql port={DB_PORT} dbname={DB_NAME} user=hyperchat_app"
-KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024")  # 0018 D6, 0019 D13, 0020-0023 KYC PR1-PR4,
-# 0024 admin auth boundary
 ORIGIN = {"origin": FRONT}
 DOMAIN = "@authtest.invalid"
 TAG = "authtest-sm" + secrets.token_hex(3)  # this run's creators: <TAG>a, <TAG>b, <TAG>c
 SOCKET = "1234.5678"
 STARTED = datetime.now(UTC)
 
-results: list[tuple[str, str, str, str]] = []  # (section, name, PASS|FAIL|BLOCKED, detail)
 secrets_seen: list[str] = []  # tokens and passwords that must never appear in a log
-
-
-def check(section: str, name: str, ok: bool, detail: str = "") -> bool:
-    results.append((section, name, "PASS" if ok else "FAIL", "" if ok else detail[:300]))
-    print(f"{'PASS' if ok else 'FAIL'}  [{section}] {name}" + ("" if ok else f"  -- {detail[:300]}"), flush=True)
-    return ok
-
-
-def blocked(section: str, name: str, why: str) -> None:
-    results.append((section, name, "BLOCKED", why))
-    print(f"BLOCKED [{section}] {name}  -- {why}", flush=True)
+EMAILS: set[str] = set()  # every synthetic address this run used: its rate-limit keys derive from them
+SUITE_IP: str | None = None  # the address the API sees for this host (from the run's own probe row)
 
 
 def refuse(why: str) -> None:
     print(f"REFUSED: {why}", file=sys.stderr)
     sys.exit(2)
+
+
+try:
+    EXPECT_HEAD = parse_expect_head(os.environ.get("HYPERCHAT_SMOKE_EXPECT_HEAD"))
+except SmokeError as exc:
+    refuse(str(exc))
+R = Results(strict=EXPECT_HEAD is not None, out=lambda line: print(line, flush=True))
+check, blocked = R.check, R.blocked
 
 
 def db() -> psycopg.Connection:
@@ -104,15 +107,20 @@ def password() -> str:
 
 def make_user(name: str, pw: str | None, role: str = "streamer", streamer_id: str | None = None,
               active: bool = True) -> str:
+    if role == "admin":  # since 0024 only the owner may create an administrator (the runtime roles are refused)
+        with fixture_db() as c:
+            return c.execute(ADMIN_INSERT, (email(name), hash_password(pw) if pw else None)).fetchone()[0]
     with db() as c:
         return c.execute("INSERT INTO public.users (email, password_hash, role, streamer_id, is_active) "
                          "VALUES (%s, %s, %s, %s, %s) RETURNING id::text",
-                         (f"{TAG}-{name}{DOMAIN}", hash_password(pw) if pw else None, role, streamer_id,
+                         (email(name), hash_password(pw) if pw else None, role, streamer_id,
                           active)).fetchone()[0]
 
 
 def email(name: str) -> str:
-    return f"{TAG}-{name}{DOMAIN}"
+    address = f"{TAG}-{name}{DOMAIN}"
+    EMAILS.add(address)
+    return address
 
 
 def make_creator(suffix: str, owner: str | None) -> str:
@@ -134,9 +142,10 @@ def make_donation(streamer_id: str, donor: str, amount: int, moderation: str = "
 
 
 def reset_login_counters() -> None:
-    """The suite signs in many times from one IP (the VPS); clear the login counters it consumed (auth:login*)."""
+    """The suite signs in many times from one IP (the VPS); clear the sign-in counters THIS run consumed: its host's
+    IP and its synthetic accounts only (smoke_policy.reset_login_counters). Real users' counters are never touched."""
     with db() as c:
-        c.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:login%'")
+        smoke_policy.reset_login_counters(c, rate_limit_keys(EMAILS, SUITE_IP))
 
 
 class Session:
@@ -169,16 +178,16 @@ def wait_for(predicate, seconds: float = 60, step: float = 1.0):
 
 
 # ── preconditions: DEV only, bots off ───────────────────────────────────────
-if DB_NAME in ("hyperchat", "hyperchat_restore_test"):
-    refuse("never against the production or restore database")
-if "api.hyperchat.space" in API:
-    refuse("never against the production API")
+why = refusal(DB_NAME, API, {"environment": "development"}, LOCAL)  # the URLs first, before any request
+if why:
+    refuse(why)
 try:
     LOCAL_HEALTH = httpx.get(LOCAL + "/health", timeout=10).json()
 except (httpx.HTTPError, ValueError) as exc:
     refuse(f"cannot read the local health endpoint ({type(exc).__name__})")
-if LOCAL_HEALTH.get("environment") != "development":
-    refuse(f"the API at {LOCAL} is not the development environment")
+why = refusal(DB_NAME, API, LOCAL_HEALTH if isinstance(LOCAL_HEALTH, dict) else {}, LOCAL)
+if why:
+    refuse(f"{why} ({LOCAL})")
 env_text = Path(ENV_FILE).read_text() if Path(ENV_FILE).exists() else ""
 bots_flag = re.search(r"^HYPERCHAT_BOTS_ENABLED=(.*)$", env_text, re.M)
 if bots_flag and bots_flag.group(1).strip().lower() in ("1", "true", "yes", "on"):
@@ -187,7 +196,8 @@ with db() as c:
     if c.execute("SELECT current_database()").fetchone()[0] != DB_NAME:
         refuse("connected to an unexpected database")
 
-print(f"DEV backend smoke suite: run {TAG}, API {API}, release {LOCAL_HEALTH.get('release')}", flush=True)
+print(f"DEV backend smoke suite: run {TAG}, API {API}, release {LOCAL_HEALTH.get('release')}"
+      + (f", REHEARSAL: expect head {EXPECT_HEAD}" if EXPECT_HEAD else ""), flush=True)
 ids: dict[str, str] = {}
 sessions: list[Session] = []
 try:
@@ -205,7 +215,8 @@ try:
         state = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True).stdout.strip()
         check(S, f"{unit} active", state == "active", state)
     head = as_postgres("SELECT version_num FROM alembic_version")
-    check(S, f"database at a known migration head ({head})", head in KNOWN_HEADS, head)
+    ok, label = head_check(head, EXPECT_HEAD)
+    check(S, label, ok, head)
     check(S, "bots disabled (HYPERCHAT_BOTS_ENABLED)", bool(bots_flag) and bots_flag.group(1).strip() == "false",
           bots_flag.group(1) if bots_flag else "missing")
     with db() as c:
@@ -223,6 +234,13 @@ try:
           str(sorted(cols)))
 
     # ── synthetic fixtures ──────────────────────────────────────────────────
+    # one failed sign-in for a synthetic address: its account-at-IP row tells which address the API sees for this host
+    probe = httpx.post(API + "/api/v1/auth/login", json={"email": email("probe"), "password": "not-the-password-1"},
+                       headers=ORIGIN, timeout=15)
+    with db() as c:
+        SUITE_IP = suite_ip(c, email("probe"))
+    check(S, "this host's own rate-limit key identified (only its and synthetic counters are ever reset)",
+          probe.status_code == 401 and bool(SUITE_IP), f"{probe.status_code} {SUITE_IP}")
     reset_login_counters()
     pw = {k: password() for k in ("owner_a", "owner_b", "linked", "plain", "admin", "throttle", "change",
                                   "change_limit", "reset", "deact", "owner_c")}
@@ -263,7 +281,7 @@ try:
     reset_login_counters()
     # IP throttle (F2/F9): 20 attempts from this IP, then a valid account is refused too
     for i in range(20):
-        httpx.post(API + "/api/v1/auth/login", json={"email": f"{TAG}-nobody{i}{DOMAIN}", "password": "x"},
+        httpx.post(API + "/api/v1/auth/login", json={"email": email(f"nobody{i}"), "password": "x"},
                    headers=ORIGIN, timeout=15)
     r = httpx.post(API + "/api/v1/auth/login", json={"email": email("throttle"), "password": pw["throttle"]},
                    headers=ORIGIN, timeout=15)
@@ -721,7 +739,7 @@ try:
         check(S, "goal: the public goal overlay's fields only (no goal_activated_at)", set(g) == {
             "active", "name", "target_amount_inr", "progress_inr", "brand_color", "goal_overlay_id"}, str(sorted(g)))
         pending = make_creator("pend", None)
-        with db() as c:
+        with fixture_db() as c:  # since 0023 a runtime role never writes a status (streamers_guard_activation)
             c.execute("UPDATE public.streamers SET status = 'pending' WHERE id = %s", (pending,))
             pslug = c.execute("SELECT streamer_slug FROM public.streamers WHERE id = %s", (pending,)).fetchone()[0]
         cfg = {ref: httpx.get(API + "/api/v1/realtime/config", params={"streamer": ref}, timeout=15)
@@ -739,7 +757,7 @@ try:
     for path in ("/api/v1/public/hypersounds", "/api/v1/metrics/platform", "/api/v1/metrics/showcase"):
         r = httpx.get(API + path, timeout=15)
         check(S, f"GET {path}", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
-    signup = {"name": "Smoke Signup", "email": f"{TAG}-signup{DOMAIN}", "mobile_number": "+91 90000 00000"}
+    signup = {"name": "Smoke Signup", "email": email("signup"), "mobile_number": "+91 90000 00000"}
     a = httpx.post(API + "/api/v1/public/signups", json=signup, headers=ORIGIN, timeout=15)
     b = httpx.post(API + "/api/v1/public/signups", json=signup, headers=ORIGIN, timeout=15)
     check(S, "signup form: repeated email gets the identical answer (D14)", a.status_code == b.status_code == 201
@@ -761,7 +779,8 @@ try:
         check(S4, "an unsigned Didit webhook is refused (401, or 503 while Didit is not configured)",
               unsigned.status_code in (401, 503), str(unsigned.status_code))
         if not me.json().get("available"):
-            blocked(S4, "Didit session start", "no DEV Didit sandbox credentials configured (needs owner approval)")
+            blocked(S4, "Didit session start", "no DEV Didit sandbox credentials configured (needs owner approval)",
+                    external=True)
     # ── KYC enforcement (PR4, migration 0023): read-only; the smoke never activates, grants or restricts ──
     enforcement = admin.get("/api/v1/admin/kyc/enforcement")
     if enforcement.status_code == 404:
@@ -773,6 +792,51 @@ try:
         check("kyc", "the restore witness agrees with the database", view["witness"]["problem"] is None,
               str(view["witness"]))
 
+    # ── admin MFA / step-up (0025-0028): no verifier on DEV, enforcement draft; nothing enrolled or activated ──
+    S = "mfa"
+    if not head_at_least(head, FEATURE_HEADS["mfa"]):
+        blocked(S, "Admin step-up MFA (S1-S3, migrations 0025-0028)", "not deployed on DEV yet")
+    else:
+        MFA = "/api/v1/auth/mfa"
+        mfa_rows = ("SELECT (SELECT count(*) FROM public.webauthn_credentials) || '|' || "
+                    "(SELECT count(*) FROM public.stepup_challenges) || '|' || (SELECT count(*) FROM public.stepup_grants)")
+        before = as_postgres(mfa_rows)
+        draft_sql = ("SELECT state || '|' || generation FROM public.kyc_enforcement", "SELECT state FROM public.stepup_enforcement")
+        ok, detail = enforcement_draft(*(as_postgres(q) for q in draft_sql))
+        check(S, "KYC enforcement draft (generation 0) and MFA enforcement draft", ok, detail)
+        endpoints = (("GET", "/status"), ("GET", "/credentials"), ("POST", "/registration/options"),
+                     ("POST", "/registration/verify"), ("POST", "/assertion/options"), ("POST", "/assertion/verify"))
+        anon = [(p, httpx.request(m, API + MFA + p, headers=ORIGIN, json={}, timeout=15).status_code)
+                for m, p in endpoints]
+        check(S, "anonymous -> 401 on every passkey endpoint", all(c == 401 for _, c in anon), str(anon))
+        user = [(p, owner_a.write(m, MFA + p, json={}).status_code) for m, p in endpoints]
+        check(S, "non-admin (signed in, CSRF) -> 403 on every passkey endpoint", all(c == 403 for _, c in user),
+              str(user))
+        r = admin.get(MFA + "/status")
+        ok, detail = mfa_status_ok(r.status_code, r.json() if r.headers.get("content-type", "").startswith(
+            "application/json") else r.text)
+        check(S, "admin status: enforcement draft, no assurance, verifier not_configured, no credentials", ok, detail)
+        r = admin.client.post(MFA + "/registration/options", headers=ORIGIN)
+        check(S, "passkey registration without the CSRF token -> 403", r.status_code == 403, f"{r.status_code}")
+        r = admin.client.post(MFA + "/registration/options", headers={**admin.headers, "origin": "https://evil.invalid"})
+        check(S, "passkey registration from a foreign origin -> 403", r.status_code == 403, f"{r.status_code}")
+        for path, body in (("/registration/options", None), ("/credentials", None),
+                           ("/assertion/options", {"action": "session.aal2", "target": "session", "params": {}})):
+            r = admin.get(MFA + path) if path == "/credentials" else admin.write("POST", MFA + path, json=body)
+            ok, detail = ceremony_refused_safely(r.status_code, r.json() if r.headers.get(
+                "content-type", "").startswith("application/json") else r.text)
+            check(S, f"{path} without a verifier -> 503 stepup_not_configured (fails closed)", ok, detail)
+        r = admin.get("/api/v1/admin/users", params={"limit": 1})
+        check(S, "admin routes still work while MFA enforcement is draft", r.status_code == 200, r.text[:200])
+        lifetime = as_postgres("SELECT bool_and(absolute_expires_at <= now() + interval '12 hours 5 minutes') "
+                               f"FROM public.sessions WHERE user_id = '{ids['admin']}' AND revoked_at IS NULL")
+        check(S, "admin sessions end within 12 h (A4)", lifetime == "t", lifetime)
+        after = as_postgres(mfa_rows)
+        check(S, "nothing enrolled: passkeys, challenges and grants unchanged", after == before and "|" in after,
+              f"{before} -> {after}")
+        ok, detail = enforcement_draft(*(as_postgres(q) for q in draft_sql))
+        check(S, "enforcement still draft after the section (nothing activated)", ok, detail)
+
     # ── creator applications (KYC PR2, migration 0021): the synthetic signup above, synthetic creator only ──
     S3 = "applications"
     if admin.get("/api/v1/admin/applications").status_code == 404:
@@ -780,7 +844,7 @@ try:
     else:
         with db() as c:
             app_id = c.execute("SELECT id::text FROM public.user_signups WHERE email = %s",
-                               (f"{TAG}-signup{DOMAIN}",)).fetchone()[0]
+                               (email("signup"),)).fetchone()[0]
         check(S3, "the signup form created a submitted application (no account)",
               admin.get(f"/api/v1/admin/applications/{app_id}").json()["application"]["review_status"] == "submitted")
         check(S3, "anonymous / non-admin cannot read applications",
@@ -852,7 +916,7 @@ try:
         check(S, "D4 creator check: missing creator -> not exists", r.status_code == 200
               and r.json().get("exists") is False, r.text)
         signup = {"channel_name": "Smoke Partner Creator", "mobile_number": "9000000000",
-                  "youtube_channel": "https://youtube.com/@smoke-partner", "email": f"{TAG}-partner{DOMAIN}"}
+                  "youtube_channel": "https://youtube.com/@smoke-partner", "email": email("partner")}
         r = httpx.post(signup_url, json={**signup, "partner_slug": "clipwave"}, headers=good, timeout=15)
         check(S, "D4 partner_slug cannot be supplied (spoofing refused)", r.status_code == 400
               and "partner_slug" in r.json().get("fields", {}), r.text)
@@ -874,7 +938,7 @@ try:
 
     # ── payments account model (D6): one 'primary' account; no Razorpay call, no order ──
     S = "payments-account"
-    if head not in ("0018", "0019"):  # the deployed release predates D6
+    if not head_at_least(head, FEATURE_HEADS["payments-account"]):  # D6 arrived with migration 0018
         blocked(S, "Razorpay secondary retired (D6)", "not deployed on DEV yet; needs an approved DEV deploy")
     else:
         with db() as c:
@@ -917,7 +981,7 @@ try:
         check(S, "D7 CLI command payment-health is installed (help only, no probe)",
               cli_help.returncode == 0 and "payment-health" in cli_help.stdout, cli_help.stderr[-200:])
         blocked(S, "D7 admin health result and CLI probe",
-                "BLOCKED_BY_APPROVAL: both call Razorpay (GET /payments?count=1, test mode on DEV)")
+                "BLOCKED_BY_APPROVAL: both call Razorpay (GET /payments?count=1, test mode on DEV)", external=True)
 
     # ── admin email correction (D11): synthetic users only, no email sent ───
     S = "admin-email"
@@ -991,7 +1055,8 @@ try:
         blocked(S, "Admin creator ownership transfer (D13)", "not deployed on DEV yet; needs an approved DEV deploy")
     else:
         check(S, "D13 needs a session -> 401", anon.status_code == 401, str(anon.status_code))
-        check(S, "D13 database at migration 0019 (owner-specific soundboard terms)", head == "0019", head)
+        check(S, "D13 database at migration 0019 or later (owner-specific soundboard terms)",
+              head_at_least(head, FEATURE_HEADS["owner-transfer"]), head)
         d13_pw = {k: password() for k in ("d13old", "d13new")}
         ids["d13old"] = make_user("d13old", d13_pw["d13old"])
         ids["d13new"] = make_user("d13new", d13_pw["d13new"], role="user")
@@ -1080,7 +1145,8 @@ try:
         blocked(S, "Abandoned-upload cleanup (D9)", "not deployed on DEV yet; needs an approved DEV deploy")
     elif os.environ.get("HYPERCHAT_SMOKE_R2") != "1":
         blocked(S, "Abandoned-upload cleanup (D9)",
-                "BLOCKED_BY_APPROVAL: writes and deletes synthetic objects in the DEV R2 bucket (HYPERCHAT_SMOKE_R2=1)")
+                "BLOCKED_BY_APPROVAL: writes and deletes synthetic objects in the DEV R2 bucket (HYPERCHAT_SMOKE_R2=1)",
+                external=True)
     else:
         import asyncio
         import uuid
@@ -1206,51 +1272,13 @@ finally:
                           "AND j.status IN ('queued', 'running')").fetchone()[0]
         return n == 0
     wait_for(_open_jobs, 60)
-    with db() as c:
-        c.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
-        with fixture_db() as owner:  # review history is append-only for the runtime roles (migration 0021)
-            owner.execute("DELETE FROM public.application_events WHERE signup_id IN "
-                          "(SELECT id FROM public.user_signups WHERE email LIKE %s)", ("%" + DOMAIN,))
-        c.execute("DELETE FROM public.user_signups WHERE email LIKE %s", ("%" + DOMAIN,))
-        c.execute("DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
-                  "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')")
-        c.execute("DELETE FROM public.jobs WHERE dedupe_key IN (SELECT d.id::text FROM public.donations d "
-                  "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')")
-        c.execute("DELETE FROM public.donations WHERE streamer_id IN "
-                  "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%')")
-        c.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'")  # cascades its rows
-        c.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))  # cascades sessions, tokens
-        c.execute("DELETE FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'")
-        c.execute("DELETE FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'")
-        c.execute("DELETE FROM public.rate_limits WHERE ip_address LIKE 'partner:authtest-%%'")
-        c.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%' OR endpoint LIKE 'admin:%%' "
-                  "OR endpoint LIKE 'signup:%%' OR endpoint LIKE 'upload:%%' OR endpoint LIKE 'obs:%%' "
-                  "OR endpoint LIKE 'realtime:%%' OR endpoint LIKE 'payment:%%' OR endpoint LIKE 'transcription:%%'")
-        left = c.execute("""
-            SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE %(d)s),
-                   (SELECT count(*) FROM public.sessions s JOIN public.users u ON u.id = s.user_id
-                     WHERE u.email::text LIKE %(d)s),
-                   (SELECT count(*) FROM public.password_reset_tokens),
-                   (SELECT count(*) FROM public.user_invites WHERE email::text LIKE %(d)s),
-                   (SELECT count(*) FROM public.user_signups WHERE email LIKE %(d)s),
-                   (SELECT count(*) FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'),
-                   (SELECT count(*) FROM public.donations WHERE order_id LIKE 'authtest-%%'),
-                   (SELECT count(*) FROM public.streamers_moderators WHERE mod_name = 'Smoke Mod'),
-                   (SELECT count(*) FROM public.banned_donors WHERE donor_name LIKE 'Smoke %%'),
-                   (SELECT count(*) FROM public.obs_tokens o LEFT JOIN public.streamers s ON s.id = o.streamer_id
-                     WHERE s.id IS NULL),
-                   (SELECT count(*) FROM public.jobs j LEFT JOIN public.donations d ON d.id::text = j.dedupe_key
-                     WHERE j.kind = 'donation_audio' AND d.id IS NULL AND j.created_at > %(t)s),
-                   (SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_slug LIKE 'authtest-%%'),
-                   (SELECT count(*) FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'),
-                   (SELECT count(*) FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'
-                     OR email LIKE %(d)s)
-        """, {"d": "%" + DOMAIN, "t": STARTED}).fetchone()
-    labels = ("users", "sessions", "reset tokens (all)", "invites", "signups", "creators", "donations", "moderators",
-              "bans", "orphan OBS tokens", "jobs", "soundboard terms acceptances",
-              "partner keys", "partner signups")
-    print("cleanup left: " + ", ".join(f"{k}={v}" for k, v in zip(labels, left)), flush=True)
-    check("cleanup", "no synthetic row left", all(v == 0 for v in left), str(dict(zip(labels, left))))
+    try:
+        with db() as c, fixture_db() as owner:
+            left = cleanup(c, owner, DOMAIN, STARTED, rate_limit_keys(EMAILS, SUITE_IP))
+        print("cleanup left: " + ", ".join(f"{k}={v}" for k, v in left.items()), flush=True)
+        check("cleanup", "no synthetic row left", all(v == 0 for v in left.values()), str(left))
+    except Exception as exc:  # noqa: BLE001 - a failed cleanup is a FAIL with what is left, never silent
+        check("cleanup", "no synthetic row left", False, f"{type(exc).__name__}: {exc}")
 
 # ── logs: no token, CSRF value, OBS token, reset/invite link or password anywhere ──
 since = STARTED.strftime("%Y-%m-%d %H:%M:%S")
@@ -1276,12 +1304,11 @@ for name, why in (
         ("voice / media / soundboard uploads to R2 (PAY-11 smoke)", "writes R2 objects: needs owner approval"),
         ("bots: Telegram / Discord messages", "bots stay disabled on DEV"),
         ("hosted Supabase rehearsal (D1)", "production-readiness work; separate approval (G1-G6)")):
-    blocked("blocked", name, why)
+    blocked("blocked", name, why, external=True)
 
-passed = sum(1 for r in results if r[2] == "PASS")
-failed = [r for r in results if r[2] == "FAIL"]
-blocked_n = sum(1 for r in results if r[2] == "BLOCKED")
-print(f"\n{passed} passed, {len(failed)} failed, {blocked_n} blocked (need credentials or approval)")
-for section, name, _, detail in failed:
+passed, failed_n, blocked_n = R.counts()
+print(f"\n{passed} passed, {failed_n} failed, {blocked_n} blocked (need credentials or approval)"
+      + (f"; rehearsal target {EXPECT_HEAD}" if EXPECT_HEAD else ""))
+for section, name, _, detail in R.failed():
     print(f"  FAILED [{section}] {name}: {detail}")
-sys.exit(1 if failed else 0)
+sys.exit(R.exit_code())

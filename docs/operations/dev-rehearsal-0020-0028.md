@@ -515,15 +515,21 @@ The same applies to a failure in Phases B, C or E: stop what that phase started,
 
 ## Phase E: Post-migration smoke tests (approval: "Phase E")
 ### Prerequisite: smoke suite updated in a separate test-only PR
-At `c2fe883`, `tests/e2e/smoke_dev_backend.py` knows migration heads only up to `0024` (`KNOWN_HEADS`), and it has no MFA / step-up section. **A failing head check is never accepted as part of a successful rehearsal.** Before Phase E, a separate, reviewed and merged **test-only PR** must:
-- add `0025`–`0028` to `KNOWN_HEADS`;
-- add an MFA section:
-  - `stepup_enforcement` is `draft`;
-  - `GET /api/v1/auth/mfa/status` and `POST /api/v1/auth/mfa/registration/options` as an admin answer `503` with reason `stepup_not_configured` while no verifier is installed;
-  - anonymous and non-admin callers are refused;
-  - ordinary admin routes still answer;
-  - admin session expiry is at most 12 h after sign-in;
-- change only files under `tests/`, so the deployed `c2fe883` code is unaffected.
+At `c2fe883`, `tests/e2e/smoke_dev_backend.py` knew migration heads only up to `0024`, had no MFA / step-up section, and created and removed its synthetic admin as `hyperchat_app`, which 0024 refuses. **A failing head check is never accepted as part of a successful rehearsal.** The test-only PR "DEV smoke-test readiness" (#82) does the following; it must be reviewed and merged before Phase E:
+- **Heads:** `KNOWN_HEADS` runs through `0028` (`tests/e2e/smoke_policy.py`).
+- **Rehearsal mode:** `HYPERCHAT_SMOKE_EXPECT_HEAD=0028` requires exactly that head, and turns every BLOCKED that is not an approved external integration (e.g. "not deployed on DEV yet") into a FAIL.
+- **An `mfa` section:**
+  - KYC enforcement `draft` / generation 0 and MFA enforcement `draft`, before and after the section;
+  - anonymous callers get 401, and a signed-in non-admin gets 403, on all six passkey endpoints;
+  - the admin's `GET /api/v1/auth/mfa/status` answers 200 `{"enforcement": "draft", "aal": <2, "mfa_required": false, "verifier": "not_configured", "credentials": null}`;
+  - `POST …/registration/options` and `POST …/assertion/options`, and `GET …/credentials`, answer exactly `503` with reason `stepup_not_configured`;
+  - registration without the CSRF token, or from a foreign Origin, gets 403;
+  - admin routes still answer;
+  - admin sessions end within 12 h;
+  - passkey, challenge and grant counts are unchanged (nothing is enrolled).
+- **Admin fixture:** the synthetic admin is created and removed through the schema owner.
+- **Cleanup:** it runs statement by statement and reports what is left.
+- **Scope:** only files under `tests/` and `backend/tests/` change, so the deployed `c2fe883` code is unaffected.
 
 Phase E then uses a root-only copy of that PR's merge commit. Set `SMOKE_SHA` to its full 40-character SHA first.
 
@@ -531,28 +537,29 @@ Phase E then uses a root-only copy of that PR's merge commit. Set `SMOKE_SHA` to
 ```
 SMOKE_SHA=   # the merge commit of the smoke PR, 40 hex characters
 [ "${#SMOKE_SHA}" = 40 ] \
-  && [ -z "$(git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef "$SMOKE_SHA" -- backend database deploy)" ] \
+  && [ -z "$(git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef "$SMOKE_SHA" -- backend database deploy ':(exclude)backend/tests' ':(exclude)*.md')" ] \
   && git archive "$SMOKE_SHA" backend tests | ssh root@VPS "install -d -o root -g root -m 0700 /root/hyperchat-smoke && tar -x -C /root/hyperchat-smoke" \
   && echo "SMOKE COPY OK" || echo "STOP: SMOKE_SHA unset, the smoke PR changes code outside tests/, or the copy failed"
 ```
-**Record:** `SMOKE_SHA` and the empty `git diff --stat` output.
+**Record:** `SMOKE_SHA` and the empty `git diff --stat` output: application, migration and deployment code identical to `c2fe883`; only tests (`backend/tests`, `tests/`) and documentation may differ.
 
 ### What must pass
 - **Mandatory: PASS.** Every runnable check of both suites, including the migration-head check, plus every E2 and E3 row below.
-- **Allowed: BLOCKED.** Only the third-party integrations or approvals that are deliberately unavailable on DEV:
+- **Allowed: BLOCKED.** Only the third-party integrations or approvals that are deliberately unavailable on DEV. In rehearsal mode the suite itself turns any other BLOCKED into a FAIL:
   - email delivery (Resend);
   - Google sign-in;
   - TTS and transcription providers (MiniMax, ElevenLabs, Sarvam);
-  - Didit;
-  - the live Razorpay probe (D7);
+  - the Didit session start (no sandbox credentials);
+  - the live Razorpay probe (D7), Razorpay checkout / order creation, and the PAY-7 status poll / confirm with a real test payment;
   - R2-writing sections (`HYPERCHAT_SMOKE_R2=1` not approved);
-  - bots (disabled).
+  - bots (disabled);
+  - the hosted Supabase rehearsal (D1).
 - **Fails Phase E:** any FAIL, or a BLOCKED outside that list.
 
 ### E1. The smoke suites
 ```
 cd /root/hyperchat-smoke
-/opt/hyperchat/current/venv/bin/python tests/e2e/smoke_dev_backend.py; echo "exit=$?"     # exit=0
+HYPERCHAT_SMOKE_EXPECT_HEAD=0028 /opt/hyperchat/current/venv/bin/python tests/e2e/smoke_dev_backend.py; echo "exit=$?"     # exit=0
 HYPERCHAT_SMOKE_SAMESITE=none /opt/hyperchat/current/venv/bin/python tests/e2e/smoke_auth.py; echo "exit=$?"   # exit=0
 ```
 
@@ -597,11 +604,11 @@ This also proves the 0028 set restores on PostgreSQL 15.
 ### E3. API checks (covered by the updated suites; listed so the record can tick each)
 | Area | Expect |
 |---|---|
-| Admin authentication through `hyperchat_auth` | `smoke_auth.py` passes: admin and ordinary sign-in, sign-out, password change. Admin sign-in can only succeed through `hyperchat_auth` once 0024 is in place |
-| Admin session limits | expiry at most 12 h after sign-in |
-| Step-up fails safe | MFA endpoints `503` `stepup_not_configured`, a `stepup_unavailable` security event, ordinary admin routes answer (enforcement `draft`) |
+| Admin authentication through `hyperchat_auth` | `smoke_dev_backend.py` section `admin`: the synthetic admin signs in and uses the admin routes (only possible through `hyperchat_auth` once 0024 is in place). `smoke_auth.py` covers ordinary sign-in, sign-out and session handling |
+| Admin session limits | section `mfa`: admin sessions end within 12 h |
+| Step-up fails safe | section `mfa`: status 200 with `verifier: "not_configured"` and no credentials; ceremonies `503` `stepup_not_configured`; anonymous 401, non-admin 403, missing CSRF or foreign Origin 403; admin routes answer; nothing enrolled; enforcement `draft` |
 | Applications and lifecycle | sections `applications` and `creator-lifecycle` pass (no longer BLOCKED) |
-| KYC | section `kyc`: enforcement `draft`/0, witness agrees; KYC session start answers 503 (Didit not configured; an expected result, not a BLOCKED) |
+| KYC | section `kyc`: the owner's KYC view, unsigned webhook refused, enforcement view and witness agree; section `mfa`: enforcement `draft`/0. The Didit session start is an allowed BLOCKED (no sandbox credentials) |
 | Payments and webhooks | sections `payments` (checkout validation; a Razorpay webhook with a bad signature is refused), `payments-account` (D6), `payment-health` (D7 route and CLI; the live probe may be BLOCKED). No order is created. Webhook duplicate and replay handling is covered by CI (`backend/tests/payments`), not by this smoke |
 | OBS, realtime, worker | sections `obs`, `realtime`, `worker` pass; the worker log shows the synthetic job processed |
 | DEV/production separation | `curl -fsS http://127.0.0.1:8000/health` reports development and `hyperchat_dev`; read-only: `curl -fsS http://127.0.0.1:8001/health` still reports production release `940137070657`, and `sudo -u postgres psql -X -p 5432 -d hyperchat -Atc "SELECT version_num FROM alembic_version"` still `0009` |
