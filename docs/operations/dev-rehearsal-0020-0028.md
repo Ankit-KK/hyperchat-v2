@@ -622,7 +622,12 @@ b0_staged
 
 **B1. One verified DEV backup set** (the pinned script, DEV profile on the same line; see "The backup script and production"):
 ```
-rm -f "$ST/phaseB.set"; [ -f "$ST/B0-passed" ] && dev_backup phaseB.set || echo "STOP: B0 has not passed, or the backup failed"
+b1_backup() {  # non-zero on any failure; $ST/phaseB.set exists only after a verified backup
+  rm -f "$ST/phaseB.set"
+  [ -f "$ST/B0-passed" ] || { echo "STOP: B0 has not passed"; return 1; }
+  dev_backup phaseB.set || { rm -f "$ST/phaseB.set"; echo "STOP: the backup failed; $ST/phaseB.set stays absent"; return 1; }
+}
+b1_backup
 ```
 - **The backup directory already exists:** `/var/backups/hyperchat-dev` (root 0700, only `.lock`) is left from the stopped 2026-10-24 attempt. The script accepts it as it is; never remove it by hand.
 - **Required:** `SET hyperchat_dev_<UTC>`, written to `$ST/phaseB.set` only when the script exited 0 and named a complete set.
@@ -937,12 +942,16 @@ baseline > "$ST/baseline-after.txt"; diff "$ST/baseline-before.txt" "$ST/baselin
 
 **Privilege isolation**, verified on a restored copy, never by probing the live database:
 ```
-rm -f "$ST/phaseE.set" "$ST/E-restore-passed"
-dev_backup phaseE.set \
-  && ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
-         --set "$(cat "$ST/phaseE.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
-         --output "$ST/restorecheck-0028.json" ) \
-  && date -u +%FT%TZ > "$ST/E-restore-passed" && echo "E2 RESTORE OK" || echo "STOP: backup or restore check failed"
+e2_restore() { local rc  # non-zero on any failure; $ST/E-restore-passed only after both succeeded
+  rm -f "$ST/phaseE.set" "$ST/E-restore-passed"
+  dev_backup phaseE.set || { rm -f "$ST/phaseE.set"; echo "STOP: backup failed"; return 1; }
+  ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
+      --set "$(cat "$ST/phaseE.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
+      --output "$ST/restorecheck-0028.json" ); rc=$?
+  [ "$rc" = 0 ] || { echo "STOP: restore check failed (restore_check exited $rc; see $ST/restorecheck-0028.json)"; return 1; }
+  date -u +%FT%TZ > "$ST/E-restore-passed" && echo "E2 RESTORE OK"
+}
+e2_restore
 ```
 **Required:**
 - `E2 RESTORE OK`, and the backup's manifest records alembic `0028` and KYC `draft`;
