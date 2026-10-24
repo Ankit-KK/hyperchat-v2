@@ -175,6 +175,10 @@ services_stopped() { local s st; for s in hyperchat-api hyperchat-worker hyperch
 enter_stopped_state() { systemctl stop hyperchat-cleanup.timer hyperchat-cleanup.service; systemctl stop hyperchat-worker; systemctl stop hyperchat-api
                         services_stopped || { echo "STOP: DEV is NOT fully stopped; escalate (see 'If a phase fails')"; return 1; }
                         echo "DEV STOPPED: wait for the owner (see 'If a phase fails')"; }
+# Phase E: the root-only copy of the smoke PR's merge commit (#82, test-only), pinned by its tree fingerprint
+SMOKE=/root/hyperchat-smoke
+SMOKE_SHA=f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13
+SMOKE_FP=23dc26875b484ce5c5f7c5bcf25600a30a0a4b8e40433b2ecb8f8b2910af6933   # LF content, as the cmd.exe git archive pipe transfers it
 # Phase D: the DEV release link, and how long D4 watches the started services for restarts (seconds)
 APP_CURRENT=/opt/hyperchat/current
 D4_SETTLE=30
@@ -1206,17 +1210,35 @@ At `c2fe883`, `tests/e2e/smoke_dev_backend.py` knew migration heads only up to `
 - **Cleanup:** it runs statement by statement and reports what is left.
 - **Scope:** only files under `tests/` and `backend/tests/` change, so the deployed `c2fe883` code is unaffected.
 
-Phase E then uses a root-only copy of that PR's merge commit. Set `SMOKE_SHA` to its full 40-character SHA first.
+Phase E then uses a root-only copy of that PR's merge commit: **#82, merged as `f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13`** (`SMOKE_SHA` in the session setup). It descends from `c2fe883`, and compared with it changes only tests (`tests/e2e/*`, `backend/tests/test_smoke_harness.py`) and documentation. Its `backend tests` tree is pinned by `SMOKE_FP` (295 files). The fingerprint is over the LF content that `git archive` emits from `cmd.exe` or Linux git; a Git-Bash `git archive` with `core.autocrlf=true` emits CRLF and a different fingerprint. The copy is verified on the server, so a copy of anything else is a STOP.
 
-**(workstation)**
+**How to run it:**
+- **One root shell per VPS step:** the session setup, then the step's block exactly as written.
+- **Step gates:** each step writes a marker in `$ST` only when everything in it succeeded, and returns non-zero with `STOP` otherwise. The next step refuses to start without it: D4 → E0 → `E0-passed` → E1 → `E1-passed` → E2 checks → `E2-checks-passed` → E2 restore → `E-restore-passed` → E3 → `E3-passed`.
+
+**E0. The smoke copy.**
+
+**(workstation)**, a read-only check that must print nothing (no application, migration or deployment change):
 ```
-SMOKE_SHA=   # the merge commit of the smoke PR, 40 hex characters
-[ "${#SMOKE_SHA}" = 40 ] \
-  && [ -z "$(git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef "$SMOKE_SHA" -- backend database deploy ':(exclude)backend/tests' ':(exclude)*.md')" ] \
-  && git archive "$SMOKE_SHA" backend tests | ssh root@VPS "install -d -o root -g root -m 0700 /root/hyperchat-smoke && tar -x -C /root/hyperchat-smoke" \
-  && echo "SMOKE COPY OK" || echo "STOP: SMOKE_SHA unset, the smoke PR changes code outside tests/, or the copy failed"
+git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13 -- backend database deploy ':(exclude)backend/tests' ':(exclude)*.md'
 ```
-**Record:** `SMOKE_SHA` and the empty `git diff --stat` output: application, migration and deployment code identical to `c2fe883`; only tests (`backend/tests`, `tests/`) and documentation may differ.
+**(workstation)**, the copy. It runs only after D4 passed and never into an existing directory, and its exit status is the remote command's:
+```
+git archive f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13 backend tests \
+  | ssh root@VPS "[ -f /root/rehearsal-dev/D4-passed ] && [ ! -e /root/hyperchat-smoke ] && install -d -o root -g root -m 0700 /root/hyperchat-smoke && tar -x -C /root/hyperchat-smoke"
+```
+**(VPS)**: must print `E0 OK`.
+```
+e0_smoke_ok() {
+  [ -f "$ST/D4-passed" ] || { echo "STOP: Phase D has not passed"; return 1; }
+  [ ! -e "$ST/E0-passed" ] || { echo "STOP: E0 already passed once"; return 1; }
+  [ -d "$SMOKE" ] && [ ! -L "$SMOKE" ] && [ "$(stat -c '%U:%G %a' "$SMOKE")" = "root:root 700" ] || { echo "STOP: $SMOKE is not a root-only directory"; return 1; }
+  [ "$(fp "$SMOKE")" = "$SMOKE_FP" ] && [ "$(find "$SMOKE" -type f | wc -l)" = 295 ] || { echo "STOP: $SMOKE is not the $SMOKE_SHA backend+tests tree"; return 1; }
+  date -u +%FT%TZ > "$ST/E0-passed" && echo "E0 OK: $SMOKE is the pinned smoke tree"
+}
+e0_smoke_ok
+```
+**Record:** the empty `git diff --stat` output and the E0 output.
 
 ### What must pass
 - **Mandatory: PASS.** Every runnable check of both suites, including the migration-head check, plus every E2 and E3 row below.
@@ -1232,15 +1254,51 @@ SMOKE_SHA=   # the merge commit of the smoke PR, 40 hex characters
 - **Fails Phase E:** any FAIL, or a BLOCKED outside that list.
 
 ### E1. The smoke suites
+Both suites run as root from the smoke copy with the release's venv, against DEV only. They refuse the production API and database and the restore source, and they require environment `development`.
+- **What they write:** synthetic rows only (`@authtest.invalid`, `authtest-*`), removed and verified at the end. The login rate-limit rows they consume are cleared. Approving a synthetic donation makes the DEV worker publish realtime events to the DEV Pusher app; nothing else leaves the server.
+- **No bytecode:** they run with `PYTHONDONTWRITEBYTECODE=1`, so nothing is written into the release's venv or into the smoke copy, which E1 checks afterwards.
+- **Pass:** each suite's own exit code must be 0. In rehearsal mode, `smoke_dev_backend.py` exits non-zero for any BLOCKED outside the allowed list above.
 ```
-cd /root/hyperchat-smoke
-HYPERCHAT_SMOKE_EXPECT_HEAD=0028 /opt/hyperchat/current/venv/bin/python tests/e2e/smoke_dev_backend.py; echo "exit=$?"     # exit=0
-HYPERCHAT_SMOKE_SAMESITE=none /opt/hyperchat/current/venv/bin/python tests/e2e/smoke_auth.py; echo "exit=$?"   # exit=0
+e1_smoke() { local rc venv_pyc
+  [ -f "$ST/E0-passed" ] || { echo "STOP: E0 has not passed"; return 1; }
+  [ ! -e "$ST/E1-passed" ] || { echo "STOP: E1 already passed once"; return 1; }
+  [ "$(readlink -f "$APP_CURRENT")" = "$REL_NEW" ] || { echo "STOP: current is not $REL_NEW"; return 1; }
+  head_is 0028 && api_healthy c2fe883be71d || return 1
+  venv_pyc="$(find "$REL_NEW/venv" -name '*.pyc' | wc -l)"
+  ( cd "$SMOKE" && PYTHONDONTWRITEBYTECODE=1 HYPERCHAT_SMOKE_EXPECT_HEAD=0028 "$APP_CURRENT/venv/bin/python" tests/e2e/smoke_dev_backend.py ) \
+    > "$ST/smoke-dev-backend.txt" 2>&1; rc=$?
+  tail -n 25 "$ST/smoke-dev-backend.txt"
+  [ "$rc" = 0 ] || { echo "STOP: smoke_dev_backend.py exited $rc (see $ST/smoke-dev-backend.txt)"; return 1; }
+  ( cd "$SMOKE" && PYTHONDONTWRITEBYTECODE=1 HYPERCHAT_SMOKE_SAMESITE=none "$APP_CURRENT/venv/bin/python" tests/e2e/smoke_auth.py ) \
+    > "$ST/smoke-auth.txt" 2>&1; rc=$?
+  tail -n 10 "$ST/smoke-auth.txt"
+  [ "$rc" = 0 ] || { echo "STOP: smoke_auth.py exited $rc (see $ST/smoke-auth.txt)"; return 1; }
+  [ "$(find "$REL_NEW/venv" -name '*.pyc' | wc -l)" = "$venv_pyc" ] && [ "$(find "$REL_NEW/backend" "$REL_NEW/database" -name __pycache__ | wc -l)" = 0 ] \
+    && [ "$(fp "$SMOKE")" = "$SMOKE_FP" ] || { echo "STOP: the suites wrote into the release or the smoke copy"; return 1; }
+  date -u +%FT%TZ > "$ST/E1-passed" && echo "E1 OK: both suites passed"
+}
+e1_smoke
 ```
 
 ### E2. Database checks (read-only; after the suites cleaned their synthetic rows)
+`e2_checks` checks every row of the table below by machine and writes `E2-checks-passed` only when all hold:
 ```
-baseline > "$ST/baseline-after.txt"; diff "$ST/baseline-before.txt" "$ST/baseline-after.txt" && echo baseline-unchanged
+e2_checks() { local signups out rc
+  [ -f "$ST/E1-passed" ] || { echo "STOP: E1 has not passed"; return 1; }
+  baseline > "$ST/baseline-after.txt" || { echo "STOP: baseline"; return 1; }
+  diff "$ST/baseline-before.txt" "$ST/baseline-after.txt" || { echo "STOP: the data baseline changed (diff above)"; return 1; }
+  signups="$(sed -n 's/^signups=//p' "$ST/D-expect.txt")"
+  [ -n "$signups" ] && [ "$(Q "SELECT review_status || '|' || count(*) FROM user_signups GROUP BY review_status")" = "legacy_unreviewed|$signups" ] \
+    || { echo "STOP: signups are not all legacy_unreviewed"; return 1; }
+  [ "$(Q "SELECT count(*) FROM streamers WHERE public.creator_donation_block(id) IS NULL")" = "$(cat "$ST/eligible-after-0020.txt")" ] \
+    || { echo "STOP: eligible creators differ from after 0020"; return 1; }
+  drafts_ok && witness_ok || return 1
+  out="$(bash "$STAGE/deploy/check_isolation.sh" dev 2>&1)"; rc=$?
+  printf '%s\n' "$out" > "$ST/isolation-E2-dev.txt"
+  [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q '^FAIL' || { echo "STOP: the isolation audit is not all OK (exit $rc)"; return 1; }
+  date -u +%FT%TZ > "$ST/E2-checks-passed" && echo "E2 CHECKS OK: baseline unchanged"
+}
+e2_checks
 ```
 | Area | Check | Expect |
 |---|---|---|
@@ -1252,33 +1310,62 @@ baseline > "$ST/baseline-after.txt"; diff "$ST/baseline-before.txt" "$ST/baselin
 | Witness | `stat -c %s /var/lib/hyperchat-kyc/dev.witness; lsattr /var/lib/hyperchat-kyc/dev.witness` | `0`, `a` flag |
 | Process isolation | `bash "$STAGE/deploy/check_isolation.sh" dev` | only `OK`, exit 0 |
 
-**Privilege isolation**, verified on a restored copy, never by probing the live database:
+**Privilege isolation**, verified on a restored copy, never by probing the live database. `e2_restore` runs the following, and any failure returns non-zero without a marker:
+- **Backup:** a new backup set, whose manifest must record alembic `0028`, KYC `draft`/0, MFA `draft` and a copied witness, and whose dump must match its checksum.
+- **Before the restore:** the pinned staging `roles.sql`, and no scratch directory or process left over.
+- **Restore check:** the release's `restore_check`, which must exit 0.
+- **After it:** the scratch directory gone and no scratch PostgreSQL process left.
+- **JSON:** every required field checked explicitly.
+- **Marker:** `E-restore-passed`, written last.
 ```
-e2_restore() { local rc  # non-zero on any failure; $ST/E-restore-passed only after both succeeded
+e2_restore() { local rc set
+  [ -f "$ST/E2-checks-passed" ] || { echo "STOP: the E2 checks have not passed"; return 1; }
   rm -f "$ST/phaseE.set" "$ST/E-restore-passed"
   dev_backup phaseE.set || { rm -f "$ST/phaseE.set"; echo "STOP: backup failed"; return 1; }
+  set="$(cat "$ST/phaseE.set")"
+  ( cd /var/backups/hyperchat-dev && sha256sum -c --quiet "$set.dump.sha256" ) \
+    && python3 -I - "/var/backups/hyperchat-dev/$set.manifest.json" <<'PY' || { echo "STOP: the Phase E set's manifest is not as required"; return 1; }
+import json, sys
+m = json.load(open(sys.argv[1]))
+ok = (m.get("alembic_version") == "0028" and m.get("kyc_enforcement") == {"state": "draft", "generation": 0}
+      and m.get("stepup_enforcement") == "draft" and m.get("witness_status") == "copied")
+print("manifest:", m.get("alembic_version"), m.get("kyc_enforcement"), m.get("stepup_enforcement"), m.get("witness_status"))
+sys.exit(0 if ok else 1)
+PY
   roles_sql_ok || return 1
-  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] || { echo "STOP: a scratch directory is left from an earlier run"; return 1; }
+  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] && ! pgrep -f 'hc-restorecheck-' >/dev/null \
+    || { echo "STOP: a scratch directory or cluster is left from an earlier run"; return 1; }
   ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
-      --set "$(cat "$ST/phaseE.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
-      --roles-sql "$ROLES_SQL" --output "$ST/restorecheck-0028.json" ); rc=$?
+      --set "$set" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
+      --roles-sql "$ROLES_SQL" --expect-head 0028 --output "$ST/restorecheck-0028.json" ); rc=$?
   [ "$rc" = 0 ] || { echo "STOP: restore check failed (restore_check exited $rc; see $ST/restorecheck-0028.json)"; return 1; }
+  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] && ! pgrep -f 'hc-restorecheck-' >/dev/null \
+    || { echo "STOP: the scratch cluster was not removed (do not delete it by hand)"; return 1; }
+  python3 -I - "$ST/restorecheck-0028.json" "$set" <<'PY' || { echo "STOP: the restore check result is not as required"; return 1; }
+import json, sys
+d = json.load(open(sys.argv[1])); inv = d.get("invariants") or {}
+checks = {"set is the Phase E set": d.get("set") == sys.argv[2],
+          "structurally_valid: true": d.get("structurally_valid") is True,
+          "restore_valid: true": d.get("restore_valid") is True,
+          "invariants.alembic_version: 0028": inv.get("alembic_version") == "0028",
+          "alembic matches the head and the manifest": inv.get("alembic_matches_expected_head") is True and inv.get("alembic_matches_manifest") is True,
+          "objects_not_owned_by_hyperchat_owner: 0": inv.get("objects_not_owned_by_hyperchat_owner") == 0,
+          "public_table_privileges: 0": inv.get("public_table_privileges") == 0,
+          "guard triggers: enabled > 0, disabled 0": (inv.get("guard_triggers_enabled") or 0) > 0 and inv.get("guard_triggers_disabled") == 0,
+          "runtime_role_privilege_leaks: []": inv.get("runtime_role_privilege_leaks") == [],
+          "stepup_enforcement: draft": inv.get("stepup_enforcement") == "draft",
+          "kyc_enforcement: draft/0": inv.get("kyc_enforcement") == {"state": "draft", "generation": 0},
+          "kyc_witness: consistent": d.get("kyc_witness") == "consistent",
+          "live_operation_approved: false": d.get("live_operation_approved") is False}
+for name, ok in checks.items():
+    print(("OK    " if ok else "FAIL  ") + name)
+sys.exit(0 if all(checks.values()) else 1)
+PY
   date -u +%FT%TZ > "$ST/E-restore-passed" && echo "E2 RESTORE OK"
 }
 e2_restore
 ```
-**Required:**
-- `E2 RESTORE OK`, and the backup's manifest records alembic `0028` and KYC `draft`;
-- the restore check exits 0 (default expected head: the release's own `0028`);
-- in the JSON:
-  - `structurally_valid: true`;
-  - `invariants.alembic_matches_expected_head: true`;
-  - `objects_not_owned_by_hyperchat_owner: 0`;
-  - `public_table_privileges: 0`;
-  - `guard_triggers_disabled: 0`;
-  - `runtime_role_privilege_leaks: []`;
-  - `stepup_enforcement: "draft"`;
-  - `kyc_witness: "consistent"`.
+**Required:** `E2 RESTORE OK`, and every manifest and JSON line printed `OK`.
 
 This also proves the 0028 set restores on PostgreSQL 15.
 
@@ -1294,7 +1381,23 @@ This also proves the 0028 set restores on PostgreSQL 15.
 | OBS, realtime, worker | sections `obs`, `realtime`, `worker` pass; the worker log shows the synthetic job processed |
 | DEV/production separation | `curl -fsS http://127.0.0.1:8000/health` reports development and `hyperchat_dev`; read-only: `curl -fsS http://127.0.0.1:8001/health` still reports production release `940137070657`, and `sudo -u postgres psql -X -p 5432 -d hyperchat -Atc "SELECT version_num FROM alembic_version"` still `0009` |
 
-**Record:** both suites' totals (passed / failed / blocked, every BLOCKED named and on the allowed list), the E2 outputs, `$ST/restorecheck-0028.json`, `check_isolation.sh` output. Phase E passes only when every mandatory item passes. Otherwise, "If a phase fails".
+The table's API rows are covered by E1's exit codes. The DEV/production separation row is checked by machine:
+```
+e3_separation() {
+  [ -f "$ST/E-restore-passed" ] || { echo "STOP: the E2 restore has not passed"; return 1; }
+  curl -fsS --max-time 5 http://127.0.0.1:8000/health | python3 -c 'import json, sys; d = json.load(sys.stdin); sys.exit(0 if d.get("status") == "ok" and d.get("release") == "c2fe883be71d" and d.get("environment") == "development" and "hyperchat_dev" in (d.get("database") or {}).get("label", "") and (d.get("database") or {}).get("status") == "ok" else 1)'     || { echo "STOP: DEV /health is not development / hyperchat_dev / c2fe883be71d"; return 1; }
+  curl -fsS --max-time 5 http://127.0.0.1:8001/health | python3 -c 'import json, sys; d = json.load(sys.stdin); sys.exit(0 if d.get("status") == "ok" and d.get("release") == "940137070657" and d.get("environment") == "production" else 1)'     || { echo "STOP: production /health is not production / 940137070657"; return 1; }
+  [ "$(sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -p 5432 -d hyperchat -c 'SELECT version_num FROM alembic_version')" = 0009 ]     || { echo "STOP: production is not at 0009"; return 1; }
+  date -u +%FT%TZ > "$ST/E3-passed" && echo "E3 OK: PHASE E PASSED"
+}
+e3_separation
+```
+**Record:**
+- both suites' totals (passed / failed / blocked, every BLOCKED named and on the allowed list): `$ST/smoke-dev-backend.txt`, `$ST/smoke-auth.txt`;
+- the E2 outputs, `$ST/restorecheck-0028.json`, `$ST/isolation-E2-dev.txt`;
+- the markers.
+
+Phase E passes only when `E3 OK: PHASE E PASSED` is printed. Otherwise, "If a phase fails".
 
 ---
 
@@ -1454,7 +1557,7 @@ switch_to_old || enter_stopped_state
 | C | C1–C5: the `.before-C` copies, `setup_cluster.sh 15 restoretest 5433 hyperchat_dev`, the four pg_ident lines, five `api.env` settings, the cluster reloads | restarts, migrations, `c_undo_files` (a separate decision), dropping roles, anything on `hyperchat_restore_test` |
 | D | D1–D4: stopping DEV services (cleanup run included), migrations 0020–0028 behind the machine-checked per-revision checks, the gated release switch, start and the restart watch; on failure, the stopped state only | restores, downgrades, re-runs, switching back, smoke tests |
 | Smoke PR | the separate test-only PR (its own review and merge) | anything on the server |
-| E | the updated smoke suites, the checks listed, one more DEV backup and scratch restore | `HYPERCHAT_SMOKE_R2=1` (separate), verifier install, Didit, activation |
+| E | E0–E3: the pinned smoke copy, the updated smoke suites, the machine-checked database checks, one more DEV backup and scratch restore, the separation checks | `HYPERCHAT_SMOKE_R2=1` (separate), verifier install, Didit, activation |
 | F | `restore_into_new` (the Phase B set into `hyperchat_dev_rollback_restore`), `swap_names` (rename 2 only after rename 1), on a partial swap `retry_rename2` or `undo_rename1`, CONNECT grants, `switch_to_old` | dropping either kept database, reverting roles / pg_hba / pg_ident / `api.env` |
 
 ## After a successful rehearsal (each separately)
