@@ -91,7 +91,7 @@ Its records go to `/root/rehearsal-dev/permfix/`, created with mode 0700. That d
 
 **DEV `/health` afterwards:** `status ok`, release `229fe42381e2`, `environment development`, database ok.
 
-**Production:** not touched. Its tree, symlink, services and health are recorded unchanged. Its own 5 `__pycache__` directories in `/opt/hyperchat-prod/releases/940137070657` are still `root:root 0755`.
+**Production:** not touched. Its tree, symlink, services and health are recorded unchanged. At the time of this run, its own 5 `__pycache__` directories in `/opt/hyperchat-prod/releases/940137070657` were still `root:root 0755`. They were corrected separately at 11:14 UTC (`docs/operations/prod-permission-repair/`, PR Ankit-KK/hyperchat-v2#87).
 
 **Remaining DEV audit FAILs**, both expected. Phase C fixes them, and Phase C is not authorized:
 - `pg_hba HyperChat rule covers every login role: missing: hyperchat_auth missing: hyperchat_lifecycle missing: hyperchat_stepup`
@@ -99,4 +99,4 @@ Its records go to `/root/rehearsal-dev/permfix/`, created with mode 0700. That d
 
 ## After it passed
 - **Resuming Phase A:** A1 (`a1_records`) resumes only with its own approval.
-- **A1 is still blocked by production:** `a1_records` also runs `check_isolation.sh prod`. That audit's release-tree check will fail on production's 5 `__pycache__` directories until a separately approved production change corrects them. A1 would therefore STOP at its production audit before writing `A1-passed`.
+- **A1 was blocked by production until it was repaired:** `a1_records` also runs `check_isolation.sh prod`, which failed on production's 5 `__pycache__` directories. After the production repair (11:14 UTC), A1 ran with its own approval at 11:21 UTC and passed. Both audits printed exactly the expected lines, and `A1-passed` exists.
