@@ -355,10 +355,13 @@ dev_snapshot() {
   systemctl is-active hyperchat-api hyperchat-worker hyperchat-cleanup.timer | tr '\n' ' '; echo
   Q "SELECT 'dev alembic ' || version_num FROM alembic_version"
 }
-# observations that legitimately change with time (a nightly backup may run during Phase A): shown, never compared
+# observations that legitimately change with time (a nightly backup may run during Phase A): shown, never compared;
+# failing to collect them is a failure (never an empty, success-looking report)
 prod_observations() {
-  ls -t /var/backups/hyperchat/hyperchat_*.dump | head -n 1
-  systemctl show hyperchat-pgbackup.service -p Result -p ExecMainExitTimestamp | tr '\n' ' '; echo
+  local newest result
+  newest="$(ls -t /var/backups/hyperchat/hyperchat_*.dump 2>/dev/null | head -n 1)" && [ -n "$newest" ] || return 1
+  result="$(systemctl show hyperchat-pgbackup.service -p Result -p ExecMainExitTimestamp)" && [ -n "$result" ] || return 1
+  echo "newest production backup: $newest"; printf '%s\n' "$result" | tr '\n' ' '; echo
 }
 # the exact lines check_isolation.sh must print before Phase C (one per check): every check OK except the two
 # legacy lines Phase C fixes (pg_hba lacks lifecycle / auth / stepup; pg_ident maps the API user to app and worker
@@ -561,10 +564,11 @@ a9_after() {
   diff "$ST/A0-prod.snapshot" "$ST/A9-prod.snapshot" || { echo "STOP: PRODUCTION CHANGED during Phase A (diff above)"; return 1; }
   diff "$ST/A0-dev.snapshot" "$ST/A9-dev.snapshot" || { echo "STOP: DEV release, services or schema changed (diff above)"; return 1; }
   api_healthy "$(cat "$ST/old-release.id")" || return 1
-  echo "observations (not compared):"; prod_observations
+  echo "observations (not compared):"
+  prod_observations || { echo "STOP: cannot collect the production observations"; return 1; }
   echo "A9 OK: production and DEV unchanged by Phase A"
 }
-a9_after; ls -la "$ST"
+a9_after && ls -la "$ST"
 ```
 
 **Record:** the files in `$ST`:
