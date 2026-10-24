@@ -100,10 +100,23 @@ BASE="${DB}_${STAMP}"
 WORK="$(mktemp -d "$DIR/.partial-$STAMP-XXXXXX")"
 trap 'rm -rf -- "$WORK"' EXIT
 
-# Facts recorded BEFORE the dump starts: the dump's snapshot is at least this recent.
-ALEMBIC="$(q "SELECT CASE WHEN to_regclass('public.alembic_version') IS NULL THEN '' ELSE (SELECT version_num FROM public.alembic_version) END")"
-KYC="$(q "SELECT CASE WHEN to_regclass('public.kyc_enforcement') IS NULL THEN '' ELSE (SELECT state || ' ' || generation FROM public.kyc_enforcement) END")"
-STEPUP="$(q "SELECT CASE WHEN to_regclass('public.stepup_enforcement') IS NULL THEN '' ELSE (SELECT state FROM public.stepup_enforcement) END")"
+# Facts recorded BEFORE the dump starts: the dump's snapshot is at least this recent. A table that does not exist yet
+# (production at 0009, DEV at 0019: no enforcement tables) is recorded as "" (generation 0). PostgreSQL resolves every
+# table a statement names while parsing it, even inside a CASE branch that never runs, so existence is asked first
+# and the table read only when it exists; a table that exists must hold exactly one row, and any failed query fails.
+table_exists() {
+  local t; t="$(q "SELECT to_regclass('public.$1') IS NOT NULL")" || fail "cannot tell whether public.$1 exists"
+  case "$t" in t) return 0 ;; f) return 1 ;; *) fail "cannot tell whether public.$1 exists" ;; esac
+}
+one_row() {  # one_row TABLE SQL: the single row's value, or the backup fails
+  local out; out="$(q "$2")" || fail "cannot read public.$1"
+  [[ -n "$out" && "$out" != *$'\n'* ]] || fail "public.$1 must hold exactly one row"
+  printf '%s\n' "$out"
+}
+ALEMBIC=""; KYC=""; STEPUP=""
+if table_exists alembic_version; then ALEMBIC="$(one_row alembic_version "SELECT version_num FROM public.alembic_version")" || exit 1; fi
+if table_exists kyc_enforcement; then KYC="$(one_row kyc_enforcement "SELECT state || ' ' || generation FROM public.kyc_enforcement")" || exit 1; fi
+if table_exists stepup_enforcement; then STEPUP="$(one_row stepup_enforcement "SELECT state FROM public.stepup_enforcement")" || exit 1; fi
 
 run_pg "$BIN/pg_dump" -h "$HOST" -p "$PORT" -Fc -Z 9 "$DB" > "$WORK/$BASE.dump" || fail "pg_dump failed"
 ENTRIES="$("$BIN/pg_restore" -l "$WORK/$BASE.dump" | grep -vc '^;')" || fail "pg_restore cannot read the new archive"
@@ -125,10 +138,9 @@ if [[ -n "$WITNESS" ]]; then
   fi
 fi
 
-KYC_STATE="${KYC%% *}"; KYC_GEN="${KYC##* }"
-[[ -n "$KYC" ]] || { KYC_STATE=""; KYC_GEN=0; }
-[[ "$KYC_GEN" =~ ^[0-9]+$ && "$ALEMBIC" =~ ^[0-9a-z_]*$ && "$KYC_STATE" =~ ^[a-z]*$ && "$STEPUP" =~ ^[a-z]*$ ]] \
-  || die "unexpected database facts"
+KYC_STATE=""; KYC_GEN=0
+[[ -z "$KYC" ]] || { [[ "$KYC" =~ ^([a-z]+)\ ([0-9]+)$ ]] || die "unexpected database facts"; KYC_STATE="${BASH_REMATCH[1]}"; KYC_GEN="${BASH_REMATCH[2]}"; }
+[[ "$ALEMBIC" =~ ^[0-9a-z_]*$ && "$STEPUP" =~ ^[a-z]*$ ]] || die "unexpected database facts"
 cat > "$WORK/$BASE.manifest.json" <<EOF
 {"format": 1, "environment": "$ENV_NAME", "database": "$DB", "cluster": "$CLUSTER", "server_version_num": $SERVER_NUM,
  "created_at": "$STAMP", "alembic_version": "$ALEMBIC", "kyc_enforcement": {"state": "$KYC_STATE", "generation": $KYC_GEN},

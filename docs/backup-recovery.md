@@ -44,7 +44,7 @@ Each run writes one set (`<db>_<UTC>`), all or nothing:
 | `.dump` | `pg_dump -Fc`, made with the **source cluster's own major version**. The script checks the tools and the answering server against the named cluster. |
 | `.dump.sha256` | `sha256sum -c` format, as before |
 | `.witness` | A copy of the environment's KYC witness, taken **after** the dump |
-| `.manifest.json` | Written **last**: environment, database, cluster, server version, Alembic head, KYC and MFA enforcement state before the dump, every file's SHA-256, archive TOC count. No secrets. |
+| `.manifest.json` | Written **last**: environment, database, cluster, server version, Alembic head, KYC and MFA enforcement state before the dump, every file's SHA-256, archive TOC count. No secrets. A schema without an enforcement table (production at 0009, DEV at 0019) records it as `""` (KYC generation `0`). An enforcement table that exists but doesn't hold exactly one row, or any failed query, fails the backup: it is never recorded as absent. |
 
 - **Atomicity:**
   - Everything is built in a private `.partial-*` directory.
