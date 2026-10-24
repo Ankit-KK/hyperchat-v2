@@ -176,9 +176,14 @@ enter_stopped_state() { systemctl stop hyperchat-cleanup.timer hyperchat-cleanup
                         services_stopped || { echo "STOP: DEV is NOT fully stopped; escalate (see 'If a phase fails')"; return 1; }
                         echo "DEV STOPPED: wait for the owner (see 'If a phase fails')"; }
 # Phase E: the root-only copy of the smoke PR's merge commit (#82, test-only), pinned by its tree fingerprint
-SMOKE=/root/hyperchat-smoke
-SMOKE_SHA=f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13
-SMOKE_FP=23dc26875b484ce5c5f7c5bcf25600a30a0a4b8e40433b2ecb8f8b2910af6933   # LF content, as the cmd.exe git archive pipe transfers it
+# first copy (E0, 2026-10-24; kept unchanged as evidence): #82's merge commit
+SMOKE1=/root/hyperchat-smoke
+SMOKE1_SHA=f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13
+SMOKE1_FP=23dc26875b484ce5c5f7c5bcf25600a30a0a4b8e40433b2ecb8f8b2910af6933   # LF content, as the cmd.exe git archive pipe transfers it
+# the corrected suite: #94's merge commit (creator-linked fixtures through the schema owner, migration 0027), used by the resumed E1-E3
+SMOKE=/root/hyperchat-smoke-2
+SMOKE_SHA=ae60aa5b144517384ea6b9fbb50f6654eadd07b4
+SMOKE_FP=02ddd7f723329b18a841fab7c56d4ae0dc751f98369fac7d93ba73cecef5930c    # 296 files, LF content
 # Phase D: the DEV release link, and how long D4 watches the started services for restarts (seconds)
 APP_CURRENT=/opt/hyperchat/current
 D4_SETTLE=30
@@ -1214,7 +1219,7 @@ Phase E then uses a root-only copy of that PR's merge commit: **#82, merged as `
 
 **How to run it:**
 - **One root shell per VPS step:** the session setup, then the step's block exactly as written.
-- **Step gates:** each step writes a marker in `$ST` only when everything in it succeeded, and returns non-zero with `STOP` otherwise. The next step refuses to start without it: D4 → E0 → `E0-passed` → E1 → `E1-passed` → E2 checks → `E2-checks-passed` → E2 restore → `E-restore-passed` → E3 → `E3-passed`.
+- **Step gates:** each step writes a marker in `$ST` only when everything in it succeeded, and returns non-zero with `STOP` otherwise. The next step refuses to start without it: D4 → E0 → `E0-passed` → (the E1 stop and its resume: R1 → `E-resume-checked` → R2 → `E0b-passed`) → E1 → `E1-passed` → E2 checks → `E2-checks-passed` → E2 restore → `E-restore-passed` → E3 → `E3-passed`.
 
 **E0. The smoke copy.**
 
@@ -1232,9 +1237,9 @@ git archive f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13 backend tests \
 e0_smoke_ok() {
   [ -f "$ST/D4-passed" ] || { echo "STOP: Phase D has not passed"; return 1; }
   [ ! -e "$ST/E0-passed" ] || { echo "STOP: E0 already passed once"; return 1; }
-  [ -d "$SMOKE" ] && [ ! -L "$SMOKE" ] && [ "$(stat -c '%U:%G %a' "$SMOKE")" = "root:root 700" ] || { echo "STOP: $SMOKE is not a root-only directory"; return 1; }
-  [ "$(fp "$SMOKE")" = "$SMOKE_FP" ] && [ "$(find "$SMOKE" -type f | wc -l)" = 295 ] || { echo "STOP: $SMOKE is not the $SMOKE_SHA backend+tests tree"; return 1; }
-  date -u +%FT%TZ > "$ST/E0-passed" && echo "E0 OK: $SMOKE is the pinned smoke tree"
+  [ -d "$SMOKE1" ] && [ ! -L "$SMOKE1" ] && [ "$(stat -c '%U:%G %a' "$SMOKE1")" = "root:root 700" ] || { echo "STOP: $SMOKE1 is not a root-only directory"; return 1; }
+  [ "$(fp "$SMOKE1")" = "$SMOKE1_FP" ] && [ "$(find "$SMOKE1" -type f | wc -l)" = 295 ] || { echo "STOP: $SMOKE1 is not the $SMOKE1_SHA backend+tests tree"; return 1; }
+  date -u +%FT%TZ > "$ST/E0-passed" && echo "E0 OK: $SMOKE1 is the pinned smoke tree"
 }
 e0_smoke_ok
 ```
@@ -1253,6 +1258,76 @@ e0_smoke_ok
   - the hosted Supabase rehearsal (D1).
 - **Fails Phase E:** any FAIL, or a BLOCKED outside that list.
 
+### Resuming Phase E after the E1 stop (2026-10-24)
+**What happened:**
+- **E0** passed: `E0-passed`, and `$SMOKE1` holds the `f8bd98b` copy.
+- **E1** stopped. `smoke_dev_backend.py` exited 1 at its setup: its fixture inserted a creator-linked account as `hyperchat_app`, and migration 0027's `stepup_guard_users` refuses that (`InsufficientPrivilege: an admin or creator-linked account is created only by an invitation`).
+- **The suite's cleanup** reported nothing left, and `smoke_auth.py` didn't run.
+- **The guard was right.** PR #94 (test-only, merged as `ae60aa5b144517384ea6b9fbb50f6654eadd07b4`) makes the suite write that account through the schema owner, like its admins and creators. Its `backend tests` tree is pinned by `SMOKE_FP` (296 files, LF content as the `cmd.exe` or Linux `git archive` emits it).
+
+**Resuming needs the owner's explicit approval of this procedure.** It never repeats the first transfer, never overwrites `$SMOKE1`, and never reuses a marker: E1 requires all three of `E0-passed`, `E-resume-checked` and `E0b-passed`.
+
+**R1. Check the stopped state** (VPS; read-only apart from moving the first attempt's log aside and its marker). It must print `RESUME CHECK OK`. It requires:
+- **The exact E1 failure:** `E0-passed` exists; none of the E1–E3 markers exist; the first attempt's log shows exactly that failure (1 failed); `smoke_auth.py` never ran.
+- **No synthetic rows:** no users, creators, signups or invitations left.
+- **DEV as after Phase D:** on `c2fe883be71d` at 0028 and healthy; KYC and MFA `draft`; the witness intact; the baseline identical; eligibility unchanged; the isolation audit all `OK`.
+- **Production unchanged:** on `940137070657` at 0009.
+- **The two copies:** the first copy still matches `SMOKE1_FP`, and `$SMOKE` doesn't exist yet.
+```
+e_resume_check() { local out rc
+  [ -f "$ST/E0-passed" ] || { echo "STOP: E0 has not passed"; return 1; }
+  [ ! -e "$ST/E-resume-checked" ] || { echo "STOP: the resume check already passed once"; return 1; }
+  [ -z "$(ls "$ST" | grep -E '^E1-passed$|^E2-checks-passed$|^E-restore-passed$|^E3-passed$|^phaseE\.set$')" ] \
+    || { echo "STOP: a later Phase E marker exists; this is not the stopped E1 state"; return 1; }
+  [ -f "$ST/smoke-dev-backend.txt" ] && [ ! -e "$ST/smoke-auth.txt" ] \
+    && grep -qF 'FAILED [suite] runs to completion: InsufficientPrivilege: an admin or creator-linked account is created only by an invitation' "$ST/smoke-dev-backend.txt" \
+    && grep -qE '^[0-9]+ passed, 1 failed, [0-9]+ blocked' "$ST/smoke-dev-backend.txt" && grep -qF 'PASS  [cleanup] no synthetic row left' "$ST/smoke-dev-backend.txt" \
+    || { echo "STOP: the first E1 attempt's log is not the recorded 0027 fixture failure"; return 1; }
+  [ "$(Q "SELECT (SELECT count(*) FROM users WHERE email LIKE '%@authtest.invalid') + (SELECT count(*) FROM streamers WHERE streamer_slug LIKE 'authtest-%') + (SELECT count(*) FROM user_signups WHERE lower(email) LIKE '%@authtest.invalid') + (SELECT count(*) FROM user_invites WHERE lower(email) LIKE '%@authtest.invalid')")" = 0 ] \
+    || { echo "STOP: synthetic rows remain"; return 1; }
+  [ "$(readlink -f "$APP_CURRENT")" = "$REL_NEW" ] && head_is 0028 && api_healthy c2fe883be71d && drafts_ok && witness_ok || return 1
+  baseline > "$ST/baseline-resume.txt" && diff "$ST/baseline-before.txt" "$ST/baseline-resume.txt" || { echo "STOP: the data baseline changed"; return 1; }
+  [ "$(Q "SELECT count(*) FROM streamers WHERE public.creator_donation_block(id) IS NULL")" = "$(cat "$ST/eligible-after-0020.txt")" ] || { echo "STOP: eligibility changed"; return 1; }
+  out="$(bash "$STAGE/deploy/check_isolation.sh" dev 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q '^FAIL' || { echo "STOP: the isolation audit is not all OK"; return 1; }
+  curl -fsS --max-time 5 http://127.0.0.1:8001/health | python3 -c 'import json, sys; d = json.load(sys.stdin); sys.exit(0 if d.get("status") == "ok" and d.get("release") == "940137070657" else 1)' \
+    && [ "$(sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -p 5432 -d hyperchat -c 'SELECT version_num FROM alembic_version')" = 0009 ] \
+    || { echo "STOP: production is not on 940137070657 at 0009"; return 1; }
+  [ "$(fp "$SMOKE1")" = "$SMOKE1_FP" ] || { echo "STOP: the first copy $SMOKE1 changed"; return 1; }
+  [ ! -e "$SMOKE" ] || { echo "STOP: $SMOKE already exists"; return 1; }
+  mv -n "$ST/smoke-dev-backend.txt" "$ST/smoke-dev-backend.attempt1.txt" && [ ! -e "$ST/smoke-dev-backend.txt" ] || { echo "STOP: cannot keep the first attempt's log"; return 1; }
+  date -u +%FT%TZ > "$ST/E-resume-checked" && echo "RESUME CHECK OK: stopped E1 state verified; first log kept as smoke-dev-backend.attempt1.txt"
+}
+e_resume_check
+```
+
+**R2. Copy the corrected suite to a new path.**
+
+**(workstation)**, a read-only check that must print nothing. Application and migration code must be identical to `c2fe883`; `deploy/` changed after it (the backup script, #88) but isn't part of the copy:
+```
+git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef ae60aa5b144517384ea6b9fbb50f6654eadd07b4 -- backend database ':(exclude)backend/tests' ':(exclude)*.md'
+```
+**(workstation)**, through `cmd.exe`. It runs only after the resume check, and never into an existing directory:
+```
+git archive ae60aa5b144517384ea6b9fbb50f6654eadd07b4 backend tests \
+  | ssh root@VPS "[ -f /root/rehearsal-dev/E-resume-checked ] && [ ! -e /root/hyperchat-smoke-2 ] && install -d -o root -g root -m 0700 /root/hyperchat-smoke-2 && tar -x -C /root/hyperchat-smoke-2"
+```
+**(VPS)**: must print `E0b OK`.
+```
+e0b_smoke_ok() {
+  [ -f "$ST/E-resume-checked" ] || { echo "STOP: the resume check has not passed"; return 1; }
+  [ ! -e "$ST/E0b-passed" ] || { echo "STOP: E0b already passed once"; return 1; }
+  [ -d "$SMOKE" ] && [ ! -L "$SMOKE" ] && [ "$(stat -c '%U:%G %a' "$SMOKE")" = "root:root 700" ] || { echo "STOP: $SMOKE is not a root-only directory"; return 1; }
+  [ "$(fp "$SMOKE")" = "$SMOKE_FP" ] && [ "$(find "$SMOKE" -type f | wc -l)" = 296 ] || { echo "STOP: $SMOKE is not the $SMOKE_SHA backend+tests tree"; return 1; }
+  [ "$(fp "$SMOKE1")" = "$SMOKE1_FP" ] || { echo "STOP: the first copy $SMOKE1 changed"; return 1; }
+  date -u +%FT%TZ > "$ST/E0b-passed" && echo "E0b OK: $SMOKE is the pinned corrected smoke tree"
+}
+e0b_smoke_ok
+```
+**Then:** E1, the E2 checks, the E2 restore and E3 below, unchanged, each in its own root shell. E1 runs the suites from `$SMOKE`, the corrected copy.
+
+**Record:** the R1 and R2 outputs, `$ST/smoke-dev-backend.attempt1.txt`, `$ST/baseline-resume.txt`, and the markers `E-resume-checked` and `E0b-passed`.
+
 ### E1. The smoke suites
 Both suites run as root from the smoke copy with the release's venv, against DEV only. They refuse the production API and database and the restore source, and they require environment `development`.
 - **What they write:** synthetic rows only (`@authtest.invalid`, `authtest-*`), removed and verified at the end. The login rate-limit rows they consume are cleared. Approving a synthetic donation makes the DEV worker publish realtime events to the DEV Pusher app; nothing else leaves the server.
@@ -1260,7 +1335,8 @@ Both suites run as root from the smoke copy with the release's venv, against DEV
 - **Pass:** each suite's own exit code must be 0. In rehearsal mode, `smoke_dev_backend.py` exits non-zero for any BLOCKED outside the allowed list above.
 ```
 e1_smoke() { local rc venv_pyc
-  [ -f "$ST/E0-passed" ] || { echo "STOP: E0 has not passed"; return 1; }
+  [ -f "$ST/E0-passed" ] && [ -f "$ST/E-resume-checked" ] && [ -f "$ST/E0b-passed" ] \
+    || { echo "STOP: E0, the resume check and E0b must have passed (see 'Resuming Phase E after the E1 stop')"; return 1; }
   [ ! -e "$ST/E1-passed" ] || { echo "STOP: E1 already passed once"; return 1; }
   [ "$(readlink -f "$APP_CURRENT")" = "$REL_NEW" ] || { echo "STOP: current is not $REL_NEW"; return 1; }
   head_is 0028 && api_healthy c2fe883be71d || return 1
