@@ -1,6 +1,6 @@
-# DEV permission repair (117 paths): for review, not yet run
+# DEV permission repair (117 paths): executed
 
-**Status:** prepared on 2026-10-24 and waiting for owner approval. Nothing here has run on a server except the read-only `reconcile.sh`.
+**Status:** executed successfully on DEV on 2026-10-24 at 10:37 UTC, with owner approval. `apply.sh` and `rollback.sh` were byte-identical to commit `d49879c`. `apply.sh` ran once and exited 0; `rollback.sh` was not needed and was not run. No further permission change is planned here. See [Execution record](#execution-record-2026-10-24).
 
 **Why it's needed:** Phase A of [the DEV rehearsal](../dev-rehearsal-0020-0028.md) stopped at A1. The DEV isolation audit refused "other" access in `/opt/hyperchat`. The cause is described in the `deploy/README.md` "Rules".
 
@@ -70,5 +70,33 @@ Its records go to `/root/rehearsal-dev/permfix/`, created with mode 0700. That d
 
 **Trigger rollback when:** any STOP after `pf_pre`, or any later doubt. A STOP inside `pf_pre` changed nothing, but its records directory exists: move it aside (`mv /root/rehearsal-dev/permfix /root/rehearsal-dev/permfix.stopped-<time>`) before a later run.
 
-## After it passes
-Phase A resumes at A1 (`a1_records`) only with its own approval.
+## Execution record (2026-10-24)
+`apply.sh` output (exit 0):
+
+    pre OK: 117 paths == manifest, all root:root 755 plain directories; ActiveState=active MainPID=26643 NRestarts=0  ActiveState=active MainPID=26639 NRestarts=0
+    top OK: /opt/hyperchat and /opt/hyperchat/releases are root:hyperchat 750; hyperchat reads its release; API healthy
+    pycache OK: 115 directories root:hyperchat 750
+    verify OK: 0 violations; 117 paths root:hyperchat 750; API healthy on 229fe42381e2; services, release symlink, production and PostgreSQL config unchanged; audit: 21 OK + 2 legacy FAIL
+
+**Evidence** is on the server in `/root/rehearsal-dev/permfix/` (root 0700):
+
+| File | Content |
+|---|---|
+| `before.txt` / `after.txt` | 117 × `root:root 755 directory` / 117 × `root:hyperchat 750 directory` |
+| `violations-before.txt` / `violations-after.txt` | 117 paths, identical to the manifest (`drift.diff` empty) / empty |
+| `*.err` (violations, invariants, audit) | all empty |
+| `services-before.txt` = `services-after.txt` | API PID 26643 and worker PID 26639, both active, 0 restarts: nothing restarted or reloaded |
+| `invariants-before.txt` = `invariants-after.txt` | identical. DEV `current` → `229fe42381e2`. Production `current` → `940137070657`, production `/health` ok (release `940137070657`, database ok), production API active (PID 471695, 0 restarts). The sha256 of both clusters' `pg_hba`/`pg_ident` and of the unit files is unchanged. |
+| `audit.txt`, `audit.expected`, `audit.diff` | `check_isolation.sh dev`: exit 1, empty stderr, exactly the expected lines (`audit.diff` empty) |
+
+**DEV `/health` afterwards:** `status ok`, release `229fe42381e2`, `environment development`, database ok.
+
+**Production:** not touched. Its tree, symlink, services and health are recorded unchanged. Its own 5 `__pycache__` directories in `/opt/hyperchat-prod/releases/940137070657` are still `root:root 0755`.
+
+**Remaining DEV audit FAILs**, both expected. Phase C fixes them, and Phase C is not authorized:
+- `pg_hba HyperChat rule covers every login role: missing: hyperchat_auth missing: hyperchat_lifecycle missing: hyperchat_stepup`
+- `pg_ident maps hyperchat to: 'hyperchat_app hyperchat_worker ' (want 'hyperchat_app hyperchat_auth hyperchat_lifecycle hyperchat_worker ')`
+
+## After it passed
+- **Resuming Phase A:** A1 (`a1_records`) resumes only with its own approval.
+- **A1 is still blocked by production:** `a1_records` also runs `check_isolation.sh prod`. That audit's release-tree check will fail on production's 5 `__pycache__` directories until a separately approved production change corrects them. A1 would therefore STOP at its production audit before writing `A1-passed`.
