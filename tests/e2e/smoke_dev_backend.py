@@ -1274,7 +1274,7 @@ finally:
     wait_for(_open_jobs, 60)
     try:
         with db() as c, fixture_db() as owner:
-            left = cleanup(c, owner, DOMAIN, STARTED, rate_limit_keys(EMAILS, SUITE_IP))
+            left = cleanup(c, owner, DOMAIN, STARTED, rate_limit_keys(EMAILS, SUITE_IP), tag=TAG)
         print("cleanup left: " + ", ".join(f"{k}={v}" for k, v in left.items()), flush=True)
         check("cleanup", "no synthetic row left", all(v == 0 for v in left.values()), str(left))
     except Exception as exc:  # noqa: BLE001 - a failed cleanup is a FAIL with what is left, never silent
