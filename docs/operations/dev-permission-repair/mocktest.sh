@@ -31,17 +31,20 @@ build() {
 pkill -u hyperchat sleep 2>/dev/null; sudo -u hyperchat sleep 900 & sleep 1; P1=$(pgrep -u hyperchat sleep | head -1)
 cat > $B/systemctl <<EOF
 #!/bin/bash
-case "\$*" in *--value*) echo $P1; echo $P1 ;; *) echo "MainPID=$P1"; echo NRestarts=0; echo ActiveState=active ;; esac
+[ -e $B/sysfail ] && exit 1
+for u in "\$@"; do case "\$u" in hyperchat*) case "\$*" in *--value*) echo $P1 ;; *) printf 'MainPID=$P1\nNRestarts=0\nActiveState=active\n\n' ;; esac ;; esac; done
 EOF
 cat > $B/curl <<'EOF'
 #!/bin/bash
 [ -e /var/tmp/pfbin/unhealthy ] && [ "$(stat -c %a /opt/hyperchat/releases)" = 750 ] && exit 22
+case "$*" in *:8001/*) [ -e /var/tmp/pfbin/prodfail ] && exit 7 ;; *:8000/*) [ -e /var/tmp/pfbin/devfail ] && exit 7 ;; esac
 echo '{"status":"ok","release":"229fe42381e2","database":{"status":"ok"}}'
 EOF
 cat > $B/chmod <<'EOF'
 #!/bin/bash
 [ -e /var/tmp/pfbin/failon ] && [ "${@: -1}" = "$(cat /var/tmp/pfbin/failon)" ] && exit 1
 [ -e /var/tmp/pfbin/touchhba ] && [ "${@: -1}" = /opt/hyperchat/releases ] && echo "# changed" >> /etc/postgresql/15/restoretest/pg_hba.conf
+[ -e /var/tmp/pfbin/prodfail_after ] && [ "${@: -1}" = /opt/hyperchat/releases ] && touch /var/tmp/pfbin/prodfail
 exec /usr/bin/chmod "$@"
 EOF
 /usr/bin/chmod +x $B/systemctl $B/curl $B/chmod
@@ -108,6 +111,52 @@ rm -f /etc/systemd/system/hyperchat-dev-offsite.service
 
 build; rm /opt/hyperchat/current; ln -s /opt/hyperchat/releases/e953eab498f6 /opt/hyperchat/current
 out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: current is not release 229fe42381e2'; t $? "another active release stops pf_pre"
+
+unchanged() { [ "$(xargs -d '
+' stat -c '%U:%G %a' < $D/manifest.txt | sort -u)" = "root:root 755" ]; }
+build; touch $B/prodfail
+out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: cannot collect the invariants'; t $? "failed production health request stops pf_pre"
+unchanged; t $? "failed production health: no permission changed"; rm -f $B/prodfail
+
+build; mv /etc/postgresql/17/hyperchat/pg_ident.conf /var/tmp/pg_ident.saved
+out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: cannot collect the invariants'; t $? "failed sha256sum (missing pg_ident) stops pf_pre"
+unchanged; t $? "failed sha256sum: no permission changed"; mv /var/tmp/pg_ident.saved /etc/postgresql/17/hyperchat/pg_ident.conf
+
+build; rm /opt/hyperchat-prod/current
+out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: cannot collect the invariants'; t $? "failed metadata inspection (no prod symlink) stops pf_pre"
+unchanged; t $? "failed metadata inspection: no permission changed"; ln -s /opt/hyperchat-prod/releases/940137070657 /opt/hyperchat-prod/current
+
+build; printf '#!/bin/bash
+echo "{\\"status\\":\\"degraded\\",\\"database\\":{\\"status\\":\\"ok\\"}}"
+' > $B/curl8001
+sed -i '2i case "$*" in *:8001/*) [ -e /var/tmp/pfbin/curl8001 ] \&\& exec bash /var/tmp/pfbin/curl8001 ;; esac' $B/curl
+out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: cannot collect the invariants'; t $? "production health not ok stops pf_pre"
+unchanged; t $? "production not ok: no permission changed"; rm -f $B/curl8001
+
+build; touch $B/sysfail
+out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: '; t $? "failed systemctl stops pf_pre"
+unchanged; t $? "failed systemctl: no permission changed"; rm -f $B/sysfail
+
+build; printf '#!/bin/bash
+case "$*" in *--value*) exit 0 ;; esac
+exec /var/tmp/pfbin/systemctl.real "$@"
+' > $B/systemctl.wrap
+mv $B/systemctl $B/systemctl.real; mv $B/systemctl.wrap $B/systemctl; /usr/bin/chmod +x $B/systemctl
+out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: cannot read the API and worker main PIDs'; t $? "no main PIDs stops pf_pre"
+unchanged; t $? "no main PIDs: no permission changed"; mv $B/systemctl.real $B/systemctl
+
+build; touch $B/prodfail_after
+out="$(run apply.sh)"; echo "$out" | grep -q 'STOP: cannot collect the invariants after the change'; t $? "snapshot failure after the change stops pf_verify"
+echo "$out" | grep -q '^verify OK'; [ $? != 0 ]; t $? "snapshot failure after the change: no verify OK"
+rm -f $B/prodfail_after $B/prodfail
+
+build; run apply.sh >/dev/null; touch $B/devfail
+out="$(run rollback.sh)"; echo "$out" | grep -q '^rollback INCOMPLETE'; t $? "rollback with failed DEV health reports INCOMPLETE"
+echo "$out" | grep -q '^rollback OK'; [ $? != 0 ]; t $? "rollback with failed DEV health: never OK"
+rm -f $B/devfail; touch $B/sysfail
+out="$(run rollback.sh)"; echo "$out" | grep -q '^rollback INCOMPLETE'; t $? "rollback with failed systemctl reports INCOMPLETE"
+rm -f $B/sysfail
+out="$(run rollback.sh)"; echo "$out" | grep -q '^rollback OK'; t $? "rollback OK once checks pass"
 
 pkill -u hyperchat sleep; rm -rf $MOCKS /var/tmp/elsewhere $B
 echo "passed=$pass failed=$failn"

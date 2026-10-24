@@ -131,7 +131,11 @@ TOP="$A $A/releases"
 pycache() { manifest | grep '/__pycache__$'; }
 violations() { find "$A" ! -type l \( ! -user root -o -perm /0022 -o -perm /0007 \) -print | LC_ALL=C sort; }
 is_plain_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(readlink -f "$1")" = "$1" ]; }
-svc_state() { systemctl show hyperchat-api hyperchat-worker -p MainPID -p NRestarts -p ActiveState | tr '\n' ' '; }
+svc_state() {  # fails unless systemctl answers and both DEV services are active
+  local x; x="$(systemctl show hyperchat-api hyperchat-worker -p MainPID -p NRestarts -p ActiveState)" || return 1
+  [ "$(printf '%s\n' "$x" | grep -cx 'ActiveState=active')" = 2 ] || return 1
+  printf '%s' "$x" | tr '\n' ' '
+}
 svc_access() {  # the service user reaches and reads its active release
   local R; R="$(readlink -f "$A/current")"
   sudo -u "$SVC" test -x "$A" && sudo -u "$SVC" test -x "$A/releases" && sudo -u "$SVC" test -r "$R/backend/app/main.py" \
@@ -153,15 +157,22 @@ CONSUMERS="/etc/systemd/system/hyperchat-api.service User=hyperchat
 /etc/systemd/system/hyperchat-worker.service User=hyperchat"
 # what must not change at all: the DEV release symlink, production (tree top, symlink, health, services), the
 # PostgreSQL client-auth files of both clusters, the env-file metadata and the unit files (read-only)
+# Fails (non-zero) when any command fails or returns nothing; production must be healthy and its API active.
 snapshot() {
-  echo "dev current -> $(readlink "$A/current") $(stat -c '%i %U:%G %Z' "$A/current")"
-  echo "dev env $(stat -c '%U:%G %a %Y' /etc/hyperchat/api.env)"
-  echo "prod current -> $(readlink /opt/hyperchat-prod/current)"
-  stat -c '%U:%G %a %i %Y %Z %n' /opt/hyperchat-prod /opt/hyperchat-prod/releases /opt/hyperchat-prod/current
-  echo "prod health $(curl -fsS --max-time 5 http://127.0.0.1:8001/health | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d["status"], d["release"], d["database"]["status"])')"
-  echo "prod services $(systemctl show hyperchat-prod-api hyperchat-prod-worker -p MainPID -p NRestarts -p ActiveState | tr '\n' ' ')"
+  local x h
+  x="$(readlink "$A/current")" && [ -n "$x" ] || return 1; echo "dev current -> $x"
+  x="$(stat -c '%i %U:%G %Z' "$A/current")" || return 1; echo "dev current link $x"
+  x="$(stat -c '%U:%G %a %Y' /etc/hyperchat/api.env)" || return 1; echo "dev env $x"
+  x="$(readlink /opt/hyperchat-prod/current)" && [ -n "$x" ] || return 1; echo "prod current -> $x"
+  stat -c '%U:%G %a %i %Y %Z %n' /opt/hyperchat-prod /opt/hyperchat-prod/releases /opt/hyperchat-prod/current || return 1
+  h="$(curl -fsS --max-time 5 http://127.0.0.1:8001/health)" || return 1
+  x="$(printf '%s' "$h" | python3 -c 'import json, sys; d = json.load(sys.stdin); assert d["status"] == "ok" and d["database"]["status"] == "ok"; print(d["status"], d.get("release"), d["database"]["status"])')" || return 1
+  echo "prod health $x"
+  x="$(systemctl show hyperchat-prod-api -p MainPID -p NRestarts -p ActiveState)" || return 1
+  printf '%s\n' "$x" | grep -qx 'ActiveState=active' || return 1
+  echo "prod api $(printf '%s' "$x" | tr '\n' ' ')"
   sha256sum /etc/postgresql/15/restoretest/pg_hba.conf /etc/postgresql/15/restoretest/pg_ident.conf \
-    /etc/postgresql/17/hyperchat/pg_hba.conf /etc/postgresql/17/hyperchat/pg_ident.conf /etc/systemd/system/hyperchat*.service
+    /etc/postgresql/17/hyperchat/pg_hba.conf /etc/postgresql/17/hyperchat/pg_ident.conf /etc/systemd/system/hyperchat*.service || return 1
 }
 audit_expected() {  # $1 = dev | prod
   local svc other app etc rel units u mode
@@ -203,7 +214,7 @@ audit_expected() {  # $1 = dev | prod
 #    running services hold group hyperchat, API healthy. Records everything under $PF (single-use: mkdir fails if
 #    it exists).
 pf_pre() {
-  local p g
+  local p g g2
   [ "$(id -u)" = 0 ] || { echo "STOP: run as root"; return 1; }
   [ "$(manifest | sha256sum | cut -c1-64)" = "$MANIFEST_SHA" ] || { echo "STOP: embedded manifest altered"; return 1; }
   [ "$(manifest | wc -l)" = 117 ] && [ "$(pycache | wc -l)" = 115 ] || { echo "STOP: manifest is not 2 + 115 paths"; return 1; }
@@ -212,8 +223,8 @@ pf_pre() {
   [ "$(readlink -f "$A/current")" = "$A/releases/$REL" ] || { echo "STOP: current is not release $REL"; return 1; }
   [ "$(consumers)" = "$CONSUMERS" ] || { echo "STOP: unexpected consumers of $A:"; consumers; return 1; }
   [ -d /root/rehearsal-dev ] && mkdir -m 700 "$PF" || { echo "STOP: $PF exists or /root/rehearsal-dev missing"; return 1; }
-  snapshot > "$PF/invariants-before.txt" 2> "$PF/invariants-before.err"
-  [ ! -s "$PF/invariants-before.err" ] || { echo "STOP: cannot collect the invariants:"; head -n 5 "$PF/invariants-before.err"; return 1; }
+  snapshot > "$PF/invariants-before.txt" 2> "$PF/invariants-before.err" && [ ! -s "$PF/invariants-before.err" ] \
+    || { echo "STOP: cannot collect the invariants (a command failed or production is not healthy):"; head -n 5 "$PF/invariants-before.err"; return 1; }
   violations > "$PF/violations-before.txt" 2> "$PF/violations-before.err"
   [ ! -s "$PF/violations-before.err" ] || { echo "STOP: find reported errors"; cat "$PF/violations-before.err"; return 1; }
   diff <(manifest) "$PF/violations-before.txt" > "$PF/drift.diff" \
@@ -226,13 +237,15 @@ pf_pre() {
   manifest | xargs -d '\n' stat -c '%U:%G %a %F %n' > "$PF/before.txt"
   g="$(getent group "$SVC" | cut -d: -f3)"; [ -n "$g" ] && id -G "$SVC" | tr ' ' '\n' | grep -qx "$g" \
     || { echo "STOP: $SVC is not in group $SVC"; return 1; }
-  for p in $(systemctl show -p MainPID --value hyperchat-api hyperchat-worker); do
+  g2="$(systemctl show -p MainPID --value hyperchat-api hyperchat-worker)" && [ "$(printf '%s\n' $g2 | grep -c '^[1-9][0-9]*$')" = 2 ] \
+    || { echo "STOP: cannot read the API and worker main PIDs"; return 1; }
+  for p in $g2; do
     [ "$p" -gt 0 ] 2>/dev/null && grep -E '^Groups:' "/proc/$p/status" | tr -s ' \t' '\n' | grep -qx "$g" \
       || { echo "STOP: running process $p does not hold group $SVC ($g)"; return 1; }
   done
   svc_access || { echo "STOP: $SVC cannot read its active release before the change"; return 1; }
   api_ok || { echo "STOP: API not healthy on $REL before the change"; return 1; }
-  svc_state > "$PF/services-before.txt"
+  svc_state > "$PF/services-before.txt" || { echo "STOP: cannot read the DEV service state, or a service is not active"; return 1; }
   echo "pre OK: 117 paths == manifest, all root:root 755 plain directories; $(cat "$PF/services-before.txt")"
 }
 
@@ -272,9 +285,10 @@ pf_verify() {
   [ "$(grep -c "^root:$SVC 750 directory /" "$PF/after.txt")" = 117 ] || { echo "STOP: not all 117 paths are root:$SVC 750"; return 1; }
   svc_access || { echo "STOP: $SVC cannot read its active release"; return 1; }
   api_ok || { echo "STOP: API not healthy on $REL"; return 1; }
-  svc_state > "$PF/services-after.txt"
+  svc_state > "$PF/services-after.txt" || { echo "STOP: cannot read the DEV service state, or a service is not active"; return 1; }
   diff "$PF/services-before.txt" "$PF/services-after.txt" || { echo "STOP: a service restarted or changed state"; return 1; }
-  snapshot > "$PF/invariants-after.txt" 2>&1
+  snapshot > "$PF/invariants-after.txt" 2> "$PF/invariants-after.err" && [ ! -s "$PF/invariants-after.err" ] \
+    || { echo "STOP: cannot collect the invariants after the change (a command failed or production is not healthy):"; head -n 5 "$PF/invariants-after.err"; return 1; }
   diff "$PF/invariants-before.txt" "$PF/invariants-after.txt" \
     || { echo "STOP: the release symlink, production, PostgreSQL config or a unit changed"; return 1; }
   bash "$AUDIT" dev > "$PF/audit.txt" 2> "$PF/audit.err"; rc=$?

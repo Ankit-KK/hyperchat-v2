@@ -31,7 +31,7 @@ Exactly the paths in [`manifest.txt`](manifest.txt): 117 directories, sha256 `0f
 | [`manifest.txt`](manifest.txt) | The 117 paths, taken from that output. It is embedded in both scripts and checked by sha256. |
 | [`apply.sh`](apply.sh) | `pf_pre && pf_top && pf_pycache && pf_verify`. It fails closed: each step prints `STOP: …` and stops at the first surprise. |
 | [`rollback.sh`](rollback.sh) | Puts all 117 paths back to `root:root 0755`. Safe to re-run, and works from any partial state. |
-| [`mocktest.sh`](mocktest.sh) | 28 local tests on a mock tree: the happy path, drift, symlink, mode change, unhealthy API, partial failure plus rollback, changed invariant, unexpected consumer, wrong active release. Run it as root on a throwaway machine (WSL); it refuses to run if any path it mocks already exists. |
+| [`mocktest.sh`](mocktest.sh) | 46 local tests on a mock tree: the happy path, drift, symlink, mode change, unhealthy API, partial failure plus rollback, changed invariant, unexpected consumer, wrong active release, and fail-closed collection (production health failed or not ok, a failed sha256sum, stat or systemctl, no main PIDs, a snapshot failure after the change, rollback never OK on failed health or service checks). Run it as root on a throwaway machine (WSL); it refuses to run if any path it mocks already exists. |
 
 ## How it runs (after approval)
 `apply.sh` and `rollback.sh` are generated with the manifest and the runbook's `audit_expected` embedded verbatim. Each runs as a single SSH session:
@@ -49,7 +49,7 @@ Its records go to `/root/rehearsal-dev/permfix/`, created with mode 0700. That d
   - `hyperchat` and its running processes hold group `hyperchat`.
   - `hyperchat` can read its active release.
   - The DEV API is healthy on `229fe42381e2`.
-  - The invariants can be recorded. These are the DEV `current` symlink, the production tree top and symlink, production health and services, the `pg_hba` and `pg_ident` of both clusters, the env-file metadata and the unit files.
+  - Every invariant command succeeds (production must be healthy, its API active). The invariants are the DEV `current` symlink, the production tree top and symlink, production health and services, the `pg_hba` and `pg_ident` of both clusters, the env-file metadata and the unit files.
 - **`pf_top`:**
   1. Runs `chgrp` on both directories and checks the result.
   2. Runs `chmod 0750` on `releases`, then on `/opt/hyperchat`. After each, it checks that `hyperchat` can still read its release and that the API is healthy. On a failure, that directory goes back to 0755 at once, then STOP.
