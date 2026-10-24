@@ -1,6 +1,6 @@
-# Production permission repair (5 paths): for review, not yet run
+# Production permission repair (5 paths): executed
 
-**Status:** prepared on 2026-10-24 and waiting for explicit owner approval. Nothing here has run on a server except the read-only `reconcile.sh`.
+**Status:** executed successfully on production on 2026-10-24 at 11:14 UTC, with explicit owner approval. `apply.sh` and `rollback.sh` were byte-identical to commit `5fad4c2`. `apply.sh` ran once and exited 0; rollback was not required and was not run. No further permission change is planned here. See [Execution record](#execution-record-2026-10-24).
 
 **Why it's needed:**
 - The production isolation audit refuses "other" access to 5 `__pycache__` directories in the active release.
@@ -98,3 +98,31 @@ Its records go to `/root/prod-permfix/`, created with mode 0700. That directory 
 - **What it restores:** the exact before-state, recorded in `before.txt`. Only ctimes differ.
 
 **Trigger rollback when:** any STOP after `pf_pre`, or any later doubt. A STOP inside `pf_pre` changed nothing, but its records directory exists: move it aside (`mv /root/prod-permfix /root/prod-permfix.stopped-<time>`) before a later run.
+
+## Execution record (2026-10-24)
+`apply.sh` from `5fad4c2` printed this and exited 0:
+
+    pre OK: 5 paths == manifest, all root:root 755 plain directories; ActiveState=active MainPID=471695 NRestarts=0  ActiveState=active
+    pycache OK: 5 directories root:hyperchat-prod 750
+    verify OK: 0 violations; 5 paths root:hyperchat-prod 750; production healthy on 940137070657; units, DEV and PostgreSQL config unchanged; audits: prod 20 OK, dev 21 OK, 2 legacy FAIL each
+
+**Evidence** is on the server in `/root/prod-permfix/` (root 0700):
+
+| File | Content |
+|---|---|
+| `before.txt` / `after.txt` | the 5 paths as `root:root 755 directory` / as `root:hyperchat-prod 750 directory` |
+| `violations-before.txt` / `violations-after.txt` | the 5 paths, identical to the manifest (`drift.diff` empty) / empty |
+| `*.err` (violations, invariants, audits) | all empty |
+| `services-before.txt` = `services-after.txt` | production API active, PID 471695, 0 restarts; cleanup timer active |
+| `invariants-before.txt` = `invariants-after.txt` | identical. Production `current` → `940137070657`. DEV `current` → `229fe42381e2`, DEV health ok, DEV API and worker PIDs 26643 / 26639 with 0 restarts. The sha256 of both clusters' `pg_hba`/`pg_ident`, of the unit files and of the backup script is unchanged. |
+| `audit-after-prod.*`, `audit-after-dev.*` | each exit 1, empty stderr, exactly the expected lines (`.diff` empty): production 20 OK, DEV 21 OK |
+
+**After the run:**
+- **Health:** production `/health` ok on `940137070657`, DEV `/health` ok on `229fe42381e2`, both databases ok.
+- **Nothing else happened:** no service restart or reload, no database change, no deployment, no change to DEV.
+
+**Remaining audit FAILs, both expected in each environment.** Phase C fixes them, and Phase C is not authorized:
+- `pg_hba HyperChat rule covers every login role: missing: hyperchat_auth missing: hyperchat_lifecycle missing: hyperchat_stepup`
+- `pg_ident maps hyperchat-prod to: 'hyperchat_app hyperchat_worker ' (want 'hyperchat_app hyperchat_auth hyperchat_lifecycle hyperchat_worker ')`
+
+**What this unblocked:** Phase A step A1 (`a1_records`) ran afterwards, with its own approval, at 11:21 UTC and passed. Both audits printed exactly the expected lines, and `A1-passed` exists.
