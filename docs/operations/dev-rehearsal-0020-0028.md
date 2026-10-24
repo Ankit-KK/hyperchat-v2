@@ -1,8 +1,8 @@
 # DEV migration rehearsal: 0019 → 0028
 
 The controlled rehearsal of migrations 0020–0028 on the **DEV** environment, with the matching application release.
-**Nothing in this document has been run.** Every phase below needs its own explicit owner approval. Approving one
-phase never authorizes the next, and nothing here authorizes an improvised step.
+**Phases 0, A and B have run (2026-10-24; results in their sections). Phases C–F have not.** Every phase needs its own
+explicit owner approval. Approving one phase never authorizes the next, and nothing here authorizes an improvised step.
 
 ## Scope and fixed rules
 - **Environment:** DEV only.
@@ -143,6 +143,11 @@ Q()  { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -
 QD() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d "$1" -Atc "$2"; }
 # QP: the DEV cluster's maintenance database (database-level statements; port 5433 only)
 QP() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d postgres -Atc "$1"; }
+# the DEV cluster's configuration directory and the DEV environment file (Phase C)
+PGCONF=/etc/postgresql/15/restoretest
+API_ENV=/etc/hyperchat/api.env
+# conn_as OSUSER ROLE: a NEW peer connection to hyperchat_dev (read-only session); prints the role it got, or nothing
+conn_as() { (cd /tmp && sudo -u "$1" env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -p 5433 -d hyperchat_dev -U "$2" -c 'SELECT current_user' 2>/dev/null); }
 # baseline: the data fingerprint compared before and after (read-only). Optional $1 = database name.
 baseline() {
   local d="${1:-hyperchat_dev}"
@@ -293,20 +298,26 @@ The 2026-10-23 results therefore stand: releases, alembic versions, roles, pg_hb
 
 **What it most likely is (inference, not proven):** a read-only login for the legacy restore database. `database/etl/rehearsal.py` requires its source to be a read-only session on `hyperchat_restore_test`, which matches the role's settings and its only grant. Whether anything still uses it isn't established. The DEV PostgreSQL log prefix is `%m [%p] %q%u@%d`, so the Phase 0 count of `user=hyperchat` lines (0) proves nothing. A later read-only check would count `hyperchat@hyperchat_restore_test` lines instead.
 
-**Isolation finding (pre-existing; not changed by the rehearsal):**
-- **The path:** the DEV cluster's `pg_hba.conf` keeps the generic rule `local all all peer` (line 96). With no ident map, an OS user may log in as the database role of the same name. The DEV API runs as OS user `hyperchat`, so the API's account can open a read-only session as role `hyperchat` on `hyperchat_restore_test`.
-- **Why it matters:** that database is the restore of the legacy production dump. A compromised DEV API process could therefore read legacy production data.
+**Isolation finding (pre-existing; not changed by the rehearsal; re-checked read-only on 2026-10-24 before Phase C):**
+- **Two paths from the API's OS user `hyperchat` to `hyperchat_restore_test`** (the restore of the legacy production dump):
+  - **As role `hyperchat`:** the generic rule `local all all peer` (line 96) lets an OS user log in as the role of the same name. Confirmed: a session opens as `hyperchat`, read-only.
+  - **As `hyperchat_app` / `hyperchat_worker`:** the HyperChat rule (line 95) covers database `all`, and `hyperchat_restore_test` grants `CONNECT` and `TEMP` to **`PUBLIC`** (`=Tc/postgres`, plus `hyperchat=c/postgres`). After Phase C, `hyperchat_lifecycle` and `hyperchat_auth` reach it the same way.
+- **What such a session can read:**
+  - **Table data: none today.** All 176 tables are owned by `postgres`, and none of `hyperchat`, `hyperchat_app`, `hyperchat_worker`, `hyperchat_readonly` or `hyperchat_migrator` has `SELECT` on any of them.
+  - **Still possible:** the catalog (table, column and function names and definitions), temporary objects (`TEMP` for `PUBLIC`), and any function executable by `PUBLIC`.
+  - **Legacy grants:** the schema `public` grants `USAGE` to `PUBLIC` and to the legacy roles `anon`, `authenticated` and `service_role`.
+- **Why it matters:** a compromised DEV API process can connect to the legacy production restore and read its structure. A single later `GRANT SELECT` there, or a `PUBLIC`-executable function, would expose its data.
 
 **Effect on the rehearsal:** none.
 - The role has no access to `hyperchat_dev`.
 - Phase C's `REVOKE ALL ON DATABASE hyperchat_dev FROM PUBLIC` is already in effect (no `PUBLIC` entry), so it cuts nothing off.
-- No phase touches `hyperchat_restore_test`.
+- No phase touches `hyperchat_restore_test`; C2 records its ACL before and checks it unchanged after.
 
 **Decision (owner, separate approval, not part of this rehearsal):**
 - **Recommended:** keep the role while the ETL needs a read-only source.
-- **Close the path from the API's OS user** in one of two ways:
-  - `ALTER ROLE hyperchat NOLOGIN` between ETL runs; or
-  - give the ETL a reader role that no service user can reach through peer authentication, then drop `hyperchat`.
+- **Close the paths from the API's OS user:**
+  - `REVOKE CONNECT, TEMP ON DATABASE hyperchat_restore_test FROM PUBLIC` (it then admits only the roles granted by name);
+  - for the role `hyperchat`, either `ALTER ROLE hyperchat NOLOGIN` between ETL runs, or give the ETL a reader role that no service user can reach through peer authentication, then drop `hyperchat`.
 - **Before either:** the log check above, to confirm nothing uses it.
 
 ### 0.2 Production backup: verified healthy (and its limits)
@@ -710,72 +721,229 @@ The scratch cluster runs in a temporary directory (`/tmp/hc-restorecheck-*`) wit
 ---
 
 ## Phase C: Roles, authentication rules, environment (approval: "Phase C"; requires 0.1 and 0.4 answered)
-These changes are compatible with the running 0019 release. New roles and map lines are unused by it, and new `api.env` settings are ignored by it. Nothing is restarted.
+These changes are compatible with the running 0019 release:
+- New roles and map lines are unused by it, and new `api.env` settings are ignored by it (`extra="ignore"`; it defines none of the five keys).
+- `roles.sql` leaves the five existing roles exactly as they are (connection limits, timeouts and membership already match; re-checked 2026-10-24).
+- Nothing is restarted. A reload affects only NEW connections; the running API's pool keeps its connections.
 
-**C1. Keep the originals** (fixed names; `cp -n` never overwrites an earlier copy):
+**How to run it:**
+- **One root shell per step:** the session setup, then the step's block exactly as written.
+- **Step gates:** each step writes a marker in `$ST` only when everything in it succeeded, and returns non-zero with `STOP` otherwise. The next step refuses to start without it: B2 → C1 → `C1-passed` → C2 → `C2-passed` → C3 → `C3-passed` → C4 → `C4-passed` → C5 → `C5-passed`.
+- **Any `STOP`:** record and escalate ("If a phase fails"). Undoing C's file changes (below) is a separate owner decision.
+
+**Expected changes (read-only preflight, 2026-10-24):**
+- **`pg_hba.conf`:** one line. The HyperChat rule (line 95) gains `hyperchat_lifecycle,hyperchat_auth,hyperchat_stepup`. Every other line is unchanged, and there are no parse errors.
+- **`pg_ident.conf`:** four lines are added.
+  - `root → hyperchat_auth`, `hyperchat → hyperchat_lifecycle`, `hyperchat → hyperchat_auth`, `hyperchat-stepup → hyperchat_stepup`.
+  - The OS user `hyperchat-stepup` doesn't exist yet.
+- **Roles:**
+  - **New:** `hyperchat_lifecycle` (connection limit 5, timeout 15 s), `hyperchat_auth` (10, 15 s), `hyperchat_stepup` (5, 5 s). All are `LOGIN`, with no superuser, create-db, create-role, replication or bypass-RLS.
+  - **Grants:** `CONNECT` on `hyperchat_dev` for the three new roles.
+- **`api.env`:** five keys are appended, none present today.
+  - The file is `root:hyperchat 600`, ending in a newline, with no step-up socket or Didit keys.
+
+**C1. Keep the originals** (single-use, verified copies):
 ```
-cp -pn /etc/postgresql/15/restoretest/pg_hba.conf   "$ST/pg_hba.conf.before-C"
-cp -pn /etc/postgresql/15/restoretest/pg_ident.conf "$ST/pg_ident.conf.before-C"
-cp -pn /etc/hyperchat/api.env "$ST/api.env.before-C"
-ls -l "$ST"
+c1_originals() { local f d
+  [ -f "$ST/B2-passed" ] || { echo "STOP: Phase B has not passed"; return 1; }
+  [ ! -e "$ST/C1-passed" ] || { echo "STOP: C1 already passed once"; return 1; }
+  for f in "$PGCONF/pg_hba.conf" "$PGCONF/pg_ident.conf" "$API_ENV"; do
+    d="$ST/$(basename "$f").before-C"
+    [ ! -e "$d" ] || { echo "STOP: $d already exists; it is never overwritten"; return 1; }
+  done
+  for f in "$PGCONF/pg_hba.conf" "$PGCONF/pg_ident.conf" "$API_ENV"; do
+    d="$ST/$(basename "$f").before-C"
+    cp -p "$f" "$d" && cmp -s "$f" "$d" || { echo "STOP: cannot copy $f"; return 1; }
+  done
+  QP "SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = 'hyperchat_restore_test'" > "$ST/restore_test-acl.before-C" \
+    || { echo "STOP: cannot record the hyperchat_restore_test ACL"; return 1; }
+  date -u +%FT%TZ > "$ST/C1-passed" && echo "C1 OK: originals kept in $ST"
+}
+c1_originals
 ```
 
-**C2. Roles, CONNECT grants and the pg_hba rule.** Preview the pg_hba change, then run `setup_cluster.sh` (idempotent). It:
+**C2. Roles, CONNECT grants and the pg_hba rule** (`setup_cluster.sh`, idempotent). It:
 - applies `roles.sql` (the three new roles);
-- syncs the HyperChat pg_hba rule (keeping its own `pg_hba.conf.bak-<timestamp>`);
+- syncs the HyperChat pg_hba rule, keeping its own `pg_hba.conf.bak-<timestamp>`;
 - reloads the cluster;
 - revokes `CONNECT` from `PUBLIC` on `hyperchat_dev` and grants it to the seven HyperChat login roles.
 
-Preview (read-only). Review the diff before applying:
+Before it runs, the preview must be **exactly** the expected one-line change, checked by the function, not by eye. Name only `hyperchat_dev`; `hyperchat_restore_test` must stay as it is. `setup_cluster.sh` runs nothing on the production cluster: every command takes the version, cluster and port given.
 ```
-bash "$STAGE/deploy/postgres/sync_pg_hba.sh" "$STAGE/deploy/postgres/pg_hba.conf" /etc/postgresql/15/restoretest/pg_hba.conf \
-  | diff /etc/postgresql/15/restoretest/pg_hba.conf -
+c2_roles_hba() { local H="$PGCONF/pg_hba.conf" old new rc
+  old='local   all   hyperchat_migrator,hyperchat_app,hyperchat_worker,hyperchat_readonly   peer map=hyperchat'
+  new="$(grep -v '^#' "$STAGE/deploy/postgres/pg_hba.conf" | grep -v '^[[:space:]]*$')"
+  [ -f "$ST/C1-passed" ] || { echo "STOP: C1 has not passed"; return 1; }
+  [ ! -e "$ST/C2-passed" ] || { echo "STOP: C2 already passed once"; return 1; }
+  cmp -s "$H" "$ST/pg_hba.conf.before-C" || { echo "STOP: pg_hba.conf changed since C1"; return 1; }
+  bash "$STAGE/deploy/postgres/sync_pg_hba.sh" "$STAGE/deploy/postgres/pg_hba.conf" "$H" > "$ST/pg_hba.conf.C2-preview" \
+    || { echo "STOP: sync_pg_hba.sh refused the live pg_hba.conf"; return 1; }
+  diff "$H" "$ST/pg_hba.conf.C2-preview" > "$ST/pg_hba.C2.diff"; rc=$?
+  [ "$rc" = 1 ] && [ "$(grep -c '^[<>]' "$ST/pg_hba.C2.diff")" = 2 ] && grep -qxF "< $old" "$ST/pg_hba.C2.diff" \
+    && grep -qxF "> $new" "$ST/pg_hba.C2.diff" || { echo "STOP: the pg_hba change is not exactly the expected one line:"; cat "$ST/pg_hba.C2.diff"; return 1; }
+  bash "$STAGE/deploy/postgres/setup_cluster.sh" 15 restoretest 5433 hyperchat_dev > "$ST/setup_cluster.C2.log" 2>&1 \
+    || { echo "STOP: setup_cluster.sh failed (see $ST/setup_cluster.C2.log)"; tail -n 5 "$ST/setup_cluster.C2.log"; return 1; }
+  cmp -s "$H" "$ST/pg_hba.conf.C2-preview" || { echo "STOP: the installed pg_hba.conf is not the previewed one"; return 1; }
+  [ "$(QP "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL")" = 0 ] || { echo "STOP: pg_hba.conf has parse errors"; return 1; }
+  [ "$(QP "SELECT count(*) FROM pg_roles WHERE rolname IN ('hyperchat_lifecycle','hyperchat_auth','hyperchat_stepup') AND rolcanlogin AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)")" = 3 ] \
+    || { echo "STOP: the three new roles are not all present as plain login roles"; return 1; }
+  [ "$(QP "SELECT count(*) FROM unnest(ARRAY['hyperchat_migrator','hyperchat_app','hyperchat_worker','hyperchat_readonly','hyperchat_lifecycle','hyperchat_auth','hyperchat_stepup']) r WHERE has_database_privilege(r, 'hyperchat_dev', 'CONNECT')")" = 7 ] \
+    || { echo "STOP: CONNECT on hyperchat_dev is not granted to all seven roles"; return 1; }
+  [ "$(QP "SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = 'hyperchat_restore_test'")" = "$(cat "$ST/restore_test-acl.before-C")" ] \
+    || { echo "STOP: the hyperchat_restore_test ACL changed"; return 1; }
+  date -u +%FT%TZ > "$ST/C2-passed" && echo "C2 OK: roles, CONNECT grants, the HyperChat pg_hba rule"
+}
+c2_roles_hba
 ```
-Apply, only after the preview shows exactly the HyperChat rule gaining `hyperchat_lifecycle,hyperchat_auth,hyperchat_stepup`:
-```
-bash "$STAGE/deploy/postgres/setup_cluster.sh" 15 restoretest 5433 hyperchat_dev && echo "C2 OK" || echo "STOP: setup_cluster.sh failed"
-```
-Name only `hyperchat_dev`; never `hyperchat_restore_test`, whose grants stay as they are. `setup_cluster.sh` runs nothing on the production cluster: every command takes the version, cluster and port given.
 
-**C3. pg_ident lines** (`setup_cluster.sh` appends the map only when none exists, so DEV needs these added). Append each missing mapping of `deploy/postgres/pg_ident.conf`, compared by field so differences in spacing never cause duplicates:
+**C3. pg_ident lines.** `setup_cluster.sh` appends the map only when none exists, so DEV needs these lines added. Each missing mapping of `deploy/postgres/pg_ident.conf` is appended, compared by field so that differences in spacing never cause duplicates:
 ```
-add_ident() { local F=/etc/postgresql/15/restoretest/pg_ident.conf m u r
+c3_ident() { local F="$PGCONF/pg_ident.conf" m u r
+  [ -f "$ST/C2-passed" ] || { echo "STOP: C2 has not passed"; return 1; }
+  [ ! -e "$ST/C3-passed" ] || { echo "STOP: C3 already passed once"; return 1; }
+  ! grep -qE '^[^#]*[[:space:]]hyperchat-prod[[:space:]]' "$F" || { echo "STOP: a hyperchat-prod line is in the DEV map"; return 1; }
+  [ -z "$(tail -c1 "$F")" ] || { echo "STOP: $F does not end with a newline"; return 1; }
   for m in "root hyperchat_auth" "hyperchat hyperchat_lifecycle" "hyperchat hyperchat_auth" "hyperchat-stepup hyperchat_stepup"; do
     u="${m% *}"; r="${m#* }"
     awk -v u="$u" -v r="$r" '$1 == "hyperchat" && $2 == u && $3 == r {f=1} END {exit !f}' "$F" \
       || printf 'hyperchat   %-17s %s\n' "$u" "$r" >> "$F" || { echo "STOP: cannot append to $F"; return 1; }
   done
+  for m in "root hyperchat_auth" "hyperchat hyperchat_lifecycle" "hyperchat hyperchat_auth" "hyperchat-stepup hyperchat_stepup"; do
+    u="${m% *}"; r="${m#* }"
+    [ "$(awk -v u="$u" -v r="$r" '$1 == "hyperchat" && $2 == u && $3 == r' "$F" | wc -l)" = 1 ] || { echo "STOP: '$m' is not in $F exactly once"; return 1; }
+  done
+  pg_ctlcluster 15 restoretest reload || { echo "STOP: reload failed"; return 1; }
+  [ "$(QP "SELECT count(*) FROM pg_ident_file_mappings WHERE error IS NOT NULL")" = 0 ] || { echo "STOP: pg_ident.conf has parse errors"; return 1; }
   grep -nE '^hyperchat[[:space:]]' "$F"
-  pg_ctlcluster 15 restoretest reload && echo "C3 OK" || { echo "STOP: reload failed"; return 1; }
+  date -u +%FT%TZ > "$ST/C3-passed" && echo "C3 OK: pg_ident lines"
 }
-add_ident
+c3_ident
 ```
 - **The `hyperchat-stepup` line is harmless** before that OS user exists. The isolation audit requires that only that user maps to `hyperchat_stepup`.
 - **Never add** a `hyperchat-prod` line here, or any DEV line on the production cluster.
 
-**C4. `api.env` settings** (names from `deploy/api.env.example`; no secret value). Two passes: check every key first, append only if none conflicts. An existing key with another value is a STOP, and nothing is appended:
+**C4. `api.env` settings** (names from `deploy/api.env.example`; no secret value). The live file is replaced in one atomic step, never edited in place:
+- **Checked before anything is written:**
+  - the file's ownership and mode (`root:hyperchat` 600 or 640, as the isolation audit accepts);
+  - not a symlink, a final newline;
+  - no verifier socket or Didit setting;
+  - none of the five keys with another value or more than once;
+  - no staging file left from an earlier run;
+  - unchanged since C1 (its `.before-C` copy);
+  - a DEV path (never `/etc/hyperchat-prod/`).
+- **Staged:** the complete proposed file is written to `mktemp` in the same directory (same filesystem; root-owned, mode 0600 from creation). It holds the current file unchanged, followed by the missing keys.
+- **Validated:** the staged file must start with the current file byte-for-byte, add exactly the missing keys and nothing else, and hold each of the five settings exactly once with its value. It then takes the live file's owner, group and mode.
+- **Installed:** `mv -T` renames it over the live file (`rename(2)`: atomic; the live file is either the old one or the complete new one). Any failure before this removes the staged file and leaves the live file untouched.
+- **Verified after installation:** the content again, the owner and group, and the mode. A failure here leaves the complete new file installed, and C4 STOPs without a marker. Recovery: `c_undo_files` (below, owner approval) puts back the C1 copy; the running API doesn't read `api.env` until it restarts, and Phase C restarts nothing.
 ```
-add_env() { local E=/etc/hyperchat/api.env kv k
+c4_env() { local E="$API_ENV" N kv k mode add
   local want="HYPERCHAT_DB_LIFECYCLE_USER=hyperchat_lifecycle HYPERCHAT_DB_AUTH_USER=hyperchat_auth HYPERCHAT_ADMIN_SESSION_IDLE_HOURS=2 HYPERCHAT_ADMIN_SESSION_ABSOLUTE_HOURS=12 HYPERCHAT_KYC_WITNESS_PATH=/var/lib/hyperchat-kyc/dev.witness"
+  [ -f "$ST/C3-passed" ] || { echo "STOP: C3 has not passed"; return 1; }
+  [ ! -e "$ST/C4-passed" ] || { echo "STOP: C4 already passed once"; return 1; }
+  case "$E" in /etc/hyperchat-prod/*) echo "STOP: $E is production's; never changed"; return 1 ;; esac
+  # 1. the live file, before anything is written
+  cmp -s "$E" "$ST/api.env.before-C" || { echo "STOP: $E changed since C1; nothing written"; return 1; }
+  mode="$(stat -c '%U:%G %a' "$E")"
+  case "$mode" in "root:hyperchat 600" | "root:hyperchat 640") ;; *) echo "STOP: $E is $mode (want root:hyperchat 600 or 640); nothing written"; return 1 ;; esac
+  [ ! -L "$E" ] && [ -z "$(tail -c1 "$E")" ] || { echo "STOP: $E is a symlink or does not end with a newline; nothing written"; return 1; }
+  [ "$(grep -cE '^HYPERCHAT_(STEPUP_SOCKET|DIDIT_)' "$E")" = 0 ] || { echo "STOP: a verifier socket or Didit setting is present; nothing written"; return 1; }
+  add=""
   for kv in $want; do k="${kv%%=*}"
-    if grep -q "^$k=" "$E" && ! grep -qx "$kv" "$E"; then echo "STOP: $k already set to another value; nothing appended"; return 1; fi
+    case "$(grep -c "^$k=" "$E")" in
+      0) add="$add$kv"$'\n' ;;
+      1) grep -qxF "$kv" "$E" || { echo "STOP: $k already set to another value; nothing written"; return 1; } ;;
+      *) echo "STOP: $k is set more than once; nothing written"; return 1 ;;
+    esac
   done
-  for kv in $want; do grep -qx "$kv" "$E" || printf '%s\n' "$kv" >> "$E" || { echo "STOP: cannot append to $E"; return 1; }; done
-  [ "$(stat -c '%U:%G %a' "$E")" = "root:hyperchat 640" ] || { echo "STOP: $E is not root:hyperchat 640"; return 1; }
-  [ "$(grep -cE '^HYPERCHAT_(STEPUP_SOCKET|DIDIT_)' "$E")" = 0 ] || { echo "STOP: a verifier socket or Didit setting is present"; return 1; }
-  echo "C4 OK"
+  [ -z "$(ls -A "${E%/*}" | grep '^\.api\.env\.C4\.')" ] || { echo "STOP: a staging file from an earlier run is in ${E%/*}; nothing written"; return 1; }
+  # 2. stage the complete proposed file next to it (same filesystem), root-only from creation
+  N="$(mktemp "${E%/*}/.api.env.C4.XXXXXX")" || { echo "STOP: cannot create a staging file; nothing written"; return 1; }
+  [ "$(stat -c '%U %a' "$N")" = "root 600" ] && [ ! -L "$N" ] || { rm -f -- "$N"; echo "STOP: the staging file is not root-only; nothing written"; return 1; }
+  { cat -- "$E" && printf '%s' "$add"; } > "$N" || { rm -f -- "$N"; echo "STOP: staging failed; nothing written"; return 1; }
+  # 3. validate the whole proposed file
+  cmp -s -n "$(stat -c %s "$E")" "$E" "$N" && [ "$(tail -c +"$(( $(stat -c %s "$E") + 1 ))" "$N")" = "${add%$'\n'}" ] \
+    || { rm -f -- "$N"; echo "STOP: the staged file is not the current file plus exactly the new keys; nothing written"; return 1; }
+  for kv in $want; do k="${kv%%=*}"
+    [ "$(grep -c "^$k=" "$N")" = 1 ] && grep -qxF "$kv" "$N" || { rm -f -- "$N"; echo "STOP: $k is not set exactly once in the staged file; nothing written"; return 1; }
+  done
+  chown --reference="$E" -- "$N" && chmod --reference="$E" -- "$N" && [ "$(stat -c '%U:%G %a' "$N")" = "$mode" ] \
+    || { rm -f -- "$N"; echo "STOP: cannot give the staged file $mode; nothing written"; return 1; }
+  sync -- "$N"
+  # 4. install atomically
+  mv -T -- "$N" "$E" || { rm -f -- "$N"; echo "STOP: the atomic install failed; $E is unchanged"; return 1; }
+  # 5. verify the installed file
+  [ ! -L "$E" ] && [ "$(stat -c '%U:%G %a' "$E")" = "$mode" ] && cmp -s -n "$(stat -c %s "$ST/api.env.before-C")" "$ST/api.env.before-C" "$E" \
+    || { echo "STOP: the installed $E is not as staged (owner, mode or content); recover with c_undo_files (owner approval)"; return 1; }
+  for kv in $want; do k="${kv%%=*}"
+    [ "$(grep -c "^$k=" "$E")" = 1 ] && grep -qxF "$kv" "$E" || { echo "STOP: $k is not set exactly once in the installed $E; recover with c_undo_files (owner approval)"; return 1; }
+  done
+  date -u +%FT%TZ > "$ST/C4-passed" && echo "C4 OK: five settings, $E replaced atomically, still $mode"
 }
-add_env
+c4_env
 ```
 
-**C5. Verify** (read-only):
+**C5. Verify** (read-only apart from its marker). C5 checks all of the following:
+- **Parse errors:** none in either file.
+- **New connections:** fresh peer connections work for every OS-user / role pair the map allows, and the old pairs still work.
+- **Refused pairs:** `hyperchat` must not reach `hyperchat_stepup` or `hyperchat_migrator`.
+- **Audit:** the isolation audit is now all `OK`.
+- **API:** the running 0019 API is still healthy.
 ```
-QP "SELECT rolname FROM pg_roles WHERE rolname LIKE 'hyperchat%' ORDER BY 1"
-QP "SELECT r, has_database_privilege(r, 'hyperchat_dev', 'CONNECT') FROM unnest(ARRAY['hyperchat_lifecycle','hyperchat_auth','hyperchat_stepup']) r"
-bash "$STAGE/deploy/check_isolation.sh" dev && echo "isolation OK" || echo "STOP: isolation audit"   # every line OK
-api_healthy "$(cat "$ST/old-release.id")"                        # the 0019 release still answers, healthy
+c5_verify() { local pair u r got out rc
+  [ -f "$ST/C4-passed" ] || { echo "STOP: C4 has not passed"; return 1; }
+  [ "$(QP "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL") $(QP "SELECT count(*) FROM pg_ident_file_mappings WHERE error IS NOT NULL")" = "0 0" ] \
+    || { echo "STOP: pg_hba.conf or pg_ident.conf has parse errors"; return 1; }
+  for pair in "hyperchat hyperchat_app" "hyperchat hyperchat_worker" "hyperchat hyperchat_lifecycle" "hyperchat hyperchat_auth" \
+              "root hyperchat_migrator" "root hyperchat_readonly" "root hyperchat_auth"; do
+    u="${pair% *}"; r="${pair#* }"; got="$(conn_as "$u" "$r")"
+    [ "$got" = "$r" ] || { echo "STOP: OS user $u cannot connect as $r (got '$got')"; return 1; }
+  done
+  for r in hyperchat_stepup hyperchat_migrator; do
+    [ -z "$(conn_as hyperchat "$r")" ] || { echo "STOP: OS user hyperchat can connect as $r"; return 1; }
+  done
+  out="$(bash "$STAGE/deploy/check_isolation.sh" dev 2>&1)"; rc=$?
+  printf '%s\n' "$out" > "$ST/isolation-C5-dev.txt"
+  [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q '^FAIL' || { echo "STOP: the isolation audit is not all OK (exit $rc):"; grep '^FAIL' "$ST/isolation-C5-dev.txt"; return 1; }
+  api_healthy "$(cat "$ST/old-release.id")" || return 1   # the 0019 release still answers, healthy
+  date -u +%FT%TZ > "$ST/C5-passed" && echo "C5 OK: Phase C verified"
+}
+c5_verify
 ```
-**Record:** the pg_hba diff, `setup_cluster.sh` output, the pg_ident lines, the `api.env` mode, `check_isolation.sh dev` (all `OK`), `/health`.
+**Record:** `$ST/pg_hba.C2.diff`, `$ST/setup_cluster.C2.log`, the pg_ident lines (C3 output), the `api.env` mode (C4 output), `$ST/isolation-C5-dev.txt` (all `OK`), `/health`, and the markers.
+
+**Failure states and undoing C's file changes** (only with the owner's approval; never automatic). After a STOP, nothing has been restarted, and the running API keeps its pooled connections. What is left depends on the step:
+
+| Stopped in | State left | Undo |
+|---|---|---|
+| C1 | at most the `.before-C` copies | nothing to undo |
+| C2 before `setup_cluster.sh` | the preview files only | nothing to undo |
+| C2 inside or after `setup_cluster.sh` | possibly the new pg_hba rule (reloaded), the new roles, the CONNECT grants | restore pg_hba (below) |
+| C3 | possibly some of the four map lines (reloaded or not) | restore pg_ident (below) |
+| C4 before the install | at most a staging file `.api.env.C4.*` (removed on every handled failure; one left by a killed shell is root 0600 and makes the next C4 STOP) | nothing to undo; remove a leftover staging file by hand after checking it |
+| C4 after the install | the complete new `api.env`; the running API never reads it (it reads `api.env` only at start) | restore `api.env` (below) |
+| C5 | nothing changed by C5 | as needed |
+
+```
+c_undo_files() {  # put back the C1 copies of the files C changed, reload, and verify new connections (owner approval)
+  local f
+  for f in "$PGCONF/pg_hba.conf" "$PGCONF/pg_ident.conf" "$API_ENV"; do
+    [ -f "$ST/$(basename "$f").before-C" ] || { echo "STOP: no C1 copy of $f"; return 1; }
+  done
+  for f in "$PGCONF/pg_hba.conf" "$PGCONF/pg_ident.conf" "$API_ENV"; do
+    cmp -s "$f" "$ST/$(basename "$f").before-C" || cp -p "$ST/$(basename "$f").before-C" "$f" || { echo "STOP: cannot restore $f"; return 1; }
+  done
+  pg_ctlcluster 15 restoretest reload || { echo "STOP: reload failed"; return 1; }
+  [ "$(QP "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL") $(QP "SELECT count(*) FROM pg_ident_file_mappings WHERE error IS NOT NULL")" = "0 0" ] \
+    || { echo "STOP: parse errors after the restore"; return 1; }
+  [ "$(conn_as hyperchat hyperchat_app)" = hyperchat_app ] && [ "$(conn_as hyperchat hyperchat_worker)" = hyperchat_worker ] \
+    || { echo "STOP: the API's roles cannot connect after the restore"; return 1; }
+  api_healthy "$(cat "$ST/old-release.id")" || return 1
+  echo "C UNDONE: pg_hba.conf, pg_ident.conf and api.env are the C1 copies again"
+}
+```
+- **What it doesn't undo:** the three new roles and their `CONNECT` grants stay. They are unused by the 0019 release and reachable by no one once the map lines are gone. Dropping them is a separate decision. `setup_cluster.sh`'s own `pg_hba.conf.bak-<timestamp>` stays as well.
+- **If the DEV API ever loses database access after a reload** (new connections refused while the pool still answers): run `c_undo_files` with the owner's approval. A reload is enough; no restart is needed, and the API's pool reconnects through the restored rules.
+- **A pg_hba or pg_ident file with errors is not applied on reload.** PostgreSQL keeps the previous rules and logs the error, which is why every step checks `pg_hba_file_rules` and `pg_ident_file_mappings` explicitly.
 
 ---
 
@@ -1163,7 +1331,7 @@ switch_to_old || enter_stopped_state
 | 0 | read-only commands 0.1–0.4 (0.3 after A1) | any change |
 | A | staging copy and `/root/rehearsal-dev`, target release build (not switched), DEV witness file | backup runs, units or `/usr/local/sbin`, roles, env, migrations |
 | B | staging the fixed backup script (B0, pinned SHA-256, root-only), one DEV backup run with it (DEV profile), one scratch restore check | backup units or timers, `/usr/local/sbin`, anything in C–F |
-| C | `setup_cluster.sh 15 restoretest 5433 hyperchat_dev`, the four pg_ident lines, five `api.env` settings, the cluster reload | restarts, migrations |
+| C | C1–C5: the `.before-C` copies, `setup_cluster.sh 15 restoretest 5433 hyperchat_dev`, the four pg_ident lines, five `api.env` settings, the cluster reloads | restarts, migrations, `c_undo_files` (a separate decision), dropping roles, anything on `hyperchat_restore_test` |
 | D | stopping DEV services, migrations 0020–0028 behind the per-revision checks, the gated release switch, start; on failure, the stopped state only | restores, downgrades, re-runs, switching back, smoke tests |
 | Smoke PR | the separate test-only PR (its own review and merge) | anything on the server |
 | E | the updated smoke suites, the checks listed, one more DEV backup and scratch restore | `HYPERCHAT_SMOKE_R2=1` (separate), verifier install, Didit, activation |
