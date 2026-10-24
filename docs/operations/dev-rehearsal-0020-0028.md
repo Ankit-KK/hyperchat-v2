@@ -106,6 +106,8 @@ checks the user; it changes nothing.
 ```
 # HyperChat DEV rehearsal: session setup (read-only definitions)
 [ "$(id -u)" = 0 ] || echo "STOP: run as root"
+# root-run Python in a release (alembic, restore_check, app.cli) must never write __pycache__ (deploy/README.md "Rules")
+export PYTHONDONTWRITEBYTECODE=1
 REL_OLD=/opt/hyperchat/releases/229fe42381e2
 REL_NEW=/opt/hyperchat/releases/c2fe883be71d
 STAGE=/root/hyperchat-c2fe883
@@ -161,6 +163,7 @@ dev_backup() { local out rc name
   [ -n "$name" ] && [ -f "/var/backups/hyperchat-dev/$name.manifest.json" ] || { echo "STOP: no complete set named in the output"; return 1; }
   printf '%s\n' "$name" > "$ST/$1" && echo "SET $name"; }
 ```
+- **No bytecode:** the session exports `PYTHONDONTWRITEBYTECODE=1`. Every root-run Python in Phases A–F (the migrations in D, `restore_check` in B, E and F) then writes no root-owned `__pycache__` into a release, which the isolation audits in A, C and E would refuse.
 - **No `set -e`:** it would close an interactive shell on the first error.
 - **Fail-closed functions:** every consequential step (anything that creates, renames, switches or starts) is a function whose steps are chained with `&&`. A failing step makes the function print `STOP: …` and return non-zero before anything later in it runs. Where the runbook writes `f || enter_stopped_state`, a failure leaves DEV stopped.
 - **On `STOP`,** don't run the next command. Go to "If a phase fails" below.
