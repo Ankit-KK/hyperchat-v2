@@ -129,7 +129,13 @@ EOF
 }
 TOP="$A $A/releases"
 pycache() { manifest | grep '/__pycache__$'; }
-violations() { find "$A" ! -type l \( ! -user root -o -perm /0022 -o -perm /0007 \) -print | LC_ALL=C sort; }
+violations() {  # the audit's strict predicate, sorted; non-zero when find or sort fails
+  local v s
+  v="$(find "$A" ! -type l \( ! -user root -o -perm /0022 -o -perm /0007 \) -print)" || return 1
+  [ -n "$v" ] || return 0
+  s="$(printf '%s\n' "$v" | LC_ALL=C sort)" || return 1
+  printf '%s\n' "$s"
+}
 is_plain_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(readlink -f "$1")" = "$1" ]; }
 svc_state() {  # fails unless systemctl answers and both DEV services are active
   local x; x="$(systemctl show hyperchat-api hyperchat-worker -p MainPID -p NRestarts -p ActiveState)" || return 1
@@ -214,7 +220,7 @@ audit_expected() {  # $1 = dev | prod
 #    running services hold group hyperchat, API healthy. Records everything under $PF (single-use: mkdir fails if
 #    it exists).
 pf_pre() {
-  local p g g2
+  local p g g2 a
   [ "$(id -u)" = 0 ] || { echo "STOP: run as root"; return 1; }
   [ "$(manifest | sha256sum | cut -c1-64)" = "$MANIFEST_SHA" ] || { echo "STOP: embedded manifest altered"; return 1; }
   [ "$(manifest | wc -l)" = 117 ] && [ "$(pycache | wc -l)" = 115 ] || { echo "STOP: manifest is not 2 + 115 paths"; return 1; }
@@ -225,16 +231,18 @@ pf_pre() {
   [ -d /root/rehearsal-dev ] && mkdir -m 700 "$PF" || { echo "STOP: $PF exists or /root/rehearsal-dev missing"; return 1; }
   snapshot > "$PF/invariants-before.txt" 2> "$PF/invariants-before.err" && [ ! -s "$PF/invariants-before.err" ] \
     || { echo "STOP: cannot collect the invariants (a command failed or production is not healthy):"; head -n 5 "$PF/invariants-before.err"; return 1; }
-  violations > "$PF/violations-before.txt" 2> "$PF/violations-before.err"
-  [ ! -s "$PF/violations-before.err" ] || { echo "STOP: find reported errors"; cat "$PF/violations-before.err"; return 1; }
+  violations > "$PF/violations-before.txt" 2> "$PF/violations-before.err" && [ ! -s "$PF/violations-before.err" ] \
+    || { echo "STOP: the violations scan failed (find or sort)"; head -n 5 "$PF/violations-before.err"; return 1; }
   diff <(manifest) "$PF/violations-before.txt" > "$PF/drift.diff" \
     || { echo "STOP: live violations differ from the manifest (< manifest only / > live only):"; cat "$PF/drift.diff"; return 1; }
   while IFS= read -r p; do
     is_plain_dir "$p" || { echo "STOP: $p is not a plain directory (symlink on the way?)"; return 1; }
     [ "$(stat -c '%U:%G %a %F' "$p")" = "root:root 755 directory" ] || { echo "STOP: $p is $(stat -c '%U:%G %a %F' "$p")"; return 1; }
-    [ "$(lsattr -d "$p" 2>/dev/null | cut -c5)" != i ] || { echo "STOP: $p is immutable"; return 1; }
+    a="$(lsattr -d "$p")" && [ -n "$a" ] || { echo "STOP: cannot read the attributes of $p"; return 1; }
+    [ "$(printf '%s' "$a" | cut -c5)" != i ] || { echo "STOP: $p is immutable"; return 1; }
   done < <(manifest)
-  manifest | xargs -d '\n' stat -c '%U:%G %a %F %n' > "$PF/before.txt"
+  manifest | xargs -d '\n' stat -c '%U:%G %a %F %n' > "$PF/before.txt" && [ "$(grep -c '^root:root 755 directory /' "$PF/before.txt")" = 117 ] \
+    || { echo "STOP: cannot record the before-state of the 117 paths"; return 1; }
   g="$(getent group "$SVC" | cut -d: -f3)"; [ -n "$g" ] && id -G "$SVC" | tr ' ' '\n' | grep -qx "$g" \
     || { echo "STOP: $SVC is not in group $SVC"; return 1; }
   g2="$(systemctl show -p MainPID --value hyperchat-api hyperchat-worker)" && [ "$(printf '%s\n' $g2 | grep -c '^[1-9][0-9]*$')" = 2 ] \
@@ -279,10 +287,11 @@ pf_pycache() {
 #    and the audit prints exactly the expected lines (the two legacy pg_hba / pg_ident FAILs only).
 pf_verify() {
   local rc
-  violations > "$PF/violations-after.txt" 2>&1
+  violations > "$PF/violations-after.txt" 2> "$PF/violations-after.err" && [ ! -s "$PF/violations-after.err" ] \
+    || { echo "STOP: the violations scan failed after the change (find or sort)"; head -n 5 "$PF/violations-after.err"; return 1; }
   [ ! -s "$PF/violations-after.txt" ] || { echo "STOP: violations remain:"; head -n 5 "$PF/violations-after.txt"; return 1; }
-  manifest | xargs -d '\n' stat -c '%U:%G %a %F %n' > "$PF/after.txt"
-  [ "$(grep -c "^root:$SVC 750 directory /" "$PF/after.txt")" = 117 ] || { echo "STOP: not all 117 paths are root:$SVC 750"; return 1; }
+  manifest | xargs -d '\n' stat -c '%U:%G %a %F %n' > "$PF/after.txt" \
+    && [ "$(grep -c "^root:$SVC 750 directory /" "$PF/after.txt")" = 117 ] || { echo "STOP: not all 117 paths are root:$SVC 750"; return 1; }
   svc_access || { echo "STOP: $SVC cannot read its active release"; return 1; }
   api_ok || { echo "STOP: API not healthy on $REL"; return 1; }
   svc_state > "$PF/services-after.txt" || { echo "STOP: cannot read the DEV service state, or a service is not active"; return 1; }

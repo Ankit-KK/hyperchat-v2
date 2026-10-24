@@ -132,7 +132,7 @@ rb() {
     [ -d "$p" ] && [ ! -L "$p" ] && [ "$(readlink -f "$p")" = "$p" ] || { echo "SKIP: $p is not a plain directory"; bad=1; continue; }
     chmod 0755 "$p" && chgrp --no-dereference root "$p" || { echo "FAILED: $p"; bad=1; }
   done < <(manifest)
-  [ "$(manifest | xargs -d '\n' stat -c '%U:%G %a %F' | grep -c '^root:root 755 directory$')" = 117 ] \
+  x="$(manifest | xargs -d '\n' stat -c '%U:%G %a %F')" && [ "$(printf '%s\n' "$x" | grep -c '^root:root 755 directory$')" = 117 ] \
     || { echo "not all 117 paths are root:root 755"; bad=1; }
   sudo -u hyperchat test -r "$(readlink -f "$A/current")/backend/app/main.py" || { echo "hyperchat cannot read its release"; bad=1; }
   curl -fsS --max-time 5 http://127.0.0.1:8000/health 2>/dev/null | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d); sys.exit(0 if d.get("status") == "ok" and d.get("release") == sys.argv[1] and (d.get("database") or {}).get("status") == "ok" else 1)' "$REL" \

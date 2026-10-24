@@ -45,11 +45,17 @@ cat > $B/chmod <<'EOF'
 [ -e /var/tmp/pfbin/failon ] && [ "${@: -1}" = "$(cat /var/tmp/pfbin/failon)" ] && exit 1
 [ -e /var/tmp/pfbin/touchhba ] && [ "${@: -1}" = /opt/hyperchat/releases ] && echo "# changed" >> /etc/postgresql/15/restoretest/pg_hba.conf
 [ -e /var/tmp/pfbin/prodfail_after ] && [ "${@: -1}" = /opt/hyperchat/releases ] && touch /var/tmp/pfbin/prodfail
+[ -e /var/tmp/pfbin/findfail_after ] && [ "${@: -1}" = /opt/hyperchat/releases ] && touch /var/tmp/pfbin/findfail
 exec /usr/bin/chmod "$@"
 EOF
-/usr/bin/chmod +x $B/systemctl $B/curl $B/chmod
+for c in find sort lsattr xargs; do
+  printf '#!/bin/bash\n[ -e /var/tmp/pfbin/%sfail ] && exit 1\nexec %s "$@"\n' $c "$(command -v $c)" > $B/$c
+done
+/usr/bin/chmod +x $B/systemctl $B/curl $B/chmod $B/find $B/sort $B/lsattr $B/xargs
 mkdir -p /root/hyperchat-c2fe883/deploy
 cat > /root/hyperchat-c2fe883/deploy/check_isolation.sh <<EOF
+[ -e $B/auditempty ] && exit 1
+[ -e $B/auditrc0 ] && exit 0
 source <(sed -n '/^audit_expected()/,/^}/p' $D/apply.sh)
 v="\$(find /opt/hyperchat ! -type l \( ! -user root -o -perm /0022 -o -perm /0007 \) -print | head -5 | tr '\n' ' ')"
 audit_expected dev 2>/dev/null | { [ -z "\$v" ] && cat || sed "1s|.*|FAIL  release tree: \$v|"; }; exit 1
@@ -157,6 +163,33 @@ rm -f $B/devfail; touch $B/sysfail
 out="$(run rollback.sh)"; echo "$out" | grep -q '^rollback INCOMPLETE'; t $? "rollback with failed systemctl reports INCOMPLETE"
 rm -f $B/sysfail
 out="$(run rollback.sh)"; echo "$out" | grep -q '^rollback OK'; t $? "rollback OK once checks pass"
+
+for c in find sort lsattr xargs; do
+  case $c in find|sort) want='STOP: the violations scan failed (find or sort)' ;; lsattr) want='STOP: cannot read the attributes' ;; xargs) want='STOP: cannot record the before-state' ;; esac
+  build; touch $B/${c}fail
+  out="$(run apply.sh)"; rm -f $B/${c}fail
+  echo "$out" | grep -qF "$want"; t $? "failed $c (empty stdout) stops pf_pre"
+  unchanged; t $? "failed $c: no permission changed"
+done
+
+build; touch $B/findfail_after
+out="$(run apply.sh)"; rm -f $B/findfail_after $B/findfail
+echo "$out" | grep -qF 'STOP: the violations scan failed after the change (find or sort)'; t $? "failed find after the change (empty stdout) stops pf_verify"
+echo "$out" | grep -q '^verify OK'; [ $? != 0 ]; t $? "failed find after the change: no verify OK"
+
+build; touch $B/auditempty
+out="$(run apply.sh)"; rm -f $B/auditempty
+echo "$out" | grep -qF 'STOP: audit differs from the expected lines'; t $? "audit exit 1 with empty stdout after the change stops pf_verify"
+echo "$out" | grep -q '^verify OK'; [ $? != 0 ]; t $? "empty audit: no verify OK"
+
+build; touch $B/auditrc0
+out="$(run apply.sh)"; rm -f $B/auditrc0
+echo "$out" | grep -qF 'STOP: audit exited 0 or wrote to stderr'; t $? "audit exit 0 with empty stdout after the change stops pf_verify"
+
+build; run apply.sh >/dev/null; touch $B/xargsfail
+out="$(run rollback.sh)"; rm -f $B/xargsfail
+echo "$out" | grep -q '^rollback INCOMPLETE'; t $? "rollback whose stat check fails reports INCOMPLETE"
+out="$(run rollback.sh)"; echo "$out" | grep -q '^rollback OK'; t $? "rollback OK once its stat check passes"
 
 pkill -u hyperchat sleep; rm -rf $MOCKS /var/tmp/elsewhere $B
 echo "passed=$pass failed=$failn"
