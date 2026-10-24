@@ -23,9 +23,16 @@ while (( $# )); do case "$1" in -c) sql="$2"; shift 2 ;; -d) db="$2"; shift 2 ;;
 case "$sql" in
   "SHOW server_version_num") echo "${STUB_SERVER_NUM:-170004}" ;;
   "SELECT current_database()") echo "${STUB_CURRENT_DB:-$db}" ;;
+  *to_regclass*) [[ -n "${STUB_REGCLASS_FAIL:-}" ]] && { echo "ERROR: canceling statement" >&2; exit 1; }
+                 case "$sql" in  # does the table exist? t / f (schema 0009 and 0019: no enforcement tables)
+                   *alembic_version*) echo "${STUB_ALEMBIC_TABLE:-t}" ;;
+                   *kyc_enforcement*) echo "${STUB_KYC_TABLE:-t}" ;;
+                   *stepup_enforcement*) echo "${STUB_STEPUP_TABLE:-t}" ;;
+                 esac ;;
   *alembic_version*) echo "${STUB_ALEMBIC:-0028}" ;;
-  *kyc_enforcement*) echo "${STUB_KYC:-draft 0}" ;;
-  *stepup_enforcement*) echo "draft" ;;
+  *kyc_enforcement*) [[ -n "${STUB_KYC_FAIL:-}" ]] && { echo "ERROR: permission denied for table kyc_enforcement" >&2; exit 1; }
+                     printf '%b\n' "${STUB_KYC-draft 0}" | sed '/^$/d' ;;  # "" = no row; "\n" separates rows
+  *stepup_enforcement*) printf '%b\n' "${STUB_STEPUP-draft}" | sed '/^$/d' ;;
   *) echo "unexpected sql" >&2; exit 3 ;;
 esac
 """

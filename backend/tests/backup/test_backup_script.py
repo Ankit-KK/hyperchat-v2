@@ -189,6 +189,63 @@ def test_a_witness_symlink_is_never_followed(box):
     assert not list((tmp / "backups").glob("*.witness"))
 
 
+# ── schemas before the enforcement tables (production 0009, DEV 0019) and the facts' integrity ──────────────────
+
+@pytest.mark.parametrize("alembic", ["0009", "0019"])
+def test_a_schema_without_the_enforcement_tables_backs_up_with_empty_facts(box, alembic):
+    tmp, bin_dir = box
+    r = run_script(env_for(tmp, bin_dir, STUB_ALEMBIC=alembic, STUB_KYC_TABLE="f", STUB_STEPUP_TABLE="f"))
+    assert r.returncode == 0, r.stderr
+    d = tmp / "backups"
+    (base,) = sets_in(d)
+    m = manifest(d, base)
+    assert m["alembic_version"] == alembic and f"alembic={alembic}" in r.stdout
+    assert m["kyc_enforcement"] == {"state": "", "generation": 0} and m["stepup_enforcement"] == ""  # no table, no row
+    assert m["witness_status"] == "copied" and load(d, base, expect_env="test")
+    assert "retention verified=1 unverified=0" in r.stdout  # the set verifies (no KYC history needs a witness)
+
+
+def test_the_newest_schema_records_its_enforcement_rows(box):
+    tmp, bin_dir = box
+    r = run_script(env_for(tmp, bin_dir, STUB_KYC="active 3", STUB_STEPUP="active"))
+    assert r.returncode == 0, r.stderr
+    d = tmp / "backups"
+    (base,) = sets_in(d)
+    m = manifest(d, base)
+    assert m["kyc_enforcement"] == {"state": "active", "generation": 3} and m["stepup_enforcement"] == "active"
+    assert m["witness_status"] == "copied" and "retention verified=1 unverified=0" in r.stdout
+
+
+def test_enforcement_history_without_its_witness_is_written_but_never_trusted(box):
+    tmp, bin_dir = box
+    (tmp / "test.witness").unlink()
+    r = run_script(env_for(tmp, bin_dir, STUB_KYC="active 3"))
+    assert r.returncode == 3 and "witness" in r.stderr  # fails visibly, as before
+    d = tmp / "backups"
+    (base,) = sets_in(d)
+    assert manifest(d, base)["kyc_enforcement"] == {"state": "active", "generation": 3}
+    assert "retention verified=0 unverified=1" in r.stdout  # a KYC history without its witness never counts
+
+
+@pytest.mark.parametrize("over,reason,code", [
+    ({"STUB_REGCLASS_FAIL": "1"}, "cannot tell whether public.alembic_version exists", 1),  # a failed query ...
+    ({"STUB_KYC_TABLE": "maybe"}, "cannot tell whether public.kyc_enforcement exists", 1),  # ... or an odd answer
+    ({"STUB_KYC_FAIL": "1"}, "cannot read public.kyc_enforcement", 1),                      # permission denied
+    ({"STUB_KYC": ""}, "public.kyc_enforcement must hold exactly one row", 1),               # table, no row
+    ({"STUB_KYC": "draft 0\\nactive 2"}, "public.kyc_enforcement must hold exactly one row", 1),
+    ({"STUB_STEPUP": ""}, "public.stepup_enforcement must hold exactly one row", 1),
+    ({"STUB_KYC": "draft"}, "unexpected database facts", 2),                                 # no generation
+    ({"STUB_KYC": "Active 2"}, "unexpected database facts", 2),
+    ({"STUB_KYC": "active -1"}, "unexpected database facts", 2),
+])
+def test_an_unreadable_or_ambiguous_fact_is_never_recorded_as_absent(box, over, reason, code):
+    tmp, bin_dir = box
+    r = run_script(env_for(tmp, bin_dir, **over))
+    assert r.returncode == code and reason in r.stderr, (r.returncode, r.stderr)
+    d = tmp / "backups"
+    assert sets_in(d) == [] and not list(d.glob("*.dump")) and not list(d.glob(".partial-*"))
+
+
 # ── retention ───────────────────────────────────────────────────────────────────
 
 def test_retention_keeps_the_newest_sets_and_touches_nothing_else(box):
