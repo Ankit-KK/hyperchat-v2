@@ -180,9 +180,9 @@ enter_stopped_state() { systemctl stop hyperchat-cleanup.timer hyperchat-cleanup
 SMOKE1=/root/hyperchat-smoke
 SMOKE1_SHA=f8bd98b3bf0070a3fcfe24cdefb5a6b26c69eb13
 SMOKE1_FP=23dc26875b484ce5c5f7c5bcf25600a30a0a4b8e40433b2ecb8f8b2910af6933   # LF content, as the cmd.exe git archive pipe transfers it
-# the corrected suite (#94: creator-linked fixtures through the schema owner, migration 0027), used by the resumed E1-E3
+# the corrected suite: #94's merge commit (creator-linked fixtures through the schema owner, migration 0027), used by the resumed E1-E3
 SMOKE=/root/hyperchat-smoke-2
-SMOKE_SHA=238bb97e6684008918b9da585ab48dd4a735c1ed
+SMOKE_SHA=ae60aa5b144517384ea6b9fbb50f6654eadd07b4
 SMOKE_FP=02ddd7f723329b18a841fab7c56d4ae0dc751f98369fac7d93ba73cecef5930c    # 296 files, LF content
 # Phase D: the DEV release link, and how long D4 watches the started services for restarts (seconds)
 APP_CURRENT=/opt/hyperchat/current
@@ -1263,7 +1263,7 @@ e0_smoke_ok
 - **E0** passed: `E0-passed`, and `$SMOKE1` holds the `f8bd98b` copy.
 - **E1** stopped. `smoke_dev_backend.py` exited 1 at its setup: its fixture inserted a creator-linked account as `hyperchat_app`, and migration 0027's `stepup_guard_users` refuses that (`InsufficientPrivilege: an admin or creator-linked account is created only by an invitation`).
 - **The suite's cleanup** reported nothing left, and `smoke_auth.py` didn't run.
-- **The guard was right.** PR #94 (test-only) makes the suite write that account through the schema owner, like its admins and creators.
+- **The guard was right.** PR #94 (test-only, merged as `ae60aa5b144517384ea6b9fbb50f6654eadd07b4`) makes the suite write that account through the schema owner, like its admins and creators. Its `backend tests` tree is pinned by `SMOKE_FP` (296 files, LF content as the `cmd.exe` or Linux `git archive` emits it).
 
 **Resuming needs the owner's explicit approval of this procedure.** It never repeats the first transfer, never overwrites `$SMOKE1`, and never reuses a marker: E1 requires all three of `E0-passed`, `E-resume-checked` and `E0b-passed`.
 
@@ -1305,11 +1305,11 @@ e_resume_check
 
 **(workstation)**, a read-only check that must print nothing. Application and migration code must be identical to `c2fe883`; `deploy/` changed after it (the backup script, #88) but isn't part of the copy:
 ```
-git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef 238bb97e6684008918b9da585ab48dd4a735c1ed -- backend database ':(exclude)backend/tests' ':(exclude)*.md'
+git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef ae60aa5b144517384ea6b9fbb50f6654eadd07b4 -- backend database ':(exclude)backend/tests' ':(exclude)*.md'
 ```
 **(workstation)**, through `cmd.exe`. It runs only after the resume check, and never into an existing directory:
 ```
-git archive 238bb97e6684008918b9da585ab48dd4a735c1ed backend tests \
+git archive ae60aa5b144517384ea6b9fbb50f6654eadd07b4 backend tests \
   | ssh root@VPS "[ -f /root/rehearsal-dev/E-resume-checked ] && [ ! -e /root/hyperchat-smoke-2 ] && install -d -o root -g root -m 0700 /root/hyperchat-smoke-2 && tar -x -C /root/hyperchat-smoke-2"
 ```
 **(VPS)**: must print `E0b OK`.
