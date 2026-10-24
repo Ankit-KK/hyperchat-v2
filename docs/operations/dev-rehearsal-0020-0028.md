@@ -323,52 +323,151 @@ The 2026-10-23 results therefore stand: releases, alembic versions, roles, pg_hb
 ---
 
 ## Phase A: Preparation (approval: "Phase A")
-Prepares files only. Changes no database, no running service, no unit, and nothing under `/usr/local/sbin`.
+Phase A prepares files only. It changes no database, no running service, no unit, and nothing under `/usr/local/sbin`.
 
-**A1. Staging copy and record directory.** The staging copy is root-only. It provides the scripts and the smoke suite, and is never run as a service.
+**How to run it:**
+- Every step is one root shell: the session setup first, then the step's block exactly as written here.
+- A step runs only after the previous one printed its `OK` line. A `STOP` ends Phase A (see "If a phase fails").
+- Steps that write anything are fail-closed functions.
+
+**Workstation pipes:** the transfer commands pipe a `git archive` into `ssh`. On Windows, run them through `cmd.exe /c "…"`, with `C:\Windows\System32\OpenSSH\ssh.exe` and the ssh-agent. A PowerShell pipe re-encodes binary data.
+
+**A0. Preconditions and snapshots (read-only).** It defines the helpers the later steps use; paste it in every Phase A shell, after the session setup. It must print `A0 OK`.
+```
+# Phase A helpers (read-only definitions)
+PRODSQL() { sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -v ON_ERROR_STOP=1 -p 5432 "$@"; }
+# a fingerprint of a tree's content: compared with the values computed from c2fe883 on a workstation
+fp() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
+# everything production-side that Phase A must not change (read-only); printed before and after, must be identical
+prod_snapshot() {
+  sha256sum /usr/local/sbin/hyperchat-pgbackup
+  ls -l --time-style=+%FT%T /usr/local/sbin | sha256sum
+  systemctl cat hyperchat-pgbackup.service hyperchat-pgbackup.timer 2>&1 | sha256sum
+  systemctl list-unit-files 'hyperchat*' --no-legend | sort | sha256sum
+  systemctl is-active hyperchat-prod-api hyperchat-pgbackup.timer hyperchat-prod-cleanup.timer | tr '\n' ' '; echo
+  readlink -f /opt/hyperchat-prod/current
+  PRODSQL -d hyperchat -c "SELECT 'prod alembic ' || version_num FROM alembic_version"
+  ls -l --time-style=+%FT%T /etc/hyperchat-prod/api.env | awk '{print $1, $3, $4, $5, $6}'
+  if [ -e /var/lib/hyperchat-kyc/prod.witness ]; then echo "prod.witness PRESENT"; else echo "prod.witness absent"; fi
+}
+dev_snapshot() {
+  readlink -f /opt/hyperchat/current
+  systemctl is-active hyperchat-api hyperchat-worker hyperchat-cleanup.timer | tr '\n' ' '; echo
+  Q "SELECT 'dev alembic ' || version_num FROM alembic_version"
+}
+a0_preconditions() {
+  [ ! -e "$STAGE" ] || { echo "STOP: $STAGE already exists"; return 1; }
+  [ ! -e "$REL_NEW" ] || { echo "STOP: $REL_NEW already exists"; return 1; }
+  [ ! -e "$ST" ] || { echo "STOP: $ST already exists"; return 1; }
+  [ ! -e /var/lib/hyperchat-kyc ] || { echo "STOP: /var/lib/hyperchat-kyc already exists"; ls -la /var/lib/hyperchat-kyc; return 1; }
+  [ "$(readlink -f /opt/hyperchat/current)" = "$REL_OLD" ] || { echo "STOP: current is not $REL_OLD"; return 1; }
+  head_is 0019 || return 1
+  api_healthy "$(cat "$REL_OLD/backend/RELEASE")" || return 1
+  command -v python3.14 >/dev/null || { echo "STOP: python3.14 missing"; return 1; }
+  id hyperchat >/dev/null || { echo "STOP: no hyperchat user"; return 1; }
+  echo "A0 OK"
+}
+```
+Run it, and record the two snapshots:
+```
+a0_preconditions; echo "--- production"; prod_snapshot; echo "--- DEV"; dev_snapshot
+```
+
+**A1. Staging copy and record directory.** The staging copy is root-only. It provides the scripts and the smoke suite, and is never run as a service. The copy refuses to write into an existing directory.
 
 **(workstation)**
 ```
 git archive c2fe883be71d1a494232d4147ed4d6fbc4e70eef backend database deploy tests \
-  | ssh root@VPS "install -d -o root -g root -m 0700 /root/hyperchat-c2fe883 && tar -x -C /root/hyperchat-c2fe883"
+  | ssh root@VPS "[ ! -e /root/hyperchat-c2fe883 ] && install -d -o root -g root -m 0700 /root/hyperchat-c2fe883 && tar -x -C /root/hyperchat-c2fe883"
 ```
-**(VPS)**
+**(VPS)**: must print `A1 OK`.
 ```
-install -d -o root -g root -m 0700 "$ST"
-ls "$STAGE/deploy/check_isolation.sh" "$STAGE/deploy/backup/hyperchat-pgbackup.sh" "$STAGE/deploy/postgres/setup_cluster.sh" || echo "STOP: staging copy incomplete"
-cat "$REL_OLD/backend/RELEASE" > "$ST/old-release.id" && cat "$ST/old-release.id"     # the id /health reports for the 0019 release
-api_healthy "$(cat "$ST/old-release.id")"      # read-only: the running API reports exactly that id
+a1_records() {
+  [ "$(fp "$STAGE")" = 83b9276f0484b72e1057e4698ec8d9a8c37a1fa4309d3e3116f2bad0dbac9e36 ] \
+    && [ "$(find "$STAGE" -type f | wc -l)" = 381 ] || { echo "STOP: $STAGE is not the c2fe883 tree"; return 1; }
+  [ "$(stat -c '%U:%G %a' "$STAGE")" = "root:root 700" ] || { echo "STOP: $STAGE is not root:root 700"; return 1; }
+  [ ! -e "$ST" ] && install -d -o root -g root -m 0700 "$ST" || { echo "STOP: cannot create $ST (or it exists)"; return 1; }
+  cat "$REL_OLD/backend/RELEASE" > "$ST/old-release.id" && [ -s "$ST/old-release.id" ] || { echo "STOP: old release id"; return 1; }
+  api_healthy "$(cat "$ST/old-release.id")" || return 1   # read-only: the running API reports exactly that id
+  echo "A1 OK: staging copy verified, records in $ST"
+}
+a1_records
 ```
+Then run the isolation audit (0.3). It is read-only; its output goes to `$ST`.
+```
+bash "$STAGE/deploy/check_isolation.sh" dev > "$ST/isolation-A1-dev.txt" 2>&1; echo "dev exit=$?"
+bash "$STAGE/deploy/check_isolation.sh" prod > "$ST/isolation-A1-prod.txt" 2>&1; echo "prod exit=$?"
+grep -n FAIL "$ST/isolation-A1-dev.txt" "$ST/isolation-A1-prod.txt"
+```
+- **Allowed FAILs:** only the old pg_hba rule (lifecycle, auth and stepup not covered) and the old pg_ident map (API user not mapped to lifecycle and auth). Phase C fixes both.
+- **Any other FAIL is a STOP:** release tree, `api.env`, units, service account, symlinks or mounts. Nothing is fixed automatically.
 
-**A2. Build the target release**, without switching `current` ("Deploy a commit" steps 1–3; `deploy/README.md`). The directory name follows the 12-character convention of `229fe42381e2`.
+**A2. Build the target release**, without switching `current` ("Deploy a commit" steps 1–3; `deploy/README.md`). The directory name follows the 12-character convention of `229fe42381e2`. The copy refuses to write into an existing directory.
 
 **(workstation)**
 ```
 git archive c2fe883be71d1a494232d4147ed4d6fbc4e70eef backend database \
-  | ssh root@VPS "mkdir -p /opt/hyperchat/releases/c2fe883be71d && tar -x -C /opt/hyperchat/releases/c2fe883be71d"
+  | ssh root@VPS "[ ! -e /opt/hyperchat/releases/c2fe883be71d ] && mkdir -p /opt/hyperchat/releases/c2fe883be71d && tar -x -C /opt/hyperchat/releases/c2fe883be71d"
 ```
-**(VPS)**
+**(VPS)**: must print `A2 OK`.
 ```
 build_release() {
+  [ "$(fp "$REL_NEW")" = 1ffdf1e5c931d4e67eb9e4be9f1c9a69284a63ec691efec4042c2293e7df1d78 ] \
+    && [ "$(find "$REL_NEW" -type f | wc -l)" = 335 ] || { echo "STOP: $REL_NEW is not the c2fe883 tree"; return 1; }
   [ -d "$REL_NEW/backend" ] && [ ! -e "$REL_NEW/venv" ] || { echo "STOP: $REL_NEW missing, or a venv already exists"; return 1; }
-  python3.14 -m venv "$REL_NEW/venv" && "$REL_NEW/venv/bin/pip" install -r "$REL_NEW/backend/requirements.txt" || { echo "STOP: venv"; return 1; }
+  python3.14 -m venv "$REL_NEW/venv" && "$REL_NEW/venv/bin/pip" install -q -r "$REL_NEW/backend/requirements.txt" || { echo "STOP: venv"; return 1; }
   echo c2fe883be71d > "$REL_NEW/backend/RELEASE" \
     && chown -R root:hyperchat "$REL_NEW" && chmod -R g+rX,g-w,o-rwx "$REL_NEW" || { echo "STOP: RELEASE / ownership"; return 1; }
-  ( cd "$REL_NEW/backend" && ../venv/bin/python -c "import app.main" ) || { echo "STOP: import"; return 1; }
+  # as the service user (proves it can read the release) and without writing bytecode: a root import would leave
+  # root-owned, world-readable __pycache__ directories, which the isolation audit (no access for other) refuses
+  ( cd "$REL_NEW/backend" && sudo -u hyperchat env PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -c "import app.main" ) \
+    || { echo "STOP: import"; return 1; }
+  [ "$(find "$REL_NEW" ! -user root | wc -l)" = 0 ] && [ "$(find "$REL_NEW" ! -type l -perm /g=w | wc -l)" = 0 ] \
+    && [ "$(find "$REL_NEW" ! -type l -perm /o=rwx | wc -l)" = 0 ] \
+    && [ "$(find "$REL_NEW/backend" "$REL_NEW/database" -name __pycache__ | wc -l)" = 0 ] \
+    || { echo "STOP: release ownership / permissions / bytecode not as required"; return 1; }
+  [ "$(cat "$REL_NEW/backend/RELEASE")" = c2fe883be71d ] || { echo "STOP: RELEASE"; return 1; }
+  "$REL_NEW/venv/bin/pip" check >/dev/null || { echo "STOP: pip check"; return 1; }
   [ "$(readlink -f /opt/hyperchat/current)" = "$REL_OLD" ] || { echo "STOP: current is not $REL_OLD"; return 1; }
+  api_healthy "$(cat "$ST/old-release.id")" || return 1   # the running API still serves the old release
   echo "A2 OK: release built, nothing switched"
 }
 build_release
 ```
-A failed build leaves an unused directory and nothing else. It is removed or rebuilt only by decision.
+- **If the build fails:** an unused directory is left, and nothing else. It is removed or rebuilt only by decision.
+- **Then the isolation audit again** (read-only), with the new release in the tree. Its FAIL lines must be identical to those after A1:
+  ```
+  bash "$STAGE/deploy/check_isolation.sh" dev > "$ST/isolation-A2-dev.txt" 2>&1; echo "dev exit=$?"
+  diff <(grep FAIL "$ST/isolation-A1-dev.txt") <(grep FAIL "$ST/isolation-A2-dev.txt") && echo "A2 audit: same FAIL set as after A1"
+  ```
 
-**A3. Create the DEV KYC witness** (`docs/kyc-rollout.md` "Server setup"), so that every backup in Phases B and E carries it:
+**A3. Create the DEV KYC witness** (`docs/kyc-rollout.md` "Server setup"), so that every backup in Phases B and E carries it. It must print `A3 OK`.
+- **Fail-closed:** an existing witness (or anything at that path) is a STOP, and the function then touches nothing: no recreate, truncate or attribute change.
+- **The directory:** an existing directory is used only when it is a real `root:root 0755` directory; it is never re-moded.
 ```
-install -d -o root -g root -m 0755 /var/lib/hyperchat-kyc
-[ -e /var/lib/hyperchat-kyc/dev.witness ] && echo "STOP: dev.witness already exists; do not recreate it" \
-  || { install -o hyperchat -g hyperchat -m 0600 /dev/null /var/lib/hyperchat-kyc/dev.witness && chattr +a /var/lib/hyperchat-kyc/dev.witness; }
-stat -c '%U:%G %a %s bytes' "$W"; lsattr "$W"   # hyperchat:hyperchat 600 0 bytes; 'a' flag
-witness_ok && echo "A3 OK"
+create_dev_witness() {
+  local D=/var/lib/hyperchat-kyc
+  if [ -e "$W" ] || [ -L "$W" ]; then
+    echo "STOP: $W already exists; it is never recreated, truncated or modified"
+    stat -c '%U:%G %a %s bytes' "$W"; lsattr "$W"
+    return 1
+  fi
+  if [ -e "$D" ] || [ -L "$D" ]; then
+    if [ -L "$D" ] || [ ! -d "$D" ] || [ "$(stat -c '%U:%G %a' "$D")" != "root:root 755" ]; then
+      echo "STOP: $D exists but is not a root:root 0755 directory"; return 1
+    fi
+  else
+    install -d -o root -g root -m 0755 "$D" || { echo "STOP: cannot create $D"; return 1; }
+  fi
+  install -o hyperchat -g hyperchat -m 0600 /dev/null "$W" || { echo "STOP: cannot create $W"; return 1; }
+  if ! chattr +a "$W"; then
+    echo "STOP: $W was created but is NOT append-only; do not retry or delete it: escalate"; return 1
+  fi
+  [ "$(stat -c '%U:%G %a %s' "$W")" = "hyperchat:hyperchat 600 0" ] && witness_ok >/dev/null \
+    || { echo "STOP: $W is not an empty hyperchat:hyperchat 0600 append-only file"; return 1; }
+  echo "A3 OK: $(stat -c '%U:%G %a %s bytes' "$W"), $(lsattr "$W" | awk '{print $1}')"
+}
+create_dev_witness
 ```
 - **An empty file is a fresh witness.** At 0019 nothing reads it.
 - **After 0023:** the API appends a line only once enforcement history exists (`KycWitness.record` returns early at generation 0), so the file stays empty throughout this rehearsal.
@@ -377,7 +476,17 @@ witness_ok && echo "A3 OK"
 
 **A4. No backup units, no `/usr/local/sbin` install.** See "The backup script and production".
 
-**Record:** A1–A3 outputs (`$ST/old-release.id`, `A2 OK`, `A3 OK`, witness `stat` / `lsattr`), the release's ownership (`stat -c '%U:%G %a' "$REL_NEW"`), and that `current` is unchanged. Run 0.3 now if it isn't done yet.
+**A9. After (read-only).** The production snapshot must be identical to A0's. DEV must still run `229fe42381e2`, with its services active and the database at 0019.
+```
+echo "--- production"; prod_snapshot; echo "--- DEV"; dev_snapshot
+api_healthy "$(cat "$ST/old-release.id")"; ls -la "$ST"
+```
+
+**Record:**
+- A0's snapshots;
+- `A1 OK`, `A2 OK`, `A3 OK`;
+- both audit outputs;
+- A9's snapshots and their comparison with A0's.
 
 ---
 
