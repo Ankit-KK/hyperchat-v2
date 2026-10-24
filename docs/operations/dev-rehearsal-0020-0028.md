@@ -33,10 +33,10 @@ phase never authorizes the next, and nothing here authorizes an improvised step.
 | `api.env` | none of `HYPERCHAT_DB_*_USER`, `HYPERCHAT_KYC_WITNESS_PATH`, `HYPERCHAT_STEPUP_SOCKET` | same |
 | KYC witness | `/var/lib/hyperchat-kyc` absent | absent |
 | Data | 133 creators, 0 without an owner; 233 `user_signups` | not queried |
-| Backups | manual pre-deploy dumps only (newest `hyperchat_dev_pre_main229fe42_20261015T045216Z.dump`) | the old nightly script; result not yet checked |
+| Backups | manual pre-deploy dumps only (newest `hyperchat_dev_pre_main229fe42_20261015T045216Z.dump`) | the old nightly script; verified 2026-10-24 (Phase 0.2) |
 | Disk | one 48 GB root filesystem, 39 GB free | same filesystem |
 
-`deploy/check_isolation.sh` is not in the deployed DEV release (it arrived later).
+`deploy/check_isolation.sh` is not in the deployed DEV release (it arrived later). Phase 0 (2026-10-24) found no drift and closed the open questions; see Phase 0 below.
 
 ## What changes between the DEV release and the target
 Repository facts, `git diff 229fe42381e2 c2fe883`:
@@ -170,60 +170,155 @@ dev_backup() { local out rc name
 ---
 
 ## Phase 0: Inspection gaps (read-only; approval: read-only VPS access)
-These checks change nothing. **Phase C may not start until 0.1 and 0.4 are answered.**
+**Done on 2026-10-24** (owner-approved, one root SSH session, nothing changed on the server). Results are recorded below.
+**Phase C may not start until 0.1 and 0.4 are answered; both are answered.** 0.3 waits for Phase A1.
 
-### 0.1 The unexpected DEV database role `hyperchat`
-`roles.sql` doesn't create a role named `hyperchat`, and no repository file maps or uses one. Find out what it is before `setup_cluster.sh` runs `REVOKE ALL ON DATABASE hyperchat_dev FROM PUBLIC` (Phase C), which could cut off anything that silently relies on it.
-```
-QP "SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil FROM pg_roles WHERE rolname = 'hyperchat'"
-QP "SELECT rolpassword IS NOT NULL AS has_password FROM pg_authid WHERE rolname = 'hyperchat'"
-QP "SELECT g.rolname AS granted_role, m.rolname AS member FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles m ON m.oid = a.member WHERE 'hyperchat' IN (g.rolname, m.rolname)"
-QP "SELECT datname, pg_get_userbyid(datdba) AS owner, datacl FROM pg_database ORDER BY 1"
-for db in hyperchat_dev hyperchat_restore_test postgres; do QD "$db" "SELECT '$db', count(*) FROM pg_class WHERE relowner = 'hyperchat'::regrole"; done
-QP "SELECT count(*) FROM pg_stat_activity WHERE usename = 'hyperchat'"
-grep -nE '(^|[[:space:]])hyperchat([[:space:]]|$)' /etc/postgresql/15/restoretest/pg_hba.conf /etc/postgresql/15/restoretest/pg_ident.conf
-```
-**Record:** attributes, whether it can log in or has a password, memberships, owned objects per database, database ACLs, live sessions.
-- **Decision (owner):** keep, document, or drop it.
-- **Dropping is a separate approved change,** never part of this rehearsal.
-- **If it owns objects in `hyperchat_dev` or `hyperchat_restore_test`, or has a live session:** stop and decide before Phase C.
+### The commands that ran
+They are read-only by construction:
+- **SQL sessions:** forced read-only by the server (`PGOPTIONS='-c default_transaction_read_only=on'`). On throwaway PostgreSQL 15 and 17, such a session refused both an `INSERT` and an `ALTER ROLE` while the queries were validated. `-X` skips `~/.psqlrc`, and `-c` keeps no history.
+- **No sensitive values printed:** setting values never appear (setting names only), and a password is reported only as present or absent.
+- **What else ran:** only listings, `systemctl show` / `cat`, the journal, `sha256sum -c` and `pg_restore -l`.
+- **Ordinary read side effects only:** reading files may update their access time (the root filesystem is mounted `relatime`), and `sudo` and PostgreSQL log their sessions.
 
-### 0.2 Production backup: exit status, archive and integrity (read-only)
-A timer that fired doesn't mean a backup succeeded. Check the last run's result and the newest archive itself:
+Each line says which cluster or files it reads: DEV (`15/restoretest`, port 5433) or PRODUCTION (`17/hyperchat`, port 5432, `/var/backups/hyperchat`).
 ```
+# HyperChat DEV rehearsal - Phase 0 (read-only). One root SSH session; nothing is written, started, stopped or changed.
+# Every SQL session is forced read-only by the server (default_transaction_read_only); -X skips ~/.psqlrc, -c keeps no history.
+DEVSQL()  { sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -v ON_ERROR_STOP=1 -p 5433 "$@"; }  # DEV cluster 15/restoretest
+PRODSQL() { sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -At -v ON_ERROR_STOP=1 -p 5432 "$@"; }  # PRODUCTION cluster 17/hyperchat
+s() { echo; echo "## $*"; }
+
+s "0.0 drift since 2026-10-23 (DEV + PRODUCTION)"
+date -u +%FT%TZ
+readlink -f /opt/hyperchat/current /opt/hyperchat-prod/current
+systemctl is-active hyperchat-api hyperchat-worker hyperchat-cleanup.timer hyperchat-prod-api hyperchat-prod-worker hyperchat-pgbackup.timer
+DEVSQL  -d hyperchat_dev -c "SELECT 'dev alembic', version_num FROM alembic_version"
+PRODSQL -d hyperchat     -c "SELECT 'prod alembic', version_num FROM alembic_version"
+findmnt -no OPTIONS /
+
+s "0.1 DEV role hyperchat: attributes, password present (boolean only), memberships"
+DEVSQL -d postgres -c "SELECT rolname, rolcanlogin, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil FROM pg_roles WHERE rolname = 'hyperchat'"
+DEVSQL -d postgres -c "SELECT 'has_password', rolpassword IS NOT NULL FROM pg_authid WHERE rolname = 'hyperchat'"
+DEVSQL -d postgres -c "SELECT g.rolname AS granted_role, m.rolname AS member, a.admin_option FROM pg_auth_members a JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles m ON m.oid = a.member WHERE 'hyperchat' IN (g.rolname, m.rolname)"
+s "0.1 every dependency on the role, all databases (shared catalog: o=owner, a=ACL, r=policy, i=initial ACL)"
+DEVSQL -d postgres -c "SELECT coalesce(d.datname, '(cluster)'), s.classid::regclass, s.deptype, count(*) FROM pg_shdepend s LEFT JOIN pg_database d ON d.oid = s.dbid WHERE s.refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'hyperchat') GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"
+DEVSQL -d postgres -c "SELECT d.datname, pg_get_userbyid(d.datdba) AS owner, EXISTS (SELECT 1 FROM aclexplode(d.datacl) x WHERE x.grantee = r.oid) AS role_in_acl FROM pg_database d, pg_roles r WHERE r.rolname = 'hyperchat' ORDER BY 1"
+for db in $(DEVSQL -d postgres -c "SELECT datname FROM pg_database WHERE datallowconn ORDER BY 1"); do
+  DEVSQL -d "$db" -c "SELECT '$db', 'relations', count(*) FROM pg_class WHERE relowner = (SELECT oid FROM pg_roles WHERE rolname = 'hyperchat')
+                      UNION ALL SELECT '$db', 'functions', count(*) FROM pg_proc WHERE proowner = (SELECT oid FROM pg_roles WHERE rolname = 'hyperchat')
+                      UNION ALL SELECT '$db', 'schemas', count(*) FROM pg_namespace WHERE nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'hyperchat')
+                      UNION ALL SELECT '$db', 'default ACLs', count(*) FROM pg_default_acl WHERE defaclrole = (SELECT oid FROM pg_roles WHERE rolname = 'hyperchat')"
+done
+s "0.1 sessions now, role-level settings (names only), and who could connect as it"
+DEVSQL -d postgres -c "SELECT datname, application_name, client_addr IS NULL AS unix_socket, state, count(*) FROM pg_stat_activity WHERE usename = 'hyperchat' GROUP BY 1, 2, 3, 4"
+DEVSQL -d postgres -c "SELECT coalesce(d.datname, '*'), array(SELECT split_part(x, '=', 1) FROM unnest(s.setconfig) x) FROM pg_db_role_setting s LEFT JOIN pg_database d ON d.oid = s.setdatabase WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = 'hyperchat')"
+grep -nE '^[^#]*[[:space:]]hyperchat([[:space:]]|,|$)' /etc/postgresql/15/restoretest/pg_hba.conf /etc/postgresql/15/restoretest/pg_ident.conf
+grep -nE '^[^#]*local[[:space:]]+all[[:space:]]+all' /etc/postgresql/15/restoretest/pg_hba.conf
+grep -hoE '^HYPERCHAT_DB_[A-Z_]*USER=[a-z_]*' /etc/hyperchat/api.env /etc/hyperchat-prod/api.env
+DEVSQL -d postgres -c "SELECT name, setting FROM pg_settings WHERE name IN ('log_connections', 'log_line_prefix')"
+grep -cE 'user=hyperchat([ ,]|$)' /var/log/postgresql/postgresql-15-restoretest.log
+
+s "0.2 PRODUCTION backup: unit result (not the timer), unit definition, installed script fingerprint"
 systemctl show hyperchat-pgbackup.service -p Result -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp
-systemctl cat hyperchat-pgbackup.service | grep -E '^(ExecStart|Environment)='
-journalctl -u hyperchat-pgbackup.service --since "3 days ago" --no-pager | tail -n 30
-ls -lt /var/backups/hyperchat | head -n 10
-N=$(ls -t /var/backups/hyperchat/hyperchat_*.dump | head -n 1); echo "$N"; stat -c '%s bytes, %y' "$N"
+systemctl show hyperchat-pgbackup.timer -p LastTriggerUSec -p NextElapseUSecRealtime
+systemctl cat hyperchat-pgbackup.service | grep -E '^(ExecStart|Environment|User)='
+ls -l /usr/local/sbin/hyperchat-pgbackup; sha256sum /usr/local/sbin/hyperchat-pgbackup
+journalctl -u hyperchat-pgbackup.service --since "-3 days" --no-pager -o short-iso | tail -n 20
+s "0.2 PRODUCTION archives: newest set, size, SHA-256, archive readability"
+ls -lt --time-style=+%FT%T /var/backups/hyperchat | head -n 12
+ls /var/backups/hyperchat | grep -c '\.dump$'; ls /var/backups/hyperchat | grep -c '\.partial$'
+N=$(ls -t /var/backups/hyperchat/hyperchat_*.dump | head -n 1); echo "$N"; stat -c '%s bytes, modified %y' "$N"
 ( cd /var/backups/hyperchat && sha256sum -c "$(basename "$N").sha256" )
-/usr/lib/postgresql/17/bin/pg_restore -l "$N" | grep -c '^[0-9]'
-```
-**Record:**
-- `Result=success` and `ExecMainStatus=0`;
-- the newest archive's name, time (the 02:37 UTC run) and size;
-- `sha256sum -c` → `OK`;
-- a non-zero TOC entry count;
-- the `ExecStart` path (expected `/usr/local/sbin/hyperchat-pgbackup`, which confirms the rule in "The backup script and production").
+/usr/lib/postgresql/17/bin/pg_restore --version
+/usr/lib/postgresql/17/bin/pg_restore -l "$N" | grep -vc '^;'
 
-Any other answer is a production finding, reported to the owner. The DEV rehearsal doesn't depend on it, but production's backup must not be assumed healthy.
+s "0.3 isolation audit: does the read-only script exist on the server? (no copy is made)"
+ls -l /opt/hyperchat/current/deploy/check_isolation.sh /opt/hyperchat/releases/*/deploy/check_isolation.sh /root/hyperchat-*/deploy/check_isolation.sh 2>&1
+command -v namei
 
-### 0.3 Isolation audit behaviour today (read-only; after Phase A1 exists)
-The deployed DEV release has no `check_isolation.sh`, so it runs from the staging copy that Phase A1 creates. If Phase A isn't approved yet, run this right after A1.
+s "0.4 DEV database-level configuration (setting names only)"
+DEVSQL -d postgres -c "SELECT datname, pg_get_userbyid(datdba), pg_encoding_to_char(encoding), datcollate, datctype, datconnlimit, datallowconn, datistemplate, datacl FROM pg_database WHERE datname = 'hyperchat_dev'"
+DEVSQL -d postgres -c "SELECT coalesce(r.rolname, '*'), array(SELECT split_part(x, '=', 1) FROM unnest(s.setconfig) x) FROM pg_db_role_setting s LEFT JOIN pg_roles r ON r.oid = s.setrole WHERE s.setdatabase = (SELECT oid FROM pg_database WHERE datname = 'hyperchat_dev')"
+DEVSQL -d postgres -c "SELECT pg_size_pretty(pg_database_size('hyperchat_dev'))"
 ```
-bash "$STAGE/deploy/check_isolation.sh" dev; echo "exit=$?"
-bash "$STAGE/deploy/check_isolation.sh" prod; echo "exit=$?"
-```
-- **Expected today:** exit 1, with `FAIL` lines for the pg_hba rule (lifecycle, auth and stepup not covered) and the pg_ident map (API user not mapped to lifecycle and auth), on both environments. File-ownership and unit lines should be `OK`.
-- **Record:** the full output. Any FAIL outside pg_hba / pg_ident (release tree, `api.env`, units, service account) must be understood before Phase C. The script is read-only (`deploy/check_isolation.sh` header) and needs `namei` (util-linux).
 
-### 0.4 Database-level settings of `hyperchat_dev` (read-only)
-A restore into a new database (Phase F) recreates the schema and data, but not settings attached to the database itself.
-```
-QP "SELECT coalesce(r.rolname, '*') AS role, s.setconfig FROM pg_db_role_setting s LEFT JOIN pg_roles r ON r.oid = s.setrole WHERE s.setdatabase = (SELECT oid FROM pg_database WHERE datname = 'hyperchat_dev')"
-QP "SELECT pg_get_userbyid(datdba), pg_encoding_to_char(encoding), datcollate, datctype FROM pg_database WHERE datname = 'hyperchat_dev'"
-```
-**Record:** every row. Phase F re-applies any per-database setting found here. No rows is the expected answer.
+### 0.0 Drift since 2026-10-23: none
+- DEV: `current` → `229fe42381e2`, alembic `0019`; `hyperchat-api`, `hyperchat-worker`, `hyperchat-cleanup.timer` active.
+- Production: `current` → `940137070657`, alembic `0009`; `hyperchat-prod-api` active, `hyperchat-prod-worker` inactive (not installed), `hyperchat-pgbackup.timer` active.
+- Root filesystem `rw,relatime`.
+
+The 2026-10-23 results therefore stand: releases, alembic versions, roles, pg_hba / pg_ident lines, `api.env` setting names, no KYC witness, DEV counts and disk. Phase D's pre-flight checks them again at the time.
+
+### 0.1 The DEV role `hyperchat`: retain, document, decide separately
+| Question | Answer (2026-10-24) |
+|---|---|
+| Attributes | `LOGIN`, `NOSUPERUSER`, `NOINHERIT`, no create-role / create-db / replication / bypass-RLS, connection limit 10, no expiry |
+| Password | none (`has_password = false`): it can only log in through peer authentication |
+| Memberships | none, in either direction |
+| Role-level settings | in every database: `default_transaction_read_only` and `statement_timeout` (names only) |
+| Dependencies (all databases, `pg_shdepend`) | exactly one: an entry in a database ACL, which is `hyperchat_restore_test` (owned by `postgres`) |
+| Owned objects | none in any database (relations, functions, schemas, default ACLs all 0) |
+| Access to `hyperchat_dev` | none: `hyperchat_dev`'s ACL lists only `hyperchat_owner`, `hyperchat_migrator`, `hyperchat_app`, `hyperchat_worker`, `hyperchat_readonly` (no `PUBLIC`, no `hyperchat`) |
+| Sessions | none at the time |
+| Configured use | no pg_ident line maps to it; neither `api.env` names it (both use `HYPERCHAT_DB_USER=hyperchat_app`); no repository file creates or names it |
+
+**What it most likely is (inference, not proven):** a read-only login for the legacy restore database. `database/etl/rehearsal.py` requires its source to be a read-only session on `hyperchat_restore_test`, which matches the role's settings and its only grant. Whether anything still uses it isn't established. The DEV PostgreSQL log prefix is `%m [%p] %q%u@%d`, so the Phase 0 count of `user=hyperchat` lines (0) proves nothing. A later read-only check would count `hyperchat@hyperchat_restore_test` lines instead.
+
+**Isolation finding (pre-existing; not changed by the rehearsal):**
+- **The path:** the DEV cluster's `pg_hba.conf` keeps the generic rule `local all all peer` (line 96). With no ident map, an OS user may log in as the database role of the same name. The DEV API runs as OS user `hyperchat`, so the API's account can open a read-only session as role `hyperchat` on `hyperchat_restore_test`.
+- **Why it matters:** that database is the restore of the legacy production dump. A compromised DEV API process could therefore read legacy production data.
+
+**Effect on the rehearsal:** none.
+- The role has no access to `hyperchat_dev`.
+- Phase C's `REVOKE ALL ON DATABASE hyperchat_dev FROM PUBLIC` is already in effect (no `PUBLIC` entry), so it cuts nothing off.
+- No phase touches `hyperchat_restore_test`.
+
+**Decision (owner, separate approval, not part of this rehearsal):**
+- **Recommended:** keep the role while the ETL needs a read-only source.
+- **Close the path from the API's OS user** in one of two ways:
+  - `ALTER ROLE hyperchat NOLOGIN` between ETL runs; or
+  - give the ETL a reader role that no service user can reach through peer authentication, then drop `hyperchat`.
+- **Before either:** the log check above, to confirm nothing uses it.
+
+### 0.2 Production backup: verified healthy (and its limits)
+| Check | Result |
+|---|---|
+| Last run of `hyperchat-pgbackup.service` | `Result=success`, `ExecMainStatus=0`, started and finished 2026-10-24 02:38:01 UTC (the timer's last trigger; next 2026-10-25 02:30 UTC) |
+| Unit | `ExecStart=/usr/local/sbin/hyperchat-pgbackup`, no `Environment=` override (the path rule in "The backup script and production" holds) |
+| Installed script | 1,103 bytes, 2026-10-04; SHA-256 `c839856d30dbe62922907f633046d17e14a70f242061b2488d9ed20c3028fed3`, identical to `deploy/backup/hyperchat-pgbackup.sh` at `940137070657` and `229fe42381e2` (the pre-A3 script) |
+| Journal | `backup ok db=hyperchat file=hyperchat_20261024T023801Z.dump bytes=269344 toc_entries=303 sha256=07cd0690…f31f7`; the day before likewise (`toc_entries=303`) |
+| Newest archive | `hyperchat_20261024T023801Z.dump`, 269,344 bytes, 2026-10-24 02:38:01 UTC |
+| SHA-256 | `sha256sum -c` → `OK` |
+| Archive readable | `pg_restore -l` (17.11) reads it: 303 TOC entries, the same count the script recorded |
+| Leftovers | 24 `.dump` files in the directory, no `.partial` file |
+
+**Limits:**
+- **Not a restore drill:** a readable archive isn't a restored database. The first drill is still to be run (`docs/backup-recovery.md`).
+- **Retention:** the installed (pre-A3) script deletes every dump older than 14 days unconditionally, with no minimum kept. If backups ever stopped, all copies would be gone within 14 days. A3's verified retention (keep the newest 3) replaces it only with the separately approved production A3 install.
+- **One copy:** everything is on the same VPS (no off-site copy).
+- **Idle database:** production takes no traffic, so the daily dumps are the same size.
+
+### 0.3 Isolation audit: deferred to Phase A1
+- **Phase 0 result:** `check_isolation.sh` doesn't exist on the server (not in `/opt/hyperchat/current/deploy`, any release, or `/root/hyperchat-*`), because releases carry only `backend/` and `database/`. `namei` is installed (`/usr/bin/namei`).
+- **Why it waits:** Phase 0 copies nothing. The audit runs from the staging copy Phase A1 creates, right after A1:
+  ```
+  bash "$STAGE/deploy/check_isolation.sh" dev; echo "exit=$?"
+  bash "$STAGE/deploy/check_isolation.sh" prod; echo "exit=$?"
+  ```
+- **Expected:** exit 1, with `FAIL` lines for the pg_hba rule (lifecycle, auth and stepup not covered) and the pg_ident map (API user not mapped to lifecycle and auth), on both environments. File-ownership and unit lines should be `OK`.
+- **Before Phase C:** any FAIL outside pg_hba / pg_ident must be understood. The script is read-only.
+
+### 0.4 `hyperchat_dev` database-level configuration
+| Property | Value (2026-10-24) |
+|---|---|
+| Owner | `hyperchat_owner` |
+| Encoding / collation / ctype | `UTF8` / `C.UTF-8` / `C.UTF-8` |
+| Connection limit, connections allowed, template | -1, yes, no |
+| ACL | `hyperchat_owner=CTc`, `CONNECT` for `hyperchat_migrator`, `hyperchat_app`, `hyperchat_worker`, `hyperchat_readonly`; no `PUBLIC` |
+| Per-database settings (`pg_db_role_setting`) | none |
+| Size | 32 MB |
+
+**Consequence for Phase F:** the restore database is created with exactly this encoding and locale (`TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'`), and `verify_restored` checks it. Otherwise a restore could silently change text ordering. There are no per-database settings to re-apply.
 
 ---
 
@@ -634,6 +729,9 @@ dev_grants() { QP "REVOKE ALL ON DATABASE \"hyperchat_dev\" FROM PUBLIC" \
 verify_restored() {
   rm -f "$ST/F3-verified"
   [ "$(QD "$RESTORE_DB" 'SELECT version_num FROM alembic_version')" = 0019 ] || { echo "STOP: $RESTORE_DB is not at 0019"; return 1; }
+  [ "$(QP "SELECT pg_encoding_to_char(encoding) || '|' || datcollate || '|' || datctype FROM pg_database WHERE datname = '$RESTORE_DB'")" \
+    = "$(QP "SELECT pg_encoding_to_char(encoding) || '|' || datcollate || '|' || datctype FROM pg_database WHERE datname = 'hyperchat_dev'")" ] \
+    || { echo "STOP: $RESTORE_DB encoding / locale differs from hyperchat_dev"; return 1; }
   baseline "$RESTORE_DB" > "$ST/baseline-restored.txt" || { echo "STOP: baseline of $RESTORE_DB"; return 1; }
   diff "$ST/baseline-before.txt" "$ST/baseline-restored.txt" || { echo "STOP: restored data differs from the Phase D baseline (owner decision)"; return 1; }
   date -u +%FT%TZ > "$ST/F3-verified" && echo "F3 VERIFIED"
@@ -646,7 +744,9 @@ restore_into_new() { local name path
   path="/var/backups/hyperchat-dev/$name"
   ( cd /var/backups/hyperchat-dev && sha256sum -c "$name.dump.sha256" ) || { echo "STOP: set checksum"; return 1; }
   [ "$(db_names)" = "hyperchat_dev" ] || { echo "STOP: expected only hyperchat_dev, found '$(db_names)'"; return 1; }
-  QP "CREATE DATABASE \"$RESTORE_DB\" OWNER hyperchat_owner" && QP "REVOKE ALL ON DATABASE \"$RESTORE_DB\" FROM PUBLIC" \
+  # the same encoding and locale as hyperchat_dev (Phase 0.4: UTF8, C.UTF-8 / C.UTF-8), never template1's defaults
+  QP "CREATE DATABASE \"$RESTORE_DB\" OWNER hyperchat_owner TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'" \
+    && QP "REVOKE ALL ON DATABASE \"$RESTORE_DB\" FROM PUBLIC" \
     || { echo "STOP: cannot create $RESTORE_DB"; return 1; }
   sudo -u postgres /usr/lib/postgresql/15/bin/pg_restore -p 5433 --exit-on-error --single-transaction -d "$RESTORE_DB" < "$path.dump" \
     || { echo "STOP: pg_restore failed; $RESTORE_DB is empty and kept; hyperchat_dev unchanged"; return 1; }
@@ -773,7 +873,7 @@ switch_to_old || enter_stopped_state
 
 ## After a successful rehearsal (each separately)
 - The A3 install for both environments: the script at `/usr/local/sbin`, the units, and a production witness. Production's backup changes there, so it needs its own approval.
-- Decide on the `hyperchat` role (0.1).
+- Decide on the `hyperchat` role and close the peer path from the API's OS user to `hyperchat_restore_test` (0.1).
 - Install the step-up verifier on DEV (`docs/admin-stepup.md` "Deployment sequence" step 4).
 - Didit sandbox verification (`docs/kyc-rollout.md` step 3).
 - Production planning (0010→0028), which this rehearsal does not cover.
