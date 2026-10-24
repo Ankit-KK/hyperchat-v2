@@ -170,8 +170,14 @@ witness_ok() { [ -f "$W" ] && [ "$(stat -c %s "$W")" = 0 ] && lsattr "$W" 2>/dev
 services_stopped() { local s st; for s in hyperchat-api hyperchat-worker hyperchat-cleanup.timer hyperchat-cleanup.service; do
                        st="$(systemctl is-active "$s")"; case "$st" in inactive|failed) ;; *) echo "STOP: $s is $st"; return 1 ;; esac
                      done; }
-enter_stopped_state() { systemctl stop hyperchat-cleanup.timer; systemctl stop hyperchat-worker; systemctl stop hyperchat-api
-                        services_stopped && echo "DEV STOPPED: wait for the owner (see 'If a phase fails')"; }
+# enter_stopped_state: stops the timer, a cleanup run in progress, the worker and the API; the unit STATES decide (a
+# failed `systemctl stop` is caught by services_stopped); non-zero with STOP unless every unit is inactive or failed
+enter_stopped_state() { systemctl stop hyperchat-cleanup.timer hyperchat-cleanup.service; systemctl stop hyperchat-worker; systemctl stop hyperchat-api
+                        services_stopped || { echo "STOP: DEV is NOT fully stopped; escalate (see 'If a phase fails')"; return 1; }
+                        echo "DEV STOPPED: wait for the owner (see 'If a phase fails')"; }
+# Phase D: the DEV release link, and how long D4 watches the started services for restarts (seconds)
+APP_CURRENT=/opt/hyperchat/current
+D4_SETTLE=30
 # api_healthy RELEASE: polls the local /health for up to 2 minutes; succeeds only with status ok, database ok, that release
 api_healthy() { local i out
   for i in $(seq 1 24); do
@@ -196,7 +202,7 @@ dev_backup() { local out rc name
 ```
 - **No bytecode:** the session exports `PYTHONDONTWRITEBYTECODE=1`. Every root-run Python in Phases A–F (the migrations in D, `restore_check` in B, E and F) then writes no root-owned `__pycache__` into a release, which the isolation audits in A, C and E would refuse.
 - **No `set -e`:** it would close an interactive shell on the first error.
-- **Fail-closed functions:** every consequential step (anything that creates, renames, switches or starts) is a function whose steps are chained with `&&`. A failing step makes the function print `STOP: …` and return non-zero before anything later in it runs. Where the runbook writes `f || enter_stopped_state`, a failure leaves DEV stopped.
+- **Fail-closed functions:** every consequential step (anything that creates, renames, switches or starts) is a function whose steps are chained with `&&`. A failing step makes the function print `STOP: …` and return non-zero before anything later in it runs. Phase D's release switch runs as `d4_switch`: on a failure it returns DEV to the stopped state AND returns non-zero. (Phase F's `… || enter_stopped_state` lines still return 0 when the stop succeeds; read their output, not only the exit status.)
 - **On `STOP`,** don't run the next command. Go to "If a phase fails" below.
 - **Read-only blocks** (inspections, records) may print `STOP` and continue; they change nothing.
 - **Where commands run:** commands marked **(workstation)** run on the operator's machine, in a checkout of this repository; `root@VPS` stands for the server's SSH target, as in `deploy/README.md`. Everything else runs on the VPS as root, after the session setup.
@@ -948,31 +954,78 @@ c_undo_files() {  # put back the C1 copies of the files C changed, reload, and v
 ---
 
 ## Phase D: The migration rehearsal (approval: "Phase D", with a time window)
-DEV is unavailable for the window. Expect minutes.
+DEV is unavailable for the window: about 5–10 minutes (see "Expected window" after D4).
 
-**D1. Pre-flight.** It starts every Phase D attempt by **invalidating any earlier gate marker**, then checks the starting state. It must print `D1 PASSED`; otherwise STOP before anything is stopped.
+**How to run it:**
+- **One root shell per step:** the session setup, then the step's block exactly as written. D3 runs one revision per line.
+- **Step gates:** each step writes a marker in `$ST` only when everything in it succeeded, and returns non-zero with `STOP` otherwise. The next step refuses to start without it: D1 → `D1-passed` → D2 → `D2-passed` → D3 (`D3-<rev>-ok` per revision, in order) → `d3_gate` → `D3-passed` → D4 → `D4-passed`.
+- **A new attempt starts with D1,** which removes every Phase D marker first, so no marker from an earlier attempt can authorize anything.
+
+**D1. Pre-flight.** It checks the starting state and writes `D1-passed`; otherwise it STOPs before anything is stopped. The checks:
+- Phase C completed;
+- the built target release unchanged since A2 (its fingerprint, `RELEASE`, venv tools, ownership and permissions, no bytecode);
+- DEV on the old release at 0019, healthy;
+- the verified Phase B set;
+- the witness;
+- no bots.
+
+It also records the expected values for D3's checks.
 ```
-d1_preflight() {
-  rm -f "$ST/D3-passed" && [ ! -e "$ST/D3-passed" ] || { echo "STOP: cannot remove an old D3 marker"; return 1; }
-  [ "$(readlink -f /opt/hyperchat/current)" = "$REL_OLD" ] || { echo "STOP: current is not $REL_OLD"; return 1; }
+d1_preflight() { local f n
+  rm -f "$ST/D1-passed" "$ST/D2-passed" "$ST/D3-passed" "$ST/D4-passed" "$ST"/D3-00[0-9][0-9]-ok "$ST/D-expect.txt" \
+    && [ -z "$(ls "$ST" | grep -E '^D[1-4]-passed$|^D3-[0-9]{4}-ok$|^D-expect\.txt$')" ] || { echo "STOP: cannot remove the markers of an earlier attempt"; return 1; }
+  [ -f "$ST/C5-passed" ] || { echo "STOP: Phase C has not passed"; return 1; }
+  f="$(cd "$REL_NEW" && find . -type f ! -path './venv/*' ! -path './backend/RELEASE' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)"
+  n="$(cd "$REL_NEW" && find . -type f ! -path './venv/*' ! -path './backend/RELEASE' | wc -l)"
+  [ "$f" = 1ffdf1e5c931d4e67eb9e4be9f1c9a69284a63ec691efec4042c2293e7df1d78 ] && [ "$n" = 335 ] \
+    && [ "$(cat "$REL_NEW/backend/RELEASE")" = c2fe883be71d ] && [ -x "$REL_NEW/venv/bin/alembic" ] && [ -x "$REL_NEW/venv/bin/uvicorn" ] \
+    || { echo "STOP: $REL_NEW is not the release built in A2"; return 1; }
+  [ "$(find "$REL_NEW" ! -user root | wc -l)" = 0 ] && [ "$(find "$REL_NEW" ! -type l -perm /g=w | wc -l)" = 0 ] \
+    && [ "$(find "$REL_NEW" ! -type l -perm /o=rwx | wc -l)" = 0 ] && [ "$(find "$REL_NEW/backend" "$REL_NEW/database" -name __pycache__ | wc -l)" = 0 ] \
+    || { echo "STOP: $REL_NEW ownership, permissions or bytecode not as built"; return 1; }
+  [ "$(readlink -f "$APP_CURRENT")" = "$REL_OLD" ] || { echo "STOP: current is not $REL_OLD"; return 1; }
   head_is 0019 || return 1
   test -s "$ST/phaseB.set" && test -f "$ST/B2-passed" \
     && test -f "/var/backups/hyperchat-dev/$(cat "$ST/phaseB.set").manifest.json" || { echo "STOP: no verified Phase B set"; return 1; }
   witness_ok || return 1
-  ! grep -q '^HYPERCHAT_BOTS_ENABLED=true' /etc/hyperchat/api.env || { echo "STOP: bots enabled"; return 1; }
+  ! grep -q '^HYPERCHAT_BOTS_ENABLED=true' "$API_ENV" || { echo "STOP: bots enabled"; return 1; }
   api_healthy "$(cat "$ST/old-release.id")" || return 1
-  baseline > "$ST/baseline-before.txt" && cat "$ST/baseline-before.txt" || { echo "STOP: baseline"; return 1; }   # streamers|133|0, signups|233|…
-  echo "D1 PASSED"
+  baseline > "$ST/baseline-before.txt" && cat "$ST/baseline-before.txt" || { echo "STOP: baseline"; return 1; }
+  { echo "streamers=$(Q 'SELECT count(*) FROM streamers')"; echo "active=$(Q "SELECT count(*) FROM streamers WHERE status = 'active'")"
+    echo "signups=$(Q 'SELECT count(*) FROM user_signups')"; } > "$ST/D-expect.txt" \
+    && [ "$(grep -cE '^(streamers|active|signups)=[0-9]+$' "$ST/D-expect.txt")" = 3 ] || { echo "STOP: cannot record the expected counts"; return 1; }
+  cat "$ST/D-expect.txt"
+  date -u +%FT%TZ > "$ST/D1-passed" && echo "D1 PASSED"
 }
 d1_preflight
 ```
 
-**D2. Stop DEV services** (reverse of the recovery order in `docs/backup-recovery.md`). It must print `DEV STOPPED`:
+**D2. Stop DEV services** (reverse of the recovery order in `docs/backup-recovery.md`). It refuses without `D1-passed`, and stops:
+- the timer;
+- a cleanup run in progress;
+- the worker;
+- the API.
+
+Then every unit must be `inactive` or `failed`, and no runtime-role session may remain on `hyperchat_dev` (waited for up to 30 s). It must print `D2 OK`:
 ```
-enter_stopped_state
+d2_stop() { local i n
+  [ -f "$ST/D1-passed" ] || { echo "STOP: D1 has not passed"; return 1; }
+  [ ! -e "$ST/D2-passed" ] || { echo "STOP: D2 already passed in this attempt"; return 1; }
+  enter_stopped_state || return 1
+  for i in $(seq 1 30); do
+    n="$(QP "SELECT count(*) FROM pg_stat_activity WHERE datname = 'hyperchat_dev' AND usename IN ('hyperchat_app','hyperchat_worker','hyperchat_lifecycle','hyperchat_auth')")" || { echo "STOP: cannot read pg_stat_activity"; return 1; }
+    [ "$n" = 0 ] && break; sleep 1
+  done
+  [ "$n" = 0 ] || { echo "STOP: $n runtime-role sessions remain on hyperchat_dev"; return 1; }
+  date -u +%FT%TZ > "$ST/D2-passed" && echo "D2 OK: DEV stopped, no runtime sessions"
+}
+d2_stop
 ```
 
-**D3. Migrate one revision at a time. Fail-stop.** Define the step function in this session:
+**D3. Migrate one revision at a time. Fail-stop.** Define the step functions in this session:
+- **`migrate_one`:** runs one Alembic revision and checks the head.
+- **`d3_check`:** the revision's expected result, checked by machine against the counts D1 recorded.
+- **`migrate_checked`:** refuses unless D2 passed and the previous revision's marker exists, then runs both and writes `D3-<rev>-ok`.
 ```
 migrate_one() {   # $1 = the revision; succeeds only when alembic succeeded AND the database is exactly at $1
   services_stopped || return 1
@@ -981,53 +1034,120 @@ migrate_one() {   # $1 = the revision; succeeds only when alembic succeeded AND 
   head_is "$1" || return 1
   echo "OK $1"
 }
+d3_check() { local streamers active signups got   # $1 = the revision just applied
+  streamers="$(sed -n 's/^streamers=//p' "$ST/D-expect.txt")"; active="$(sed -n 's/^active=//p' "$ST/D-expect.txt")"; signups="$(sed -n 's/^signups=//p' "$ST/D-expect.txt")"
+  [ -n "$streamers" ] && [ -n "$active" ] && [ -n "$signups" ] || { echo "STOP: no expected counts from D1"; return 1; }
+  case "$1" in
+    0020) got="$(Q "SELECT kyc_track || '|' || count(*) || '|' || count(*) FILTER (WHERE kyc_baseline_owner_id IS NOT DISTINCT FROM user_id) FROM streamers GROUP BY kyc_track")"
+          [ "$got" = "legacy|$streamers|$streamers" ] || { echo "STOP: 0020 creators: '$got', expected 'legacy|$streamers|$streamers'"; return 1; }
+          got="$(Q "SELECT count(*) FROM streamers WHERE public.creator_donation_block(id) IS NULL")"
+          printf '%s\n' "$got" > "$ST/eligible-after-0020.txt"
+          [ "$got" = "$active" ] || { echo "STOP: 0020 eligible creators: $got, expected $active (the active ones)"; return 1; } ;;
+    0021) got="$(Q "SELECT review_status || '|' || count(*) FROM user_signups GROUP BY review_status")"
+          [ "$got" = "legacy_unreviewed|$signups" ] || { echo "STOP: 0021 signups: '$got', expected 'legacy_unreviewed|$signups'"; return 1; } ;;
+    0023) got="$(Q "SELECT state || '|' || generation FROM kyc_enforcement")"
+          [ "$got" = "draft|0" ] || { echo "STOP: 0023 KYC enforcement: '$got', expected 'draft|0'"; return 1; } ;;
+    0025) got="$(Q "SELECT state FROM stepup_enforcement")"
+          [ "$got" = draft ] || { echo "STOP: 0025 MFA enforcement: '$got', expected 'draft'"; return 1; } ;;
+    0022|0024|0026|0027|0028) ;;   # the head check in migrate_one is the check
+    *) echo "STOP: unknown revision $1"; return 1 ;;
+  esac
+}
+migrate_checked() { local prev=0019 r
+  [ -f "$ST/D2-passed" ] || { echo "STOP: D2 has not passed"; return 1; }
+  for r in 0020 0021 0022 0023 0024 0025 0026 0027 0028; do [ "$r" = "$1" ] && break; prev="$r"; done
+  [ "$r" = "$1" ] || { echo "STOP: $1 is not one of 0020-0028"; return 1; }
+  [ "$prev" = 0019 ] || [ -f "$ST/D3-$prev-ok" ] || { echo "STOP: $prev has not passed its check"; return 1; }
+  [ ! -e "$ST/D3-$1-ok" ] || { echo "STOP: $1 already applied in this attempt"; return 1; }
+  migrate_one "$1" && d3_check "$1" || return 1
+  date -u +%FT%TZ > "$ST/D3-$1-ok" && echo "D3 $1 OK"
+}
 ```
-Then run **one line at a time**, and run the next line **only if the previous one printed `OK …`** and its check printed the expected value. There is deliberately no loop:
+Then run **one line at a time**, and run the next line **only after the previous one printed `D3 <rev> OK`**. There is deliberately no loop.
+- `migrate_checked 0020`
+- `migrate_checked 0021`
+- `migrate_checked 0022`
+- `migrate_checked 0023`
+- `migrate_checked 0024`
+- `migrate_checked 0025`
+- `migrate_checked 0026`
+- `migrate_checked 0027`
+- `migrate_checked 0028`
 
-| Run | Then check (must match "Expect") | Expect |
+What `d3_check` requires (2026-10-24 values; D1 records the counts at the time):
+
+| Revision | Check | Expect |
 |---|---|---|
-| `migrate_one 0020` | `Q "SELECT kyc_track, count(*), count(*) FILTER (WHERE kyc_baseline_owner_id IS NOT DISTINCT FROM user_id) FROM streamers GROUP BY 1"` | `legacy\|133\|133` |
-| | `Q "SELECT count(*) FROM streamers WHERE public.creator_donation_block(id) IS NULL" > "$ST/eligible-after-0020.txt"; cat "$ST/eligible-after-0020.txt"` | the number of `active` creators in the baseline (`Q "SELECT count(*) FROM streamers WHERE status = 'active'"`) |
-| `migrate_one 0021` | `Q "SELECT review_status, count(*) FROM user_signups GROUP BY 1"` | `legacy_unreviewed\|<the baseline signups count>` (233, or more if signups arrived after the inspection) |
-| `migrate_one 0022` | (none beyond `OK`) | |
-| `migrate_one 0023` | `Q "SELECT state, generation FROM kyc_enforcement"` | `draft\|0` |
-| `migrate_one 0024` | (none beyond `OK`) | |
-| `migrate_one 0025` | `Q "SELECT state FROM stepup_enforcement"` | `draft` |
-| `migrate_one 0026` | (none beyond `OK`) | |
-| `migrate_one 0027` | (none beyond `OK`) | |
-| `migrate_one 0028` | `Q "SELECT version_num FROM alembic_version"` | `0028` |
+| 0020 | creators by `kyc_track`, and those whose baseline owner is their owner | `legacy\|<streamers>\|<streamers>` (133) |
+| 0020 | creators eligible for donations (`creator_donation_block(id) IS NULL`, kept in `$ST/eligible-after-0020.txt`) | the active creators (133) |
+| 0021 | signups by `review_status` | `legacy_unreviewed\|<signups>` (233) |
+| 0023 | `kyc_enforcement` | `draft\|0` |
+| 0025 | `stepup_enforcement` | `draft` |
+| 0022, 0024, 0026, 0027, 0028 | the head check in `migrate_one` | the revision itself |
 
-**D3 gate.** It removes any marker first and writes a new one **last**, only when every check succeeds:
+**D3 gate.** It removes any marker first and writes a new one **last**, only when all nine revisions passed their checks in this attempt and the state is right:
 ```
-d3_gate() {
+d3_gate() { local r
   rm -f "$ST/D3-passed"
+  for r in 0020 0021 0022 0023 0024 0025 0026 0027 0028; do
+    [ -f "$ST/D3-$r-ok" ] || { echo "STOP: $r has not passed its check; do not switch the release"; return 1; }
+  done
   services_stopped && head_is 0028 && drafts_ok && witness_ok || { echo "STOP: D3 gate failed; do not switch the release"; return 1; }
   date -u +%FT%TZ > "$ST/D3-passed" && echo "D3 PASSED"
 }
 d3_gate
 ```
 
-**D4. Switch the release and start the services.** The marker is single-use: the function removes it before doing anything, so a stale or reused marker can never authorize a switch. Then it re-validates the state itself (services stopped, head 0028, KYC `draft|0`, MFA `draft`, witness empty and append-only) and switches. It starts the API, and starts the worker and the cleanup timer **only after `/health` reports `ok` on release `c2fe883be71d`**. Any failure leaves DEV stopped:
+**D4. Switch the release and start the services.** The marker is single-use: the function removes it before doing anything, so a stale or reused marker can never authorize a switch.
+- **Re-validation:** it checks the state itself (services stopped, head 0028, KYC `draft|0`, MFA `draft`, witness empty and append-only), then switches.
+- **Start order:** it starts the API, and starts the worker and the cleanup timer **only after `/health` reports `ok` on release `c2fe883be71d`**.
+- **Restart watch:** for `D4_SETTLE` seconds it checks that the API and worker don't restart (same main PID, same restart count, still `active`), then checks `/health` again.
+- **On any failure:** `d4_switch` returns DEV to the stopped state AND returns non-zero.
 ```
-switch_to_new() {
+switch_to_new() { local s api_pid wrk_pid api_n wrk_n
   [ -f "$ST/D3-passed" ] || { echo "STOP: no D3 marker from this attempt; run d3_gate"; return 1; }
   rm -f "$ST/D3-passed" || { echo "STOP: cannot consume the D3 marker"; return 1; }
   services_stopped && head_is 0028 && drafts_ok && witness_ok || { echo "STOP: state is not what the gate checked; not switching"; return 1; }
-  ln -sfn "$REL_NEW" /opt/hyperchat/current && [ "$(readlink -f /opt/hyperchat/current)" = "$REL_NEW" ] || { echo "STOP: release link not switched"; return 1; }
+  ln -sfn "$REL_NEW" "$APP_CURRENT" && [ "$(readlink -f "$APP_CURRENT")" = "$REL_NEW" ] || { echo "STOP: release link not switched"; return 1; }
   systemctl start hyperchat-api || { echo "STOP: hyperchat-api did not start"; return 1; }
   api_healthy c2fe883be71d || return 1
   systemctl start hyperchat-worker || { echo "STOP: hyperchat-worker did not start"; return 1; }
   systemctl start hyperchat-cleanup.timer || { echo "STOP: hyperchat-cleanup.timer did not start"; return 1; }
-  echo "D4 DONE: DEV runs release c2fe883be71d"
+  api_pid="$(systemctl show -p MainPID --value hyperchat-api)"; wrk_pid="$(systemctl show -p MainPID --value hyperchat-worker)"
+  api_n="$(systemctl show -p NRestarts --value hyperchat-api)"; wrk_n="$(systemctl show -p NRestarts --value hyperchat-worker)"
+  sleep "$D4_SETTLE"
+  for s in hyperchat-api hyperchat-worker hyperchat-cleanup.timer; do
+    [ "$(systemctl is-active "$s")" = active ] || { echo "STOP: $s is not active after ${D4_SETTLE}s"; return 1; }
+  done
+  [ "$api_pid" -gt 0 ] 2>/dev/null && [ "$wrk_pid" -gt 0 ] 2>/dev/null \
+    && [ "$(systemctl show -p MainPID --value hyperchat-api)" = "$api_pid" ] && [ "$(systemctl show -p MainPID --value hyperchat-worker)" = "$wrk_pid" ] \
+    && [ "$(systemctl show -p NRestarts --value hyperchat-api)" = "$api_n" ] && [ "$(systemctl show -p NRestarts --value hyperchat-worker)" = "$wrk_n" ] \
+    || { echo "STOP: the API or the worker restarted within ${D4_SETTLE}s"; return 1; }
+  api_healthy c2fe883be71d || return 1
+  date -u +%FT%TZ > "$ST/D4-passed" && echo "D4 DONE: DEV runs release c2fe883be71d"
 }
-switch_to_new || enter_stopped_state
+d4_switch() {  # non-zero on ANY failure; after a failure DEV is stopped again (or enter_stopped_state says it is not)
+  switch_to_new && return 0
+  echo "STOP: D4 failed; returning DEV to the stopped state"
+  enter_stopped_state
+  return 1
+}
+d4_switch
 ```
-- **After a D4 failure:** DEV is stopped again (`DEV STOPPED`). The release link stays wherever the failure left it; switching back is Phase F. A retry needs a new `d3_gate` run, because the marker was consumed.
+- **After a D4 failure:** `d4_switch` exits non-zero. DEV is stopped again (`DEV STOPPED`), or `enter_stopped_state` names the unit that didn't stop. The release link stays wherever the failure left it; switching back is Phase F. A retry is a new attempt from D1, which refuses to start because the database is no longer at 0019. So after a D4 failure the owner decides (Phase F or a written fix-forward plan).
 - **Then (read-only):**
   ```
   journalctl -u hyperchat-api -u hyperchat-worker --since "-5 min" --no-pager | grep -iE "error|critical|refus" | head
   ```
 - **The cleanup service:** don't start it by hand. Its timer runs it daily with the same `api.env`, witness path included.
+
+**Expected window (2026-10-24 preflight values):**
+- **D2:** a few seconds. The API stops within at most 20 s and the worker within 1 min (their stop timeouts).
+- **D3:** nine revisions on a 32 MB database: seconds each, about 2–5 minutes with the operator checks between lines.
+- **D4:** the API start and `/health` (up to 2 minutes), then 30 s of restart watching.
+- **Total:** about 5–10 minutes of DEV downtime.
+- **Timing:** schedule it away from the cleanup timer's daily run (next 2026-10-25 03:16 UTC); D2 stops the timer anyway.
+- **On a STOP:** DEV stays down until the owner chooses Phase F or a fix-forward plan.
 
 ### Stop conditions
 Any of these is a Phase D failure:
@@ -1332,7 +1452,7 @@ switch_to_old || enter_stopped_state
 | A | staging copy and `/root/rehearsal-dev`, target release build (not switched), DEV witness file | backup runs, units or `/usr/local/sbin`, roles, env, migrations |
 | B | staging the fixed backup script (B0, pinned SHA-256, root-only), one DEV backup run with it (DEV profile), one scratch restore check | backup units or timers, `/usr/local/sbin`, anything in C–F |
 | C | C1–C5: the `.before-C` copies, `setup_cluster.sh 15 restoretest 5433 hyperchat_dev`, the four pg_ident lines, five `api.env` settings, the cluster reloads | restarts, migrations, `c_undo_files` (a separate decision), dropping roles, anything on `hyperchat_restore_test` |
-| D | stopping DEV services, migrations 0020–0028 behind the per-revision checks, the gated release switch, start; on failure, the stopped state only | restores, downgrades, re-runs, switching back, smoke tests |
+| D | D1–D4: stopping DEV services (cleanup run included), migrations 0020–0028 behind the machine-checked per-revision checks, the gated release switch, start and the restart watch; on failure, the stopped state only | restores, downgrades, re-runs, switching back, smoke tests |
 | Smoke PR | the separate test-only PR (its own review and merge) | anything on the server |
 | E | the updated smoke suites, the checks listed, one more DEV backup and scratch restore | `HYPERCHAT_SMOKE_R2=1` (separate), verifier install, Didit, activation |
 | F | `restore_into_new` (the Phase B set into `hyperchat_dev_rollback_restore`), `swap_names` (rename 2 only after rename 1), on a partial swap `retry_rename2` or `undo_rename1`, CONNECT grants, `switch_to_old` | dropping either kept database, reverting roles / pg_hba / pg_ident / `api.env` |
