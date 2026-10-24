@@ -1,0 +1,110 @@
+## identity
+uid=986(hyperchat-prod) gid=986(hyperchat-prod) groups=986(hyperchat-prod)
+hyperchat-prod:x:986:
+
+## consumers of /opt/hyperchat-prod (units, nginx, cron) and the user each runs as
+/etc/systemd/system/hyperchat-prod-api.service User=hyperchat-prod Caps=
+/etc/systemd/system/hyperchat-prod-cleanup.service User=hyperchat-prod Caps=
+(end of nginx/cron references)
+(end of pgbackup script references)
+
+## top-level directories
+root:root 755 directory /opt
+root:hyperchat-prod 750 directory /opt/hyperchat-prod
+root:hyperchat-prod 750 directory /opt/hyperchat-prod/releases
+root:root 777 symbolic link /opt/hyperchat-prod/current
+drwxr-x--- 3 root hyperchat-prod 4096 Oct  6 14:56 /opt/hyperchat-prod
+drwxr-x--- 3 root hyperchat-prod 4096 Oct  6 14:45 /opt/hyperchat-prod/releases
+--------------e------- /opt/hyperchat-prod
+--------------e------- /opt/hyperchat-prod/releases
+current -> /opt/hyperchat-prod/releases/940137070657
+940137070657
+
+## violations (check_isolation.sh strict predicate), full list: owner:group mode type path
+find exit=0
+root:root 755 d /opt/hyperchat-prod/releases/940137070657/backend/app/__pycache__
+root:root 755 d /opt/hyperchat-prod/releases/940137070657/backend/app/admin/__pycache__
+root:root 755 d /opt/hyperchat-prod/releases/940137070657/backend/app/auth/__pycache__
+root:root 755 d /opt/hyperchat-prod/releases/940137070657/backend/app/core/__pycache__
+root:root 755 d /opt/hyperchat-prod/releases/940137070657/backend/app/security/__pycache__
+total=5 pycache=5
+realpath differs:
+(end)
+sha256 of the path list: c61c0dc479119ec8352e26925c079341c61637fe2964e76a1d4a04f5953fbb1c
+
+## contents of the violating directories
+     13 root:root 640 f
+nested directories: 0
+drwxr-xr-x 2 root root 4096 Oct  6 17:05 /opt/hyperchat-prod/releases/940137070657/backend/app/__pycache__
+drwxr-xr-x 2 root root 4096 Oct  6 17:05 /opt/hyperchat-prod/releases/940137070657/backend/app/admin/__pycache__
+drwxr-xr-x 2 root root 4096 Oct  6 17:05 /opt/hyperchat-prod/releases/940137070657/backend/app/auth/__pycache__
+drwxr-xr-x 2 root root 4096 Oct  6 17:05 /opt/hyperchat-prod/releases/940137070657/backend/app/core/__pycache__
+drwxr-xr-x 2 root root 4096 Oct  6 17:05 /opt/hyperchat-prod/releases/940137070657/backend/app/security/__pycache__
+--------------e------- /opt/hyperchat-prod/releases/940137070657/backend/app/__pycache__
+--------------e------- /opt/hyperchat-prod/releases/940137070657/backend/app/admin/__pycache__
+--------------e------- /opt/hyperchat-prod/releases/940137070657/backend/app/auth/__pycache__
+--------------e------- /opt/hyperchat-prod/releases/940137070657/backend/app/core/__pycache__
+--------------e------- /opt/hyperchat-prod/releases/940137070657/backend/app/security/__pycache__
+
+## parents of the violating directories
+root:hyperchat-prod 750 /opt/hyperchat-prod/releases/940137070657/backend/app
+root:hyperchat-prod 750 /opt/hyperchat-prod/releases/940137070657/backend/app/admin
+root:hyperchat-prod 750 /opt/hyperchat-prod/releases/940137070657/backend/app/auth
+root:hyperchat-prod 750 /opt/hyperchat-prod/releases/940137070657/backend/app/core
+root:hyperchat-prod 750 /opt/hyperchat-prod/releases/940137070657/backend/app/security
+
+## running production services and timers
+hyperchat-prod-api: LoadState=loaded ActiveState=active SubState=running MainPID=471695 NRestarts=0 ExecMainStartTimestamp=Tue 2026-10-06 14:56:54 UTC 
+hyperchat-prod-worker: LoadState=not-found ActiveState=inactive SubState=dead MainPID=0 NRestarts=0 ExecMainStartTimestamp= 
+hyperchat-prod-cleanup.timer: LoadState=loaded ActiveState=active SubState=waiting 
+hyperchat-pgbackup.timer: LoadState=loaded ActiveState=active SubState=waiting 
+hyperchat-offsite.timer: LoadState=not-found ActiveState=inactive SubState=dead 
+hyperchat-prod-api pid 471695 user=hyperchat-prod Gid: 986 986 986 986 Groups: 986 
+
+## health
+prod: {"status":"ok","service":"hyperchat-api","release":"940137070657","environment":"production","database":{"label":"PROD hyperchat (HyperChat v2 production)","status":"ok"}}
+dev:  {"status":"ok","service":"hyperchat-api","release":"229fe42381e2","environment":"development","database":{"label":"DEV hyperchat_dev (HyperChat v2 development environment)","status":"ok"}}
+
+## service user access to the active release now
+f: /opt/hyperchat-prod/releases/940137070657/backend/app/main.py
+drwxr-xr-x root root           /
+drwxr-xr-x root root           opt
+drwxr-x--- root hyperchat-prod hyperchat-prod
+drwxr-x--- root hyperchat-prod releases
+drwxr-x--- root hyperchat-prod 940137070657
+drwxr-x--- root hyperchat-prod backend
+drwxr-x--- root hyperchat-prod app
+-rw-r----- root hyperchat-prod main.py
+hyperchat-prod test -x /opt/hyperchat-prod: yes
+hyperchat-prod test -x /opt/hyperchat-prod/releases: yes
+hyperchat-prod test -r /opt/hyperchat-prod/releases/940137070657/backend/app/main.py: yes
+hyperchat-prod test -x /opt/hyperchat-prod/releases/940137070657/venv/bin/python: yes
+
+## current production audit (staged c2fe883 copy, read-only)
+FAIL  release tree /opt/hyperchat-prod owned by root, not writable by group/other, no access for other: /opt/hyperchat-prod/releases/940137070657/backend/app/security/__pycache__ /opt/hyperchat-prod/releases/940137070657/backend/app/__pycache__ /opt/hyperchat-prod/releases/940137070657/backend/app/auth/__pycache__ /opt/hyperchat-prod/releases/940137070657/backend/app/admin/__pycache__ /opt/hyperchat-prod/releases/940137070657/backend/app/core/__pycache__
+OK    no writable directory on the way to /opt/hyperchat-prod
+OK    every symlink under /opt/hyperchat-prod resolves only through root-owned, non-writable paths
+OK    every directory reached through a symlink is root's and not writable by group/other, recursively
+OK    no mount point inside /opt/hyperchat-prod or a directory it links to
+OK    current -> /opt/hyperchat-prod/releases/940137070657
+OK    env directory /etc/hyperchat-prod owned by root, not writable by group/other
+OK    no writable directory on the way to /etc/hyperchat-prod/api.env
+OK    api.env is root:hyperchat-prod 640
+OK    hyperchat-prod-api.service owned by root, not writable by group/other
+OK    hyperchat-prod-api runs as hyperchat-prod
+OK    hyperchat-prod-worker.service not installed (skipped)
+OK    hyperchat-prod-cleanup.service owned by root, not writable by group/other
+OK    hyperchat-prod-cleanup runs as hyperchat-prod
+OK    hyperchat-prod has no login shell
+OK    hyperchat-prod is not in sudo/adm/wheel/root/hyperchat
+FAIL  pg_hba HyperChat rule covers every login role: missing: hyperchat_auth missing: hyperchat_lifecycle missing: hyperchat_stepup
+OK    pg_hba HyperChat rule takes effect (no earlier local rule matches its roles)
+FAIL  pg_ident maps hyperchat-prod to: 'hyperchat_app hyperchat_worker ' (want 'hyperchat_app hyperchat_auth hyperchat_lifecycle hyperchat_worker ')
+OK    pg_ident never maps hyperchat
+OK    only hyperchat-prod-stepup maps to hyperchat_stepup, and hyperchat-prod-stepup to nothing else
+OK    step-up verifier not installed (skipped)
+exit=1
+
+## DEV audit now (read-only)
+21
+exit=1
