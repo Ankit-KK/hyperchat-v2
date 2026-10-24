@@ -9,6 +9,7 @@ Without it the suite keeps its earlier behaviour: any known head passes, undeplo
 """
 
 import hashlib
+import re
 from datetime import datetime
 
 # Every Alembic revision a DEV database may legitimately be at; anything else FAILs.
@@ -211,11 +212,17 @@ LEFTOVER_LABELS = ("users", "sessions", "reset tokens", "invites", "signups", "c
                    "partner signups", "rate limits (this run)")
 
 
-def cleanup(app, owner, domain: str, started: datetime, keys: dict | None = None) -> dict[str, int]:
+def cleanup(app, owner, domain: str, started: datetime, keys: dict | None = None, *, tag: str) -> dict[str, int]:
     """Remove every synthetic row (users @<domain>, creators / orders / partners authtest-*) and this run's own
     rate-limit rows (keys: rate_limit_keys()), and return what is left. Each statement runs on its own (autocommit) so
     one failure cannot skip the rest; a failure is re-raised at the end after the leftover count, which then reports
-    what stayed. Real rows never match the synthetic patterns."""
+    what stayed. Real rows never match the synthetic patterns.
+
+    tag is this run's creator-slug prefix (smoke_dev_backend.TAG): the creator status audit is removed only for the
+    creators it names. Another run's audited creator keeps its audit, so its delete fails and is reported (a FAIL),
+    never removed more broadly."""
+    if not re.fullmatch(r"authtest-[a-z0-9]{3,}", tag):
+        raise ValueError(f"not a synthetic run tag: {tag!r}")
     d = "%" + domain
     rl = {"d": d, "exact": [], "prefixes": [], **(keys or {})}
     steps = [
@@ -232,6 +239,9 @@ def cleanup(app, owner, domain: str, started: datetime, keys: dict | None = None
               "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')", ()),
         (app, "DELETE FROM public.donations WHERE streamer_id IN "
               "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%')", ()),
+        # the status audit is append-only for the runtime roles (0020) and blocks deleting its creator (RESTRICT, 0023)
+        (owner, "DELETE FROM public.creator_status_events WHERE streamer_id IN "
+                "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (tag + "%",)),
         (app, "DELETE FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'", ()),  # cascades its rows
         # users through the owner: since 0024 the runtime roles may not delete an administrator (cascades sessions,
         # tokens, identities and step-up rows)
