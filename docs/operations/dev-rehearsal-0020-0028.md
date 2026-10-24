@@ -65,10 +65,14 @@ Repository facts, `git diff 229fe42381e2 c2fe883`:
 - **The path is production's:** the production unit `hyperchat-pgbackup.service` installed from releases `940137070657` and `229fe42381e2` runs `ExecStart=/usr/local/sbin/hyperchat-pgbackup`. The A3 units in `c2fe883` use the same path. The production timer runs nightly (02:37 UTC on 2026-10-23).
 - **Installing the A3 script there would change production's backup:** a new set layout, new retention, and a required witness that doesn't exist for production (exit 3, the unit fails).
 - **So this rehearsal never writes to `/usr/local/sbin/hyperchat-pgbackup`** and never installs `deploy/backup/*.service|*.timer`. The A3 install for both environments is a separate, later approval.
-- **How the rehearsal runs the A3 script:** directly from the root-only staging copy, with a cleared environment and the DEV profile fixed on the same command line:
+- **The staged `c2fe883` script cannot back up DEV.** It fails on any schema without the enforcement tables: DEV at 0019, production at 0009 (Phase B1 STOP, 2026-10-24, exit 1).
+  - **Cause:** PostgreSQL resolves every table a statement names while parsing it, even inside a `CASE` branch that never runs.
+  - **Fix:** PR Ankit-KK/hyperchat-v2#88 checks existence first, requires exactly one row, and keeps the manifest format.
+- **How the rehearsal runs the A3 script:** from a root-only copy of the **fixed** script, staged in B0 and pinned by its SHA-256 (`BACKUP_SCRIPT` and `BACKUP_SHA` in the session setup; `dev_backup` checks both before every run). It runs with a cleared environment and the DEV profile fixed on the same command line:
   ```
-  env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HYPERCHAT_BACKUP_ENV=dev bash /root/hyperchat-c2fe883/deploy/backup/hyperchat-pgbackup.sh
+  env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HYPERCHAT_BACKUP_ENV=dev bash /root/hyperchat-backupfix/hyperchat-pgbackup.sh
   ```
+  The rest of the `c2fe883` staging copy (A1 fingerprint) stays unchanged and in use.
 - **Why this can't reach production:**
   - The `dev` profile fixes the database (`hyperchat_dev`), port (5433), cluster (`15/restoretest`), directory (`/var/backups/hyperchat-dev`, created root 0700 by the script) and witness (`/var/lib/hyperchat-kyc/dev.witness`).
   - The script refuses any crossed value (`die "dev backs up hyperchat_dev …"`), and `env -i` drops any `HYPERCHAT_BACKUP_*` override from the operator's shell.
@@ -112,6 +116,9 @@ REL_OLD=/opt/hyperchat/releases/229fe42381e2
 REL_NEW=/opt/hyperchat/releases/c2fe883be71d
 STAGE=/root/hyperchat-c2fe883
 ST=/root/rehearsal-dev
+# the fixed backup script (PR #88), staged in B0 and pinned: dev_backup refuses any other content or owner
+BACKUP_SCRIPT=/root/hyperchat-backupfix/hyperchat-pgbackup.sh
+BACKUP_SHA=05509f5e915601169a37604067bd65f55f672ead9db6bb9a602489a2fd7ea854
 FAILED_DB=hyperchat_dev_failed_rehearsal
 RESTORE_DB=hyperchat_dev_rollback_restore
 # Q: one read-only query against the DEV database (port 5433 only; never production)
@@ -153,10 +160,13 @@ api_healthy() { local i out
     sleep 5
   done
   echo "STOP: API not healthy on release $1 within 2 minutes"; return 1; }
-# dev_backup FILE: one DEV backup set (DEV profile on the same line as the script); succeeds only with exit 0 AND a
+# dev_backup FILE: one DEV backup set with the pinned script (DEV profile on the same line); succeeds only with exit 0 AND a
 # "backup ok" line naming a complete set, whose name then goes to $ST/FILE
 dev_backup() { local out rc name
-  out="$(env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HYPERCHAT_BACKUP_ENV=dev bash "$STAGE/deploy/backup/hyperchat-pgbackup.sh" 2>&1)"; rc=$?
+  [ "$(stat -c '%U:%G %a' "${BACKUP_SCRIPT%/*}" 2>/dev/null)" = "root:root 700" ] && [ ! -L "$BACKUP_SCRIPT" ] \
+    && [ "$(stat -c '%U:%G %a' "$BACKUP_SCRIPT" 2>/dev/null)" = "root:root 600" ] \
+    && [ "$(sha256sum "$BACKUP_SCRIPT" | cut -d' ' -f1)" = "$BACKUP_SHA" ] || { echo "STOP: $BACKUP_SCRIPT is not the pinned fixed script (B0)"; return 1; }
+  out="$(env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HYPERCHAT_BACKUP_ENV=dev bash "$BACKUP_SCRIPT" 2>&1)"; rc=$?
   printf '%s\n' "$out"
   [ "$rc" = 0 ] || { echo "STOP: backup exit $rc"; return 1; }
   name="$(printf '%s\n' "$out" | sed -n 's/^backup ok env=dev db=hyperchat_dev set=\([A-Za-z0-9_]*\) .*/\1/p')"
@@ -584,38 +594,94 @@ a9_after && ls -la "$ST"
 ---
 
 ## Phase B: Fresh backup and disposable restore test (approval: "Phase B")
-**B1. One verified DEV backup set** (the DEV profile on the same line; see "The backup script and production"):
+**Requires:** PR Ankit-KK/hyperchat-v2#88 merged into `main` (the fixed backup script), and Phase A complete (A9 OK).
+
+**B0. Stage the fixed backup script** (root-only, pinned). The transfer runs only after A3 passed, and never into an existing directory.
+
+**(workstation)**, after `git fetch origin` (a different script on `main` fails the pin below):
 ```
-rm -f "$ST/phaseB.set"; dev_backup phaseB.set
+git show origin/main:deploy/backup/hyperchat-pgbackup.sh \
+  | ssh root@VPS "[ -f /root/rehearsal-dev/A3-passed ] && [ ! -e /root/hyperchat-backupfix ] && install -d -o root -g root -m 0700 /root/hyperchat-backupfix && cat > /root/hyperchat-backupfix/hyperchat-pgbackup.sh && chmod 0600 /root/hyperchat-backupfix/hyperchat-pgbackup.sh"
 ```
+**(VPS)**: must print `B0 OK`.
+```
+b0_staged() {
+  [ -f "$ST/A3-passed" ] || { echo "STOP: Phase A is not complete"; return 1; }
+  [ ! -e "$ST/B0-passed" ] || { echo "STOP: B0 already passed once"; return 1; }
+  [ "$(stat -c '%U:%G %a' "${BACKUP_SCRIPT%/*}")" = "root:root 700" ] && [ ! -L "$BACKUP_SCRIPT" ] \
+    && [ "$(stat -c '%U:%G %a' "$BACKUP_SCRIPT")" = "root:root 600" ] || { echo "STOP: $BACKUP_SCRIPT is not root-only"; return 1; }
+  [ "$(sha256sum "$BACKUP_SCRIPT" | cut -d' ' -f1)" = "$BACKUP_SHA" ] || { echo "STOP: $BACKUP_SCRIPT is not the pinned script"; return 1; }
+  bash -n "$BACKUP_SCRIPT" || { echo "STOP: syntax"; return 1; }
+  [ "$(sha256sum /usr/local/sbin/hyperchat-pgbackup | cut -d' ' -f1)" = c839856d30dbe62922907f633046d17e14a70f242061b2488d9ed20c3028fed3 ] \
+    || { echo "STOP: the production backup script changed"; return 1; }   # never touched by B0
+  date -u +%FT%TZ > "$ST/B0-passed"
+  echo "B0 OK: $BACKUP_SCRIPT is the pinned fixed script"
+}
+b0_staged
+```
+
+**B1. One verified DEV backup set** (the pinned script, DEV profile on the same line; see "The backup script and production"):
+```
+b1_backup() {  # non-zero on any failure; $ST/phaseB.set exists only after a verified backup
+  rm -f "$ST/phaseB.set"
+  [ -f "$ST/B0-passed" ] || { echo "STOP: B0 has not passed"; return 1; }
+  dev_backup phaseB.set || { rm -f "$ST/phaseB.set"; echo "STOP: the backup failed; $ST/phaseB.set stays absent"; return 1; }
+}
+b1_backup
+```
+- **The backup directory already exists:** `/var/backups/hyperchat-dev` (root 0700, only `.lock`) is left from the stopped 2026-10-24 attempt. The script accepts it as it is; never remove it by hand.
 - **Required:** `SET hyperchat_dev_<UTC>`, written to `$ST/phaseB.set` only when the script exited 0 and named a complete set.
 - **Any other result is a STOP, and `$ST/phaseB.set` stays absent:**
   - exit 3: witness missing, so A3 wasn't done;
-  - 2: refused configuration;
+  - 2: refused configuration, or an enforcement fact that doesn't parse;
   - 4: an older set fails verification (none should exist yet);
   - 75: another run in progress;
-  - 1: failed.
+  - 1: failed (including a failed query, or an enforcement table without exactly one row: never recorded as absent).
 
-**B2. Restore it into a disposable PostgreSQL 15** (`docs/backup-recovery.md` "Verifying a set"). The set is at 0019, so pass its own head (the default would be this checkout's 0028):
+**B2. Restore it into a disposable PostgreSQL 15** (`docs/backup-recovery.md` "Verifying a set"). The set is at 0019, so pass its own head (the default would be this checkout's 0028). It fails closed:
+- `B2-passed` is written only after `restore_check` exited 0, the scratch cluster is gone, and every required JSON field holds.
+- Any failure returns non-zero, with `STOP` and no marker.
 ```
-rm -f "$ST/B2-passed"
-test -s "$ST/phaseB.set" \
-  && ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
-         --set "$(cat "$ST/phaseB.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
-         --expect-head 0019 --output "$ST/restorecheck-0019.json" ) \
-  && date -u +%FT%TZ > "$ST/B2-passed" && echo "B2 OK" || echo "STOP: restore check failed (see $ST/restorecheck-0019.json)"
+b2_restore() { local rc
+  rm -f "$ST/B2-passed"
+  test -s "$ST/phaseB.set" || { echo "STOP: no Phase B set recorded"; return 1; }
+  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] || { echo "STOP: a scratch directory is left from an earlier run"; return 1; }
+  ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
+      --set "$(cat "$ST/phaseB.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
+      --expect-head 0019 --output "$ST/restorecheck-0019.json" ); rc=$?
+  [ "$rc" = 0 ] || { echo "STOP: restore_check exited $rc (see $ST/restorecheck-0019.json)"; return 1; }
+  [ -z "$(ls -d /tmp/hc-restorecheck-* 2>/dev/null)" ] || { echo "STOP: the scratch cluster was not removed (do not delete it by hand)"; return 1; }
+  python3 -I - "$ST/restorecheck-0019.json" "$(cat "$ST/phaseB.set")" <<'PY' || { echo "STOP: the restore check result is not as required"; return 1; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+checks = {"set is the B1 set": d.get("set") == sys.argv[2],
+          "structurally_valid: true": d.get("structurally_valid") is True,
+          "restore_valid: true": d.get("restore_valid") is True,
+          "invariants.alembic_version: 0019": (d.get("invariants") or {}).get("alembic_version") == "0019",
+          "kyc_witness: not_applicable or consistent": d.get("kyc_witness") in ("not_applicable", "consistent"),
+          "live_operation_approved: false": d.get("live_operation_approved") is False}
+for name, ok in checks.items():
+    print(("OK    " if ok else "FAIL  ") + name)
+sys.exit(0 if all(checks.values()) else 1)
+PY
+  date -u +%FT%TZ > "$ST/B2-passed" && echo "B2 OK"
+}
+b2_restore
 ```
 **Required:**
-- `B2 OK` (`restore_check` exits 0 only when the restore is structurally valid and the witness verdict is consistent or not applicable);
-- in the JSON: `structurally_valid: true`, `restore_valid: true`, `invariants.alembic_version: "0019"`;
-- `kyc_witness` `not_applicable` (no KYC tables at 0019) or `consistent`;
-- `live_operation_approved: false` (always).
+- `B2 OK`. `restore_check` exits 0 only when the restore is structurally valid and the witness verdict is `consistent` or `not_applicable`.
+- Every JSON line printed is `OK`:
+  - the set is the B1 set;
+  - `structurally_valid: true`, `restore_valid: true`;
+  - `invariants.alembic_version: "0019"`;
+  - `kyc_witness` is `not_applicable` (no KYC tables at 0019) or `consistent`;
+  - `live_operation_approved: false` (always).
 
-The scratch cluster runs in a temporary directory with no TCP and is deleted afterwards. No live database is touched.
+The scratch cluster runs in a temporary directory (`/tmp/hc-restorecheck-*`) with no TCP and is deleted afterwards. A directory left behind is a STOP, never removed by hand. No live database is touched.
 
 **B3. Fallback:** the older manual dump `hyperchat_dev_pre_main229fe42_20261015T045216Z.dump` stays where it is. Restoring it would lose 8 days of DEV changes. It is a fallback only if the B1 set turns out unusable, and only by separate decision.
 
-**Record:** `$ST/phaseB.set`, `$ST/B2-passed`, the manifest's dump `sha256`, `$ST/restorecheck-0019.json`.
+**Record:** `$ST/B0-passed` with the staged script's SHA-256, `$ST/phaseB.set`, `$ST/B2-passed`, the manifest's dump `sha256`, `$ST/restorecheck-0019.json`.
 
 ---
 
@@ -876,12 +942,16 @@ baseline > "$ST/baseline-after.txt"; diff "$ST/baseline-before.txt" "$ST/baselin
 
 **Privilege isolation**, verified on a restored copy, never by probing the live database:
 ```
-rm -f "$ST/phaseE.set" "$ST/E-restore-passed"
-dev_backup phaseE.set \
-  && ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
-         --set "$(cat "$ST/phaseE.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
-         --output "$ST/restorecheck-0028.json" ) \
-  && date -u +%FT%TZ > "$ST/E-restore-passed" && echo "E2 RESTORE OK" || echo "STOP: backup or restore check failed"
+e2_restore() { local rc  # non-zero on any failure; $ST/E-restore-passed only after both succeeded
+  rm -f "$ST/phaseE.set" "$ST/E-restore-passed"
+  dev_backup phaseE.set || { rm -f "$ST/phaseE.set"; echo "STOP: backup failed"; return 1; }
+  ( cd "$REL_NEW/backend" && ../venv/bin/python -m app.backup.restore_check --env dev --dir /var/backups/hyperchat-dev \
+      --set "$(cat "$ST/phaseE.set")" --pg-bin /usr/lib/postgresql/15/bin --scratch --scratch-user postgres \
+      --output "$ST/restorecheck-0028.json" ); rc=$?
+  [ "$rc" = 0 ] || { echo "STOP: restore check failed (restore_check exited $rc; see $ST/restorecheck-0028.json)"; return 1; }
+  date -u +%FT%TZ > "$ST/E-restore-passed" && echo "E2 RESTORE OK"
+}
+e2_restore
 ```
 **Required:**
 - `E2 RESTORE OK`, and the backup's manifest records alembic `0028` and KYC `draft`;
@@ -1066,7 +1136,7 @@ switch_to_old || enter_stopped_state
 |---|---|---|
 | 0 | read-only commands 0.1–0.4 (0.3 after A1) | any change |
 | A | staging copy and `/root/rehearsal-dev`, target release build (not switched), DEV witness file | backup runs, units or `/usr/local/sbin`, roles, env, migrations |
-| B | one DEV backup run (staging script, DEV profile), one scratch restore check | backup units or timers, anything in C–F |
+| B | staging the fixed backup script (B0, pinned SHA-256, root-only), one DEV backup run with it (DEV profile), one scratch restore check | backup units or timers, `/usr/local/sbin`, anything in C–F |
 | C | `setup_cluster.sh 15 restoretest 5433 hyperchat_dev`, the four pg_ident lines, five `api.env` settings, the cluster reload | restarts, migrations |
 | D | stopping DEV services, migrations 0020–0028 behind the per-revision checks, the gated release switch, start; on failure, the stopped state only | restores, downgrades, re-runs, switching back, smoke tests |
 | Smoke PR | the separate test-only PR (its own review and merge) | anything on the server |
