@@ -4,6 +4,7 @@ See tests/integration.py for how the database is selected and which rows are syn
 Google call leaves the process: the sender and the Google client are in-memory fakes.
 """
 
+import logging
 from urllib.parse import parse_qs, urlparse
 
 import bcrypt
@@ -11,7 +12,7 @@ import bcrypt
 from app.auth.google import GoogleIdentity
 from app.auth.service import GENERIC_LOGIN_ERROR
 from app.auth.tokens import sha256_hex
-from tests.integration import DOMAIN, FRONT, ORIGIN, PASSWORD, requires_db
+from tests.integration import DOMAIN, FRONT, ORIGIN, PASSWORD, CaptureSender, requires_db
 from tests.integration import csrf_headers as _csrf
 from tests.integration import db as _db
 from tests.integration import fixture_db
@@ -450,6 +451,83 @@ def test_expired_invite_is_rejected(app):
     r = _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
                               json={"token": token, "password": "Late-Pass-42"})
     assert r.status_code == 400
+
+
+class _BrokenSender(CaptureSender):
+    """Keeps the message (so a test can try the withheld link), then fails like an unreachable provider."""
+
+    async def send(self, email) -> None:
+        await super().send(email)
+        raise RuntimeError("email provider error")
+
+
+def _invite_state(token):
+    with _db() as conn:
+        return conn.execute("SELECT accepted_at IS NULL, revoked_at IS NOT NULL FROM public.user_invites "
+                            "WHERE token_hash = %s", (sha256_hex(token),)).fetchone()
+
+
+def test_undelivered_invite_answers_502_and_its_link_is_withdrawn(app, caplog):
+    """F1: the invitation row exists but the email failed. The admin gets a clear 502 (never a 500), no link in the
+    response, and the undelivered link is revoked; a retry with a working provider is a new invitation that works."""
+    caplog.set_level(logging.DEBUG)
+    headers = _admin(app)
+    sender, broken = app.app_state.auth.sender, _BrokenSender()
+    app.app_state.auth.sender = broken
+    try:
+        failed = app.post("/api/v1/auth/invites", headers=headers, json={"email": "undelivered" + DOMAIN})
+    finally:
+        app.app_state.auth.sender = sender
+    assert (failed.status_code, failed.json()) == (502, {"error": "The invitation email could not be sent and no link "
+                                                                  "was delivered; retry to send a new invitation"})
+    withheld = broken.last_token()
+    assert withheld not in failed.text and "undelivered" not in failed.text
+    assert _invite_state(withheld) == (True, True)
+    assert _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
+                                 json={"token": withheld, "password": "Invited-Pass-42"}).status_code == 400
+    logged = "\n".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+    assert "invite_delivery_failed" in logged and "invite_withdraw_failed" not in logged
+    assert withheld not in logged and "undelivered" + DOMAIN not in logged
+
+    retry = app.post("/api/v1/auth/invites", headers=headers, json={"email": "undelivered" + DOMAIN})
+    assert retry.status_code == 201
+    token = sender.last_token()
+    assert token != withheld and _invite_state(token) == (True, False)
+    assert _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
+                                 json={"token": token, "password": "Invited-Pass-42"}).status_code == 200
+
+
+def test_undelivered_admin_invite_is_withdrawn(app):
+    """The 0024/0027 guards let the API revoke an open admin invitation too: no admin link survives a failed send."""
+    headers = _admin(app)
+    sender, broken = app.app_state.auth.sender, _BrokenSender()
+    app.app_state.auth.sender = broken
+    try:
+        failed = app.post("/api/v1/auth/invites", headers=headers,
+                          json={"email": "undelivered-admin" + DOMAIN, "role": "admin"})
+    finally:
+        app.app_state.auth.sender = sender
+    assert failed.status_code == 502
+    assert _invite_state(broken.last_token()) == (True, True)
+    assert _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
+                                 json={"token": broken.last_token(), "password": "Admin-Pass-4242"}).status_code == 400
+
+
+def test_invite_withdraw_failure_still_answers_502_and_is_reported(app, caplog, monkeypatch):
+    caplog.set_level(logging.DEBUG)
+    headers = _admin(app)
+    auth = app.app_state.auth
+
+    async def unavailable(invite_id):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(auth.repo, "withdraw_invite", unavailable)
+    monkeypatch.setattr(auth, "sender", _BrokenSender())
+    failed = app.post("/api/v1/auth/invites", headers=headers, json={"email": "unwithdrawn" + DOMAIN})
+    assert failed.status_code == 502 and failed.json()["error"].startswith("The invitation email could not be sent")
+    events = [r.getMessage() for r in caplog.records if r.name == "hyperchat.security"]
+    assert "invite_delivery_failed" in events and "invite_withdraw_failed" in events
+    assert "invite_created" not in events
 
 
 # ── Google ──────────────────────────────────────────────────────────────────────
