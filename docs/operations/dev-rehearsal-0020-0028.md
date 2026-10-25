@@ -137,6 +137,10 @@ roles_sql_ok() {
 }
 FAILED_DB=hyperchat_dev_failed_rehearsal
 RESTORE_DB=hyperchat_dev_rollback_restore
+# Phase F may restore ONLY the Phase B set (taken at 0019; never the Phase E set at 0028) and switch back ONLY to this release
+PHASEB_SET=hyperchat_dev_20261024T140604Z
+PHASEB_SHA=d3192138ed85398087e1139711c1fc099f42e856fb2648eabee730be68dc832d
+OLD_RELEASE_ID=229fe42381e2
 # Q: one read-only query against the DEV database (port 5433 only; never production)
 Q()  { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -Atc "$1"; }
 # QD: the same against a named DEV-cluster database (used only in Phase F)
@@ -262,7 +266,7 @@ dev_backup() { local out rc name
 ```
 - **No bytecode:** the session exports `PYTHONDONTWRITEBYTECODE=1`. Every root-run Python in Phases A–F (the migrations in D, `restore_check` in B, E and F) then writes no root-owned `__pycache__` into a release, which the isolation audits in A, C and E would refuse.
 - **No `set -e`:** it would close an interactive shell on the first error.
-- **Fail-closed functions:** every consequential step (anything that creates, renames, switches or starts) is a function whose steps are chained with `&&`. A failing step makes the function print `STOP: …` and return non-zero before anything later in it runs. Phase D's release switch runs as `d4_switch`: on a failure it returns DEV to the stopped state AND returns non-zero. (Phase F's `… || enter_stopped_state` lines still return 0 when the stop succeeds; read their output, not only the exit status.)
+- **Fail-closed functions:** every consequential step (anything that creates, renames, switches or starts) is a function whose steps are chained with `&&`. A failing step makes the function print `STOP: …` and return non-zero before anything later in it runs. Phase D's release switch runs as `d4_switch`: on a failure it returns DEV to the stopped state AND returns non-zero. Phase F follows the same rule: every step is a function, its release switch runs as `f5_switch`, and each step writes its marker only on success (see "Phase F").
 - **On `STOP`,** don't run the next command. Go to "If a phase fails" below.
 - **Read-only blocks** (inspections, records) may print `STOP` and continue; they change nothing.
 - **Where commands run:** commands marked **(workstation)** run on the operator's machine, in a checkout of this repository; `root@VPS` stands for the server's SSH target, as in `deploy/README.md`. Everything else runs on the VPS as root, after the session setup.
@@ -1850,13 +1854,27 @@ e3_separation
 
 Phase E passes only when `E3 OK: PHASE E PASSED` is printed. Otherwise, "If a phase fails".
 
+**Result: Phase E PASSED (2026-10-25).** E3 printed `E3 OK: PHASE E PASSED` at 08:25:12 UTC.
+- **Markers:** `E0-passed` 2026-10-24T18:20:05Z, `E-resume-checked` 19:20:46Z, `E0b-passed` 19:21:33Z; recovery `E-recover-checked` 2026-10-25T08:11:59Z, `E-recover-cleaned` 08:12:13Z, `E-recovered` 08:12:33Z; `E-resume3-checked` 08:18:49Z, `E0c-passed` 08:23:52Z, `E1-passed` 08:24:18Z, `E2-checks-passed` 08:24:49Z, `E-restore-passed` 08:25:00Z, `E3-passed` 08:25:12Z.
+- **E1** (run `authtest-sm9fbe1d`, from `$SMOKE` at `14e6743`): `smoke_dev_backend.py` 244 passed, 0 failed, 12 blocked (all on the allowed list); `smoke_auth.py` 21 of 21. Its cleanup left no synthetic row.
+- **E2:** `baseline-after.txt` byte-identical to `baseline-before.txt`; set `hyperchat_dev_20261025T082459Z` (`phaseE.set`) restored on a scratch cluster with every check `OK`, and no scratch left.
+- **E3:** DEV on `c2fe883be71d` at 0028; production on `940137070657` at 0009.
+- **The two earlier E1 stops** and the recovery are recorded above. Every Phase E file and marker in `$ST` stays as evidence; nothing below changes them.
+
 ---
 
 ## Phase F: Rollback (approval: "Phase F"; only after a failure and the owner's decision)
 **Goal:** DEV back on release `229fe42381e2` with a database at 0019, the failed database kept for investigation, and **the KYC witness untouched**. Start with the session setup and the stopped state.
 
-Phase F defines its own fail-closed functions. Paste them after the session setup, in the shell that runs Phase F:
+Phase F defines its own fail-closed functions. Paste them after the session setup, in the shell that runs Phase F.
+- **Every step** is a function. It prints `STOP: …` and returns non-zero on any failure, and writes its marker only when everything in it succeeded.
+- **Every later step** refuses to start without the earlier markers: `F-decision.txt` → F1 → `F1-passed` → F2 → `F2-restore` or `F2-release-only` → (restore path: F3 → `F3-verified` → F4 → `F4-done`) → F5 → `F5-done` → F6 → `F6-passed`.
+- **No step converts a failure into success.** F5's release switch runs as `f5_switch`, like `d4_switch`: on a failure it returns DEV to the stopped state AND returns non-zero.
 ```
+# f_names_ok: the database names, the restore set and the old release are the fixed DEV pins (never a production name)
+f_names_ok() { [ "$FAILED_DB" = hyperchat_dev_failed_rehearsal ] && [ "$RESTORE_DB" = hyperchat_dev_rollback_restore ] \
+                 && [ "$PHASEB_SET" = hyperchat_dev_20261024T140604Z ] && [ "$OLD_RELEASE_ID" = 229fe42381e2 ] \
+                 && [ "${REL_OLD##*/}" = "$OLD_RELEASE_ID" ] || { echo "STOP: Phase F database names, set or release pins changed"; return 1; }; }
 # db_names: which of the three names exist on the DEV cluster (read-only)
 db_names() { QP "SELECT string_agg(datname, ',' ORDER BY datname) FROM pg_database WHERE datname IN ('hyperchat_dev', '$RESTORE_DB', '$FAILED_DB')"; }
 no_sessions() { [ -z "$(QP "SELECT 1 FROM pg_stat_activity WHERE datname IN ('hyperchat_dev', '$RESTORE_DB') AND pid <> pg_backend_pid() LIMIT 1")" ] \
@@ -1864,6 +1882,34 @@ no_sessions() { [ -z "$(QP "SELECT 1 FROM pg_stat_activity WHERE datname IN ('hy
 dev_grants() { QP "REVOKE ALL ON DATABASE \"hyperchat_dev\" FROM PUBLIC" \
                && QP "GRANT CONNECT ON DATABASE \"hyperchat_dev\" TO hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, hyperchat_auth, hyperchat_stepup" \
                || { echo "STOP: CONNECT grants on hyperchat_dev"; return 1; }; }
+
+# F1: the owner's written decision, DEV stopped (or a STOP), the witness recorded, production unchanged, only hyperchat_dev
+f1_preconditions() { local out
+  f_names_ok || return 1
+  [ -s "$ST/F-decision.txt" ] || { echo "STOP: no owner decision in $ST/F-decision.txt (Phase F runs only after a failure and the owner's written decision)"; return 1; }
+  [ ! -e "$ST/F1-passed" ] || { echo "STOP: F1 already passed once"; return 1; }
+  [ -z "$(ls "$ST" | grep -xE 'F2-restore|F2-release-only|F3-verified|F4-done|F5-done|F6-passed')" ] || { echo "STOP: a later Phase F marker exists"; return 1; }
+  rm -f "$ST/D3-passed"
+  services_stopped >/dev/null || enter_stopped_state || { echo "STOP: DEV is not in the stopped state; F1 not passed"; return 1; }
+  services_stopped || return 1
+  { stat -c %s "$W" && lsattr "$W"; } > "$ST/witness-F1.txt" && witness_ok || { echo "STOP: the witness (see F6); F1 not passed"; return 1; }
+  prod_ok || return 1
+  out="$(db_names)" && [ "$out" = hyperchat_dev ] || { echo "STOP: expected only hyperchat_dev on the DEV cluster, found '$out'"; return 1; }
+  date -u +%FT%TZ > "$ST/F1-passed" && echo "F1 OK: DEV stopped; witness recorded; databases: $out; hyperchat_dev at $(Q 'SELECT version_num FROM alembic_version')"
+}
+
+# F2: the path follows from the database revision, by machine
+f2_choose() { local head
+  [ -f "$ST/F1-passed" ] || { echo "STOP: F1 has not passed"; return 1; }
+  [ ! -e "$ST/F2-restore" ] && [ ! -e "$ST/F2-release-only" ] || { echo "STOP: the F2 path was already chosen"; return 1; }
+  services_stopped || return 1
+  head="$(Q 'SELECT version_num FROM alembic_version')" || { echo "STOP: cannot read alembic_version"; return 1; }
+  case "$head" in
+    0019) date -u +%FT%TZ > "$ST/F2-release-only" && echo "F2: hyperchat_dev at 0019 -> release only (F5, F6)" ;;
+    002[0-8]) date -u +%FT%TZ > "$ST/F2-restore" && echo "F2: hyperchat_dev at $head -> restore (F3, F4), then F5, F6" ;;
+    *) echo "STOP: hyperchat_dev is at '$head', not 0019-0028"; return 1 ;;
+  esac
+}
 
 # verify_restored: the restored copy is at 0019 and matches the Phase D baseline; only then the F3 marker
 verify_restored() {
@@ -1877,24 +1923,30 @@ verify_restored() {
   date -u +%FT%TZ > "$ST/F3-verified" && echo "F3 VERIFIED"
 }
 
-# restore_into_new: the Phase B set into a NEW database; never touches hyperchat_dev
-restore_into_new() { local name path
+# F3 restore_into_new: the pinned Phase B set (0019) into a NEW database; never touches hyperchat_dev
+restore_into_new() { local path=/var/backups/hyperchat-dev/$PHASEB_SET
+  f_names_ok || return 1
+  [ -f "$ST/F2-restore" ] || { echo "STOP: F2 did not choose the restore path"; return 1; }
   services_stopped || return 1
-  name="$(cat "$ST/phaseB.set")" && [ -n "$name" ] || { echo "STOP: no Phase B set recorded"; return 1; }
-  path="/var/backups/hyperchat-dev/$name"
-  ( cd /var/backups/hyperchat-dev && sha256sum -c "$name.dump.sha256" ) || { echo "STOP: set checksum"; return 1; }
+  [ "$(cat "$ST/phaseB.set")" = "$PHASEB_SET" ] && [ "$PHASEB_SET" != "$(cat "$ST/phaseE.set" 2>/dev/null)" ] || { echo "STOP: $ST/phaseB.set is not the pinned Phase B set"; return 1; }
+  ( cd /var/backups/hyperchat-dev && sha256sum -c "$PHASEB_SET.dump.sha256" ) && [ "$(sha256sum < "$path.dump" | cut -c1-64)" = "$PHASEB_SHA" ] \
+    || { echo "STOP: the Phase B set's checksum"; return 1; }
+  python3 -I -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("alembic_version") == "0019" else 1)' "$path.manifest.json" \
+    || { echo "STOP: the Phase B set's manifest is not at 0019"; return 1; }
   [ "$(db_names)" = "hyperchat_dev" ] || { echo "STOP: expected only hyperchat_dev, found '$(db_names)'"; return 1; }
   # the same encoding and locale as hyperchat_dev (Phase 0.4: UTF8, C.UTF-8 / C.UTF-8), never template1's defaults
   QP "CREATE DATABASE \"$RESTORE_DB\" OWNER hyperchat_owner TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'" \
     && QP "REVOKE ALL ON DATABASE \"$RESTORE_DB\" FROM PUBLIC" \
-    || { echo "STOP: cannot create $RESTORE_DB"; return 1; }
+    || { echo "STOP: cannot create $RESTORE_DB (hyperchat_dev unchanged)"; return 1; }
   sudo -u postgres /usr/lib/postgresql/15/bin/pg_restore -p 5433 --exit-on-error --single-transaction -d "$RESTORE_DB" < "$path.dump" \
     || { echo "STOP: pg_restore failed; $RESTORE_DB is empty and kept; hyperchat_dev unchanged"; return 1; }
   verify_restored
 }
 
-# swap_names: rename 2 runs ONLY if rename 1 succeeded; any failure returns before every later step
+# F4 swap_names: rename 2 runs ONLY if rename 1 succeeded; any failure returns before every later step
 swap_names() {
+  f_names_ok || return 1
+  [ -f "$ST/F2-restore" ] && [ ! -e "$ST/F4-done" ] || { echo "STOP: not on the restore path, or F4 already done"; return 1; }
   [ -f "$ST/F3-verified" ] || { echo "STOP: no F3 verification; run verify_restored"; return 1; }
   rm -f "$ST/F3-verified"
   services_stopped && no_sessions || return 1
@@ -1906,58 +1958,84 @@ swap_names() {
   finish_swap
 }
 finish_swap() {
-  dev_grants && head_is 0019 || return 1
-  baseline > "$ST/baseline-rolledback.txt" && diff "$ST/baseline-restored.txt" "$ST/baseline-rolledback.txt" || { echo "STOP: rolled-back data check"; return 1; }
-  echo "F4 DONE: hyperchat_dev is the restored 0019 database; $FAILED_DB kept"
+  [ "$(db_names)" = "hyperchat_dev,$FAILED_DB" ] || { echo "STOP: after the renames expected hyperchat_dev,$FAILED_DB, found '$(db_names)'"; return 1; }
+  dev_grants && head_is 0019 || { echo "STOP: the swapped hyperchat_dev is not ready; F4 not done (DEV stays stopped)"; return 1; }
+  baseline > "$ST/baseline-rolledback.txt" && diff "$ST/baseline-restored.txt" "$ST/baseline-rolledback.txt" || { echo "STOP: rolled-back data check; F4 not done"; return 1; }
+  date -u +%FT%TZ > "$ST/F4-done" && echo "F4 DONE: hyperchat_dev is the restored 0019 database; $FAILED_DB kept"
 }
 
-# partial-swap recovery: only from exactly the state rename-1-done / rename-2-failed
+# partial-swap recovery (separate owner approval each): only from exactly the state rename-1-done / rename-2-failed
 retry_rename2() {
+  f_names_ok && [ -f "$ST/F2-restore" ] || { echo "STOP: not on the Phase F restore path"; return 1; }
   services_stopped && no_sessions || return 1
   [ "$(db_names)" = "$FAILED_DB,$RESTORE_DB" ] || { echo "STOP: not the partial-swap state; found '$(db_names)'"; return 1; }
-  QP "ALTER DATABASE \"$RESTORE_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: rename 2 failed again"; return 1; }
+  QP "ALTER DATABASE \"$RESTORE_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: rename 2 failed again; the partial-swap state remains"; return 1; }
   finish_swap
 }
 undo_rename1() {
-  services_stopped || return 1
+  f_names_ok && [ -f "$ST/F2-restore" ] || { echo "STOP: not on the Phase F restore path"; return 1; }
+  services_stopped && no_sessions || return 1
   [ "$(db_names)" = "$FAILED_DB,$RESTORE_DB" ] || { echo "STOP: not the partial-swap state; found '$(db_names)'"; return 1; }
-  QP "ALTER DATABASE \"$FAILED_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: undo failed; escalate"; return 1; }
+  QP "ALTER DATABASE \"$FAILED_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: undo failed; the partial-swap state remains; escalate"; return 1; }
+  [ "$(db_names)" = "hyperchat_dev,$RESTORE_DB" ] || { echo "STOP: after the undo expected hyperchat_dev,$RESTORE_DB, found '$(db_names)'"; return 1; }
   echo "UNDONE: hyperchat_dev is the failed database again; $RESTORE_DB kept; DEV stays stopped"
 }
 
-# switch_to_old: only with hyperchat_dev at 0019; worker and timer only after a healthy API on the old release
+# F5 switch_to_old: only on the chosen path's database at 0019; worker and timer only after a healthy API on the old release
 switch_to_old() { local old
-  old="$(cat "$ST/old-release.id")" && [ -n "$old" ] || { echo "STOP: $ST/old-release.id missing"; return 1; }
+  f_names_ok || return 1
+  [ -f "$ST/F1-passed" ] && [ ! -e "$ST/F5-done" ] || { echo "STOP: F1 has not passed, or F5 already done"; return 1; }
+  [ -f "$ST/F2-release-only" ] || { [ -f "$ST/F2-restore" ] && [ -f "$ST/F4-done" ]; } || { echo "STOP: neither the release-only path nor a finished swap (F4)"; return 1; }
+  old="$(cat "$ST/old-release.id")" && [ "$old" = "$OLD_RELEASE_ID" ] || { echo "STOP: $ST/old-release.id is not $OLD_RELEASE_ID"; return 1; }
   services_stopped && head_is 0019 && witness_ok || { echo "STOP: not switching back"; return 1; }
-  ln -sfn "$REL_OLD" /opt/hyperchat/current && [ "$(readlink -f /opt/hyperchat/current)" = "$REL_OLD" ] || { echo "STOP: release link not switched back"; return 1; }
+  ln -sfn "$REL_OLD" "$APP_CURRENT" && [ "$(readlink -f "$APP_CURRENT")" = "$REL_OLD" ] || { echo "STOP: release link not switched back"; return 1; }
   systemctl start hyperchat-api || { echo "STOP: hyperchat-api did not start"; return 1; }
   api_healthy "$old" || return 1
   systemctl start hyperchat-worker || { echo "STOP: hyperchat-worker did not start"; return 1; }
   systemctl start hyperchat-cleanup.timer || { echo "STOP: hyperchat-cleanup.timer did not start"; return 1; }
-  echo "F5 DONE: DEV runs release $old on 0019"
+  date -u +%FT%TZ > "$ST/F5-done" && echo "F5 DONE: DEV runs release $old on 0019"
+}
+f5_switch() {  # non-zero on ANY failure; after a failure DEV is stopped again (or enter_stopped_state says it is not)
+  switch_to_old && return 0
+  echo "STOP: F5 failed; returning DEV to the stopped state (the release link stays where the failure left it)"
+  enter_stopped_state
+  return 1
+}
+
+# F6: the witness unchanged since F1, DEV on the old release at 0019 with every unit active, production unchanged
+f6_checks() {
+  [ -f "$ST/F5-done" ] || { echo "STOP: F5 has not completed"; return 1; }
+  { stat -c %s "$W" && lsattr "$W"; } | diff "$ST/witness-F1.txt" - || { echo "STOP: the witness changed since F1 (keep it; see below)"; return 1; }
+  witness_ok && prod_ok || return 1
+  [ "$(readlink -f "$APP_CURRENT")" = "$REL_OLD" ] && head_is 0019 && api_healthy "$OLD_RELEASE_ID" || { echo "STOP: DEV is not on $OLD_RELEASE_ID at 0019"; return 1; }
+  systemctl is-active --quiet hyperchat-api hyperchat-worker hyperchat-cleanup.timer || { echo "STOP: a DEV unit is not active"; return 1; }
+  date -u +%FT%TZ > "$ST/F6-passed" && echo "F6 OK: witness unchanged; DEV on $OLD_RELEASE_ID at 0019; production unchanged"
 }
 ```
 
+**F0. The owner's decision** (before any Phase F step): record it in `$ST/F-decision.txt`, with the date, the failure it answers and the approval text. F1 refuses without it. Phase E passed, so Phase F now runs only on a new, explicit decision.
+
 **F1. Preconditions:** must print `F1 OK`.
 ```
-rm -f "$ST/D3-passed" "$ST/F3-verified"
-services_stopped || enter_stopped_state
-{ stat -c %s "$W"; lsattr "$W"; } > "$ST/witness-F1.txt"; cat "$ST/witness-F1.txt"
-services_stopped && witness_ok && echo "F1 OK; databases: $(db_names); hyperchat_dev at $(Q 'SELECT version_num FROM alembic_version')"
+f1_preconditions
 ```
-A non-empty witness or one without its `a` flag stops Phase F (see F6).
+A non-empty witness, or one without its `a` flag, stops Phase F (see F6).
 
-**F2. Choose the path:**
-- **Database still at `0019`** (the failure was before 0020 committed, or in the release switch with no revision applied): the database is unchanged. Go to F5 (release only).
-- **Any later revision committed:** restore with F3–F4. Never downgrade.
+**F2. Choose the path,** by machine. It must print `F2: …`.
+```
+f2_choose
+```
+- **Database still at `0019`** (the failure was before 0020 committed, or in the release switch with no revision applied): the database is unchanged. F2 writes `F2-release-only`; go to F5.
+- **Any later revision committed (0020–0028):** F2 writes `F2-restore`; restore with F3–F4. Never downgrade.
 
 **F3. Restore into a new database and verify it, before any rename:**
 ```
 restore_into_new
 ```
 - **Required:** `F3 VERIFIED`. The copy is at 0019 and its data fingerprint equals the Phase D baseline.
+- **Only the pinned Phase B set:** `PHASEB_SET`, with its SHA-256 (`PHASEB_SHA`) and its manifest at 0019. It is never the Phase E set (0028).
 - **Why stdin:** root opens the dump and passes it on stdin to `pg_restore` running as `postgres`, because the backup directory is root 0700.
-- **If the restore fails:** `$RESTORE_DB` stays, empty or partial, and `hyperchat_dev` is unchanged. Dropping it is a separate decision.
+- **If the restore fails:** `$RESTORE_DB` stays, empty or partial, and `hyperchat_dev` is unchanged. Dropping it is a separate decision. A second `restore_into_new` refuses while `$RESTORE_DB` exists.
 - **If the fingerprint differs:** DEV data changed between the Phase B backup and the Phase D baseline. The diff is printed, no marker is written, and the owner decides. With the owner's written acceptance of that loss, `date -u +%FT%TZ > "$ST/F3-verified"` records it. The 0019 check has already passed.
 - **If 0.4 recorded per-database settings:** apply each one now to `$RESTORE_DB` with `ALTER DATABASE … SET …`, written out from the 0.4 record and reviewed before it runs. With no rows in 0.4 (the expected case), skip this.
 
@@ -1967,23 +2045,24 @@ swap_names
 ```
 - **Required:** `F4 DONE`, with `hyperchat_dev` at 0019, CONNECT granted to the seven roles and not to `PUBLIC`, and `$FAILED_DB` kept.
 - **Rename 1 fails** (usually a remaining connection; `no_sessions` lists them): nothing changed and the F3 marker is consumed. Clear the cause, run `verify_restored` again, then `swap_names` again.
-- **Rename 2 fails after rename 1:** the state is exactly `$FAILED_DB` and `$RESTORE_DB` (`db_names` prints them sorted: `hyperchat_dev_failed_rehearsal,hyperchat_dev_rollback_restore`), with **no `hyperchat_dev`**. DEV stays stopped, and no service may start. Then either:
+- **Rename 2 fails after rename 1:** the state is exactly `$FAILED_DB` and `$RESTORE_DB` (`db_names` prints them sorted: `hyperchat_dev_failed_rehearsal,hyperchat_dev_rollback_restore`), with **no `hyperchat_dev`**. DEV stays stopped, and F5 refuses (no `F4-done`). Then, with the owner's approval, either:
   - `retry_rename2`, once the cause is cleared; it finishes the swap and the checks; or
   - `undo_rename1`, which brings back the pre-swap state (`hyperchat_dev` is the failed database again). After that, `verify_restored` and `swap_names` may be retried.
 
   Both refuse unless the cluster is in exactly that partial state.
+- **Both renames done, but the grants, the 0019 check or the data check fail:** `hyperchat_dev` is the restored database, `F4-done` is not written, DEV stays stopped, and F5 refuses. The owner decides.
 - **The failed database** `hyperchat_dev_failed_rehearsal` stays for investigation, untouched. Dropping it is a later, separate approval. No service refers to it by name.
 
-**F5. Release back to `229fe42381e2` and start.** Database at 0019, then a healthy API on the old release, then worker and timer. Any failure leaves DEV stopped:
+**F5. Release back to `229fe42381e2` and start.** Database at 0019, then a healthy API on the old release, then worker and timer. It must print `F5 DONE`; on any failure it prints STOP, returns DEV to the stopped state and exits non-zero:
 ```
-switch_to_old || enter_stopped_state
+f5_switch
 ```
 - **`api.env`:** keep the Phase C settings. The 0019 release ignores them (`extra="ignore"`), and keeping `HYPERCHAT_KYC_WITNESS_PATH` costs nothing. Returning to `$ST/api.env.before-C` is a separate decision.
 - **Roles, pg_hba and pg_ident from Phase C stay.** They are additive and unused by the 0019 release. Reverting them is a separate decision (copy the `before-C` files back, then `pg_ctlcluster 15 restoretest reload`).
 
-**F6. KYC witness: mandatory checks.**
+**F6. KYC witness and final state: mandatory checks.** It must print `F6 OK`.
 ```
-{ stat -c %s "$W"; lsattr "$W"; } | diff "$ST/witness-F1.txt" - && witness_ok && echo "F6 OK: witness unchanged"
+f6_checks
 ```
 - **Never** `rm`, truncate, replace, recreate or `chattr -a` `/var/lib/hyperchat-kyc/dev.witness`. No step above touches it.
 - **Why it stays correct:** enforcement never left `draft`/generation 0, so the witness is empty. An empty witness is consistent with the 0019 database (no KYC tables) and with a later rehearsal attempt.
@@ -1994,6 +2073,20 @@ switch_to_old || enter_stopped_state
   4. record it for the owner.
 
   A later attempt follows `docs/kyc-rollout.md` "After a restore". Never re-anchor or acknowledge automatically.
+
+**After a Phase F failure: what is left, and what needs a separate approval.** No step retries itself, and none drops a database, downgrades or touches production. Every failure below leaves the witness, production, Phase B's set, Phase E's files and markers, and `$FAILED_DB` untouched.
+
+| Failure at | State left | Next step (owner approval each) |
+|---|---|---|
+| F1 | DEV stopped, or `enter_stopped_state` names the unit that did not stop; no `F1-passed` | fix the cause, then F1 |
+| F2 | DEV stopped; no path marker | investigate the revision |
+| F3, before the restore | DEV stopped; `hyperchat_dev` unchanged; no `$RESTORE_DB` (or an empty one if only the REVOKE failed) | fix the cause; drop an empty `$RESTORE_DB` (separate); F3 |
+| F3, `pg_restore` or verify | DEV stopped; `hyperchat_dev` unchanged; `$RESTORE_DB` kept (partial, or full but unverified) | accept or reject in writing; drop `$RESTORE_DB` (separate) |
+| F4, rename 1 | DEV stopped; nothing renamed; `F3-verified` consumed | clear sessions; `verify_restored`; `swap_names` |
+| F4, rename 2 | DEV stopped; `$FAILED_DB` + `$RESTORE_DB`, **no `hyperchat_dev`** | `retry_rename2` or `undo_rename1` |
+| F4, after both renames | DEV stopped; `hyperchat_dev` = restored copy; no `F4-done` | investigate; no automatic F5 |
+| F5 | DEV stopped again (`f5_switch`); the release link wherever the failure left it (old or new); no `F5-done` | investigate; F5 again only on a new approval |
+| F6 | DEV running on the old release; no `F6-passed` | investigate (witness: never modify it) |
 
 **Record:** the path taken, every output, the three baseline files and their diffs, the witness size and flags before and after.
 
@@ -2009,7 +2102,7 @@ switch_to_old || enter_stopped_state
 | D | D1–D4: stopping DEV services (cleanup run included), migrations 0020–0028 behind the machine-checked per-revision checks, the gated release switch, start and the restart watch; on failure, the stopped state only | restores, downgrades, re-runs, switching back, smoke tests |
 | Smoke PR | the separate test-only PR (its own review and merge) | anything on the server |
 | E | E0–E3: the pinned smoke copy, the updated smoke suites, the machine-checked database checks, one more DEV backup and scratch restore, the separation checks | `HYPERCHAT_SMOKE_R2=1` (separate), verifier install, Didit, activation |
-| F | `restore_into_new` (the Phase B set into `hyperchat_dev_rollback_restore`), `swap_names` (rename 2 only after rename 1), on a partial swap `retry_rename2` or `undo_rename1`, CONNECT grants, `switch_to_old` | dropping either kept database, reverting roles / pg_hba / pg_ident / `api.env` |
+| F | after the owner's written decision (`F-decision.txt`): `f1_preconditions` (stopping DEV), `f2_choose`, `restore_into_new` (the pinned Phase B set into `hyperchat_dev_rollback_restore`), `swap_names` (rename 2 only after rename 1), CONNECT grants, `f5_switch`, `f6_checks` | a partial-swap `retry_rename2` / `undo_rename1` (each separately), any retry after a STOP, dropping either kept database, reverting roles / pg_hba / pg_ident / `api.env` |
 
 ## After a successful rehearsal (each separately)
 - The A3 install for both environments: the script at `/usr/local/sbin`, the units, and a production witness. Production's backup changes there, so it needs its own approval.
