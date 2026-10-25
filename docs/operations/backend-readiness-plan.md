@@ -4,6 +4,9 @@
 **[APPROVAL]** needs the owner's explicit approval at the time it runs. Basis: `main` after #99, DEV on release
 `c2fe883be71d` at 0028 (Phase E passed 2026-10-25), production on `940137070657` at 0009.
 
+**Update 2026-10-25, 16:32 UTC:** DEV runs release **`a9b9486efd86`**, deployed application-only with no migration
+(section 4, "DEV deployment of `a9b9486`"). Production is unchanged.
+
 ## 1. Code complete is not verified end to end
 | Area | Code and CI | Verified end to end on DEV | Needed before production |
 |---|---|---|---|
@@ -13,7 +16,7 @@
 | KYC (Didit) | yes | read-only paths only | Didit sandbox, then live [APPROVAL] |
 | Payments (Razorpay) | yes | validation and refusals only; no order, no payment | §4 |
 | Payment health (D7) | yes | CLI installed; the probe was BLOCKED | §4 |
-| Email (Resend), five categories (#105, #106) | yes (merged at `a9b9486`) | not deployed (DEV runs `c2fe883`); no key installed; `disabled` | §4 |
+| Email (Resend), five categories (#105, #106) | yes (merged at `a9b9486`) | code deployed on DEV (`a9b9486efd86`, 2026-10-25); no key installed; `disabled`; no category active | §4 |
 | Uploads and storage (R2), upload cleanup (D9) | yes | BLOCKED (R2 writes not approved) | `HYPERCHAT_SMOKE_R2=1` run [APPROVAL] |
 | TTS, transcription, bots, Google sign-in | yes | not configured | per product scope |
 | Backups and restore checks | yes | yes (DEV: two sets, scratch restores) | A3 install on production (§5) |
@@ -76,10 +79,10 @@ Locally (#101) the same functions already ran against a real PostgreSQL 16 throw
 | D7 payment health: `python -m app.cli --env-file /etc/hyperchat/api.env payment-health` and the admin result | Razorpay test key id, secret, webhook secret | **set**, key mode `test` | one Razorpay API call (`GET /payments?count=1`) |
 | Checkout / order creation | the same | set | creating test-mode orders |
 | PAY-7: a real test payment, status poll and confirm, webhook | the same, plus a test payment through Razorpay's test checkout | set | an owner-run test payment; the webhook URL in the Razorpay **test** dashboard pointing at the DEV API |
-| Email: reset and invite delivery | per category: `HYPERCHAT_EMAIL_<CATEGORY>_FROM`, `_VERIFIED_DOMAIN`, `_RESEND_API_KEY` (one domain-restricted key each); `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES`; `HYPERCHAT_EMAIL_BACKEND=resend` | **unset** (`disabled`; the DEV release predates the categories) | deploy `a9b9486` to DEV; install the five keys (`docs/operations/email-category-keys.md`); activate `onboarding`, then `authentication`, each with a restart and one owner-inbox send |
+| Email: reset and invite delivery | per category: `HYPERCHAT_EMAIL_<CATEGORY>_FROM`, `_VERIFIED_DOMAIN`, `_RESEND_API_KEY` (one domain-restricted key each); `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES`; `HYPERCHAT_EMAIL_BACKEND=resend` | **unset** (`disabled`; DEV runs `a9b9486efd86`, which has the categories, none active) | install the five keys (`docs/operations/email-category-keys.md`); activate `onboarding`, then `authentication`, each with a restart and one owner-inbox send |
 
 **Email status (2026-10-25):**
-- **Code:** merged (`a9b9486`).
+- **Code:** merged (`a9b9486`) and deployed on DEV (release `a9b9486efd86`). Production still runs `940137070657`.
   - five independently configured categories, all off by default;
   - fixed routing: invitations, admin-role included, → onboarding; password reset → authentication;
   - no cross-category fallback;
@@ -88,6 +91,58 @@ Locally (#101) the same functions already ran against a real PostgreSQL 16 throw
   - logs carry no recipient identifier;
   - F1 fixed (#105): an unconfirmed invitation send answers a neutral 502 and its link is revoked.
 - **Resend:** all five DEV domains (`*.quicktestspace.site`) are verified, each with its own key. **Nothing is installed or active on DEV or production.**
+
+**Email readiness checklist:**
+
+| Step | What | Status |
+|---|---|---|
+| 1 | DEV application deployment (`a9b9486efd86`) | **COMPLETE** (2026-10-25, 16:32 UTC; results below) |
+| 2 | Secure Resend credential installation (`docs/operations/email-category-keys.md` steps 1–6) | **PENDING OWNER APPROVAL** |
+| 3 | Onboarding email activation and delivery testing | **NOT AUTHORIZED** |
+| 4 | Authentication email activation and delivery testing | **NOT AUTHORIZED** |
+
+**DEV deployment of `a9b9486` (2026-10-25, 16:32 UTC; verified):**
+- **Releases:** previous `c2fe883be71d`, new `a9b9486efd86`.
+- **Type:** application-only, using `deploy/README.md` "Deploy a commit" steps 1–3 and 5, gated the way rehearsal A2 and D4 were.
+- **No migration:**
+  - the release's newest migration is 0028;
+  - the DEV head is **0028**, unchanged;
+  - `requirements.txt` and the installed dependencies are identical to `c2fe883`.
+- **Release checks:**
+  - the archive matched its pinned SHA-256;
+  - the tree matched its fingerprint (339 files);
+  - files are `root:hyperchat`, with no group write and no access for others;
+  - there is no bytecode;
+  - the service user imported it successfully;
+  - `pip check` passed.
+- **Services:**
+  - **`hyperchat-api` and `hyperchat-worker`:** restarted, active and healthy.
+  - **Restart monitoring:** passed. The main PIDs and restart counts were unchanged over 30 s.
+  - **`hyperchat-cleanup.timer`:** active.
+- **Health:**
+  - **Local `/health`:** `ok`, database `ok`, release `a9b9486efd86`.
+  - **Public `/health`:** HTTP 200, status `ok`, database `ok`. The public answer omits the release by design (security audit F5).
+- **Non-destructive checks:**
+  - `GET /api/v1/public/config` → 200;
+  - unauthenticated `GET /api/v1/auth/session` → 401;
+  - unauthenticated `GET /api/v1/admin/users` → 401;
+  - unauthenticated `POST /api/v1/auth/invites` → 401, with no row created;
+  - no ERROR, CRITICAL or traceback in the API or worker logs since the switch;
+  - KYC enforcement `draft|0`, MFA enforcement `draft`;
+  - the DEV isolation audit is identical to before (23 OK).
+- **Email:**
+  - **`HYPERCHAT_EMAIL_BACKEND`:** `disabled`.
+  - **Active categories:** none. The running API's startup log reports `email_backend=disabled`, `email_categories={}`.
+  - **Resend credentials:** not installed; there are no category variables in `api.env`.
+- **`api.env`:** unchanged (owner, mode `root:hyperchat 0600`, mtime, size and content hash all compared).
+- **Production unchanged:**
+  - release `940137070657`, alembic 0009;
+  - units, states, PID and restart count identical;
+  - `api.env` identical;
+  - `/health` ok;
+  - its isolation audit identical.
+- **Rollback:** not required. The previous release `/opt/hyperchat/releases/c2fe883be71d` is kept. The application-only rollback is to point `current` back to it and restart the API and worker; the database is never touched.
+- **Record (root-only):** `/root/deploy-dev-a9b9486/` holds the before-snapshots, the pinned archive and the step markers.
 - **Not implemented** (P1/P2, `docs/email-architecture-proposal.md` §6): the reset retry, the domain-check CLI, delivery records and any new email trigger.
 - **Before relying on the opt-in check:** the #103 delivery check (`tests/e2e/smoke_integrations.py`) still reads the legacy `HYPERCHAT_RESEND_API_KEY` / `HYPERCHAT_EMAIL_FROM`, not the onboarding category settings. Moving it onto the category settings is a small code follow-up; until then, prove delivery through the activation step in the key runbook.
 
@@ -114,7 +169,7 @@ Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, 
 |---|---|---|
 | 1 | Review and merge #100 (restore_check early error) and #101 (redirectable F3–F4) | code / docs review |
 | 2 | D7 payment-health probe and test-mode order on DEV | [APPROVAL] (credentials already present) |
-| 3 | Email: deploy `a9b9486` to DEV; install the five category keys; activate `onboarding`, then `authentication`, with one owner-inbox send each (DNS and domains already verified; code merged in #105/#106) | [APPROVAL] at each step |
+| 3 | Email: DEV deployment of `a9b9486` **done** (2026-10-25). Next: install the five category keys, then activate `onboarding`, then `authentication`, with one owner-inbox send each (DNS and domains already verified) | [APPROVAL] at each step |
 | 4 | `hyperchat_restore_test` R0 → R2 (→ R4) | [APPROVAL] |
 | 5 | Opt-in smoke sections for Razorpay and email: merged (#103); move the email check onto the onboarding category settings | code |
 | 6 | Disposable F3–F4 rehearsal on the VPS | [APPROVAL] |

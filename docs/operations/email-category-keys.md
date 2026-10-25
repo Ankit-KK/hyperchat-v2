@@ -76,7 +76,7 @@ stat -c '%U:%G %a' /etc/hyperchat/api.env   # expect the same as before (DEV: ro
 grep -E '^HYPERCHAT_EMAIL_(BACKEND|ACTIVE_CATEGORIES)=' /etc/hyperchat/api.env   # expect disabled and empty
 ```
 
-**5. Validate with the deployed code, without activating anything.** This needs a release that contains the P0 email categories. It runs the startup check as if all five categories were active and prints `ok`, or a refusal that names variables only (`hide_input_in_errors`). Root opens `api.env` and passes it on stdin, so the code runs as the service user without that user being able to read the file.
+**5. Validate with the deployed code, without activating anything.** This needs a release that contains the P0 email categories; DEV has had one since 2026-10-25 (`a9b9486efd86`). It runs the startup check as if all five categories were active and prints `ok`, or a refusal that names variables only (`hide_input_in_errors`). Root opens `api.env` and passes it on stdin, so the code runs as the service user without that user being able to read the file.
 ```bash
 cd /opt/hyperchat/current/backend && sudo -u hyperchat env PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -c "
 from app.core.config import Settings
