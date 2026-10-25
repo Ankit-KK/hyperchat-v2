@@ -13,7 +13,7 @@
 | KYC (Didit) | yes | read-only paths only | Didit sandbox, then live [APPROVAL] |
 | Payments (Razorpay) | yes | validation and refusals only; no order, no payment | §4 |
 | Payment health (D7) | yes | CLI installed; the probe was BLOCKED | §4 |
-| Email (Resend) | yes | not configured (`HYPERCHAT_EMAIL_BACKEND=disabled`) | §4 |
+| Email (Resend), five categories (#105, #106) | yes (merged at `a9b9486`) | not deployed (DEV runs `c2fe883`); no key installed; `disabled` | §4 |
 | Uploads and storage (R2), upload cleanup (D9) | yes | BLOCKED (R2 writes not approved) | `HYPERCHAT_SMOKE_R2=1` run [APPROVAL] |
 | TTS, transcription, bots, Google sign-in | yes | not configured | per product scope |
 | Backups and restore checks | yes | yes (DEV: two sets, scratch restores) | A3 install on production (§5) |
@@ -76,10 +76,23 @@ Locally (#101) the same functions already ran against a real PostgreSQL 16 throw
 | D7 payment health: `python -m app.cli --env-file /etc/hyperchat/api.env payment-health` and the admin result | Razorpay test key id, secret, webhook secret | **set**, key mode `test` | one Razorpay API call (`GET /payments?count=1`) |
 | Checkout / order creation | the same | set | creating test-mode orders |
 | PAY-7: a real test payment, status poll and confirm, webhook | the same, plus a test payment through Razorpay's test checkout | set | an owner-run test payment; the webhook URL in the Razorpay **test** dashboard pointing at the DEV API |
-| Email: reset and invite delivery | `HYPERCHAT_RESEND_API_KEY`; a verified sender domain for DEV (SPF/DKIM DNS records); `HYPERCHAT_EMAIL_FROM` on that domain; `HYPERCHAT_EMAIL_BACKEND=resend` | **unset** (`disabled`) | the DNS records; the key in `api.env`; an API restart; sending only to an owner-controlled inbox |
+| Email: reset and invite delivery | per category: `HYPERCHAT_EMAIL_<CATEGORY>_FROM`, `_VERIFIED_DOMAIN`, `_RESEND_API_KEY` (one domain-restricted key each); `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES`; `HYPERCHAT_EMAIL_BACKEND=resend` | **unset** (`disabled`; the DEV release predates the categories) | deploy `a9b9486` to DEV; install the five keys (`docs/operations/email-category-keys.md`); activate `onboarding`, then `authentication`, each with a restart and one owner-inbox send |
+
+**Email status (2026-10-25):**
+- **Code:** merged (`a9b9486`).
+  - five independently configured categories, all off by default;
+  - fixed routing: invitations, admin-role included, → onboarding; password reset → authentication;
+  - no cross-category fallback;
+  - startup refuses mismatched senders or domains, missing or shared keys, and any active category in production;
+  - a 2xx is always success;
+  - logs carry no recipient identifier;
+  - F1 fixed (#105): an unconfirmed invitation send answers a neutral 502 and its link is revoked.
+- **Resend:** all five DEV domains (`*.quicktestspace.site`) are verified, each with its own key. **Nothing is installed or active on DEV or production.**
+- **Not implemented** (P1/P2, `docs/email-architecture-proposal.md` §6): the reset retry, the domain-check CLI, delivery records and any new email trigger.
+- **Before relying on the opt-in check:** the #103 delivery check (`tests/e2e/smoke_integrations.py`) still reads the legacy `HYPERCHAT_RESEND_API_KEY` / `HYPERCHAT_EMAIL_FROM`, not the onboarding category settings. Moving it onto the category settings is a small code follow-up; until then, prove delivery through the activation step in the key runbook.
 
 **How:**
-- **Not yet runnable:** the smoke suite reports these checks BLOCKED unconditionally.
+- **Opt-in since #103:** without the opt-in variables, the smoke suite still reports these checks BLOCKED.
 - **Proposed opt-in sections** (a test-only PR, then a runbook phase), modelled on `HYPERCHAT_SMOKE_R2`:
   - `HYPERCHAT_SMOKE_RAZORPAY=1` runs the D7 probe and creates a test-mode order. It refuses `rzp_live_` keys; the app's settings already refuse live keys outside production.
   - `HYPERCHAT_SMOKE_EMAIL_TO=<owner inbox>` sends one reset and one invite to that inbox only, never to `.invalid` synthetic addresses.
@@ -101,9 +114,9 @@ Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, 
 |---|---|---|
 | 1 | Review and merge #100 (restore_check early error) and #101 (redirectable F3–F4) | code / docs review |
 | 2 | D7 payment-health probe and test-mode order on DEV | [APPROVAL] (credentials already present) |
-| 3 | Resend: DEV sender domain DNS, key, one owner-inbox delivery | [APPROVAL] + owner credentials |
+| 3 | Email: deploy `a9b9486` to DEV; install the five category keys; activate `onboarding`, then `authentication`, with one owner-inbox send each (DNS and domains already verified; code merged in #105/#106) | [APPROVAL] at each step |
 | 4 | `hyperchat_restore_test` R0 → R2 (→ R4) | [APPROVAL] |
-| 5 | Opt-in smoke sections for Razorpay and email (test-only PR) | code |
+| 5 | Opt-in smoke sections for Razorpay and email: merged (#103); move the email check onto the onboarding category settings | code |
 | 6 | Disposable F3–F4 rehearsal on the VPS | [APPROVAL] |
 | 7 | Production A3 backup install; production migration runbook 0010 → 0028 | [APPROVAL] / docs |
 | 8 | Step-up verifier on DEV, then production; enrollment; activation | [APPROVAL] |
