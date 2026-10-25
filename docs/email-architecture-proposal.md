@@ -1,8 +1,10 @@
 # Transactional email: multi-category architecture (proposal)
 
-**Status: PROPOSAL for review. Nothing here is implemented.** No configuration, DNS or credential was changed, and no
-email was sent. Implementing it needs separate approval. The limited delivery smoke test (#103) uses only the verified
-onboarding domain and is separate from this proposal.
+**Status (2026-10-25):**
+- **All five DEV sending domains are verified in Resend.** Each has its own domain-restricted sending key.
+- **No key is installed on DEV or production, and no category is active.**
+- **P0 is implemented for review** (see section 6). Merging it, installing keys (`docs/operations/email-category-keys.md`) and activating categories each need separate approval.
+- The opt-in delivery check (#103) still uses only the onboarding sender.
 
 ## 1. What exists today (audit of `main`)
 **Delivery path.** One global sender:
@@ -59,11 +61,13 @@ onboarding domain and is separate from this proposal.
 ### 2.1 Categories, senders, routing
 | Category | Domain (DEV) | Sender | Templates (today → later) |
 |---|---|---|---|
-| `onboarding` | `onboarding.quicktestspace.site` (**verified**) | `HyperChat <no-reply@onboarding.quicktestspace.site>` | `invite` (T2, T3) |
-| `auth` | `auth.quicktestspace.site` (not yet verified) | `HyperChat Security <no-reply@auth.quicktestspace.site>` | `reset-password` (T1); later security alerts |
-| `notifications` | `notifications.quicktestspace.site` | `HyperChat <no-reply@notifications.quicktestspace.site>` | none yet |
-| `payments` | `payments.quicktestspace.site` | `HyperChat Payments <no-reply@payments.quicktestspace.site>` | none yet (needs a donor-email decision) |
-| `support` | `support.quicktestspace.site` | `HyperChat Support <no-reply@support.quicktestspace.site>` | none yet (needs a support system) |
+| `onboarding` | `onboarding.quicktestspace.site` (verified) | `HyperChat <no-reply@onboarding.quicktestspace.site>` | `invite` (T2, T3) |
+| `authentication` | `auth.quicktestspace.site` (verified) | `HyperChat Security <no-reply@auth.quicktestspace.site>` | `reset-password` (T1); later security alerts |
+| `notifications` | `notifications.quicktestspace.site` (verified) | `HyperChat <no-reply@notifications.quicktestspace.site>` | none yet |
+| `payments` | `payments.quicktestspace.site` (verified) | `HyperChat Payments <no-reply@payments.quicktestspace.site>` | none yet (needs a donor-email decision) |
+| `support` | `support.quicktestspace.site` (verified) | `HyperChat Support <no-reply@support.quicktestspace.site>` | none yet (needs a support system) |
+
+"Verified" means verified in Resend. **None is active:** every category is off until it is listed in `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES`.
 
 **Rules:**
 - **A fixed, code-owned map from template to category** (`app/email/categories.py`). Callers name the template only, never a sender or category, so a reset can never be sent from onboarding.
@@ -104,7 +108,7 @@ The service:
   - 400 / 422: `rejected` — permanent;
   - 429 / 5xx / network or timeout: `transient`.
 - **T1 (reset):** at most 2 attempts inside the existing 15 s deadline and slot, with the same `Idempotency-Key` (derived from the reset token's hash). It still never raises to the caller.
-- **T2 and T3 (invites):** no automatic retry, because the call is synchronous. Both answer 502 `invite_delivery_failed` (T2 gains this, fixing F1), and an admin retry issues a fresh link.
+- **T2 and T3 (invites):** no automatic retry, because the call is synchronous. Both answer 502 (T2 since F1, #105: "Invitation delivery could not be confirmed", the link revoked and never resent), and an admin retry issues a fresh link.
 - **Tokens are never queued.** A raw link or token is never written to the jobs table or any log. Later non-secret notifications may use the existing job queue (`dedupe_key`, backoff) with the same idempotency rule.
 - **Every outcome has a `Delivery` status.**
 
@@ -118,12 +122,12 @@ The service:
 - Reset keeps the generic 202, the rate limits, background dispatch, hashed tokens and active-account-only behaviour.
 - Invitations keep `require_admin`, step-up for admin or creator-linked invitations, and the S3 database guards.
 - Only the sender selection changes, plus F1's error handling.
-- **Owner decision D1:** should admin-role invitations (T2 with `role=admin`) go from `onboarding` (proposed: it is an invitation) or from `auth`?
+- **Owner decision D1 (answered):** every invitation goes from `onboarding`, admin-role invitations included. Password resets and future security events go from `authentication`.
 
 ## 3. Priorities
 | Priority | Work | Notes |
 |---|---|---|
-| **P0** | `EmailService` with the fixed template → category map; per-category config and startup validation; refusal of inactive categories; Resend client with classification and `Idempotency-Key`; delivery logging; T1–T3 moved onto it; **F1 fix** (T2 answers 502) | No migration. Activate `onboarding` first (verified), then `auth` only after `auth.quicktestspace.site` is verified |
+| **P0** | `EmailService` with the fixed template → category map; per-category config and startup validation; refusal of inactive categories; Resend client with classification and `Idempotency-Key`; delivery logging; T1–T3 moved onto it; **F1 fix** (T2 answers 502) | No migration. Activate `onboarding` first, then `authentication` (both domains verified; each activation approved separately) |
 | P0 (ops) | #103 opt-in delivery check from `no-reply@onboarding.quicktestspace.site`; later the same check per category | Each real send approved |
 | P1 | `email-domain-check` CLI; optional `email_deliveries` table; security alerts (password changed / reset completed / admin email corrected) on `auth` | Alerts are new behaviour (owner approval of content and recipients) |
 | P2 | Application decision and welcome emails (`onboarding`); notifications; payments (needs a donor-email and consent decision); support (needs a support system) | Each is new product behaviour |
@@ -139,3 +143,20 @@ The service:
 
 ## 5. Not in scope
 DNS changes, Resend account settings, installing keys on DEV or production, real sends, and frontend work. Each needs separate approval.
+
+## 6. Implementation status (P0, review-only PR)
+**Implemented as designed, with these differences:**
+- **Location.** The code lives in `backend/app/auth/email.py`; there is no new `app/email/` package.
+  - `TEMPLATE_CATEGORY` (the fixed map) and `CategorySender` keep the `sender.send(Email)` interface, so the three call sites, their authorization, rate limits, tokens and responses are untouched.
+  - `sender_from_settings` builds one `ResendSender` per active category.
+- **Settings** follow the Razorpay per-account pattern in `app/core/config.py`, with startup validation in `Settings._validate_email_categories`.
+- **Stricter than section 2.3:**
+  - every active category needs its **own** key; no shared keys at all;
+  - a key must look like a Resend key (`re_`);
+  - **no category may be active in production** until production sending domains are decided (owner decision D2).
+- **The legacy `HYPERCHAT_RESEND_API_KEY` / `HYPERCHAT_EMAIL_FROM`** are no longer used by the API. Only the opt-in #103 check reads them.
+- **Not in P0:**
+  - the bounded retry for T1;
+  - the `email-domain-check` CLI;
+  - the `email_deliveries` table.
+- **F1** was fixed separately in #105 (merged). With P0, an inactive onboarding category also answers that 502 and revokes the link.

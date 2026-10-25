@@ -158,6 +158,9 @@ async def lifespan(app: FastAPI):
                                                creators=settings.bot_creators)
     log.info("authentication", extra={"auth_configured": settings.auth_secret is not None,
                                       "email_backend": settings.email_backend,
+                                      # Category names and domains only, never keys or senders' secrets.
+                                      "email_categories": {c: settings.email_category(c)[2]
+                                                           for c in settings.email_categories},
                                       "google_enabled": settings.google_enabled})
     # Variable names only, never values.
     log.info("uploads", extra={"upload_grants_configured": settings.upload_grants_configured,

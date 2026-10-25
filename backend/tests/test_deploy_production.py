@@ -237,7 +237,8 @@ def test_production_env_template_values():
         "HYPERCHAT_ALLOWED_ORIGINS": "", "HYPERCHAT_SESSION_COOKIE_SAMESITE": "lax", "HYPERCHAT_SESSION_IDLE_DAYS": "7",
         "HYPERCHAT_SESSION_ABSOLUTE_DAYS": "30", "HYPERCHAT_ADMIN_SESSION_IDLE_HOURS": "2",
         "HYPERCHAT_ADMIN_SESSION_ABSOLUTE_HOURS": "12", "HYPERCHAT_AUTH_RETURN_INVITE_LINKS": "false",
-        "HYPERCHAT_EMAIL_BACKEND": "disabled", "HYPERCHAT_EMAIL_FROM": "HyperChat <no-reply@hyperchat.space>",
+        "HYPERCHAT_EMAIL_BACKEND": "disabled", "HYPERCHAT_EMAIL_ACTIVE_CATEGORIES": "",
+        "HYPERCHAT_EMAIL_FROM": "HyperChat <no-reply@hyperchat.space>",
         # the worker (hyperchat-prod-worker.service): every integration explicitly off until approved
         "HYPERCHAT_WORKER_CONCURRENCY": "2", "HYPERCHAT_AUDIO_PROVIDERS_ENABLED": "false",
         "HYPERCHAT_REALTIME_ENABLED": "false", "HYPERCHAT_BOTS_ENABLED": "false"}
@@ -251,6 +252,7 @@ def test_production_env_template_passes_the_production_guards(monkeypatch):
     assert s.app_env == "production" and s.db_name == "hyperchat" and s.db_port == 5432
     assert s.session_cookie_samesite == "lax" and s.browser_origins == frozenset({"https://hyperchat.space"})
     assert s.auth_secret is None and s.google_enabled is False and s.resend_api_key is None
+    assert s.email_categories == ()  # no email category in production until its domains are approved
     # the worker's integrations: all off, nothing configured, until set on the server with approval
     assert s.worker_concurrency == 2 and s.audio_providers_enabled is False and s.realtime_enabled is False
     assert s.bots_enabled is False and not s.telegram_configured and not s.discord_configured

@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 import bcrypt
 import httpx
 
+from app.auth.email import CategorySender
 from app.auth.google import GoogleIdentity
 from app.auth.service import GENERIC_LOGIN_ERROR
 from app.auth.tokens import sha256_hex
@@ -492,6 +493,16 @@ def _invite_with(app, monkeypatch, headers, sender, address, **body):
     r = app.post("/api/v1/auth/invites", headers=headers, json={"email": address, **body})
     monkeypatch.undo()
     return r
+
+
+def test_an_invite_is_never_sent_from_another_category(app, monkeypatch):
+    """Only authentication active: the invitation (onboarding) is refused, never re-routed, and withdrawn."""
+    headers, other = _admin(app), CaptureSender()
+    r = _invite_with(app, monkeypatch, headers, CategorySender({"authentication": other}), "wrong-category" + DOMAIN)
+    assert (r.status_code, r.json()) == (502, UNCONFIRMED) and other.sent == []
+    with _db() as conn:
+        assert conn.execute("SELECT revoked_at IS NOT NULL FROM public.user_invites WHERE email = %s",
+                            ("wrong-category" + DOMAIN,)).fetchone() == (True,)
 
 
 def test_unconfirmed_delivery_answers_502_and_revokes_the_link_even_if_it_arrived(app, caplog, monkeypatch):
