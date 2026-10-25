@@ -53,7 +53,7 @@ HYPERCHAT_SMOKE_EMAIL_TO=you@example.org HYPERCHAT_SMOKE_EMAIL_ALLOW=you@example
 - **Email:**
   - sent only to an address listed exactly in `HYPERCHAT_SMOKE_EMAIL_ALLOW`, never to a reserved or synthetic domain;
   - only with `HYPERCHAT_EMAIL_BACKEND=resend` and a key;
-  - only from the approved DEV sender `no-reply@mail.quicktestspace.site` (`HYPERCHAT_EMAIL_FROM`, a display name allowed).
+  - only from the approved DEV sender `no-reply@onboarding.quicktestspace.site` (`HYPERCHAT_EMAIL_FROM`, a display name allowed).
 - **Evidence:**
   - Each line shows the key mode, the order id and amount, the masked recipient and the run tag.
   - Provider errors appear only as a reason code or an exception type, and a settings error only as its type.

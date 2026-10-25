@@ -20,7 +20,7 @@ from app.payments.razorpay import Order  # noqa: E402
 TEST_KEY, LIVE_KEY, SECRET, WEBHOOK = "rzp_test_AbCdEf123456", "rzp_live_AbCdEf123456", "s3cr3t-key-value-xyz", "whsec-value-123456"
 RESEND = "re_resend_api_key_value_123"
 OWNER = "owner.inbox@gmail.com"
-SENDER = "HyperChat DEV <no-reply@mail.quicktestspace.site>"
+SENDER = "HyperChat <no-reply@onboarding.quicktestspace.site>"
 RAZORPAY = {"HYPERCHAT_SMOKE_RAZORPAY": "1"}
 EMAIL = {"HYPERCHAT_SMOKE_EMAIL_TO": OWNER, "HYPERCHAT_SMOKE_EMAIL_ALLOW": OWNER}
 
@@ -267,17 +267,23 @@ def test_email_refuses_without_an_exact_allowlisted_real_recipient(env_file, env
 @pytest.mark.parametrize("st,reason", [
     (settings(backend="disabled"), "the email backend is not resend"),
     (settings(resend=""), "the email backend is not resend"),
-    (settings(sender="HyperChat <no-reply@hyperchat.space>"), "not the approved DEV sender no-reply@mail.quicktestspace.site"),
+    (settings(sender="HyperChat <no-reply@hyperchat.space>"), "not the approved DEV sender no-reply@onboarding.quicktestspace.site"),
     (settings(sender="no-reply@quicktestspace.site"), "not the approved DEV sender"),
-    (settings(sender="no-reply@mail.quicktestspace.site.evil.com"), "not the approved DEV sender"),
+    (settings(sender="no-reply@onboarding.quicktestspace.site.evil.com"), "not the approved DEV sender"),
     (settings(sender=""), "not the approved DEV sender"),
+    # the other planned category domains are not verified: this check never sends from them
+    (settings(sender="HyperChat Security <no-reply@auth.quicktestspace.site>"), "not the approved DEV sender"),
+    (settings(sender="HyperChat <no-reply@notifications.quicktestspace.site>"), "not the approved DEV sender"),
+    (settings(sender="HyperChat Payments <no-reply@payments.quicktestspace.site>"), "not the approved DEV sender"),
+    (settings(sender="HyperChat Support <no-reply@support.quicktestspace.site>"), "not the approved DEV sender"),
+    (settings(sender="HyperChat <hello@onboarding.quicktestspace.site>"), "not the approved DEV sender"),
 ])
 def test_email_refuses_without_the_resend_backend_key_and_approved_sender(env_file, st, reason):
     code, out = run(EMAIL, st, approved=env_file)
     assert code == 1 and reason in out
 
 
-@pytest.mark.parametrize("sender", [SENDER, "no-reply@mail.quicktestspace.site", "NO-REPLY@mail.quicktestspace.site"])
+@pytest.mark.parametrize("sender", [SENDER, "no-reply@onboarding.quicktestspace.site", "NO-REPLY@onboarding.quicktestspace.site"])
 def test_one_message_from_the_approved_sender_to_the_allowlisted_recipient(env_file, sender):
     FakeSender.sent, FakeSender.fail = [], False
     code, out = run({"HYPERCHAT_SMOKE_EMAIL_TO": OWNER.upper(), "HYPERCHAT_SMOKE_EMAIL_ALLOW": f"x@y.org, {OWNER}"},
@@ -285,7 +291,7 @@ def test_one_message_from_the_approved_sender_to_the_allowlisted_recipient(env_f
     assert code == 0 and [s[0] for s in FakeSender.sent] == ["init", "send"]
     assert FakeSender.sent[0][1:] == (RESEND, sender) and FakeSender.sent[1][1].to == OWNER
     assert "delivery check" in FakeSender.sent[1][1].subject
-    assert f"for {ip.mask(OWNER)} from no-reply@mail.quicktestspace.site" in out and ip.mask(OWNER) == "o***@gmail.com"
+    assert f"for {ip.mask(OWNER)} from no-reply@onboarding.quicktestspace.site" in out and ip.mask(OWNER) == "o***@gmail.com"
     no_secret(out)
 
 
@@ -309,7 +315,7 @@ def real_env_file(env_file, monkeypatch):
         "HYPERCHAT_APP_ENV=development", f"HYPERCHAT_RAZORPAY_PRIMARY_KEY_ID={TEST_KEY}",
         f"HYPERCHAT_RAZORPAY_PRIMARY_KEY_SECRET={SECRET}", f"HYPERCHAT_RAZORPAY_PRIMARY_WEBHOOK_SECRET={WEBHOOK}",
         "HYPERCHAT_EMAIL_BACKEND=resend", f"HYPERCHAT_RESEND_API_KEY={RESEND}",
-        "HYPERCHAT_EMAIL_FROM=HyperChat DEV <no-reply@mail.quicktestspace.site>", ""]))
+        "HYPERCHAT_EMAIL_FROM=HyperChat <no-reply@onboarding.quicktestspace.site>", ""]))
     return env_file
 
 
@@ -320,13 +326,13 @@ def test_the_real_settings_loader_reads_only_the_approved_file(real_env_file):
                    approved_env_file=real_env_file)
     text = "\n".join(out)
     assert code == 0 and rp.calls == [("probe", TEST_KEY)], text
-    assert FakeSender.sent[0][1:] == (RESEND, "HyperChat DEV <no-reply@mail.quicktestspace.site>")
+    assert FakeSender.sent[0][1:] == (RESEND, "HyperChat <no-reply@onboarding.quicktestspace.site>")
     no_secret(text)
 
 
 def test_the_real_settings_loader_refuses_a_file_with_the_production_sender(real_env_file):
     Path(real_env_file).write_text(Path(real_env_file).read_text().replace(
-        "HyperChat DEV <no-reply@mail.quicktestspace.site>", "HyperChat <no-reply@hyperchat.space>"))
+        "HyperChat <no-reply@onboarding.quicktestspace.site>", "HyperChat <no-reply@hyperchat.space>"))
     out: list[str] = []
     code = si.main(env=EMAIL, client_factory=never, sender_factory=never, out=out.append, approved_env_file=real_env_file)
     assert code == 1 and "not the approved DEV sender" in "\n".join(out)
@@ -337,4 +343,4 @@ def test_the_policy_never_runs_outside_development():
         assert ip.razorpay_plan(RAZORPAY, app_env, TEST_KEY)[0] == "refuse"
         assert ip.email_plan(EMAIL, app_env, "resend", True, SENDER)[0] == "refuse"
     assert ip.key_mode(TEST_KEY) == "test" and ip.key_mode(LIVE_KEY) == "live"
-    assert ip.DEV_ENV_FILE == "/etc/hyperchat/api.env" and ip.APPROVED_SENDER == "no-reply@mail.quicktestspace.site"
+    assert ip.DEV_ENV_FILE == "/etc/hyperchat/api.env" and ip.APPROVED_SENDER == "no-reply@onboarding.quicktestspace.site"

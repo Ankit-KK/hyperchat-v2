@@ -10,7 +10,7 @@ Environment (nothing else named HYPERCHAT_* may be set: it would override the se
     HYPERCHAT_SMOKE_RAZORPAY_ORDER=1  additionally ONE test-mode order of INR 1.00 (receipt authtest-int-<tag>)
     HYPERCHAT_SMOKE_EMAIL_TO=addr   ONE delivery-check message to addr, only if addr is in
     HYPERCHAT_SMOKE_EMAIL_ALLOW     exact addresses, comma-separated (no wildcards, no reserved/synthetic domains),
-                                    sent from the approved DEV sender no-reply@mail.quicktestspace.site
+                                    sent from the approved DEV sender no-reply@onboarding.quicktestspace.site
 Evidence: PASS / FAIL / SKIPPED / REFUSED lines with the key MODE, the order id and amount, the masked recipient and a
 run tag to find the message. Key ids, secrets and the full recipient are never printed: provider errors are reduced to
 a reason code or an exception type, and any line that would carry one of them is withheld before it is printed.

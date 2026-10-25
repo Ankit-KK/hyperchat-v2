@@ -10,7 +10,7 @@ Every check is OFF unless explicitly enabled, and refuses rather than guesses:
     HYPERCHAT_SMOKE_RAZORPAY_ORDER=1 additionally creates ONE test-mode order. Only rzp_test_ keys.
   * Email: HYPERCHAT_SMOKE_EMAIL_TO=<address> sends ONE message, only when the same address is listed in
     HYPERCHAT_SMOKE_EMAIL_ALLOW (exact addresses, comma-separated), never to a reserved or synthetic domain, only with
-    the resend backend configured and the approved DEV sender no-reply@mail.quicktestspace.site.
+    the resend backend configured and the approved DEV sender no-reply@onboarding.quicktestspace.site.
 """
 
 import os
@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from email.utils import parseaddr
 
 DEV_ENV_FILE = "/etc/hyperchat/api.env"
-APPROVED_SENDER = "no-reply@mail.quicktestspace.site"
+APPROVED_SENDER = "no-reply@onboarding.quicktestspace.site"
 KNOWN_SMOKE_VARS = ("HYPERCHAT_SMOKE_ENV_FILE", "HYPERCHAT_SMOKE_RAZORPAY", "HYPERCHAT_SMOKE_RAZORPAY_ORDER",
                     "HYPERCHAT_SMOKE_EMAIL_TO", "HYPERCHAT_SMOKE_EMAIL_ALLOW")
 FLAGS = ("HYPERCHAT_SMOKE_RAZORPAY", "HYPERCHAT_SMOKE_RAZORPAY_ORDER")
