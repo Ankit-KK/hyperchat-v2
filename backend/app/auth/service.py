@@ -5,7 +5,7 @@ import ipaddress
 import uuid
 from dataclasses import dataclass
 
-from app.auth.email import DisabledSender, EmailSender, ResendSender, render
+from app.auth.email import EmailSender, render, sender_from_settings
 from app.auth.google import GoogleAuthError, GoogleOAuth
 from app.auth.passwords import hash_password, needs_rehash, validate_new_password, verify_password
 from app.auth.repository import (
@@ -100,9 +100,7 @@ class AuthService:
 
     @classmethod
     def from_settings(cls, settings: Settings, repo: AuthRepository) -> "AuthService":
-        sender: EmailSender = DisabledSender()
-        if settings.email_backend == "resend" and settings.resend_api_key:
-            sender = ResendSender(settings.resend_api_key.get_secret_value(), settings.email_from)
+        sender = sender_from_settings(settings)
         google = None
         if settings.google_enabled:
             google = GoogleOAuth(settings.google_client_id, settings.google_client_secret.get_secret_value(),

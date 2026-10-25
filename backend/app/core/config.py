@@ -10,6 +10,7 @@ import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from email.utils import parseaddr
 from urllib.parse import urlsplit
 
 from psycopg.conninfo import make_conninfo
@@ -24,6 +25,11 @@ _R2_ACCOUNT = re.compile(r"^[A-Za-z0-9]{1,64}$")  # becomes part of a host name:
 _R2_BUCKET = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 RAZORPAY_ACCOUNTS = ("primary",)  # values of streamers.razorpay_account (D6: secondary retired)
 PUSHER_GROUPS = (1, 2, 3, 4)  # configurable Pusher apps (streamers.pusher_group 5..10 use group 1)
+# Email category -> its DEV/test sending domain (each verified separately in Resend). Production domains are an
+# owner decision not yet made: until then no category may be activated in production.
+EMAIL_DEV_DOMAINS = {"onboarding": "onboarding.quicktestspace.site", "authentication": "auth.quicktestspace.site",
+                     "notifications": "notifications.quicktestspace.site",
+                     "payments": "payments.quicktestspace.site", "support": "support.quicktestspace.site"}
 _PUSHER_APP_ID = re.compile(r"^[0-9]{1,20}$")
 _PUSHER_KEY = re.compile(r"^[A-Za-z0-9]{1,64}$")
 _PUSHER_CLUSTER = re.compile(r"^[a-z0-9]{1,20}$")  # becomes part of a host name (api-<cluster>.pusher.com)
@@ -127,8 +133,28 @@ class Settings(BaseSettings):
     auth_return_invite_links: bool = False  # dev convenience: include the accept URL in the admin response
 
     email_backend: Literal["disabled", "resend"] = "disabled"
+    # Used only by the opt-in delivery check (tests/e2e/smoke_integrations.py); the API sends per category (below).
     resend_api_key: SecretStr | None = None
     email_from: str = "HyperChat <no-reply@hyperchat.space>"
+    # ── Transactional email by category (docs/email-architecture-proposal.md). The template decides the category
+    #    in code (app.auth.email.TEMPLATE_CATEGORY); a category sends only when listed here, with its own sender
+    #    and its own domain-restricted Resend key. Never a fallback to another category. Empty = nothing is sent.
+    email_active_categories: str = ""
+    email_onboarding_from: str = ""
+    email_onboarding_resend_api_key: SecretStr | None = None
+    email_onboarding_verified_domain: str = ""  # set by the operator only after Resend shows the domain verified
+    email_authentication_from: str = ""
+    email_authentication_resend_api_key: SecretStr | None = None
+    email_authentication_verified_domain: str = ""
+    email_notifications_from: str = ""
+    email_notifications_resend_api_key: SecretStr | None = None
+    email_notifications_verified_domain: str = ""
+    email_payments_from: str = ""
+    email_payments_resend_api_key: SecretStr | None = None
+    email_payments_verified_domain: str = ""
+    email_support_from: str = ""
+    email_support_resend_api_key: SecretStr | None = None
+    email_support_verified_domain: str = ""
 
     google_client_id: str | None = None
     google_client_secret: SecretStr | None = None
@@ -419,6 +445,47 @@ class Settings(BaseSettings):
             raise ValueError(f"Refusing to start: test Razorpay keys in production: {found}")
         if found:
             raise ValueError(f"Refusing to start: live Razorpay keys outside production: {found}")
+        return self
+
+    @property
+    def email_categories(self) -> tuple[str, ...]:
+        """The activated email categories, as listed (names checked at startup)."""
+        return tuple(dict.fromkeys(c.strip().lower() for c in self.email_active_categories.split(",") if c.strip()))
+
+    def email_category(self, category: str) -> tuple[str, str, str]:
+        """(from, Resend key, verified domain) of a category in EMAIL_DEV_DOMAINS; "" for unset values."""
+        if category not in EMAIL_DEV_DOMAINS:
+            raise ValueError("unknown email category")
+        return (getattr(self, f"email_{category}_from").strip(),
+                _secret_value(getattr(self, f"email_{category}_resend_api_key")),
+                getattr(self, f"email_{category}_verified_domain").strip().lower())
+
+    @model_validator(mode="after")
+    def _validate_email_categories(self) -> "Settings":
+        """Every activated category needs its own key and a sender on its own, operator-verified domain. Variable
+        names only in the refusal, never values."""
+        active = self.email_categories
+        unknown = [c for c in active if c not in EMAIL_DEV_DOMAINS]
+        if unknown:
+            raise ValueError(f"Refusing to start: unknown HYPERCHAT_EMAIL_ACTIVE_CATEGORIES entries: {unknown}")
+        if active and self.app_env == "production":
+            raise ValueError("Refusing to start: no email category is approved for production yet "
+                             "(HYPERCHAT_EMAIL_ACTIVE_CATEGORIES must be empty)")
+        keys: dict[str, str] = {}
+        for category in active:
+            sender, key, verified = self.email_category(category)
+            name, domain = f"HYPERCHAT_EMAIL_{category.upper()}", EMAIL_DEV_DOMAINS[category]
+            address = parseaddr(sender)[1].strip().lower()
+            if verified != domain:
+                raise ValueError(f"Refusing to start: {name}_VERIFIED_DOMAIN must be {domain} (verified in Resend)")
+            if address.rpartition("@")[2] != domain or not address.partition("@")[0]:
+                raise ValueError(f"Refusing to start: {name}_FROM must be an address on {domain}")
+            if not key.startswith("re_"):
+                raise ValueError(f"Refusing to start: {name}_RESEND_API_KEY is missing or not a Resend key")
+            if key in keys:
+                raise ValueError(f"Refusing to start: {name}_RESEND_API_KEY is the same key as "
+                                 f"HYPERCHAT_EMAIL_{keys[key].upper()}_RESEND_API_KEY (one key per category)")
+            keys[key] = category
         return self
 
     @model_validator(mode="after")
