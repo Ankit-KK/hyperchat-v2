@@ -141,12 +141,15 @@ RESTORE_DB=hyperchat_dev_rollback_restore
 PHASEB_SET=hyperchat_dev_20261024T140604Z
 PHASEB_SHA=d3192138ed85398087e1139711c1fc099f42e856fb2648eabee730be68dc832d
 OLD_RELEASE_ID=229fe42381e2
+# the DEV cluster 15/restoretest, as every helper below reaches it (socket directory and port; never production's 5432)
+DEV_PGHOST=/var/run/postgresql
+DEV_PGPORT=5433
 # Q: one read-only query against the DEV database (port 5433 only; never production)
-Q()  { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -Atc "$1"; }
+Q()  { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d hyperchat_dev -Atc "$1"; }
 # QD: the same against a named DEV-cluster database (used only in Phase F)
-QD() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d "$1" -Atc "$2"; }
+QD() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d "$1" -Atc "$2"; }
 # QP: the DEV cluster's maintenance database (database-level statements; port 5433 only)
-QP() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d postgres -Atc "$1"; }
+QP() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d postgres -Atc "$1"; }
 # the DEV cluster's configuration directory and the DEV environment file (Phase C)
 PGCONF=/etc/postgresql/15/restoretest
 API_ENV=/etc/hyperchat/api.env
@@ -217,8 +220,8 @@ RUN2_BASE_OBS='obs_tokens_active|202'
 ATTEMPT1_SHA=10375f5d36aa19604acfb7c179acae8c5470b668fe3a6c321edf94d2717aa21f
 ATTEMPT2_SHA=57bd2ffec8a35528cafcd0f77db2c458751e3e6fb52b54e81ec3b1ea897e67b8
 # DEV database sessions for the recovery (port 5433 only): read-only, and the one cleanup transaction
-psql_dev_ro() { (cd /tmp && sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -At "$@"); }
-psql_dev_rw() { (cd /tmp && sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -At "$@"); }
+psql_dev_ro() { (cd /tmp && sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d hyperchat_dev -At "$@"); }
+psql_dev_rw() { (cd /tmp && sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d hyperchat_dev -At "$@"); }
 # gexec SQL [psql args]: SQL generates one counting query per table or column (\gexec); prints the non-empty results
 # sorted on one line, or QUERY-FAILED (non-zero) when psql fails (read-only)
 gexec() { local out; out="$(printf '%s\n\\gexec\n' "$1" | psql_dev_ro "${@:2}")" || { echo QUERY-FAILED; return 1; }
@@ -1870,7 +1873,54 @@ Phase F defines its own fail-closed functions. Paste them after the session setu
 - **Every step** is a function. It prints `STOP: …` and returns non-zero on any failure, and writes its marker only when everything in it succeeded.
 - **Every later step** refuses to start without the earlier markers: `F-decision.txt` → F1 → `F1-passed` → F2 → `F2-restore` or `F2-release-only` → (restore path: F3 → `F3-verified` → F4 → `F4-done`) → F5 → `F5-done` → F6 → `F6-passed`.
 - **No step converts a failure into success.** F5's release switch runs as `f5_switch`, like `d4_switch`: on a failure it returns DEV to the stopped state AND returns non-zero.
+- **Every database call** (`Q`, `QD`, `QP` and `restore_into_new`'s `pg_restore`) reaches the cluster named by `DEV_PGHOST` / `DEV_PGPORT` from the session setup; no Phase F command names a socket or port of its own.
+- **Every database change** (`CREATE DATABASE`, `pg_restore`, each rename, the grants) runs only after `f_target_ok` passes, immediately before it.
+  - **Live use** (`F_REHEARSAL` unset): the target must be exactly DEV's socket `/var/run/postgresql` and port 5433.
+  - **Rehearsal mode** (`f_scratch_enter`, see "Disposable rehearsal of F3–F4"): the target must be the verified scratch cluster and nothing else.
+  - **Either way,** an inherited `PG*` setting in the shell is a STOP.
 ```
+# ── target guard. Live use leaves F_REHEARSAL unset; rehearsal mode is entered only by f_scratch_enter. ──
+F_SCRATCH_PREFIX=/tmp/hc-frehearsal-
+# f_live_sysid PORT: a live cluster's system identifier (read-only), through its fixed socket directory and port
+f_live_sysid() { (cd /tmp && sudo -u postgres psql -X -q -At -h /var/run/postgresql -p "$1" -d postgres -c 'SELECT system_identifier FROM pg_control_system()' 2>/dev/null); }
+# f_target_ok: runs immediately before EVERY database change in Phase F; anything but the expected target is a STOP
+f_target_ok() { local dir sysid
+  ! env | grep -qE '^PG[A-Z]+=' || { echo "STOP: inherited PG* settings in this shell ($(env | grep -oE '^PG[A-Z]+' | tr '\n' ' '))"; return 1; }
+  if [ -z "${F_REHEARSAL:-}" ]; then
+    [ "$DEV_PGHOST" = /var/run/postgresql ] && [ "$DEV_PGPORT" = 5433 ] || { echo "STOP: DEV_PGHOST / DEV_PGPORT changed outside rehearsal mode"; return 1; }
+    return 0
+  fi
+  case "${F_SCRATCH_ROOT:-}" in "$F_SCRATCH_PREFIX"*[!/]*) ;; *) echo "STOP: rehearsal mode without a scratch root under $F_SCRATCH_PREFIX"; return 1 ;; esac
+  [ "$DEV_PGHOST" = "$F_SCRATCH_ROOT/socket" ] && [ ! -L "$F_SCRATCH_ROOT" ] && [ -d "$DEV_PGHOST" ] && [ ! -L "$DEV_PGHOST" ] \
+    && [ "$(readlink -f "$DEV_PGHOST")" = "$DEV_PGHOST" ] && [ "$(stat -c '%U %a' "$DEV_PGHOST")" = "postgres 700" ] \
+    || { echo "STOP: DEV_PGHOST is not the private scratch socket directory $F_SCRATCH_ROOT/socket"; return 1; }
+  [[ "$DEV_PGPORT" =~ ^[0-9]+$ ]] && [ "$DEV_PGPORT" -ge 1024 ] && [ "$DEV_PGPORT" -le 65535 ] && [ "$DEV_PGPORT" != 5432 ] && [ "$DEV_PGPORT" != 5433 ] \
+    || { echo "STOP: DEV_PGPORT '$DEV_PGPORT' is not a non-live port"; return 1; }
+  dir="$(QP 'SHOW data_directory')" && [ "$(readlink -f "$dir")" = "$F_SCRATCH_ROOT/data" ] \
+    || { echo "STOP: the target's data directory is not $F_SCRATCH_ROOT/data"; return 1; }
+  [ "$(QP 'SHOW unix_socket_directories')" = "$DEV_PGHOST" ] && [ -z "$(QP 'SHOW listen_addresses')" ] \
+    || { echo "STOP: the target is not socket-only in $DEV_PGHOST"; return 1; }
+  sysid="$(QP 'SELECT system_identifier FROM pg_control_system()')" && [ -n "$sysid" ] \
+    && [ -n "${F_LIVE_DEV_SYSID:-}" ] && [ -n "${F_LIVE_PROD_SYSID:-}" ] && [ "$sysid" != "$F_LIVE_DEV_SYSID" ] && [ "$sysid" != "$F_LIVE_PROD_SYSID" ] \
+    || { echo "STOP: the target's system identifier is unknown or a live cluster's"; return 1; }
+}
+# f_scratch_enter ROOT PORT: rehearsal mode for F3-F4 on a scratch cluster created beforehand (separate approval). It
+# never falls back to the live cluster: on any failure the shell stays in rehearsal mode with a target f_target_ok refuses.
+f_scratch_enter() { local src="$ST" f
+  F_REHEARSAL=1; F_SCRATCH_ROOT="${1:-}"; DEV_PGHOST="${1:-/nonexistent}/socket"; DEV_PGPORT="${2:-0}"
+  F_LIVE_DEV_SYSID="$(f_live_sysid 5433)"; F_LIVE_PROD_SYSID="$(f_live_sysid 5432)"
+  services_stopped() { return 0; }   # the scratch target has no services; F1, F2, F5 and F6 refuse in this mode
+  f_target_ok || { echo "STOP: not a valid scratch target; nothing may run in this shell"; return 1; }
+  ST="$F_SCRATCH_ROOT/st"
+  [ "$ST" != "$src" ] && install -d -m 0700 "$ST" || { echo "STOP: the scratch marker directory"; return 1; }
+  for f in phaseB.set phaseE.set baseline-before.txt; do cp "$src/$f" "$ST/$f" || { echo "STOP: cannot copy $f"; return 1; }; done
+  date -u +%FT%TZ > "$ST/F1-passed" && date -u +%FT%TZ > "$ST/F2-restore"
+  echo "REHEARSAL MODE: F3-F4 only, on $DEV_PGHOST port $DEV_PGPORT; markers in $ST"
+}
+f_live_only() { [ -z "${F_REHEARSAL:-}" ] || { echo "STOP: this step acts on the DEV units or the release link; never in rehearsal mode"; return 1; }; }
+# QW: one database change on the DEV cluster, only after f_target_ok
+QW() { f_target_ok && QP "$1"; }
+
 # f_names_ok: the database names, the restore set and the old release are the fixed DEV pins (never a production name)
 f_names_ok() { [ "$FAILED_DB" = hyperchat_dev_failed_rehearsal ] && [ "$RESTORE_DB" = hyperchat_dev_rollback_restore ] \
                  && [ "$PHASEB_SET" = hyperchat_dev_20261024T140604Z ] && [ "$OLD_RELEASE_ID" = 229fe42381e2 ] \
@@ -1879,13 +1929,13 @@ f_names_ok() { [ "$FAILED_DB" = hyperchat_dev_failed_rehearsal ] && [ "$RESTORE_
 db_names() { QP "SELECT string_agg(datname, ',' ORDER BY datname) FROM pg_database WHERE datname IN ('hyperchat_dev', '$RESTORE_DB', '$FAILED_DB')"; }
 no_sessions() { [ -z "$(QP "SELECT 1 FROM pg_stat_activity WHERE datname IN ('hyperchat_dev', '$RESTORE_DB') AND pid <> pg_backend_pid() LIMIT 1")" ] \
                 || { echo "STOP: sessions connected to hyperchat_dev or $RESTORE_DB"; QP "SELECT datname, usename, application_name FROM pg_stat_activity WHERE datname IN ('hyperchat_dev', '$RESTORE_DB')"; return 1; }; }
-dev_grants() { QP "REVOKE ALL ON DATABASE \"hyperchat_dev\" FROM PUBLIC" \
-               && QP "GRANT CONNECT ON DATABASE \"hyperchat_dev\" TO hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, hyperchat_auth, hyperchat_stepup" \
+dev_grants() { QW "REVOKE ALL ON DATABASE \"hyperchat_dev\" FROM PUBLIC" \
+               && QW "GRANT CONNECT ON DATABASE \"hyperchat_dev\" TO hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, hyperchat_auth, hyperchat_stepup" \
                || { echo "STOP: CONNECT grants on hyperchat_dev"; return 1; }; }
 
 # F1: the owner's written decision, DEV stopped (or a STOP), the witness recorded, production unchanged, only hyperchat_dev
 f1_preconditions() { local out
-  f_names_ok || return 1
+  f_live_only && f_names_ok || return 1
   [ -s "$ST/F-decision.txt" ] || { echo "STOP: no owner decision in $ST/F-decision.txt (Phase F runs only after a failure and the owner's written decision)"; return 1; }
   [ ! -e "$ST/F1-passed" ] || { echo "STOP: F1 already passed once"; return 1; }
   [ -z "$(ls "$ST" | grep -xE 'F2-restore|F2-release-only|F3-verified|F4-done|F5-done|F6-passed')" ] || { echo "STOP: a later Phase F marker exists"; return 1; }
@@ -1900,6 +1950,7 @@ f1_preconditions() { local out
 
 # F2: the path follows from the database revision, by machine
 f2_choose() { local head
+  f_live_only || return 1
   [ -f "$ST/F1-passed" ] || { echo "STOP: F1 has not passed"; return 1; }
   [ ! -e "$ST/F2-restore" ] && [ ! -e "$ST/F2-release-only" ] || { echo "STOP: the F2 path was already chosen"; return 1; }
   services_stopped || return 1
@@ -1935,10 +1986,11 @@ restore_into_new() { local path=/var/backups/hyperchat-dev/$PHASEB_SET
     || { echo "STOP: the Phase B set's manifest is not at 0019"; return 1; }
   [ "$(db_names)" = "hyperchat_dev" ] || { echo "STOP: expected only hyperchat_dev, found '$(db_names)'"; return 1; }
   # the same encoding and locale as hyperchat_dev (Phase 0.4: UTF8, C.UTF-8 / C.UTF-8), never template1's defaults
-  QP "CREATE DATABASE \"$RESTORE_DB\" OWNER hyperchat_owner TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'" \
-    && QP "REVOKE ALL ON DATABASE \"$RESTORE_DB\" FROM PUBLIC" \
+  QW "CREATE DATABASE \"$RESTORE_DB\" OWNER hyperchat_owner TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'" \
+    && QW "REVOKE ALL ON DATABASE \"$RESTORE_DB\" FROM PUBLIC" \
     || { echo "STOP: cannot create $RESTORE_DB (hyperchat_dev unchanged)"; return 1; }
-  sudo -u postgres /usr/lib/postgresql/15/bin/pg_restore -p 5433 --exit-on-error --single-transaction -d "$RESTORE_DB" < "$path.dump" \
+  f_target_ok || { echo "STOP: target check before pg_restore; $RESTORE_DB is empty and kept; hyperchat_dev unchanged"; return 1; }
+  sudo -u postgres /usr/lib/postgresql/15/bin/pg_restore -h "$DEV_PGHOST" -p "$DEV_PGPORT" --exit-on-error --single-transaction -d "$RESTORE_DB" < "$path.dump" \
     || { echo "STOP: pg_restore failed; $RESTORE_DB is empty and kept; hyperchat_dev unchanged"; return 1; }
   verify_restored
 }
@@ -1951,9 +2003,9 @@ swap_names() {
   rm -f "$ST/F3-verified"
   services_stopped && no_sessions || return 1
   [ "$(db_names)" = "hyperchat_dev,$RESTORE_DB" ] || { echo "STOP: expected hyperchat_dev,$RESTORE_DB, found '$(db_names)'"; return 1; }
-  QP "ALTER DATABASE \"hyperchat_dev\" RENAME TO \"$FAILED_DB\"" \
+  QW "ALTER DATABASE \"hyperchat_dev\" RENAME TO \"$FAILED_DB\"" \
     || { echo "STOP: rename 1 failed; nothing changed (hyperchat_dev is still the failed database)"; return 1; }
-  QP "ALTER DATABASE \"$RESTORE_DB\" RENAME TO \"hyperchat_dev\"" \
+  QW "ALTER DATABASE \"$RESTORE_DB\" RENAME TO \"hyperchat_dev\"" \
     || { echo "STOP: rename 2 failed AFTER rename 1: no database is named hyperchat_dev. Use retry_rename2 or undo_rename1"; return 1; }
   finish_swap
 }
@@ -1969,21 +2021,21 @@ retry_rename2() {
   f_names_ok && [ -f "$ST/F2-restore" ] || { echo "STOP: not on the Phase F restore path"; return 1; }
   services_stopped && no_sessions || return 1
   [ "$(db_names)" = "$FAILED_DB,$RESTORE_DB" ] || { echo "STOP: not the partial-swap state; found '$(db_names)'"; return 1; }
-  QP "ALTER DATABASE \"$RESTORE_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: rename 2 failed again; the partial-swap state remains"; return 1; }
+  QW "ALTER DATABASE \"$RESTORE_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: rename 2 failed again; the partial-swap state remains"; return 1; }
   finish_swap
 }
 undo_rename1() {
   f_names_ok && [ -f "$ST/F2-restore" ] || { echo "STOP: not on the Phase F restore path"; return 1; }
   services_stopped && no_sessions || return 1
   [ "$(db_names)" = "$FAILED_DB,$RESTORE_DB" ] || { echo "STOP: not the partial-swap state; found '$(db_names)'"; return 1; }
-  QP "ALTER DATABASE \"$FAILED_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: undo failed; the partial-swap state remains; escalate"; return 1; }
+  QW "ALTER DATABASE \"$FAILED_DB\" RENAME TO \"hyperchat_dev\"" || { echo "STOP: undo failed; the partial-swap state remains; escalate"; return 1; }
   [ "$(db_names)" = "hyperchat_dev,$RESTORE_DB" ] || { echo "STOP: after the undo expected hyperchat_dev,$RESTORE_DB, found '$(db_names)'"; return 1; }
   echo "UNDONE: hyperchat_dev is the failed database again; $RESTORE_DB kept; DEV stays stopped"
 }
 
 # F5 switch_to_old: only on the chosen path's database at 0019; worker and timer only after a healthy API on the old release
 switch_to_old() { local old
-  f_names_ok || return 1
+  f_live_only && f_names_ok || return 1
   [ -f "$ST/F1-passed" ] && [ ! -e "$ST/F5-done" ] || { echo "STOP: F1 has not passed, or F5 already done"; return 1; }
   [ -f "$ST/F2-release-only" ] || { [ -f "$ST/F2-restore" ] && [ -f "$ST/F4-done" ]; } || { echo "STOP: neither the release-only path nor a finished swap (F4)"; return 1; }
   old="$(cat "$ST/old-release.id")" && [ "$old" = "$OLD_RELEASE_ID" ] || { echo "STOP: $ST/old-release.id is not $OLD_RELEASE_ID"; return 1; }
@@ -2004,6 +2056,7 @@ f5_switch() {  # non-zero on ANY failure; after a failure DEV is stopped again (
 
 # F6: the witness unchanged since F1, DEV on the old release at 0019 with every unit active, production unchanged
 f6_checks() {
+  f_live_only || return 1
   [ -f "$ST/F5-done" ] || { echo "STOP: F5 has not completed"; return 1; }
   { stat -c %s "$W" && lsattr "$W"; } | diff "$ST/witness-F1.txt" - || { echo "STOP: the witness changed since F1 (keep it; see below)"; return 1; }
   witness_ok && prod_ok || return 1
@@ -2087,6 +2140,29 @@ f6_checks
 | F4, after both renames | DEV stopped; `hyperchat_dev` = restored copy; no `F4-done` | investigate; no automatic F5 |
 | F5 | DEV stopped again (`f5_switch`); the release link wherever the failure left it (old or new); no `F5-done` | investigate; F5 again only on a new approval |
 | F6 | DEV running on the old release; no `F6-passed` | investigate (witness: never modify it) |
+
+**Disposable rehearsal of F3–F4 (a separate, separately approved plan; never part of a live Phase F).**
+- **The scratch cluster:** created beforehand as `postgres` in a private root `/tmp/hc-frehearsal-<random>`:
+  - data in `<root>/data`;
+  - a socket-only listener in `<root>/socket` (`postgres`, mode 0700; `listen_addresses=''`) on a port other than 5432 / 5433;
+  - the pinned staging `roles.sql` loaded;
+  - the Phase E set restored as its `hyperchat_dev`.
+- **The run,** in a separate root shell, after the session setup and the Phase F functions:
+  1. `f_scratch_enter <root> <port>`, which must print `REHEARSAL MODE`;
+  2. `restore_into_new`;
+  3. `swap_names`;
+  4. on a partial swap, `retry_rename2` or `undo_rename1`.
+- **What `f_scratch_enter` checks,** through `f_target_ok`, which also runs again immediately before every database change:
+  - it reads both live clusters' system identifiers read-only first;
+  - no inherited `PG*` settings;
+  - the target is exactly `<root>/socket` (private, not a symlink) and a non-live port;
+  - its data directory is `<root>/data`;
+  - it listens on that socket only;
+  - its system identifier differs from both live clusters'.
+- **On any failure:** it stays in rehearsal mode with an invalid target, so nothing can fall back to the live cluster.
+- **Markers:** they go to `<root>/st`, never `$ST`.
+- **What refuses:** F1, F2, F5 and F6 refuse in rehearsal mode.
+- **Cleanup:** stop the scratch cluster and remove `<root>`.
 
 **Record:** the path taken, every output, the three baseline files and their diffs, the witness size and flags before and after.
 
