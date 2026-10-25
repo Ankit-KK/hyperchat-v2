@@ -141,12 +141,15 @@ RESTORE_DB=hyperchat_dev_rollback_restore
 PHASEB_SET=hyperchat_dev_20261024T140604Z
 PHASEB_SHA=d3192138ed85398087e1139711c1fc099f42e856fb2648eabee730be68dc832d
 OLD_RELEASE_ID=229fe42381e2
+# the DEV cluster 15/restoretest, as every helper below reaches it (socket directory and port; never production's 5432)
+DEV_PGHOST=/var/run/postgresql
+DEV_PGPORT=5433
 # Q: one read-only query against the DEV database (port 5433 only; never production)
-Q()  { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -Atc "$1"; }
+Q()  { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d hyperchat_dev -Atc "$1"; }
 # QD: the same against a named DEV-cluster database (used only in Phase F)
-QD() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d "$1" -Atc "$2"; }
+QD() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d "$1" -Atc "$2"; }
 # QP: the DEV cluster's maintenance database (database-level statements; port 5433 only)
-QP() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d postgres -Atc "$1"; }
+QP() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d postgres -Atc "$1"; }
 # the DEV cluster's configuration directory and the DEV environment file (Phase C)
 PGCONF=/etc/postgresql/15/restoretest
 API_ENV=/etc/hyperchat/api.env
@@ -217,8 +220,8 @@ RUN2_BASE_OBS='obs_tokens_active|202'
 ATTEMPT1_SHA=10375f5d36aa19604acfb7c179acae8c5470b668fe3a6c321edf94d2717aa21f
 ATTEMPT2_SHA=57bd2ffec8a35528cafcd0f77db2c458751e3e6fb52b54e81ec3b1ea897e67b8
 # DEV database sessions for the recovery (port 5433 only): read-only, and the one cleanup transaction
-psql_dev_ro() { (cd /tmp && sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -At "$@"); }
-psql_dev_rw() { (cd /tmp && sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -p 5433 -d hyperchat_dev -At "$@"); }
+psql_dev_ro() { (cd /tmp && sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d hyperchat_dev -At "$@"); }
+psql_dev_rw() { (cd /tmp && sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_PGHOST" -p "$DEV_PGPORT" -d hyperchat_dev -At "$@"); }
 # gexec SQL [psql args]: SQL generates one counting query per table or column (\gexec); prints the non-empty results
 # sorted on one line, or QUERY-FAILED (non-zero) when psql fails (read-only)
 gexec() { local out; out="$(printf '%s\n\\gexec\n' "$1" | psql_dev_ro "${@:2}")" || { echo QUERY-FAILED; return 1; }
@@ -1870,6 +1873,7 @@ Phase F defines its own fail-closed functions. Paste them after the session setu
 - **Every step** is a function. It prints `STOP: …` and returns non-zero on any failure, and writes its marker only when everything in it succeeded.
 - **Every later step** refuses to start without the earlier markers: `F-decision.txt` → F1 → `F1-passed` → F2 → `F2-restore` or `F2-release-only` → (restore path: F3 → `F3-verified` → F4 → `F4-done`) → F5 → `F5-done` → F6 → `F6-passed`.
 - **No step converts a failure into success.** F5's release switch runs as `f5_switch`, like `d4_switch`: on a failure it returns DEV to the stopped state AND returns non-zero.
+- **Every database call** (`Q`, `QD`, `QP` and `restore_into_new`'s `pg_restore`) reaches the cluster named by `DEV_PGHOST` / `DEV_PGPORT` from the session setup; no Phase F command names a socket or port of its own. A disposable rehearsal of F3–F4 can therefore point both at a scratch cluster (a separate, separately approved plan); F1, F2, F5 and F6 act on the DEV units and the release link and never run in such a rehearsal.
 ```
 # f_names_ok: the database names, the restore set and the old release are the fixed DEV pins (never a production name)
 f_names_ok() { [ "$FAILED_DB" = hyperchat_dev_failed_rehearsal ] && [ "$RESTORE_DB" = hyperchat_dev_rollback_restore ] \
@@ -1938,7 +1942,7 @@ restore_into_new() { local path=/var/backups/hyperchat-dev/$PHASEB_SET
   QP "CREATE DATABASE \"$RESTORE_DB\" OWNER hyperchat_owner TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8'" \
     && QP "REVOKE ALL ON DATABASE \"$RESTORE_DB\" FROM PUBLIC" \
     || { echo "STOP: cannot create $RESTORE_DB (hyperchat_dev unchanged)"; return 1; }
-  sudo -u postgres /usr/lib/postgresql/15/bin/pg_restore -p 5433 --exit-on-error --single-transaction -d "$RESTORE_DB" < "$path.dump" \
+  sudo -u postgres /usr/lib/postgresql/15/bin/pg_restore -h "$DEV_PGHOST" -p "$DEV_PGPORT" --exit-on-error --single-transaction -d "$RESTORE_DB" < "$path.dump" \
     || { echo "STOP: pg_restore failed; $RESTORE_DB is empty and kept; hyperchat_dev unchanged"; return 1; }
   verify_restored
 }
