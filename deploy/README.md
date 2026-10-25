@@ -181,7 +181,9 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
 7. **Backup** — `systemctl start hyperchat-pgbackup.service`; record the new
    `/var/backups/hyperchat/hyperchat_<UTC>.dump`, `sha256sum -c` its `.sha256`, and `pg_restore -l` it. With the
    current script the set also has a `.manifest.json` (written last); verify it by restoring it into a scratch cluster:
-   `PYTHONDONTWRITEBYTECODE=1 python -m app.backup.restore_check --env prod ... --scratch --scratch-user postgres` (docs/backup-recovery.md).
+   `PYTHONDONTWRITEBYTECODE=1 python -m app.backup.restore_check --env prod ... --scratch --scratch-user postgres --roles-sql /root/hyperchat-roles-<commit>/roles.sql`.
+   The release has no `deploy/`, so `--roles-sql` names a root-only copy of this commit's `deploy/postgres/roles.sql`,
+   staged and hash-checked as in docs/backup-recovery.md "Verifying a set".
 8. **Release build** — as in "Deploy a commit" steps 1–3, under `/opt/hyperchat-prod/releases/<commit>`,
    owned `root:hyperchat-prod`; import check as `hyperchat-prod`
    (`sudo -u hyperchat-prod .../venv/bin/python -c "import app.main"`).

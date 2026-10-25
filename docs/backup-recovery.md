@@ -80,10 +80,23 @@ Each run writes one set (`<db>_<UTC>`), all or nothing:
 
 ## Verifying a set (backup validity vs recoverability)
 ```
-sudo python -m app.backup.restore_check --env prod --dir /var/backups/hyperchat --set hyperchat_<UTC> \
-     --pg-bin /usr/lib/postgresql/17/bin --scratch --scratch-user postgres --output /root/restorecheck.json
+sudo PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -m app.backup.restore_check --env prod --dir /var/backups/hyperchat \
+     --set hyperchat_<UTC> --pg-bin /usr/lib/postgresql/17/bin --scratch --scratch-user postgres \
+     --roles-sql /root/hyperchat-roles-<commit>/roles.sql --output /root/restorecheck.json
 ```
-(from `/opt/hyperchat-prod/current/backend` with its venv)
+(from `/opt/hyperchat-prod/current/backend`; on DEV: `--env dev --dir /var/backups/hyperchat-dev --set hyperchat_dev_<UTC> --pg-bin /usr/lib/postgresql/15/bin`)
+
+**`--roles-sql` is required on the servers.**
+- `--scratch` first creates the HyperChat roles in the empty scratch cluster from `deploy/postgres/roles.sql`.
+- The tool's default is that file inside the release, but a release holds only `backend/` and `database/` (deploy/README.md), so the default path does not exist there.
+- Pass a root-only copy of the **deployed commit's** `roles.sql`, staged and checked from the workstation:
+  ```
+  git show <commit>:deploy/postgres/roles.sql | ssh root@VPS "install -d -o root -g root -m 0700 /root/hyperchat-roles-<commit> && umask 077 && cat > /root/hyperchat-roles-<commit>/roles.sql"
+  git show <commit>:deploy/postgres/roles.sql | sha256sum                  # workstation
+  ssh root@VPS "sha256sum /root/hyperchat-roles-<commit>/roles.sql"       # must print the same hash
+  ```
+- The file only creates roles inside the scratch cluster, which is deleted afterwards; it never touches a live cluster.
+- `--server … --disposable-server` does not read it: that server's roles must already exist.
 
 **Where it restores:**
 - `--scratch` creates a private cluster in a temporary directory: a Unix socket there, no TCP. It is stopped and deleted afterwards.
