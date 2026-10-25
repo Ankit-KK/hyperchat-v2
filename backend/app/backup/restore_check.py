@@ -241,6 +241,9 @@ def run(args: argparse.Namespace) -> dict:
 
     head = None if args.expect_head == "none" else (args.expect_head or expected_head())
     if args.scratch:
+        if not Path(args.roles_sql).is_file():  # a server release has no deploy/: --roles-sql is required there
+            result["error"] = "roles_sql_not_found"
+            return result
         target_cm = scratch_cluster(pg_bin, args.scratch_user)
     else:
         if not args.disposable_server:
