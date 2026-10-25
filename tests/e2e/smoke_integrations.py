@@ -1,20 +1,24 @@
 """Opt-in checks of the external integrations that the DEV smoke suite reports BLOCKED: Razorpay (test mode) and
-Resend email. Every check is OFF by default; with no opt-in variable this script makes no network call at all.
+Resend email. Every check is OFF by default; with no opt-in variable this script reads no settings and makes no
+network call at all.
 
 Run on the VPS from a checkout, with the release's venv (each check needs the owner's approval first):
     /opt/hyperchat/current/venv/bin/python tests/e2e/smoke_integrations.py
-Environment:
-    HYPERCHAT_SMOKE_ENV_FILE        /etc/hyperchat/api.env (the DEV API's settings; never the production file)
+Environment (nothing else named HYPERCHAT_* may be set: it would override the settings file):
+    HYPERCHAT_SMOKE_ENV_FILE        only /etc/hyperchat/api.env (the default), by its canonical path
     HYPERCHAT_SMOKE_RAZORPAY=1      D7 credential probe: GET /payments?count=1 (no order, no payment); rzp_test_ only
     HYPERCHAT_SMOKE_RAZORPAY_ORDER=1  additionally ONE test-mode order of INR 1.00 (receipt authtest-int-<tag>)
     HYPERCHAT_SMOKE_EMAIL_TO=addr   ONE delivery-check message to addr, only if addr is in
-    HYPERCHAT_SMOKE_EMAIL_ALLOW     exact addresses, comma-separated (no wildcards, no reserved/synthetic domains)
+    HYPERCHAT_SMOKE_EMAIL_ALLOW     exact addresses, comma-separated (no wildcards, no reserved/synthetic domains),
+                                    sent from the approved DEV sender no-reply@mail.quicktestspace.site
 Evidence: PASS / FAIL / SKIPPED / REFUSED lines with the key MODE, the order id and amount, the masked recipient and a
-run tag to find the message. Key ids, secrets and the full recipient are never printed; the output is checked for
-them before the script ends. Exit 0 = every enabled check passed (skipped checks are fine); 1 = a FAIL or REFUSED.
+run tag to find the message. Key ids, secrets and the full recipient are never printed: provider errors are reduced to
+a reason code or an exception type, and any line that would carry one of them is withheld before it is printed.
+Exit 0 = every enabled check passed (skipped checks are fine); 1 = a FAIL or REFUSED.
 """
 
 import asyncio
+import logging
 import os
 import secrets
 import sys
@@ -23,8 +27,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import integration_policy as ip  # noqa: E402
-
-PRODUCTION_ENV_FILES = ("/etc/hyperchat-prod/api.env",)
 
 
 class Report:
@@ -46,6 +48,12 @@ class Report:
         self._out(entry)
 
 
+def reason_of(exc: BaseException) -> str:
+    """A provider error as a reason code (RazorpayError.reason) or the exception type: never its message."""
+    reason = getattr(exc, "reason", None)
+    return reason if isinstance(reason, str) and reason.isidentifier() else type(exc).__name__
+
+
 async def check_razorpay(settings, env, report: Report, client_factory, tag: str) -> None:
     from app.payments.accounts import AccountHealth, PaymentAccounts, health_report
     key_id = settings.razorpay_credentials("primary")[0]
@@ -55,7 +63,11 @@ async def check_razorpay(settings, env, report: Report, client_factory, tag: str
         return
     client = client_factory()
     accounts = PaymentAccounts.from_settings(settings)
-    result = await health_report(accounts, AccountHealth(client))
+    try:
+        result = await health_report(accounts, AccountHealth(client))
+    except Exception as exc:  # noqa: BLE001 - reported, never retried
+        report.line("FAIL", "razorpay", f"D7 credential probe: {reason_of(exc)}")
+        return
     ok = result["configured"] and result["mode"] == "test" and result["status"] == "ok"
     report.line("PASS" if ok else "FAIL", "razorpay", f"D7 credential probe: mode={result['mode']} status={result['status']}")
     if not ok or not ip.order_wanted(env):
@@ -66,7 +78,7 @@ async def check_razorpay(settings, env, report: Report, client_factory, tag: str
         order = await client.create_order(accounts.for_payments("primary"), amount=100, currency="INR",
                                           receipt=f"authtest-int-{tag}")
     except Exception as exc:  # noqa: BLE001 - reported, never retried
-        report.line("FAIL", "razorpay", f"test order: {getattr(exc, 'reason', type(exc).__name__)}")
+        report.line("FAIL", "razorpay", f"test order: {reason_of(exc)}")
         return
     report.line("PASS", "razorpay", f"test order created: id={order.id} amount={order.amount} {order.currency} "
                                      f"status={order.status} receipt=authtest-int-{tag}")
@@ -75,7 +87,7 @@ async def check_razorpay(settings, env, report: Report, client_factory, tag: str
 async def check_email(settings, env, report: Report, sender_factory, tag: str) -> None:
     from app.auth.email import Email
     key = settings.resend_api_key.get_secret_value() if settings.resend_api_key else ""
-    decision, reason, to = ip.email_plan(env, settings.app_env, settings.email_backend, bool(key))
+    decision, reason, to = ip.email_plan(env, settings.app_env, settings.email_backend, bool(key), settings.email_from)
     if decision != "run":
         report.line("SKIPPED" if decision == "skip" else "REFUSED", "email", reason)
         return
@@ -85,38 +97,58 @@ async def check_email(settings, env, report: Report, sender_factory, tag: str) -
         await sender_factory(key, settings.email_from).send(
             Email(to=to, template="delivery-check", subject=subject, html=f"<p>{body}</p>", text=body))
     except Exception as exc:  # noqa: BLE001 - reported, never retried
-        report.line("FAIL", "email", f"provider refused the message ({type(exc).__name__}) to {ip.mask(to)}")
+        report.line("FAIL", "email", f"provider refused the message ({reason_of(exc)}) to {ip.mask(to)}")
         return
-    report.line("PASS", "email", f"accepted by the provider for {ip.mask(to)}; find the subject '{subject}'")
+    report.line("PASS", "email", f"accepted by the provider for {ip.mask(to)} from {ip.APPROVED_SENDER}; "
+                                  f"find the subject '{subject}'")
 
 
-def main(env=None, settings_factory=None, client_factory=None, sender_factory=None, out=print) -> int:
+def main(env=None, settings_factory=None, client_factory=None, sender_factory=None, out=print,
+         approved_env_file: str = ip.DEV_ENV_FILE) -> int:
     env = dict(os.environ if env is None else env)
-    env_file = env.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
     report = Report(out)
-    if env_file in PRODUCTION_ENV_FILES:
-        report.line("REFUSED", "setup", "the production settings file is never used")
+    refusal = ip.environment_refusal(env)
+    if refusal:
+        report.line("REFUSED", "setup", refusal)
         return 1
+    if not ip.any_enabled(env):  # the default: no settings read, no client created, no network call
+        report.line("SKIPPED", "razorpay", "opt-in: HYPERCHAT_SMOKE_RAZORPAY=1 not set")
+        report.line("SKIPPED", "email", "opt-in: HYPERCHAT_SMOKE_EMAIL_TO not set")
+        return 0
+    refusal = ip.env_file_refusal(env, approved_env_file)
+    if refusal:
+        report.line("REFUSED", "setup", refusal)
+        return 1
+    for name in ("httpx", "httpcore"):  # request lines stay out of the output
+        logging.getLogger(name).setLevel(logging.WARNING)
     if settings_factory is None:
         from app.core.config import Settings
-        settings_factory = lambda: Settings(_env_file=env_file)  # noqa: E731
+        settings_factory = lambda path: Settings(_env_file=path)  # noqa: E731
+    try:
+        settings = settings_factory(approved_env_file)
+    except Exception as exc:  # noqa: BLE001 - the type only: a settings error may quote a value
+        report.line("REFUSED", "setup", f"the settings could not be loaded ({type(exc).__name__})")
+        return 1
+    report.secrets = [*settings.razorpay_credentials("primary"),
+                      settings.resend_api_key.get_secret_value() if settings.resend_api_key else "",
+                      env.get("HYPERCHAT_SMOKE_EMAIL_TO", "").strip()]
+    refusal = ip.settings_refusal(settings.app_env, settings.razorpay_credentials("primary")[0])
+    if refusal:
+        report.line("REFUSED", "setup", refusal)
+        return 1
     if client_factory is None:
         from app.payments.razorpay import RazorpayClient
         client_factory = RazorpayClient
     if sender_factory is None:
         from app.auth.email import ResendSender
         sender_factory = ResendSender
-    settings = settings_factory()
-    if settings.app_env == "production":
-        report.line("REFUSED", "setup", "these checks never run with production settings")
-        return 1
-    report.secrets = [*settings.razorpay_credentials("primary"),
-                      settings.resend_api_key.get_secret_value() if settings.resend_api_key else "",
-                      env.get("HYPERCHAT_SMOKE_EMAIL_TO", "").strip().lower()]
     tag = secrets.token_hex(4)
     out(f"integration checks: run {tag}, environment {settings.app_env}")
-    asyncio.run(check_razorpay(settings, env, report, client_factory, tag))
-    asyncio.run(check_email(settings, env, report, sender_factory, tag))
+    for check, factory in ((check_razorpay, client_factory), (check_email, sender_factory)):
+        try:
+            asyncio.run(check(settings, env, report, factory, tag))
+        except Exception as exc:  # noqa: BLE001 - never a traceback: it could carry a value
+            report.line("FAIL", check.__name__.removeprefix("check_"), f"unexpected error ({reason_of(exc)})")
     return 1 if report.failed else 0
 
 
