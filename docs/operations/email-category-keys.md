@@ -89,7 +89,7 @@ print('ok', sorted(s.email_categories))"
 ## Later: activation (separate approvals, one category at a time)
 1. Set `HYPERCHAT_EMAIL_BACKEND=resend` and `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES=onboarding`, then restart `hyperchat-api`.
 2. The startup log line `authentication` shows `email_categories: {"onboarding": "onboarding.quicktestspace.site"}`, with names and domains only.
-3. Send one approved invitation to an owner-controlled inbox, then confirm delivery and the `email sent` log, which carries the category, the recipient hash and the provider message id.
+3. Send one approved invitation to an owner-controlled inbox, then confirm delivery and the `email sent` log. That log carries the category, template, status and provider message id; it has no recipient identifier. Nothing is retried automatically, and there is no delivery-record table or domain-check CLI yet: check domains in the Resend dashboard.
 4. **Watch for `invite_withdraw_failed`.** It means an invitation whose delivery was unconfirmed could not be revoked. Find and revoke it by following *Operator: unrevoked invitations* in `docs/email-architecture-proposal.md`.
 5. Only then, and with approval, add `authentication`.
 

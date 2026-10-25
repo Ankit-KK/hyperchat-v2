@@ -4,13 +4,14 @@ See tests/integration.py for how the database is selected and which rows are syn
 Google call leaves the process: the sender and the Google client are in-memory fakes.
 """
 
+import json
 import logging
 from urllib.parse import parse_qs, urlparse
 
 import bcrypt
 import httpx
 
-from app.auth.email import CategorySender
+from app.auth.email import CategorySender, ResendSender
 from app.auth.google import GoogleIdentity
 from app.auth.service import GENERIC_LOGIN_ERROR
 from app.auth.tokens import sha256_hex
@@ -503,6 +504,25 @@ def test_an_invite_is_never_sent_from_another_category(app, monkeypatch):
     with _db() as conn:
         assert conn.execute("SELECT revoked_at IS NOT NULL FROM public.user_invites WHERE email = %s",
                             ("wrong-category" + DOMAIN,)).fetchone() == (True,)
+
+
+def test_an_accepted_invite_with_unreadable_provider_metadata_keeps_its_link(app, monkeypatch):
+    """Resend answers 2xx with a body that is not the expected JSON: the invitation succeeded (201) and its link
+    works; it is never treated as failed (which would revoke it)."""
+    headers, seen = _admin(app), []
+
+    def accepted(request):
+        seen.append(request)
+        return httpx.Response(200, content=b"<html>ok</html>")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(accepted))
+    resend = ResendSender("re_TEST_onboarding_flow", "HyperChat <no-reply@onboarding.quicktestspace.site>", client,
+                          category="onboarding")
+    r = _invite_with(app, monkeypatch, headers, CategorySender({"onboarding": resend}), "accepted-odd" + DOMAIN)
+    assert r.status_code == 201 and len(seen) == 1
+    token = parse_qs(urlparse(json.loads(seen[0].content)["text"].split("\n")[3]).query)["token"][0]
+    assert _invite_state(token) == (True, False)
+    assert _accept(app, token).status_code == 200
 
 
 def test_unconfirmed_delivery_answers_502_and_revokes_the_link_even_if_it_arrived(app, caplog, monkeypatch):

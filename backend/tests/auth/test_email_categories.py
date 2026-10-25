@@ -1,6 +1,7 @@
 """Transactional email by category (P0 of docs/email-architecture-proposal.md). No HTTP leaves the process: Resend
 is an httpx.MockTransport, and every key below is a synthetic test value."""
 
+import hashlib
 import json
 import logging
 
@@ -15,7 +16,7 @@ from app.auth.email import (
     Email,
     EmailCategoryInactive,
     EmailDeliveryError,
-    recipient_hash,
+    ResendSender,
     render,
     sender_from_settings,
 )
@@ -38,13 +39,16 @@ def settings(active="", app_env="test", **fields) -> Settings:
 
 
 class Resend:
-    def __init__(self, status=200, body=None, error=None):
+    def __init__(self, status=200, body=None, error=None, content=None):
         self.seen, self.status, self.body, self.error = [], status, body or {"id": "msg_test_1"}, error
+        self.content = content  # raw bytes instead of a JSON body
 
     def handler(self, request):
         self.seen.append(request)
         if self.error:
             raise self.error
+        if self.content is not None:
+            return httpx.Response(self.status, content=self.content)
         return httpx.Response(self.status, json=self.body)
 
     def client(self):
@@ -181,8 +185,66 @@ async def test_nothing_secret_is_logged_or_raised(caplog, status):
     except EmailDeliveryError as exc:
         raised = str(exc)
     logged = "\n".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
-    assert recipient_hash(TO) in logged and "onboarding" in logged
-    for secret in (ONB_KEY, TO, "SECRET-TOKEN-123", LINK):
+    assert "onboarding" in logged and "invite" in logged
+    unkeyed = hashlib.sha256(TO.encode()).hexdigest()  # no recipient identifier at all in P0 (owner review)
+    body = render("invite", TO, LINK).html
+    for secret in (ONB_KEY, TO, "SECRET-TOKEN-123", LINK, unkeyed, body[:200], "recipient"):
         assert secret not in logged and secret not in raised
     if status == 200:
         assert "msg_test_1" in logged
+
+
+# ── provider success metadata ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("response", [
+    {"content": b"not json"}, {"content": b""}, {"content": b"\xff\xfe"}, {"body": ["msg_x"]}, {"body": {"x": 1}},
+    {"content": b'"msg_x"'}, {"content": b"null"}, {"body": {"id": 12345}}, {"body": {"id": None}},
+    {"body": {"id": "abc\ninjected log line"}}, {"body": {"id": "a" * 101}}, {"body": {"id": "<script>"}},
+])
+async def test_an_accepted_message_is_never_a_failure_whatever_its_metadata(caplog, response):
+    """A 2xx means Resend accepted the message: unreadable or odd metadata is logged as no id, never raised."""
+    caplog.set_level(logging.DEBUG)
+    sender = sender_from_settings(settings("onboarding", **ONBOARDING), Resend(**response).client())
+    await sender.send(render("invite", TO, LINK))  # no exception
+    sent = [r for r in caplog.records if r.getMessage() == "email sent"]
+    assert len(sent) == 1 and sent[0].provider_message_id == "" and sent[0].status == 200
+    assert "injected" not in caplog.text and "<script>" not in caplog.text
+
+
+@pytest.mark.parametrize("message_id", ["4ef9a417-02e9-4d39-ad75-9611e0fcc33c", "msg_test_1", "a" * 100])
+async def test_a_plain_message_id_is_logged(caplog, message_id):
+    caplog.set_level(logging.DEBUG)
+    sender = sender_from_settings(settings("onboarding", **ONBOARDING), Resend(body={"id": message_id}).client())
+    await sender.send(render("invite", TO, LINK))
+    assert [r.provider_message_id for r in caplog.records if r.getMessage() == "email sent"] == [message_id]
+
+
+# ── client lifecycle ────────────────────────────────────────────────────────────
+
+async def test_owned_clients_are_closed_and_injected_ones_are_left_open():
+    injected = Resend().client()
+    shared = sender_from_settings(settings("onboarding,authentication", **ONBOARDING, **AUTHENTICATION), injected)
+    await shared.aclose()
+    assert not injected.is_closed  # the caller's client: the caller closes it
+    await injected.aclose()
+
+    owned = sender_from_settings(settings("onboarding,authentication", **ONBOARDING, **AUTHENTICATION))
+    clients = [s._client for s in owned._senders.values()]
+    assert len(clients) == 2 and clients[0] is not clients[1] and not any(c.is_closed for c in clients)
+    await owned.aclose()
+    assert all(c.is_closed for c in clients)
+
+
+async def test_closing_is_safe_for_every_sender_kind():
+    await DisabledSender().aclose()
+    await sender_from_settings(Settings(app_env="test")).aclose()  # disabled backend
+    await sender_from_settings(settings(**ONBOARDING)).aclose()  # resend, nothing active
+
+    class NoClose:
+        async def send(self, email):
+            pass
+
+    await CategorySender({"onboarding": NoClose()}).aclose()
+    alone = ResendSender(ONB_KEY, ONBOARDING["email_onboarding_from"])
+    await alone.aclose()
+    assert alone._client.is_closed

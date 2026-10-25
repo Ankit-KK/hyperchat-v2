@@ -186,6 +186,10 @@ async def lifespan(app: FastAPI):
         mfa = getattr(app.state, "mfa", None)
         if mfa is not None and mfa.client is not None:
             await mfa.client.aclose()
+        auth = getattr(app.state, "auth", None)
+        close_email = getattr(getattr(auth, "sender", None), "aclose", None)  # the email clients this app created
+        if close_email is not None:
+            await close_email()
         await app.state.db.close()
         log.info("stopped hyperchat-api")
 
