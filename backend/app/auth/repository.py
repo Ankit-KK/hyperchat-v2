@@ -277,8 +277,8 @@ class AuthRepository:
             return await cur.fetchone()
 
     async def withdraw_invite(self, invite_id: str) -> bool:
-        """Revoke an invitation that was never delivered (its link reached nobody). Only an open one, once; the S3 and
-        0024 guards allow exactly this change for every invitation, an admin's included."""
+        """Revoke an invitation whose delivery could not be confirmed. Only an open one, once (True when this call
+        revoked it); the S3 and 0024 guards allow exactly this change for every invitation, an admin's included."""
         async with self._auth() as conn, conn.cursor() as cur:
             await cur.execute("UPDATE public.user_invites SET revoked_at = now() "
                               "WHERE id = %s AND accepted_at IS NULL AND revoked_at IS NULL", (invite_id,))
