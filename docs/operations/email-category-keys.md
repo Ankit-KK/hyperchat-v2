@@ -48,7 +48,7 @@ done
 echo "$(wc -l < /root/email-keys.tmp) $(cut -d= -f2- /root/email-keys.tmp | sort -u | wc -l) $(grep -c '_RESEND_API_KEY=re_' /root/email-keys.tmp)"
 ```
 
-**4. Merge into `api.env`.** This sets the senders, verified domains and keys, and replaces earlier values of the same variables. It keeps `root:hyperchat 0640` and writes atomically. Only the variable names are printed.
+**4. Merge into `api.env`.** This sets the senders, verified domains and keys, and replaces earlier values of the same variables. It keeps the file's existing owner and mode and writes atomically. DEV's `api.env` is `root:hyperchat 0600` (checked read-only on 2026-10-25); systemd reads it as root. Only the variable names are printed.
 ```bash
 python3 - /etc/hyperchat/api.env /root/email-keys.tmp <<'PY'
 import os, sys
@@ -67,21 +67,21 @@ st = os.stat(env)
 fd = os.open(env + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f:
     f.write("\n".join(kept + new) + "\n")
-os.chown(env + ".new", st.st_uid, st.st_gid); os.chmod(env + ".new", 0o640)
+os.chown(env + ".new", st.st_uid, st.st_gid); os.chmod(env + ".new", st.st_mode & 0o777)
 os.replace(env + ".new", env)
 print("set:", " ".join(sorted(names)))
 PY
 shred -u /root/email-keys.tmp
-stat -c '%U:%G %a' /etc/hyperchat/api.env   # expect root:hyperchat 640
+stat -c '%U:%G %a' /etc/hyperchat/api.env   # expect the same as before (DEV: root:hyperchat 600)
 grep -E '^HYPERCHAT_EMAIL_(BACKEND|ACTIVE_CATEGORIES)=' /etc/hyperchat/api.env   # expect disabled and empty
 ```
 
-**5. Validate with the deployed code, without activating anything.** This needs a release that contains the P0 email categories. It runs the startup check as if all five categories were active and prints `ok`, or a refusal that names variables only (`hide_input_in_errors`).
+**5. Validate with the deployed code, without activating anything.** This needs a release that contains the P0 email categories; DEV has had one since 2026-10-25 (`a9b9486efd86`). It runs the startup check as if all five categories were active and prints `ok`, or a refusal that names variables only (`hide_input_in_errors`). Root opens `api.env` and passes it on stdin, so the code runs as the service user without that user being able to read the file.
 ```bash
 cd /opt/hyperchat/current/backend && sudo -u hyperchat env PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -c "
 from app.core.config import Settings
-s = Settings(_env_file='/etc/hyperchat/api.env', email_active_categories='onboarding,authentication,notifications,payments,support')
-print('ok', sorted(s.email_categories))"
+s = Settings(_env_file='/dev/stdin', email_active_categories='onboarding,authentication,notifications,payments,support')
+print('ok', sorted(s.email_categories))" < /etc/hyperchat/api.env
 ```
 
 **6. Stop here.** Don't restart the API and don't change `HYPERCHAT_EMAIL_BACKEND` or `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES`. Each is a separate approval.
