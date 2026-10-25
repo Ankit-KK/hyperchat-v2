@@ -60,6 +60,17 @@ def test_server_mode_must_be_declared_disposable(stub_set):
     assert code == 1 and out["backup_valid"] and out["error"] == "server_mode_needs_--disposable-server"
 
 
+def test_scratch_mode_without_the_roles_file_stops_before_creating_a_cluster(stub_set, monkeypatch):
+    """A server release holds only backend/ and database/, so the default --roles-sql does not exist there: the check
+    names it instead of failing inside a half-built scratch cluster."""
+    tmp, bin_dir, base = stub_set
+    monkeypatch.setattr(restore_check, "scratch_cluster", lambda *a: pytest.fail("a scratch cluster was created"))
+    code, out = check("--dir", str(tmp / "backups"), "--set", base, "--pg-bin", str(bin_dir), "--scratch",
+                      "--roles-sql", str(tmp / "no-such-roles.sql"))
+    assert code == 1 and out["backup_valid"] and out["restore_valid"] is False
+    assert out["error"] == "roles_sql_not_found" and out["structurally_valid"] is False
+
+
 def test_scratch_mode_as_root_needs_an_unprivileged_user(monkeypatch, tmp_path):
     monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
     with pytest.raises(restore_check.CheckError, match="scratch-user"):
