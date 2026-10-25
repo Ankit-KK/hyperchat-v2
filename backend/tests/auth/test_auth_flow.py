@@ -24,7 +24,7 @@ from tests.integration import new_browser as _new_client
 pytestmark = requires_db
 
 
-# â”€â”€ login / session / cookie â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── login / session / cookie ────────────────────────────────────────────────────
 
 
 def test_login_sets_hardened_cookie_and_stores_only_hashes(app):
@@ -85,7 +85,7 @@ def test_account_without_password_or_disabled_cannot_log_in(app):
     assert _login(app, "disabled" + DOMAIN).status_code == 401
 
 
-# â”€â”€ CSRF / logout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── CSRF / logout ───────────────────────────────────────────────────────────────
 
 
 def test_state_changes_need_origin_and_csrf_token(app):
@@ -131,7 +131,7 @@ def test_expired_session_is_rejected(app):
     assert app.get("/api/v1/auth/session").status_code == 401
 
 
-# â”€â”€ password reset / change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── password reset / change ─────────────────────────────────────────────────────
 
 
 def test_forgot_password_never_reveals_whether_the_account_exists(app):
@@ -349,7 +349,7 @@ def test_concurrent_guesses_cannot_exceed_the_limit(env):
     assert count == 12  # every attempt was counted, none lost to the race
 
 
-# â”€â”€ invites â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── invites ─────────────────────────────────────────────────────────────────────
 
 
 def _admin(app):
@@ -580,7 +580,7 @@ def test_withdrawal_error_answers_502_and_duplicates_still_create_one_account(ap
     _assert_no_leak(caplog, failed, address, first, retry)
 
 
-# â”€â”€ Google â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Google ──────────────────────────────────────────────────────────────────────
 
 
 def _google_start(client, redirect="/dashboard/settings"):

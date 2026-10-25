@@ -21,8 +21,26 @@ onboarding domain and is separate from this proposal.
 | # | Trigger | Code | Template | Authorization / protections today | Failure handling today |
 |---|---|---|---|---|---|
 | T1 | Password reset (`POST /auth/password/forgot`) | `auth/service.py` `request_reset` → `send_reset_link` | `reset-password` | Generic 202 for every address (no enumeration); IP and per-email rate limits; the work runs after the response in a bounded background slot with a 15 s deadline; the token is stored hashed; only active accounts | Logged as `password_reset_email_failed` (exception type only); the caller still sees 202 |
-| T2 | Admin invitation (`POST /auth/invites`; role user / streamer / admin) | `auth/service.py` `create_invite` | `invite` | `require_admin`; step-up grant for admin or creator-linked invitations (S3); the token is stored hashed | **Not caught.** A provider error propagates after the invitation row exists, so the admin gets a generic 500 (finding F1) |
+| T2 | Admin invitation (`POST /auth/invites`; role user / streamer / admin) | `auth/service.py` `create_invite` | `invite` | `require_admin`; step-up grant for admin or creator-linked invitations (S3); the token is stored hashed | **Fixed (F1, #105):** 502 "Invitation delivery could not be confirmed"; the link is revoked and never resent, and a retry is a new invitation. See *Operator: unrevoked invitations* below |
 | T3 | Application owner invitation (`POST /admin/applications/{id}/invite`) | `admin/applications.py` `invite` | `invite` | `require_admin`; step-up; only approved applications; a retry revokes the previous link | 502 `invite_delivery_failed` (exception type logged), and a retry issues a fresh link |
+
+**Operator: unrevoked invitations (check before enabling real email delivery).**
+- **When it applies.** After an unconfirmed invitation send, the API tries to revoke the link and records `invite_withdrawn`. If the revocation did not happen, it records `invite_withdraw_failed` instead:
+  - at ERROR level, on the `hyperchat.security` logger;
+  - as JSON on stdout, which goes to the systemd journal;
+  - with `reason` set to `not_open` or the database error class, plus `invite_id` and the admin's `user_id`;
+  - never the address or the token.
+- **What it means.** With a database error, that link stays valid until it expires (`HYPERCHAT_INVITE_TTL_DAYS`, 7 by default). `not_open` means the invitation had already been accepted or revoked, so nothing needs revoking.
+- **Find these events:**
+  ```bash
+  journalctl -u hyperchat-api --since today | grep '"invite_withdraw_failed"'
+  ```
+- **Revoke one that is still open.** Use the API's own `hyperchat_auth` role, which the guards allow to make exactly this change, and the environment's socket, port and database. On DEV that is port `5433` and database `hyperchat_dev`:
+  ```bash
+  sudo -u hyperchat psql -X -h /var/run/postgresql -p <port> -U hyperchat_auth -d <database> -c "UPDATE public.user_invites SET revoked_at = now() WHERE id = '<invite_id>' AND accepted_at IS NULL AND revoked_at IS NULL"
+  ```
+  `UPDATE 1` means it was revoked. `UPDATE 0` means it was already accepted or revoked.
+- **Duplicates.** Even an unrevoked link can create at most one account for that address: a second acceptance is refused.
 
 **Not implemented today.** Each of these is new product behaviour; none should be described as working:
 - welcome emails;
