@@ -15,8 +15,8 @@ restore database, the API is not api.hyperchat.space, and bots are disabled. It 
 never creates a Razorpay order, never writes to R2 (except the approval-gated upload-cleanup section), never sends
 email and never calls a TTS or transcription provider; checks that would need any of that are reported as BLOCKED with the credential or approval they need.
 Approving a synthetic donation makes the worker publish realtime events to the DEV Pusher app (realtime is on in
-DEV); nothing else leaves the server. Every synthetic row is recognizable (users @authtest.invalid, creators
-"authtest-*", orders "authtest-*") and removed at the end, and the cleanup is verified. The login rate-limit counters
+DEV); nothing else leaves the server. Every synthetic row is recognizable by the run's tag (users
+<TAG>-*@authtest.invalid, creators, orders and partners <TAG>*) and removed at the end, and the cleanup is verified. The login rate-limit counters
 the suite consumes (auth:* rows) are cleared, as smoke_auth.py does. Nothing secret is printed.
 Feature sections (payments-account D6, payment-health D7, admin-email D11, owner-transfer D13, upload-cleanup D9,
 public-config D5, ...) report BLOCKED while the deployed release predates them. upload-cleanup also writes and deletes a few synthetic
@@ -138,7 +138,7 @@ def make_donation(streamer_id: str, donor: str, amount: int, moderation: str = "
             "INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
             "payment_status, moderation_status, message, message_visible) VALUES (%s, %s, %s, %s, 'INR', %s, "
             "'success', %s, %s, true) RETURNING id::text",
-            (streamer_id, "authtest-" + secrets.token_hex(6), donor, amount, amount, moderation, message)).fetchone()[0]
+            (streamer_id, f"{TAG}-{secrets.token_hex(6)}", donor, amount, amount, moderation, message)).fetchone()[0]
 
 
 def reset_login_counters() -> None:
@@ -876,7 +876,7 @@ try:
     with db() as c:
         order = c.execute("SELECT order_id FROM public.donations WHERE id = %s", (d_ok,)).fetchone()[0]
     a = httpx.get(f"{API}/api/v1/public/donations/{order}/status", headers={"x-status-token": "0" * 43}, timeout=15)
-    b = httpx.get(f"{API}/api/v1/public/donations/authtest-nonexistent/status", headers={"x-status-token": "0" * 43},
+    b = httpx.get(f"{API}/api/v1/public/donations/{TAG}-nonexistent/status", headers={"x-status-token": "0" * 43},
                   timeout=15)
     check(S, "status: wrong token and unknown order give the same 404", a.status_code == b.status_code == 404
           and a.json() == b.json(), f"{a.status_code} {b.status_code}")
@@ -1268,8 +1268,8 @@ finally:
     def _open_jobs():
         with db() as c:
             n = c.execute("SELECT count(*) FROM public.jobs j JOIN public.donations d ON d.id::text = j.dedupe_key "
-                          "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%' "
-                          "AND j.status IN ('queued', 'running')").fetchone()[0]
+                          "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s "
+                          "AND j.status IN ('queued', 'running')", (TAG + "%",)).fetchone()[0]
         return n == 0
     wait_for(_open_jobs, 60)
     try:

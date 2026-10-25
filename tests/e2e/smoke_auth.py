@@ -119,16 +119,17 @@ try:
               and pre.headers.get("access-control-allow-origin") == FRONT)
 finally:
     with psycopg.connect(DSN, autocommit=True) as db:
-        db.execute("DELETE FROM public.users WHERE email::text LIKE '%%@authtest.invalid'")
+        db.execute("DELETE FROM public.users WHERE email = %s", (EMAIL,))  # this run's one account, never others
         # only this run's counters: its host address (learned from the failed probe for nobody@) and its two
         # synthetic addresses; real users' counters are never cleared (smoke_policy)
         keys = rate_limit_keys([EMAIL, "nobody@authtest.invalid"], suite_ip(db, "nobody@authtest.invalid"))
         db.execute("DELETE FROM public.rate_limits WHERE endpoint LIKE 'auth:%%' "
                    "AND (ip_address = ANY(%(exact)s) OR ip_address LIKE ANY(%(prefixes)s))", keys)
-        left = db.execute("SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE '%%@authtest.invalid'),"
-                          " (SELECT count(*) FROM public.sessions), (SELECT count(*) FROM public.password_reset_tokens)"
-                          ).fetchone()
+        left = db.execute("SELECT (SELECT count(*) FROM public.users WHERE email = %s),"
+                          " (SELECT count(*) FROM public.sessions), (SELECT count(*) FROM public.password_reset_tokens)",
+                          (EMAIL,)).fetchone()
     print("cleanup: synthetic users / sessions / reset tokens left =", left)
+    check("cleanup: this run's synthetic account is gone", left[0] == 0)
 
 journal = subprocess.run(["journalctl", "-u", "hyperchat-api", "--since", "-15min", "-o", "cat"],
                          capture_output=True, text=True).stdout
