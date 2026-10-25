@@ -4,14 +4,16 @@ See tests/integration.py for how the database is selected and which rows are syn
 Google call leaves the process: the sender and the Google client are in-memory fakes.
 """
 
+import logging
 from urllib.parse import parse_qs, urlparse
 
 import bcrypt
+import httpx
 
 from app.auth.google import GoogleIdentity
 from app.auth.service import GENERIC_LOGIN_ERROR
 from app.auth.tokens import sha256_hex
-from tests.integration import DOMAIN, FRONT, ORIGIN, PASSWORD, requires_db
+from tests.integration import DOMAIN, FRONT, ORIGIN, PASSWORD, CaptureSender, requires_db
 from tests.integration import csrf_headers as _csrf
 from tests.integration import db as _db
 from tests.integration import fixture_db
@@ -450,6 +452,132 @@ def test_expired_invite_is_rejected(app):
     r = _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
                               json={"token": token, "password": "Late-Pass-42"})
     assert r.status_code == 400
+
+
+UNCONFIRMED = {"error": "Invitation delivery could not be confirmed. Please retry."}
+
+
+class _AcceptedThenTimeout(CaptureSender):
+    """The ambiguous case: the provider accepted (the message is kept, as if delivered), then the call timed out."""
+
+    async def send(self, email) -> None:
+        await super().send(email)
+        raise httpx.ReadTimeout("timed out")
+
+
+def _invite_state(token):
+    """(still unaccepted, revoked) of the invitation behind a link."""
+    with _db() as conn:
+        return conn.execute("SELECT accepted_at IS NULL, revoked_at IS NOT NULL FROM public.user_invites "
+                            "WHERE token_hash = %s", (sha256_hex(token),)).fetchone()
+
+
+def _accept(app, token):
+    return _new_client(app).post("/api/v1/auth/invites/accept", headers=ORIGIN,
+                                 json={"token": token, "password": "Invited-Pass-42"})
+
+
+def _security_events(caplog):
+    return [(r.getMessage(), getattr(r, "reason", None)) for r in caplog.records if r.name == "hyperchat.security"]
+
+
+def _assert_no_leak(caplog, response, address, *tokens):
+    logged = "\n".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+    for secret in (address, *tokens):
+        assert secret not in logged and secret not in response.text
+
+
+def _invite_with(app, monkeypatch, headers, sender, address, **body):
+    monkeypatch.setattr(app.app_state.auth, "sender", sender)
+    r = app.post("/api/v1/auth/invites", headers=headers, json={"email": address, **body})
+    monkeypatch.undo()
+    return r
+
+
+def test_unconfirmed_delivery_answers_502_and_revokes_the_link_even_if_it_arrived(app, caplog, monkeypatch):
+    """F1: the invitation row exists but the provider call failed, possibly after accepting the message. A neutral
+    502 (never a 500, no link); the link is revoked, so a message that still arrives is dead; the token is never
+    resent, and a retry is a new invitation with a new token that works."""
+    caplog.set_level(logging.DEBUG)
+    headers, address = _admin(app), "unconfirmed" + DOMAIN
+    sender, ambiguous = app.app_state.auth.sender, _AcceptedThenTimeout()
+    failed = _invite_with(app, monkeypatch, headers, ambiguous, address)
+    assert (failed.status_code, failed.json()) == (502, UNCONFIRMED)
+    arrived = ambiguous.last_token()  # what the recipient would hold if the provider did deliver it
+    assert _invite_state(arrived) == (True, True)
+    assert _accept(app, arrived).status_code == 400
+    assert ("invite_delivery_unconfirmed", "ReadTimeout") in _security_events(caplog)
+    assert ("invite_withdrawn", None) in _security_events(caplog)
+    assert "invite_withdraw_failed" not in str(_security_events(caplog))
+
+    sent_before = len(sender.sent)
+    retry = app.post("/api/v1/auth/invites", headers=headers, json={"email": address})
+    assert retry.status_code == 201 and set(retry.json()) == {"invite_id", "expires_at"}
+    assert len(ambiguous.sent) == 1 and len(sender.sent) == sent_before + 1  # one new message, never a resend
+    token = sender.last_token()
+    assert token != arrived and _invite_state(token) == (True, False)
+    assert _accept(app, token).status_code == 200
+    assert _accept(app, arrived).status_code == 400  # still dead after the account exists
+    _assert_no_leak(caplog, failed, address, arrived, token)
+
+
+def test_unconfirmed_admin_invite_is_revoked(app, monkeypatch):
+    """The 0024/0027 guards let the API revoke an open admin invitation too."""
+    headers, ambiguous = _admin(app), _AcceptedThenTimeout()
+    failed = _invite_with(app, monkeypatch, headers, ambiguous, "unconfirmed-admin" + DOMAIN, role="admin")
+    assert (failed.status_code, failed.json()) == (502, UNCONFIRMED)
+    assert _invite_state(ambiguous.last_token()) == (True, True)
+    assert _accept(app, ambiguous.last_token()).status_code == 400
+
+
+def test_withdrawal_that_changes_nothing_is_reported_never_claimed(app, caplog, monkeypatch):
+    """withdraw_invite returning False (the invitation was no longer open): reported, nothing claimed revoked."""
+    caplog.set_level(logging.DEBUG)
+    headers, address = _admin(app), "not-open" + DOMAIN
+
+    async def not_open(invite_id):
+        return False
+
+    monkeypatch.setattr(app.app_state.auth.repo, "withdraw_invite", not_open)
+    ambiguous = _AcceptedThenTimeout()
+    monkeypatch.setattr(app.app_state.auth, "sender", ambiguous)
+    failed = app.post("/api/v1/auth/invites", headers=headers, json={"email": address})
+    assert (failed.status_code, failed.json()) == (502, UNCONFIRMED)
+    events = _security_events(caplog)
+    assert ("invite_withdraw_failed", "not_open") in events and "invite_withdrawn" not in str(events)
+    assert "invite_created" not in str(events)
+    assert _invite_state(ambiguous.last_token()) == (True, False)  # the stub changed nothing; nor did the service
+    _assert_no_leak(caplog, failed, address, ambiguous.last_token())
+
+
+def test_withdrawal_error_answers_502_and_duplicates_still_create_one_account(app, caplog, monkeypatch):
+    """The database fails after the invitation was created: 502, reported for an operator (invite id only), the
+    link stays open until it expires. A retry adds a second open link; whichever is accepted first creates the
+    account, and the other is then refused."""
+    caplog.set_level(logging.DEBUG)
+    headers, address = _admin(app), "unwithdrawn" + DOMAIN
+
+    async def unavailable(invite_id):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(app.app_state.auth.repo, "withdraw_invite", unavailable)
+    ambiguous = _AcceptedThenTimeout()
+    monkeypatch.setattr(app.app_state.auth, "sender", ambiguous)
+    failed = app.post("/api/v1/auth/invites", headers=headers, json={"email": address})
+    monkeypatch.undo()
+    assert (failed.status_code, failed.json()) == (502, UNCONFIRMED)
+    events = _security_events(caplog)
+    assert ("invite_withdraw_failed", "OSError") in events and "invite_withdrawn" not in str(events)
+    first = ambiguous.last_token()
+    assert _invite_state(first) == (True, False)
+
+    assert app.post("/api/v1/auth/invites", headers=headers, json={"email": address}).status_code == 201
+    retry = app.app_state.auth.sender.last_token()
+    assert _accept(app, retry).status_code == 200
+    assert _accept(app, first).status_code == 409
+    with _db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.users WHERE email = %s", (address,)).fetchone()[0] == 1
+    _assert_no_leak(caplog, failed, address, first, retry)
 
 
 # ── Google ──────────────────────────────────────────────────────────────────────

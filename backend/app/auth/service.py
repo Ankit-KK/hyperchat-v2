@@ -287,12 +287,38 @@ class AuthService:
         row = await self.repo.create_invite(email, role, streamer_id, sha256_hex(token), admin.id,
                                             self.settings.invite_ttl_days, grant)
         url = f"{self.settings.frontend_url.rstrip('/')}/invite?token={token}"
-        await self.sender.send(render("invite", email, url))
+        try:
+            await self.sender.send(render("invite", email, url))
+        except Exception as exc:  # noqa: BLE001 - any provider failure: the class only, never the address or link
+            # Delivery is unknown: the provider may have accepted the message before failing (a timeout). The link is
+            # revoked either way, so a message that still arrives carries a dead link; this token is never resent. A
+            # retry is a new invitation with a new token (and, for an admin or creator-linked one, a new step-up grant).
+            security_event("invite_delivery_unconfirmed", reason=type(exc).__name__, user_id=admin.id,
+                           invite_id=row["id"])
+            await self._withdraw_unconfirmed_invite(admin, row["id"])
+            raise AuthError(502, "Invitation delivery could not be confirmed. Please retry.",
+                            "invite_delivery_unconfirmed") from None
         security_event("invite_created", level=20, user_id=admin.id)
         result = {"invite_id": row["id"], "expires_at": row["expires_at"].isoformat()}
         if self.settings.auth_return_invite_links:
             result["accept_url"] = url
         return result
+
+    async def _withdraw_unconfirmed_invite(self, admin: User, invite_id: str) -> None:
+        """Revoke an invitation whose delivery is unknown; `invite_withdrawn` only when the database confirms it. If the
+        database refuses or is unreachable, the link stays valid until it expires (invite_ttl_days): the ERROR event
+        names the invitation for an operator to revoke, and accepting it (or a retry's link) still creates at most one
+        account (a second acceptance for the same address is refused)."""
+        try:
+            revoked = await self.repo.withdraw_invite(invite_id)
+        except Exception as exc:  # noqa: BLE001 - reported; the caller answers 502 either way
+            security_event("invite_withdraw_failed", level=40, reason=type(exc).__name__, user_id=admin.id,
+                           invite_id=invite_id)
+            return
+        if revoked:
+            security_event("invite_withdrawn", level=20, user_id=admin.id, invite_id=invite_id)
+        else:  # no longer open (accepted meanwhile: the message did arrive; or revoked): nothing was changed
+            security_event("invite_withdraw_failed", level=40, reason="not_open", user_id=admin.id, invite_id=invite_id)
 
     async def accept_invite(self, token: str, password: str, username: str | None, ip: str | None,
                             user_agent: str | None) -> tuple[User, IssuedSession]:
