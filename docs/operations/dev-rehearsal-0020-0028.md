@@ -184,24 +184,27 @@ SMOKE1_FP=23dc26875b484ce5c5f7c5bcf25600a30a0a4b8e40433b2ecb8f8b2910af6933   # L
 SMOKE2=/root/hyperchat-smoke-2
 SMOKE2_SHA=ae60aa5b144517384ea6b9fbb50f6654eadd07b4
 SMOKE2_FP=02ddd7f723329b18a841fab7c56d4ae0dc751f98369fac7d93ba73cecef5930c    # 296 files, LF content
-# third copy, for E1-E3 after the recovery: #96's merge commit (run-scoped cleanup). Pinned when #96 is merged;
-# R3, E0c and E1 refuse while any of these is PENDING
+# third copy, for E1-E3 after the recovery: #96's merge commit (run-scoped cleanup); R3, E0c and E1 refuse any PENDING pin
 SMOKE=/root/hyperchat-smoke-3
-SMOKE_SHA=PENDING
-SMOKE_FP=PENDING
-SMOKE_FILES=PENDING
+SMOKE_SHA=14e6743b72e15787b35ae8cf95bc21f66b99aecd
+SMOKE_FP=26050794b6e7a1ac9071faa97d26df5cbdc4d7255d2eb3b451da87e3a3f0c990    # LF content, as the cmd.exe git archive pipe transfers it
+SMOKE_FILES=296
 # the second E1 attempt's leftovers (run authtest-smd613a5), verified read-only 2026-10-24 19:22-19:26 UTC
 RUN2_TAG=authtest-smd613a5
 RUN2_FROM='2026-10-24 19:21:45+00'
 RUN2_TO='2026-10-24 19:22:01+00'
 RUN2_IDS="0cae507e-1101-4811-a1c5-1689b025d3ba 306e6ace-e7e3-4ac1-8749-c84a7ee60843 6f2488d8-a5a3-4a37-9653-848a722ed293 a0e92335-70af-49d9-a862-fa64d47af929 ab2afbbf-9ba0-487d-9483-17a1b2ee3632 b4116509-7010-4846-a214-051d28669e03 bcb4c224-4c16-4e63-b64e-a6d7b8b2953a dfa79283-3ede-404f-9be7-31f93080671d"
-RUN2_EVENTS="707d8b4e-ab41-4be7-9aab-e6f5ea4472c8:suspend 7f742624-a9b2-4948-9933-a94f0d91369f:reactivate"
+# each creator as id:slug:status, and each audit row as id:creator:action:from:to (actor NULL, created within the attempt)
+RUN2_CREATORS="0cae507e-1101-4811-a1c5-1689b025d3ba:authtest-smd613a5c:pending 306e6ace-e7e3-4ac1-8749-c84a7ee60843:authtest-smd613a5d6:pending 6f2488d8-a5a3-4a37-9653-848a722ed293:authtest-smd613a5d13:active a0e92335-70af-49d9-a862-fa64d47af929:authtest-smd613a5life:active ab2afbbf-9ba0-487d-9483-17a1b2ee3632:authtest-smd613a5pend:pending b4116509-7010-4846-a214-051d28669e03:authtest-smd613a5app:pending bcb4c224-4c16-4e63-b64e-a6d7b8b2953a:authtest-smd613a5a:active dfa79283-3ede-404f-9be7-31f93080671d:authtest-smd613a5b:active"
+RUN2_EVENTS="707d8b4e-ab41-4be7-9aab-e6f5ea4472c8:a0e92335-70af-49d9-a862-fa64d47af929:suspend:active:suspended 7f742624-a9b2-4948-9933-a94f0d91369f:a0e92335-70af-49d9-a862-fa64d47af929:reactivate:suspended:active"
 # refs: every public column holding one of the eight ids (uuid) or the text 'authtest' (text, json), with its rows
 RUN2_REFS="banned_donors.streamer_id=1 creator_status_events.streamer_id=2 moderation_actions.streamer_id=6 obs_tokens.streamer_id=3 realtime_outbox.streamer_id=13 streamer_donator_totals.streamer_id=1 streamer_soundboard_slots.streamer_slug=40 streamers.custom_page_path=3 streamers.id=8 streamers.streamer_slug=8 streamers_moderators.streamer_id=1"
 # new_rows: every row created since RUN2_FROM, per table: the attempt's rows and nothing else
 RUN2_NEW="banned_donors=1 creator_status_events=2 moderation_actions=6 obs_tokens=3 realtime_outbox=13 streamer_soundboard_slots=40 streamers=8 streamers_moderators=1"
-# every foreign key into streamers with rows of the eight creators (checked inside the cleanup transaction)
-RUN2_FKS="banned_donors.streamer_id=1 creator_status_events.streamer_id=2 moderation_actions.streamer_id=6 obs_tokens.streamer_id=3 realtime_outbox.streamer_id=13 streamer_donator_totals.streamer_id=1 streamer_soundboard_slots.streamer_slug=40 streamers_moderators.streamer_id=1"
+# every foreign key into streamers with rows of the eight creators, as table.column:delete-rule=rows (c cascade,
+# r restrict); and the rows each locked table loses in the cleanup (checked inside the cleanup transaction)
+RUN2_FKS="banned_donors.streamer_id:c=1 creator_status_events.streamer_id:r=2 moderation_actions.streamer_id:c=6 obs_tokens.streamer_id:c=3 realtime_outbox.streamer_id:c=13 streamer_donator_totals.streamer_id:c=1 streamer_soundboard_slots.streamer_slug:c=40 streamers_moderators.streamer_id:c=1"
+RUN2_DELETES="banned_donors=1 creator_status_events=2 moderation_actions=6 obs_tokens=3 realtime_outbox=13 streamer_donator_totals=1 streamer_soundboard_slots=40 streamers=8 streamers_moderators=1"
 # the three baseline lines the eight creators and their two active OBS tokens change; every other line is identical
 RUN2_BASE_STREAMERS='streamers|141|8'
 RUN2_BASE_MD5='streamers_md5|e7140cf44ee66ff4e35f6ded19df6af7'
@@ -1391,7 +1394,7 @@ e0b_smoke_ok
 
 **Four separate approvals, in order:**
 1. Merging #96 (test-only).
-2. Merging this procedure, after its `SMOKE_SHA`, `SMOKE_FP` and `SMOKE_FILES` are pinned to #96's merge commit.
+2. Merging this procedure. Its `SMOKE_SHA`, `SMOKE_FP` and `SMOKE_FILES` are pinned to #96's merge commit `14e6743` (296 files).
 3. **"DEV recovery cleanup":** X1, X2 and X3, once. This never runs a smoke suite.
 4. **"Resume Phase E E1–E3":** R3, R4 and E0c, then E1, the E2 checks, the E2 restore and E3, each in its own root shell. Only after `E-recovered`.
 
@@ -1399,7 +1402,7 @@ Each step stops at the first STOP and is never retried automatically.
 
 **X1. Check the stopped state** (VPS; read-only apart from moving the second attempt's log aside and writing its marker). It must print `RECOVERY CHECK OK`, and STOPs unless all of these hold:
 - **Markers and logs:** E0, R1 and E0b passed; no later Phase E or recovery marker; both E1 logs are the recorded ones (`ATTEMPT1_SHA`, `ATTEMPT2_SHA`); `smoke_auth.py` never ran; no smoke suite is running.
-- **The eight creators, exactly:** every `authtest-*` creator is one of `RUN2_IDS`; all eight are unowned `authtest-smd613a5*` creators created within the attempt; their audit is exactly `RUN2_EVENTS`; no synthetic user, invitation, signup or partner row exists.
+- **The eight creators, exactly:** every `authtest-*` creator is one of `RUN2_IDS` and matches `RUN2_CREATORS` (slug, status); all eight are unowned `authtest-smd613a5*` creators created within the attempt; their audit is exactly `RUN2_EVENTS` (creator, transition), with no actor, created within the attempt; no synthetic user, invitation, signup or partner row exists.
 - **Provenance:** every column holding one of the eight ids or the text `authtest` matches `RUN2_REFS` exactly; every row created since the attempt began matches `RUN2_NEW`; and none of those rows predates or postdates the attempt. A legitimate row referencing a synthetic creator, or any unexpected row, is a STOP.
 - **Baseline:** identical to `baseline-before.txt` apart from the three `RUN2_BASE_*` lines; and, with the eight creators excluded, the creators, their md5 and the active OBS tokens equal `baseline-before.txt`; eligibility unchanged.
 - **DEV:** on `c2fe883be71d` at 0028, healthy, API and worker active; KYC and MFA `draft`; the witness intact; the isolation audit all `OK`.
@@ -1417,9 +1420,11 @@ e_recover_check() { local out rc ids="{${RUN2_IDS// /,}}"
   ! pgrep -f 'tests/e2e/smoke_' >/dev/null || { echo "STOP: a smoke suite is running"; return 1; }
   [ "$(Q "SELECT string_agg(id::text, ' ' ORDER BY id::text) FROM streamers WHERE streamer_slug LIKE 'authtest-%'")" = "$RUN2_IDS" ] \
     || { echo "STOP: the synthetic creators are not exactly the eight verified ones"; return 1; }
-  [ "$(Q "SELECT count(*) FROM streamers WHERE id = ANY('$ids'::uuid[]) AND streamer_slug LIKE '$RUN2_TAG%' AND user_id IS NULL AND created_at BETWEEN '$RUN2_FROM' AND '$RUN2_TO'")" = 8 ] \
-    || { echo "STOP: the eight creators are not unowned $RUN2_TAG creators of the second attempt"; return 1; }
-  [ "$(Q "SELECT string_agg(id::text || ':' || action, ' ' ORDER BY id::text) FROM creator_status_events WHERE streamer_id = ANY('$ids'::uuid[])")" = "$RUN2_EVENTS" ] \
+  [ "$(Q "SELECT string_agg(id::text || ':' || streamer_slug || ':' || status, ' ' ORDER BY id::text) FROM streamers WHERE streamer_slug LIKE 'authtest-%' OR id = ANY('$ids'::uuid[])")" = "$RUN2_CREATORS" ] \
+    && [ "$(Q "SELECT count(*) FROM streamers WHERE id = ANY('$ids'::uuid[]) AND streamer_slug LIKE '$RUN2_TAG%' AND user_id IS NULL AND created_at BETWEEN '$RUN2_FROM' AND '$RUN2_TO'")" = 8 ] \
+    || { echo "STOP: the eight creators are not the verified unowned $RUN2_TAG creators of the second attempt"; return 1; }
+  [ "$(Q "SELECT string_agg(id::text || ':' || streamer_id || ':' || action || ':' || from_status || ':' || to_status, ' ' ORDER BY id::text) FROM creator_status_events WHERE streamer_id = ANY('$ids'::uuid[])")" = "$RUN2_EVENTS" ] \
+    && [ "$(Q "SELECT count(*) FROM creator_status_events WHERE streamer_id = ANY('$ids'::uuid[]) AND actor_user_id IS NULL AND created_at BETWEEN '$RUN2_FROM' AND '$RUN2_TO'")" = 2 ] \
     || { echo "STOP: the status audit of the eight creators is not the two verified rows"; return 1; }
   [ "$(Q "SELECT (SELECT count(*) FROM users WHERE email::text LIKE '%@authtest.invalid') + (SELECT count(*) FROM user_invites WHERE email::text LIKE '%@authtest.invalid') + (SELECT count(*) FROM user_signups WHERE lower(email) LIKE '%@authtest.invalid') + (SELECT count(*) FROM partner_signups WHERE partner_slug LIKE 'authtest-%') + (SELECT count(*) FROM partner_api_keys WHERE partner_slug LIKE 'authtest-%')")" = 0 ] \
     || { echo "STOP: synthetic users, invitations, signups or partner rows exist"; return 1; }
@@ -1444,49 +1449,96 @@ e_recover_check() { local out rc ids="{${RUN2_IDS// /,}}"
 }
 e_recover_check
 ```
-**X2. The cleanup transaction** (VPS; the only database write; approval "DEV recovery cleanup"). It must print `RECOVERY CLEANUP COMMITTED`.
-- **One transaction** as the schema owner, with explicit ids only: no slug pattern selects what is deleted.
-- **Before deleting**, inside the transaction, with the eight creators locked: they are exactly the eight unowned `authtest-smd613a5*` creators; no other synthetic creator exists; their audit is the two `RUN2_EVENTS` rows; and every foreign key into `streamers` holds exactly `RUN2_FKS` rows of them. That includes `donations`, the KYC tables and `user_signups`, which must hold none.
-- **The deletes:** the two audit rows by id, then the eight creators by id. Their other rows go by `ON DELETE CASCADE`, and each row count is checked.
-- **After deleting**, still inside the transaction: the creators' count, unowned count and md5, and the active OBS tokens, equal `baseline-before.txt`; and no `authtest-*` creator is left.
-- **On any mismatch** the transaction raises an exception before `COMMIT`, so PostgreSQL rolls back everything, including deletes already made, and the function prints STOP. `E-recover-checked` stays, and nothing is retried.
+**X2. The cleanup transaction** (VPS; the only database write; approval "DEV recovery cleanup"). It must print `RECOVERY CLEANUP COMMITTED`. One transaction as the schema owner, with explicit ids only (no slug pattern selects what is deleted). Its invariants, in order:
+1. **Locks first.**
+   - The eight creator rows are locked `FOR UPDATE`. From then on no session can add a row referencing them, because a foreign-key insert must lock its parent row.
+   - Then `streamers`, `creator_status_events`, every table holding rows of the eight, and every table referencing those are locked in `SHARE ROW EXCLUSIVE` mode. Other sessions can still read them but cannot write them until `COMMIT`.
+   - Each locked table's row count is recorded. Nothing below can change between validation and commit; a lock not granted within 10 s is a STOP.
+2. **The creators, exactly.** Every `authtest-*` creator, together with every row with one of the eight ids, is exactly `RUN2_CREATORS` (id, slug, status). All eight are unowned `RUN2_TAG*` creators created within `RUN2_FROM`–`RUN2_TO`.
+3. **The audit, exactly.** Every audit row of the eight creators, together with the two audit ids, is exactly `RUN2_EVENTS` (id, creator, action, from, to). Both have no actor and were created within the attempt.
+4. **References and delete rules.** Every foreign key into `streamers` holding rows of the eight matches `RUN2_FKS`: table, column, delete rule (`c` cascade; `r` restrict, only the audit) and row count. That includes `donations`, the KYC tables, `user_signups` and `users`, which must hold none.
+5. **Provenance.** Every one of those rows that has a `created_at` was created within the attempt.
+6. **Nothing else is touched.** No row outside the eight creators references one of their dependent rows. Otherwise a cascade or `SET NULL` would change a row that is not theirs.
+7. **The deletes:** the two audit rows by id (with their creator and window), then the eight creators by id. Each deletion count must be exact: 2, then 8.
+8. **Per-table deletions:** every locked table lost exactly `RUN2_DELETES` rows (8 creators, 2 audit rows, 65 cascaded), and no other locked table changed.
+9. **The baseline afterwards:** the creators' count, unowned count and md5, and the active OBS tokens, equal `baseline-before.txt`. No `authtest-*` creator is left.
+10. **On any mismatch** the transaction raises an exception before `COMMIT`. PostgreSQL then rolls back everything, including deletes already made, and the function prints STOP. `E-recover-checked` stays, and nothing is retried.
+
+The two E1 logs, both smoke copies and production are never touched by it; X3 verifies them.
 ```
 e_recover_cleanup() { local rc events
   [ -f "$ST/E-recover-checked" ] || { echo "STOP: the recovery check (X1) has not passed"; return 1; }
   [ ! -e "$ST/E-recover-cleaned" ] && [ ! -e "$ST/E-recovered" ] || { echo "STOP: the recovery cleanup already ran"; return 1; }
-  head_is 0028 || return 1
+  head_is 0028 && prod_ok || return 1
   events="$(for e in $RUN2_EVENTS; do echo "${e%%:*}"; done | paste -sd, -)"
-  psql_dev_rw -v ids="{${RUN2_IDS// /,}}" -v events="{$events}" -v tag="$RUN2_TAG" -v fks="$RUN2_FKS" \
+  psql_dev_rw -v ids="{${RUN2_IDS// /,}}" -v events="{$events}" -v tag="$RUN2_TAG" -v creators="$RUN2_CREATORS" \
+    -v eventrows="$RUN2_EVENTS" -v fks="$RUN2_FKS" -v deletes="$RUN2_DELETES" -v f="$RUN2_FROM" -v upto="$RUN2_TO" \
     -v base="$(sed -n 's/^streamers|//p' "$ST/baseline-before.txt")" -v md5="$(sed -n 's/^streamers_md5|//p' "$ST/baseline-before.txt")" \
     -v obs="$(sed -n 's/^obs_tokens_active|//p' "$ST/baseline-before.txt")" <<'SQL'; rc=$?
 BEGIN;
 SET LOCAL ROLE hyperchat_owner;
 SET LOCAL lock_timeout = '10s';
 SELECT set_config('recover.ids', :'ids', true), set_config('recover.events', :'events', true),
-       set_config('recover.tag', :'tag', true), set_config('recover.fks', :'fks', true),
-       set_config('recover.base', :'base', true), set_config('recover.md5', :'md5', true),
-       set_config('recover.obs', :'obs', true) \g /dev/null
+       set_config('recover.tag', :'tag', true), set_config('recover.creators', :'creators', true),
+       set_config('recover.eventrows', :'eventrows', true), set_config('recover.fks', :'fks', true),
+       set_config('recover.deletes', :'deletes', true), set_config('recover.from', :'f', true),
+       set_config('recover.upto', :'upto', true), set_config('recover.base', :'base', true),
+       set_config('recover.md5', :'md5', true), set_config('recover.obs', :'obs', true) \g /dev/null
 DO $$
 DECLARE
   ids uuid[] := current_setting('recover.ids')::uuid[];
   events uuid[] := current_setting('recover.events')::uuid[];
   tag text := current_setting('recover.tag');
-  got text := '';
+  t_from timestamptz := current_setting('recover.from')::timestamptz;
+  t_to timestamptz := current_setting('recover.upto')::timestamptz;
+  locked text[] := ARRAY['streamers', 'creator_status_events'];
+  before jsonb := '{}';
+  got text;
   r record;
   n bigint;
+  t text;
+  xs text; xsr text; ys text; ysr text;
 BEGIN
   IF cardinality(ids) IS DISTINCT FROM 8 OR cardinality(events) IS DISTINCT FROM 2 OR tag !~ '^authtest-[a-z0-9]{3,}$' THEN
     RAISE EXCEPTION 'STOP: expected 8 creator ids, 2 audit ids and a run tag';
   END IF;
+  -- 1. locks: the eight rows (no new reference can be added), then every table holding their rows or referencing those
   PERFORM 1 FROM public.streamers WHERE id = ANY(ids) FOR UPDATE;
-  -- before: exactly the verified rows
-  SELECT count(*) INTO n FROM public.streamers WHERE id = ANY(ids) AND streamer_slug LIKE tag || '%' AND user_id IS NULL;
-  IF n IS DISTINCT FROM 8 THEN RAISE EXCEPTION 'STOP: % of the eight ids are unowned % creators', n, tag; END IF;
-  SELECT count(*) INTO n FROM public.streamers WHERE streamer_slug LIKE 'authtest-%' AND NOT (id = ANY(ids));
-  IF n IS DISTINCT FROM 0 THEN RAISE EXCEPTION 'STOP: % other synthetic creators exist', n; END IF;
-  SELECT count(*) INTO n FROM public.creator_status_events WHERE streamer_id = ANY(ids) AND NOT (id = ANY(events));
-  IF n IS DISTINCT FROM 0 THEN RAISE EXCEPTION 'STOP: % unexpected audit rows of the eight creators', n; END IF;
   FOR r IN SELECT c.conrelid::regclass::text AS t, a.attname::text AS col, ra.attname::text AS rcol
+             FROM pg_constraint c
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+             JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = c.confkey[1]
+            WHERE c.contype = 'f' AND c.confrelid = 'public.streamers'::regclass LOOP
+    EXECUTE format('SELECT count(*) FROM public.%I WHERE %I IN (SELECT %I FROM public.streamers WHERE id = ANY($1))',
+                   r.t, r.col, r.rcol) INTO n USING ids;
+    IF n > 0 AND NOT r.t = ANY(locked) THEN locked := locked || r.t; END IF;
+  END LOOP;
+  FOR r IN SELECT DISTINCT c.conrelid::regclass::text AS t FROM pg_constraint c
+            WHERE c.contype = 'f' AND c.confrelid::regclass::text = ANY(locked) AND c.confrelid <> 'public.streamers'::regclass LOOP
+    IF NOT r.t = ANY(locked) THEN locked := locked || r.t; END IF;
+  END LOOP;
+  FOREACH t IN ARRAY locked LOOP
+    EXECUTE format('LOCK TABLE public.%I IN SHARE ROW EXCLUSIVE MODE', t);
+    EXECUTE format('SELECT count(*) FROM public.%I', t) INTO n;
+    before := before || jsonb_build_object(t, n);
+  END LOOP;
+  -- 2. the creators, exactly
+  SELECT string_agg(id::text || ':' || streamer_slug || ':' || status, ' ' ORDER BY id::text) INTO got
+    FROM public.streamers WHERE streamer_slug LIKE 'authtest-%' OR id = ANY(ids);
+  IF got IS DISTINCT FROM current_setting('recover.creators') THEN RAISE EXCEPTION 'STOP: the synthetic creators are not the eight verified ones: %', got; END IF;
+  SELECT count(*) INTO n FROM public.streamers
+   WHERE id = ANY(ids) AND streamer_slug LIKE tag || '%' AND user_id IS NULL AND created_at BETWEEN t_from AND t_to;
+  IF n IS DISTINCT FROM 8 THEN RAISE EXCEPTION 'STOP: % of the eight are unowned % creators of the attempt', n, tag; END IF;
+  -- 3. the audit, exactly
+  SELECT string_agg(id::text || ':' || streamer_id || ':' || action || ':' || from_status || ':' || to_status, ' ' ORDER BY id::text) INTO got
+    FROM public.creator_status_events WHERE streamer_id = ANY(ids) OR id = ANY(events);
+  IF got IS DISTINCT FROM current_setting('recover.eventrows') THEN RAISE EXCEPTION 'STOP: the audit rows are not the two verified ones: %', got; END IF;
+  SELECT count(*) INTO n FROM public.creator_status_events
+   WHERE id = ANY(events) AND streamer_id = ANY(ids) AND actor_user_id IS NULL AND created_at BETWEEN t_from AND t_to;
+  IF n IS DISTINCT FROM 2 THEN RAISE EXCEPTION 'STOP: % of the two audit rows have no actor and were created within the attempt', n; END IF;
+  -- 4 and 5. every reference into streamers, with its delete rule and count; every row created within the attempt
+  got := '';
+  FOR r IN SELECT c.conrelid::regclass::text AS t, a.attname::text AS col, ra.attname::text AS rcol, c.confdeltype::text AS rule
              FROM pg_constraint c
              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
              JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = c.confkey[1]
@@ -1494,19 +1546,56 @@ BEGIN
             ORDER BY (c.conrelid::regclass::text || '.' || a.attname) COLLATE "C" LOOP
     EXECUTE format('SELECT count(*) FROM public.%I WHERE %I IN (SELECT %I FROM public.streamers WHERE id = ANY($1))',
                    r.t, r.col, r.rcol) INTO n USING ids;
-    IF n > 0 THEN got := concat_ws(' ', NULLIF(got, ''), r.t || '.' || r.col || '=' || n); END IF;
+    CONTINUE WHEN n = 0;
+    got := concat_ws(' ', NULLIF(got, ''), r.t || '.' || r.col || ':' || r.rule || '=' || n);
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = r.t AND column_name = 'created_at') THEN
+      EXECUTE format('SELECT count(*) FROM public.%I WHERE %I IN (SELECT %I FROM public.streamers WHERE id = ANY($1)) '
+                     'AND (created_at IS NULL OR created_at NOT BETWEEN $2 AND $3)', r.t, r.col, r.rcol) INTO n USING ids, t_from, t_to;
+      IF n > 0 THEN RAISE EXCEPTION 'STOP: % rows of % were not created within the attempt', n, r.t; END IF;
+    END IF;
   END LOOP;
-  IF got IS DISTINCT FROM current_setting('recover.fks') THEN
-    RAISE EXCEPTION 'STOP: rows of the eight creators differ from the verified set: %', got;
-  END IF;
-  -- the two audit rows by id, then the eight creators by id (their other rows cascade)
-  DELETE FROM public.creator_status_events WHERE id = ANY(events) AND streamer_id = ANY(ids);
+  IF got IS DISTINCT FROM current_setting('recover.fks') THEN RAISE EXCEPTION 'STOP: rows of the eight creators differ from the verified set: %', got; END IF;
+  -- 6. no row outside the eight creators references one of their dependent rows
+  got := '';
+  FOR r IN SELECT c.conrelid::regclass::text AS y, a.attname::text AS ycol, c.confrelid::regclass::text AS x, ra.attname::text AS xcol
+             FROM pg_constraint c
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+             JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = c.confkey[1]
+            WHERE c.contype = 'f' AND c.confrelid::regclass::text = ANY(locked) AND c.confrelid <> 'public.streamers'::regclass
+            ORDER BY 1, 2 LOOP
+    SELECT a2.attname::text, ra2.attname::text INTO xs, xsr FROM pg_constraint c2
+      JOIN pg_attribute a2 ON a2.attrelid = c2.conrelid AND a2.attnum = c2.conkey[1]
+      JOIN pg_attribute ra2 ON ra2.attrelid = c2.confrelid AND ra2.attnum = c2.confkey[1]
+     WHERE c2.contype = 'f' AND c2.conrelid = r.x::regclass AND c2.confrelid = 'public.streamers'::regclass LIMIT 1;
+    CONTINUE WHEN xs IS NULL;
+    SELECT a3.attname::text, ra3.attname::text INTO ys, ysr FROM pg_constraint c3
+      JOIN pg_attribute a3 ON a3.attrelid = c3.conrelid AND a3.attnum = c3.conkey[1]
+      JOIN pg_attribute ra3 ON ra3.attrelid = c3.confrelid AND ra3.attnum = c3.confkey[1]
+     WHERE c3.contype = 'f' AND c3.conrelid = r.y::regclass AND c3.confrelid = 'public.streamers'::regclass LIMIT 1;
+    EXECUTE format('SELECT count(*) FROM public.%I y WHERE y.%I IN (SELECT x.%I FROM public.%I x WHERE x.%I IN '
+                   '(SELECT %I FROM public.streamers WHERE id = ANY($1)))%s', r.y, r.ycol, r.xcol, r.x, xs, xsr,
+                   CASE WHEN ys IS NULL THEN '' ELSE format(' AND (y.%I IS NULL OR y.%I NOT IN (SELECT %I FROM public.streamers WHERE id = ANY($1)))', ys, ys, ysr) END)
+      INTO n USING ids;
+    IF n > 0 THEN got := concat_ws(' ', NULLIF(got, ''), r.y || '.' || r.ycol || '=' || n); END IF;
+  END LOOP;
+  IF got <> '' THEN RAISE EXCEPTION 'STOP: rows outside the eight creators reference their dependent rows: %', got; END IF;
+  -- 7. the two audit rows by id, then the eight creators by id (their other rows cascade)
+  DELETE FROM public.creator_status_events
+   WHERE id = ANY(events) AND streamer_id = ANY(ids) AND actor_user_id IS NULL AND created_at BETWEEN t_from AND t_to;
   GET DIAGNOSTICS n = ROW_COUNT;
   IF n IS DISTINCT FROM 2 THEN RAISE EXCEPTION 'STOP: % audit rows deleted, expected 2', n; END IF;
-  DELETE FROM public.streamers WHERE id = ANY(ids) AND streamer_slug LIKE tag || '%' AND user_id IS NULL;
+  DELETE FROM public.streamers
+   WHERE id = ANY(ids) AND streamer_slug LIKE tag || '%' AND user_id IS NULL AND created_at BETWEEN t_from AND t_to;
   GET DIAGNOSTICS n = ROW_COUNT;
   IF n IS DISTINCT FROM 8 THEN RAISE EXCEPTION 'STOP: % creators deleted, expected 8', n; END IF;
-  -- after: the creators and active OBS tokens exactly as before E1, no synthetic creator left
+  -- 8. every locked table lost exactly the expected rows
+  got := '';
+  FOREACH t IN ARRAY (SELECT array_agg(x ORDER BY x COLLATE "C") FROM unnest(locked) x) LOOP
+    EXECUTE format('SELECT count(*) FROM public.%I', t) INTO n;
+    IF (before ->> t)::bigint IS DISTINCT FROM n THEN got := concat_ws(' ', NULLIF(got, ''), t || '=' || ((before ->> t)::bigint - n)); END IF;
+  END LOOP;
+  IF got IS DISTINCT FROM current_setting('recover.deletes') THEN RAISE EXCEPTION 'STOP: the rows deleted per table differ: %', got; END IF;
+  -- 9. the creators and active OBS tokens exactly as before E1, no synthetic creator left
   SELECT count(*) || '|' || count(*) FILTER (WHERE user_id IS NULL) INTO got FROM public.streamers;
   IF got IS DISTINCT FROM current_setting('recover.base') THEN RAISE EXCEPTION 'STOP: creators after the cleanup: %', got; END IF;
   SELECT md5(string_agg(id::text || ':' || coalesce(user_id::text,'-') || ':' || streamer_slug || ':' || coalesce(status,'-'), ',' ORDER BY id))
@@ -1520,7 +1609,7 @@ END $$;
 COMMIT;
 SQL
   [ "$rc" = 0 ] || { echo "STOP: the cleanup transaction failed and was rolled back (psql exit $rc); nothing was deleted"; return 1; }
-  date -u +%FT%TZ > "$ST/E-recover-cleaned" && echo "RECOVERY CLEANUP COMMITTED: 2 audit rows and the 8 synthetic creators (with their cascaded rows) deleted"
+  date -u +%FT%TZ > "$ST/E-recover-cleaned" && echo "RECOVERY CLEANUP COMMITTED: 2 audit rows and the 8 synthetic creators (with their 65 cascaded rows) deleted"
 }
 e_recover_cleanup
 ```
@@ -1578,13 +1667,13 @@ e_resume3_check
 ```
 **R4. Copy #96's merge commit to the third path.**
 
-**(workstation)**: a read-only check that must print nothing. Application and migration code must be identical to `c2fe883`. Use the pinned `SMOKE_SHA` in place of `<SMOKE_SHA>`:
+**(workstation)**: a read-only check that must print nothing. Application and migration code must be identical to `c2fe883`.:
 ```
-git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef <SMOKE_SHA> -- backend database ':(exclude)backend/tests' ':(exclude)*.md'
+git diff --stat c2fe883be71d1a494232d4147ed4d6fbc4e70eef 14e6743b72e15787b35ae8cf95bc21f66b99aecd -- backend database ':(exclude)backend/tests' ':(exclude)*.md'
 ```
 **(workstation)**, through `cmd.exe` so the archive's content is LF. It runs only after R3, and never into an existing directory:
 ```
-git archive <SMOKE_SHA> backend tests \
+git archive 14e6743b72e15787b35ae8cf95bc21f66b99aecd backend tests \
   | ssh root@VPS "[ -f /root/rehearsal-dev/E-resume3-checked ] && [ ! -e /root/hyperchat-smoke-3 ] && install -d -o root -g root -m 0700 /root/hyperchat-smoke-3 && tar -x -C /root/hyperchat-smoke-3"
 ```
 **(VPS)**: must print `E0c OK`. A failed or partial transfer fails here on the fingerprint or the file count.
