@@ -179,31 +179,57 @@ class FailingConn:
 
 
 DOMAIN = "@smokeharness.invalid"
+TAG = "authtest-smk"  # the harness run's creator-slug prefix (smoke_dev_backend.TAG)
 
 
 def _seed(owner, app):
     """A synthetic admin (owner only, since 0024), a synthetic streamer and creator, and real-looking rows that the
     cleanup must never touch."""
     from app.auth.passwords import hash_password
-    admin = owner.execute(sp.ADMIN_INSERT, ("smk-admin" + DOMAIN, hash_password("Smoke-pw-12345"))).fetchone()[0]
+    admin = owner.execute(sp.ADMIN_INSERT, (TAG + "-admin" + DOMAIN, hash_password("Smoke-pw-12345"))).fetchone()[0]
     owner.execute("INSERT INTO public.users (email, role) VALUES (%s, 'streamer'), (%s, 'admin')",
-                  ("smk-owner" + DOMAIN, "keep-admin@realkeep.invalid"))
+                  (TAG + "-owner" + DOMAIN, "keep-admin@realkeep.invalid"))
     owner.execute("INSERT INTO public.users (email, role) VALUES (%s, 'streamer')", ("keep-owner@realkeep.invalid",))
     owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) VALUES "
                   "('authtest-smkharness', 'Smoke', 'active', 'legacy'), ('realkeep-smkharness', 'Keep', 'active', "
                   "'legacy')")
     owner.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES ('Smoke', %s, '+91 99999 00000')",
-                  ("smk-signup" + DOMAIN,))
+                  (TAG + "-signup" + DOMAIN,))
+    for slug in ("authtest-smkharness", "realkeep-smkharness"):  # what admin suspend / reactivate leaves (0020, 0023)
+        _audit(owner, slug)
     return admin
+
+
+def _audit(owner, slug):
+    owner.execute("INSERT INTO public.creator_status_events (streamer_id, action, from_status, to_status) "
+                  "SELECT id, 'suspend', 'active', 'suspended' FROM public.streamers WHERE streamer_slug = %s", (slug,))
+
+
+def _audits(owner, slug_like):
+    return owner.execute("SELECT count(*) FROM public.creator_status_events e JOIN public.streamers s "
+                         "ON s.id = e.streamer_id WHERE s.streamer_slug LIKE %s", (slug_like,)).fetchone()[0]
+
+
+def _drop_synthetic(owner):
+    """Test teardown only (the schema owner, this harness's own rows)."""
+    owner.execute("DELETE FROM public.creator_status_events WHERE streamer_id IN "
+                  "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'authtest-smk%%' "
+                  "OR streamer_slug LIKE 'authtest-zzother%%')")
+    owner.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'authtest-smk%%' "
+                  "OR streamer_slug LIKE 'authtest-zzother%%'")
+    owner.execute("DELETE FROM public.user_signups WHERE email LIKE %s", ("%" + DOMAIN,))
+    owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
 
 
 def _real_rows(owner):
     return owner.execute("SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE '%%@realkeep.invalid'), "
                          "(SELECT count(*) FROM public.streamers WHERE streamer_slug = 'realkeep-smkharness')"
-                         ).fetchone()
+                         ).fetchone() + (_audits(owner, "realkeep-smkharness"),)
 
 
 def _drop_real(owner):
+    owner.execute("DELETE FROM public.creator_status_events WHERE streamer_id IN "
+                  "(SELECT id FROM public.streamers WHERE streamer_slug = 'realkeep-smkharness')")
     owner.execute("DELETE FROM public.streamers WHERE streamer_slug = 'realkeep-smkharness'")
     owner.execute("DELETE FROM public.users WHERE email::text LIKE '%%@realkeep.invalid'")
 
@@ -213,8 +239,8 @@ def test_since_0024_the_runtime_role_cannot_create_or_delete_the_synthetic_admin
     with fixture_db() as owner, db() as app:
         try:
             with pytest.raises(psycopg.Error):
-                app.execute(sp.ADMIN_INSERT, ("smk-direct" + DOMAIN, None))
-            admin = owner.execute(sp.ADMIN_INSERT, ("smk-direct" + DOMAIN, None)).fetchone()[0]
+                app.execute(sp.ADMIN_INSERT, (TAG + "-direct" + DOMAIN, None))
+            admin = owner.execute(sp.ADMIN_INSERT, (TAG + "-direct" + DOMAIN, None)).fetchone()[0]
             with pytest.raises(psycopg.Error):
                 app.execute("DELETE FROM public.users WHERE id = %s", (admin,))
         finally:
@@ -246,11 +272,11 @@ def test_since_0027_a_creator_linked_account_is_written_by_the_owner_not_the_run
                                     "VALUES ('authtest-smk0027', 'Smoke', 'active', 'legacy') RETURNING id::text"
                                     ).fetchone()[0]
             with pytest.raises(psycopg.errors.InsufficientPrivilege, match="created only by an invitation"):
-                app.execute(sp.USER_INSERT, ("smk-linked-app" + DOMAIN, None, "streamer", creator, True))
-            linked = owner.execute(sp.USER_INSERT, ("smk-linked" + DOMAIN, None, "streamer", creator, True)).fetchone()[0]
-            plain = app.execute(sp.USER_INSERT, ("smk-plain" + DOMAIN, None, "user", None, True)).fetchone()[0]
+                app.execute(sp.USER_INSERT, (TAG + "-linked-app" + DOMAIN, None, "streamer", creator, True))
+            linked = owner.execute(sp.USER_INSERT, (TAG + "-linked" + DOMAIN, None, "streamer", creator, True)).fetchone()[0]
+            plain = app.execute(sp.USER_INSERT, (TAG + "-plain" + DOMAIN, None, "user", None, True)).fetchone()[0]
             assert owner.execute("SELECT count(*) FROM public.users WHERE id IN (%s, %s)", (linked, plain)).fetchone()[0] == 2
-            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC))
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)
             assert left["users"] == 0 and left["creators"] == 0, left
         finally:
             owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
@@ -268,15 +294,15 @@ def test_the_suites_other_runtime_role_fixture_writes_are_accepted_at_head_while
             creator = owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
                                     "VALUES ('authtest-smkfix', 'Smoke', 'active', 'legacy') RETURNING id::text"
                                     ).fetchone()[0]
-            admin = owner.execute(sp.ADMIN_INSERT, ("smk-fix-admin" + DOMAIN, None)).fetchone()[0]
-            old = app.execute(sp.USER_INSERT, ("smk-fix-old" + DOMAIN, None, "streamer", None, True)).fetchone()[0]
+            admin = owner.execute(sp.ADMIN_INSERT, (TAG + "-fix-admin" + DOMAIN, None)).fetchone()[0]
+            old = app.execute(sp.USER_INSERT, (TAG + "-fix-old" + DOMAIN, None, "streamer", None, True)).fetchone()[0]
             app.execute("UPDATE public.users SET streamer_id = %s WHERE id = %s", (creator, old))  # D13 migrated shape
             app.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (creator,))
             app.execute("UPDATE public.users SET email_verified_at = now() WHERE id = %s", (old,))  # D11
             app.execute("INSERT INTO public.user_invites (email, role, token_hash, invited_by, expires_at) VALUES "
-                        "(%s, 'streamer', %s, %s, now() + interval '1 day')", ("smk-fix-inv" + DOMAIN, "a" * 64, admin))
+                        "(%s, 'streamer', %s, %s, now() + interval '1 day')", (TAG + "-fix-inv" + DOMAIN, "a" * 64, admin))
             app.execute("INSERT INTO public.user_invites (email, token_hash, expires_at) VALUES "
-                        "(%s, %s, now() + interval '1 day')", ("smk-fix-inv2" + DOMAIN, "b" * 64))
+                        "(%s, %s, now() + interval '1 day')", (TAG + "-fix-inv2" + DOMAIN, "b" * 64))
             app.execute("INSERT INTO public.partner_api_keys (partner_slug, key_hash, key_prefix) VALUES "
                         "('authtest-smkfix-partner', %s, 'hc_smkfix')", ("c" * 64,))
             app.execute("UPDATE public.partner_api_keys SET revoked = true WHERE key_hash = %s", ("c" * 64,))
@@ -292,13 +318,13 @@ def test_cleanup_removes_every_synthetic_row_and_nothing_real(strict_scratch_db)
     with fixture_db() as owner, db() as app:
         try:
             _seed(owner, app)
-            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC))
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)
             assert left["users"] == 0 and left["creators"] == 0 and left["signups"] == 0, left
-            assert _real_rows(owner) == (2, 1)  # the admin and the owner outside the domain, the other creator
+            assert _real_rows(owner) == (2, 1, 1)  # the admin and the owner outside the domain, the other creator, its audit
+            assert _audits(owner, "authtest-smk%") == 0
         finally:
             _drop_real(owner)
-            owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
-            owner.execute("DELETE FROM public.streamers WHERE streamer_slug = 'authtest-smkharness'")
+            _drop_synthetic(owner)
 
 
 @requires_db
@@ -307,18 +333,222 @@ def test_a_failing_cleanup_statement_does_not_skip_the_rest_and_is_reported(stri
         try:
             _seed(owner, app)
             with pytest.raises(RuntimeError) as exc:
-                sp.cleanup(FailingConn(app, "DELETE FROM public.streamers"), owner, DOMAIN, datetime.now(UTC))
+                sp.cleanup(FailingConn(app, "DELETE FROM public.streamers"), owner, DOMAIN, datetime.now(UTC), tag=TAG)
             message = str(exc.value)
             assert "DELETE FROM public.streamers" in message and "'creators': 0" not in message  # reported, with leftovers
             with db() as check:
                 users = check.execute("SELECT count(*) FROM public.users WHERE email::text LIKE %s",
                                       ("%" + DOMAIN,)).fetchone()[0]
             assert users == 0  # the users (incl. the synthetic admin) were still removed, through the owner
-            assert _real_rows(owner) == (2, 1)
+            assert _real_rows(owner) == (2, 1, 1)
         finally:
             _drop_real(owner)
-            owner.execute("DELETE FROM public.streamers WHERE streamer_slug = 'authtest-smkharness'")
-            owner.execute("DELETE FROM public.users WHERE email::text LIKE %s", ("%" + DOMAIN,))
+            _drop_synthetic(owner)
+
+
+@requires_db
+def test_the_e1_stop_of_2026_10_24_the_status_audit_must_go_before_its_creator(strict_scratch_db):
+    """The second E1 stop: without the status-audit step, deleting the audited synthetic creator hits
+    creator_status_events_streamer_id_fkey (ON DELETE RESTRICT since 0023), the creators stay and the cleanup reports
+    it. A later cleanup with the step then removes everything (safe after a partial teardown); the real audit stays."""
+    with fixture_db() as owner, db() as app:
+        try:
+            _seed(owner, app)
+            assert owner.execute("SELECT confdeltype FROM pg_constraint WHERE conname = "
+                                 "'creator_status_events_streamer_id_fkey'").fetchone()[0] == "r"
+            with pytest.raises(RuntimeError) as exc:
+                sp.cleanup(app, FailingConn(owner, "DELETE FROM public.creator_status_events"), DOMAIN,
+                           datetime.now(UTC), tag=TAG)
+            assert "DELETE FROM public.streamers: ForeignKeyViolation" in str(exc.value)
+            assert "'creators': 1" in str(exc.value) and _audits(owner, "authtest-smkharness") == 1
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)
+            assert all(v == 0 for v in left.values()), left
+            assert _audits(owner, "authtest-smk%") == 0 and _real_rows(owner) == (2, 1, 1)
+        finally:
+            _drop_real(owner)
+            _drop_synthetic(owner)
+
+
+@requires_db
+def test_another_runs_audited_creator_and_its_audit_survive_this_runs_cleanup(strict_scratch_db):
+    """Another run's creator WITH a status audit: neither the audit nor the creator (nor its other rows) is touched,
+    and this run's cleanup succeeds."""
+    with fixture_db() as owner, db() as app:
+        try:
+            _seed(owner, app)
+            _seed_other_run(owner, app, audited=True)
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)
+            assert all(v == 0 for v in left.values()), left
+            assert _audits(owner, "authtest-zzother1") == 1 and _audits(owner, "authtest-smkharness") == 0
+            assert _other_run_rows(owner) == (1, 1, 1, 1, 1, 1, 1, 1)
+            assert _real_rows(owner) == (2, 1, 1)
+        finally:
+            _drop_real(owner)
+            _drop_other_run(owner)
+            _drop_synthetic(owner)
+
+
+@requires_db
+def test_this_runs_audited_creator_is_still_reported_if_its_audit_step_fails_with_another_run_present(
+        strict_scratch_db):
+    """Partial teardown with another run present: this run's creator stays (reported, non-zero), the other run's rows
+    are untouched, and a second cleanup finishes this run only."""
+    with fixture_db() as owner, db() as app:
+        try:
+            _seed(owner, app)
+            _seed_other_run(owner, app, audited=True)
+            with pytest.raises(RuntimeError, match="DELETE FROM public.streamers: ForeignKeyViolation"):
+                sp.cleanup(app, FailingConn(owner, "DELETE FROM public.creator_status_events"), DOMAIN,
+                           datetime.now(UTC), tag=TAG)
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)
+            assert all(v == 0 for v in left.values()), left
+            assert _other_run_rows(owner) == (1, 1, 1, 1, 1, 1, 1, 1) and _audits(owner, "authtest-zzother1") == 1
+        finally:
+            _drop_real(owner)
+            _drop_other_run(owner)
+            _drop_synthetic(owner)
+
+
+def _seed_other_run(owner, app, audited: bool):
+    """Another run's leftovers (tag authtest-zzother): a creator with a donation, moderator and OBS token, its owner
+    account, an invitation, a signup and a partner key, all in the shared synthetic namespace."""
+    other = owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) VALUES "
+                          "('authtest-zzother1', 'Other run', 'active', 'legacy') RETURNING id::text").fetchone()[0]
+    owner.execute("INSERT INTO public.users (email, role) VALUES ('authtest-zzother-owner@smokeharness.invalid', 'user')")
+    owner.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
+                  "payment_status, moderation_status) VALUES (%s, 'authtest-zzother-o1', 'Smoke Other', 10, 'INR', 10, "
+                  "'success', 'pending')", (other,))
+    owner.execute("INSERT INTO public.streamers_moderators (streamer_id, mod_name) VALUES (%s, 'Smoke Mod')", (other,))
+    owner.execute("INSERT INTO public.obs_tokens (streamer_id, token_hash) VALUES (%s, %s)", (other, "e" * 64))
+    app.execute("INSERT INTO public.user_invites (email, token_hash, expires_at) VALUES "
+                "('authtest-zzother-inv@smokeharness.invalid', %s, now() + interval '1 day')", ("d" * 64,))
+    owner.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES ('Other', "
+                  "'authtest-zzother-signup@smokeharness.invalid', '+91 99999 00001')")
+    app.execute("INSERT INTO public.partner_api_keys (partner_slug, key_hash, key_prefix) VALUES "
+                "('authtest-zzother-partner', %s, 'hc_zzother')", ("f" * 64,))
+    if audited:
+        _audit(owner, "authtest-zzother1")
+    return other
+
+
+def _other_run_rows(owner):
+    return owner.execute(
+        "SELECT (SELECT count(*) FROM public.streamers WHERE streamer_slug = 'authtest-zzother1'), "
+        "(SELECT count(*) FROM public.donations WHERE order_id = 'authtest-zzother-o1'), "
+        "(SELECT count(*) FROM public.streamers_moderators m JOIN public.streamers s ON s.id = m.streamer_id "
+        " WHERE s.streamer_slug = 'authtest-zzother1'), "
+        "(SELECT count(*) FROM public.obs_tokens WHERE token_hash = %s), "
+        "(SELECT count(*) FROM public.users WHERE email = 'authtest-zzother-owner@smokeharness.invalid'), "
+        "(SELECT count(*) FROM public.user_invites WHERE email = 'authtest-zzother-inv@smokeharness.invalid'), "
+        "(SELECT count(*) FROM public.user_signups WHERE email = 'authtest-zzother-signup@smokeharness.invalid'), "
+        "(SELECT count(*) FROM public.partner_api_keys WHERE partner_slug = 'authtest-zzother-partner')",
+        ("e" * 64,)).fetchone()
+
+
+def _drop_other_run(owner):
+    owner.execute("DELETE FROM public.donations WHERE order_id = 'authtest-zzother-o1'")
+    owner.execute("DELETE FROM public.user_invites WHERE email = 'authtest-zzother-inv@smokeharness.invalid'")
+    owner.execute("DELETE FROM public.user_signups WHERE email = 'authtest-zzother-signup@smokeharness.invalid'")
+    owner.execute("DELETE FROM public.partner_api_keys WHERE partner_slug = 'authtest-zzother-partner'")
+    owner.execute("DELETE FROM public.users WHERE email = 'authtest-zzother-owner@smokeharness.invalid'")
+
+
+@requires_db
+def test_another_runs_unaudited_rows_all_survive_this_runs_cleanup(strict_scratch_db):
+    """Review of PR #96: another run's creator WITHOUT a status audit (and its donation, moderator, OBS token, account,
+    invitation, signup and partner key) is never deleted by this run's cleanup, which itself succeeds."""
+    with fixture_db() as owner, db() as app:
+        try:
+            _seed(owner, app)
+            _seed_other_run(owner, app, audited=False)
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)
+            assert all(v == 0 for v in left.values()), left  # this run's rows only
+            assert _other_run_rows(owner) == (1, 1, 1, 1, 1, 1, 1, 1)
+            assert _audits(owner, "authtest-smk%") == 0 and _real_rows(owner) == (2, 1, 1)
+        finally:
+            _drop_real(owner)
+            _drop_other_run(owner)
+            _drop_synthetic(owner)
+
+
+@requires_db
+def test_cleanup_after_a_partial_setup_or_an_empty_run_succeeds(strict_scratch_db):
+    with fixture_db() as owner, db() as app:
+        try:
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)  # nothing was created
+            assert all(v == 0 for v in left.values()), left
+            owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) VALUES "
+                          "('authtest-smkpartial', 'Partial', 'pending', 'legacy')")  # setup stopped after one creator
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=TAG)
+            assert all(v == 0 for v in left.values()), left
+        finally:
+            _drop_synthetic(owner)
+
+
+@pytest.mark.parametrize("tag", ["", "authtest-", "authtest-%", "authtest-ab", "authtest-smk%", "real-abcdef",
+                                 "authtest-smk'x", "AUTHTEST-SMK"])
+def test_cleanup_refuses_a_broad_or_malformed_run_tag_before_any_statement(tag):
+    class Recorder:
+        def __init__(self):
+            self.sql = []
+
+        def execute(self, sql, args=()):
+            self.sql.append(sql)
+
+    app, owner = Recorder(), Recorder()
+    with pytest.raises(ValueError):
+        sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), tag=tag)
+    assert app.sql == [] and owner.sql == []
+
+
+def test_the_suite_passes_its_own_run_tag_to_the_cleanup():
+    src = SUITE.read_text(encoding="utf-8")
+    assert 'TAG = "authtest-sm" + secrets.token_hex(3)' in src
+    assert "rate_limit_keys(EMAILS, SUITE_IP), tag=TAG)" in src
+    assert 'f"{TAG}-{secrets.token_hex(6)}"' in src  # its orders carry the tag (order rate-limit keys too)
+
+
+def test_no_smoke_statement_matches_the_whole_synthetic_namespace():
+    """Every delete and leftover count is scoped to the run (tag / exact email), never 'authtest-%' or the bare
+    domain, so another run's rows are never deleted."""
+    import inspect
+    import re
+    sources = {"smoke_policy": inspect.getsource(sp)} | {
+        p.name: p.read_text(encoding="utf-8") for p in sorted(SUITE.parent.glob("*.py"))}
+    for name, src in sources.items():
+        assert not re.search(r"authtest-%", src), name
+        assert not re.search(r"LIKE '%%?@authtest\.invalid'", src), name
+        assert "(d,)" not in src and "%(d)s" not in src, name
+
+
+# The keys that refuse deleting a creator (anything but CASCADE / SET NULL), each with how the cleanup handles it.
+BLOCKING_KEYS = {
+    ("creator_status_events", "streamer_id"): "creator_status_events",  # deleted first, this run's creators only
+    ("donations", "streamer_id"): "donations",  # deleted first
+    ("user_signups", "streamer_id"): "user_signups",  # deleted first (an approved application's creator)
+    ("kyc_grace_grants", "streamer_id"): None,  # the suite never grants, restricts or activates (KYC section is
+    ("kyc_restrictions", "streamer_id"): None,  # read-only); a row here makes the delete fail and the suite FAIL
+    ("kyc_enforcement_events", "streamer_id"): None,
+}
+
+
+@requires_db
+def test_every_key_that_blocks_deleting_a_creator_is_known_and_cleaned_first(strict_scratch_db):
+    with fixture_db() as owner:
+        rows = owner.execute(
+            "SELECT c.conrelid::regclass::text, a.attname FROM pg_constraint c JOIN pg_attribute a "
+            "ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey) WHERE c.contype = 'f' "
+            "AND c.confrelid = 'public.streamers'::regclass AND c.confdeltype NOT IN ('c', 'n')").fetchall()
+    assert {(t.removeprefix("public."), col) for t, col in rows} == set(BLOCKING_KEYS)
+    import inspect
+    src = inspect.getsource(sp.cleanup)
+    creators = src.index('"DELETE FROM public.streamers')
+    for table in filter(None, BLOCKING_KEYS.values()):
+        assert -1 < src.index(f"DELETE FROM public.{table}") < creators, table
+    suite = SUITE.read_text(encoding="utf-8")
+    for table in ("kyc_grace_grants", "kyc_restrictions", "kyc_enforcement_events"):
+        assert table not in suite
+    assert "/restrict" not in suite and "/grace" not in suite
 
 
 
@@ -397,7 +627,7 @@ def _seed_rate_limits(owner, app):
     """Synthetic users / creator / OBS token and this run's counters, plus counters of a real-looking account, another
     address, a real creator, token, order and partner. Returns (synthetic emails, synthetic pairs, unrelated pairs)."""
     syn_user = owner.execute("INSERT INTO public.users (email, role) VALUES (%s, 'streamer') RETURNING id::text",
-                             ("smk-rl" + DOMAIN,)).fetchone()[0]
+                             (TAG + "-rl" + DOMAIN,)).fetchone()[0]
     real_user = owner.execute("INSERT INTO public.users (email, role) VALUES (%s, 'streamer') RETURNING id::text",
                               (REAL,)).fetchone()[0]
     syn_c, real_c = (owner.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
@@ -405,7 +635,7 @@ def _seed_rate_limits(owner, app):
                      for slug in ("authtest-smkrl", "realkeep-smkrl"))
     owner.execute("INSERT INTO public.obs_tokens (streamer_id, token_hash) VALUES (%s, %s), (%s, %s)",
                   (syn_c, _sha("syn-token"), real_c, _sha("real-token")))
-    emails = ["smk-rl" + DOMAIN, "smk-probe" + DOMAIN]
+    emails = [TAG + "-rl" + DOMAIN, TAG + "-probe" + DOMAIN]
     synthetic = [(f"ip:{SUITE_IP}", "auth:login"), (f"ip:{SUITE_IP}", "auth:login-day"),
                  (f"acct:{_sha(emails[1])}:ip:{SUITE_IP}", "auth:login-account"),
                  (f"acct:{_sha(emails[0])}:ip:{SUITE_IP}", "auth:login-account-day"),
@@ -418,7 +648,8 @@ def _seed_rate_limits(owner, app):
                  (f"email:{_sha(REAL)}", "auth:reset-email"), (f"user:{real_user}", "auth:password-change"),
                  (f"admin:{real_user}", "kyc:refresh"), (f"streamer:{real_c}", "obs:token-create"),
                  (f"obs:{_sha('real-token')[:32]}", "obs:session"), ("order:realkeep-1", "payment:poll"),
-                 ("partner:realkeep", "partner:check")]
+                 ("partner:realkeep", "partner:check"),
+                 ("order:authtest-zzother-1", "payment:poll"), ("partner:authtest-zzother", "partner:check")]  # another run
     for key, endpoint in synthetic + unrelated:
         app.execute("INSERT INTO public.rate_limits (ip_address, endpoint, request_count) VALUES (%s, %s, 3)",
                     (key, endpoint))
@@ -434,7 +665,7 @@ def _drop_rate_limit_fixtures(owner, app, synthetic, unrelated):
     for key, endpoint in synthetic + unrelated:
         app.execute("DELETE FROM public.rate_limits WHERE ip_address = %s AND endpoint = %s", (key, endpoint))
     owner.execute("DELETE FROM public.streamers WHERE streamer_slug IN ('authtest-smkrl', 'realkeep-smkrl')")
-    owner.execute("DELETE FROM public.users WHERE email::text IN (%s, %s)", ("smk-rl" + DOMAIN, REAL))
+    owner.execute("DELETE FROM public.users WHERE email::text IN (%s, %s)", (TAG + "-rl" + DOMAIN, REAL))
 
 
 @requires_db
@@ -477,7 +708,7 @@ def test_cleanup_removes_this_runs_rate_limits_and_keeps_every_other_counter(str
     with fixture_db() as owner, db() as app:
         emails, synthetic, unrelated = _seed_rate_limits(owner, app)
         try:
-            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), sp.rate_limit_keys(emails, SUITE_IP))
+            left = sp.cleanup(app, owner, DOMAIN, datetime.now(UTC), sp.rate_limit_keys(emails, SUITE_IP), tag=TAG)
             assert left["rate limits (this run)"] == 0 and not _present(app, synthetic)
             assert _present(app, unrelated) == set(unrelated)
         finally:
@@ -492,7 +723,7 @@ def test_a_partial_cleanup_failure_keeps_every_other_counter(strict_scratch_db, 
         try:
             with pytest.raises(RuntimeError) as exc:
                 sp.cleanup(FailingConn(app, fail_on), owner, DOMAIN, datetime.now(UTC),
-                           sp.rate_limit_keys(emails, SUITE_IP))
+                           sp.rate_limit_keys(emails, SUITE_IP), tag=TAG)
             assert fail_on in str(exc.value)
             assert _present(app, unrelated) == set(unrelated)
             if fail_on.endswith("rate_limits"):  # reported as left over, never deleted more broadly elsewhere

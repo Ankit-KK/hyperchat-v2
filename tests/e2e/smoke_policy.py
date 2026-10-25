@@ -9,6 +9,7 @@ Without it the suite keeps its earlier behaviour: any known head passes, undeplo
 """
 
 import hashlib
+import re
 from datetime import datetime
 
 # Every Alembic revision a DEV database may legitimately be at; anything else FAILs.
@@ -127,7 +128,7 @@ def enforcement_draft(kyc_row: str, mfa_row: str) -> tuple[bool, str]:
 # app.obs, app.realtime, app.kyc, app.stepup, app.payments, app.uploads, app.routers): ip:<addr>,
 # acct:<sha256(email)>:ip:<addr>, email:<sha256(email)>, user:<id>, admin:<id>, streamer:<id>, obs:<sha256(token)[:32]>,
 # order:<order id>, partner:<slug>. The suite only ever deletes keys that belong to this run: its synthetic emails,
-# users, creators, OBS tokens, orders and partners, and ip:<the suite host's address>, which it learns from its own
+# users, creators, OBS tokens, orders and partners (all named by its run tag), and ip:<the suite host's address>, which it learns from its own
 # probe row (acct:<sha256(probe email)>:ip:<addr>). Real users' counters are never cleared.
 
 def _sha(value: str) -> str:
@@ -156,14 +157,14 @@ def reset_login_counters(conn, keys: dict) -> int:
 
 OWNED_RATE_LIMITS = """(
     rl.ip_address = ANY(%(exact)s) OR rl.ip_address LIKE ANY(%(prefixes)s)
-    OR rl.ip_address LIKE 'order:authtest-%%' OR rl.ip_address LIKE 'partner:authtest-%%'
-    OR rl.ip_address IN (SELECT 'user:' || u.id FROM public.users u WHERE u.email::text LIKE %(d)s
-                         UNION ALL SELECT 'admin:' || u.id FROM public.users u WHERE u.email::text LIKE %(d)s
+    OR rl.ip_address LIKE 'order:' || %(c)s OR rl.ip_address LIKE 'partner:' || %(c)s
+    OR rl.ip_address IN (SELECT 'user:' || u.id FROM public.users u WHERE u.email::text LIKE %(u)s
+                         UNION ALL SELECT 'admin:' || u.id FROM public.users u WHERE u.email::text LIKE %(u)s
                          UNION ALL SELECT 'streamer:' || s.id FROM public.streamers s
-                                   WHERE s.streamer_slug LIKE 'authtest-%%'
+                                   WHERE s.streamer_slug LIKE %(c)s
                          UNION ALL SELECT 'obs:' || left(o.token_hash, 32) FROM public.obs_tokens o
                                    JOIN public.streamers s ON s.id = o.streamer_id
-                                   WHERE s.streamer_slug LIKE 'authtest-%%'))"""
+                                   WHERE s.streamer_slug LIKE %(c)s))"""
 
 
 # ── synthetic fixtures and cleanup ─────────────────────────────────────────────────────────────────────────
@@ -182,62 +183,70 @@ def owner_creates_user(role: str, streamer_id: str | None) -> bool:
     with the token, in the same transaction; the fixture is not that flow, so the owner writes it, as for admins)."""
     return role == "admin" or streamer_id is not None
 
+# this run's rows only (u: its emails, c: its creators / orders / partners); another run's leftovers are not counted
 LEFTOVERS = """
-    SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE %(d)s),
+    SELECT (SELECT count(*) FROM public.users WHERE email::text LIKE %(u)s),
            (SELECT count(*) FROM public.sessions s JOIN public.users u ON u.id = s.user_id
-             WHERE u.email::text LIKE %(d)s),
+             WHERE u.email::text LIKE %(u)s),
            (SELECT count(*) FROM public.password_reset_tokens t JOIN public.users u ON u.id = t.user_id
-             WHERE u.email::text LIKE %(d)s),
-           (SELECT count(*) FROM public.user_invites WHERE email::text LIKE %(d)s),
-           (SELECT count(*) FROM public.user_signups WHERE email LIKE %(d)s),
-           (SELECT count(*) FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'),
-           (SELECT count(*) FROM public.donations WHERE order_id LIKE 'authtest-%%'),
+             WHERE u.email::text LIKE %(u)s),
+           (SELECT count(*) FROM public.user_invites WHERE email::text LIKE %(u)s),
+           (SELECT count(*) FROM public.user_signups WHERE email LIKE %(u)s),
+           (SELECT count(*) FROM public.streamers WHERE streamer_slug LIKE %(c)s),
+           (SELECT count(*) FROM public.donations WHERE order_id LIKE %(c)s),
            (SELECT count(*) FROM public.streamers_moderators WHERE mod_name = 'Smoke Mod' AND created_at >= %(t)s),
            (SELECT count(*) FROM public.banned_donors WHERE donor_name LIKE 'Smoke %%' AND created_at >= %(t)s),
            (SELECT count(*) FROM public.obs_tokens o LEFT JOIN public.streamers s ON s.id = o.streamer_id
              WHERE s.id IS NULL),
            (SELECT count(*) FROM public.jobs j LEFT JOIN public.donations d ON d.id::text = j.dedupe_key
              WHERE j.kind = 'donation_audio' AND d.id IS NULL AND j.created_at > %(t)s),
-           (SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_slug LIKE 'authtest-%%'),
-           (SELECT count(*) FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'),
-           (SELECT count(*) FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'
-             OR email LIKE %(d)s),
+           (SELECT count(*) FROM public.soundboard_tnc_acceptances WHERE streamer_slug LIKE %(c)s),
+           (SELECT count(*) FROM public.partner_api_keys WHERE partner_slug LIKE %(c)s),
+           (SELECT count(*) FROM public.partner_signups WHERE partner_slug LIKE %(c)s
+             OR email LIKE %(u)s),
            (SELECT count(*) FROM public.rate_limits rl WHERE rl.ip_address = ANY(%(exact)s)
-             OR rl.ip_address LIKE ANY(%(prefixes)s) OR rl.ip_address LIKE 'order:authtest-%%'
-             OR rl.ip_address LIKE 'partner:authtest-%%')
+             OR rl.ip_address LIKE ANY(%(prefixes)s) OR rl.ip_address LIKE 'order:' || %(c)s
+             OR rl.ip_address LIKE 'partner:' || %(c)s)
 """
 LEFTOVER_LABELS = ("users", "sessions", "reset tokens", "invites", "signups", "creators", "donations",
                    "moderators", "bans", "orphan OBS tokens", "jobs", "soundboard terms acceptances", "partner keys",
                    "partner signups", "rate limits (this run)")
 
 
-def cleanup(app, owner, domain: str, started: datetime, keys: dict | None = None) -> dict[str, int]:
-    """Remove every synthetic row (users @<domain>, creators / orders / partners authtest-*) and this run's own
-    rate-limit rows (keys: rate_limit_keys()), and return what is left. Each statement runs on its own (autocommit) so
-    one failure cannot skip the rest; a failure is re-raised at the end after the leftover count, which then reports
-    what stayed. Real rows never match the synthetic patterns."""
-    d = "%" + domain
-    rl = {"d": d, "exact": [], "prefixes": [], **(keys or {})}
+def cleanup(app, owner, domain: str, started: datetime, keys: dict | None = None, *, tag: str) -> dict[str, int]:
+    """Remove this run's synthetic rows and its own rate-limit rows (keys: rate_limit_keys()), and return what is
+    left. tag is the run's prefix (smoke_dev_backend.TAG): its users are <tag>-*<domain>, its creators, orders and
+    partners <tag>*. Every statement is scoped by it, so another run's rows (and real rows) are never deleted; a
+    leftover of another run that blocks a delete makes it fail, which is reported. Each statement runs on its own
+    (autocommit) so one failure cannot skip the rest; a failure is re-raised at the end after the leftover count,
+    which then reports what stayed."""
+    if not re.fullmatch(r"authtest-[a-z0-9]{3,}", tag):
+        raise ValueError(f"not a synthetic run tag: {tag!r}")
+    u, c = tag + "-%" + domain, tag + "%"
+    rl = {"u": u, "c": c, "exact": [], "prefixes": [], **(keys or {})}
     steps = [
         # first, while the synthetic users / creators / tokens that identify the run's keys still exist
         (app, f"DELETE FROM public.rate_limits rl WHERE {OWNED_RATE_LIMITS}", rl),
-        (app, "DELETE FROM public.user_invites WHERE email::text LIKE %s", (d,)),
+        (app, "DELETE FROM public.user_invites WHERE email::text LIKE %s", (u,)),
         # review history is append-only for the runtime roles (migration 0021)
         (owner, "DELETE FROM public.application_events WHERE signup_id IN "
-                "(SELECT id FROM public.user_signups WHERE email LIKE %s)", (d,)),
-        (app, "DELETE FROM public.user_signups WHERE email LIKE %s", (d,)),
+                "(SELECT id FROM public.user_signups WHERE email LIKE %s)", (u,)),
+        (app, "DELETE FROM public.user_signups WHERE email LIKE %s", (u,)),
         (app, "DELETE FROM public.tts_moderation_audit WHERE donation_id IN (SELECT d.id FROM public.donations d "
-              "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')", ()),
+              "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s)", (c,)),
         (app, "DELETE FROM public.jobs WHERE dedupe_key IN (SELECT d.id::text FROM public.donations d "
-              "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE 'authtest-%%')", ()),
+              "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s)", (c,)),
         (app, "DELETE FROM public.donations WHERE streamer_id IN "
-              "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%')", ()),
-        (app, "DELETE FROM public.streamers WHERE streamer_slug LIKE 'authtest-%%'", ()),  # cascades its rows
+              "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (c,)),
+        # the status audit is append-only for the runtime roles (0020) and blocks deleting its creator (RESTRICT, 0023)
+        (owner, "DELETE FROM public.creator_status_events WHERE streamer_id IN "
+                "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (c,)),
+        (app, "DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (c,)),  # cascades its rows
         # users through the owner: since 0024 the runtime roles may not delete an administrator (cascades sessions,
         # tokens, identities and step-up rows)
-        (owner, "DELETE FROM public.users WHERE email::text LIKE %s", (d,)),
-        (app, "DELETE FROM public.partner_signups WHERE partner_slug LIKE 'authtest-%%'", ()),
-        (app, "DELETE FROM public.partner_api_keys WHERE partner_slug LIKE 'authtest-%%'", ()),
+        (owner, "DELETE FROM public.users WHERE email::text LIKE %s", (u,)),
+        (app, "DELETE FROM public.partner_signups WHERE partner_slug LIKE %s OR email LIKE %s", (c, u)),
+        (app, "DELETE FROM public.partner_api_keys WHERE partner_slug LIKE %s", (c,)),
     ]
     errors = []
     for conn, sql, args in steps:
