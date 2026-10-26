@@ -104,8 +104,9 @@ async def test_every_category_refuses_others_before_any_call(category, caplog):
     with caplog.at_level(logging.DEBUG), pytest.raises(EmailRecipientNotAllowed):
         await sender.send(message(OTHER, category))
     assert resend.seen == []
-    assert [r.getMessage() for r in caplog.records] == ["email refused: recipient not on the allowlist"]
-    assert caplog.records[0].category == category
+    records = [r for r in caplog.records if r.name == "hyperchat.email"]  # not asyncio's own debug lines
+    assert [r.getMessage() for r in records] == ["email refused: recipient not on the allowlist"]
+    assert records[0].category == category
 
 
 @pytest.mark.parametrize("template", sorted(TEMPLATE_CATEGORY))
