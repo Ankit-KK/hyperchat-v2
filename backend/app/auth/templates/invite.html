@@ -4,14 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
-  <title>Confirm your HyperChat email</title>
+  <title>You're invited to HyperChat</title>
   <!--[if mso]>
   <style>table,td{font-family:Arial,Helvetica,sans-serif !important;}</style>
   <![endif]-->
 </head>
 <body style="margin:0;padding:0;background-color:#06020F;-webkit-text-size-adjust:100%;">
   <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
-    Confirm your email to activate your HyperChat account.
+    You've been invited to HyperChat. Accept the invitation to set your password.
   </div>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#06020F;">
     <tr>
@@ -39,12 +39,12 @@
             <td style="padding:36px 32px 8px 32px;font-family:'Segoe UI',Arial,Helvetica,sans-serif;">
 
               <h1 style="margin:0 0 16px 0;font-size:24px;line-height:32px;font-weight:bold;color:#120A24;">
-                Confirm your email
+                You're invited to HyperChat
               </h1>
 
               <p style="margin:0 0 24px 0;font-size:15px;line-height:24px;color:#4B4760;">
-                Welcome to HyperChat! Click the button below to confirm
-                <strong>{{ .Email }}</strong> and activate your account.
+                A HyperChat administrator has invited <strong>{{ .Email }}</strong> to join HyperChat.
+                Accept the invitation to set your password and sign in.
               </p>
 
               <!-- Button -->
@@ -52,14 +52,14 @@
                 <tr>
                   <td align="center" style="padding:0 0 24px 0;">
                     <!--[if mso]>
-                    <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{ .ConfirmationURL }}" style="height:48px;v-text-anchor:middle;width:300px;" arcsize="17%" fillcolor="#A855F7" stroke="f">
-                      <center style="color:#FFFFFF;font-family:Arial,sans-serif;font-size:16px;font-weight:bold;">Confirm Email Address</center>
+                    <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{ .ConfirmationURL }}" style="height:48px;v-text-anchor:middle;width:300px;" arcsize="17%" fillcolor="#7E22CE" stroke="f">
+                      <center style="color:#FFFFFF;font-family:Arial,sans-serif;font-size:16px;font-weight:bold;">Accept invitation</center>
                     </v:roundrect>
                     <![endif]-->
                     <!--[if !mso]><!-->
                     <a href="{{ .ConfirmationURL }}"
-                       style="display:inline-block;background-color:#A855F7;color:#FFFFFF;font-size:16px;font-weight:bold;line-height:48px;padding:0 40px;border-radius:8px;text-decoration:none;">
-                      Confirm Email Address
+                       style="display:inline-block;background-color:#7E22CE;color:#FFFFFF;font-size:16px;font-weight:bold;line-height:48px;padding:0 40px;border-radius:8px;text-decoration:none;">
+                      Accept invitation
                     </a>
                     <!--<![endif]-->
                   </td>
@@ -67,16 +67,17 @@
               </table>
 
               <p style="margin:0 0 24px 0;font-size:13px;line-height:20px;color:#6B7280;">
-                If you didn't create a HyperChat account, you can safely ignore this email.
+                The link works once and expires in 7 days. If you weren't expecting this invitation,
+                you can safely ignore this email: nothing changes unless the link is used.
               </p>
 
               <hr style="border:none;border-top:1px solid #ECEAF3;margin:0 0 24px 0;" />
 
-              <p style="margin:0 0 8px 0;font-size:12px;line-height:18px;color:#9B98A8;">
+              <p style="margin:0 0 8px 0;font-size:12px;line-height:18px;color:#6B7280;">
                 Button not working? Paste this link into your browser:
               </p>
               <p style="margin:0 0 28px 0;font-size:12px;line-height:18px;word-break:break-all;">
-                <a href="{{ .ConfirmationURL }}" style="color:#A855F7;text-decoration:underline;">{{ .ConfirmationURL }}</a>
+                <a href="{{ .ConfirmationURL }}" style="color:#7E22CE;text-decoration:underline;">{{ .ConfirmationURL }}</a>
               </p>
 
             </td>
@@ -87,7 +88,7 @@
         <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px;">
           <tr>
             <td align="center" style="padding:28px 24px 0 24px;font-family:'Segoe UI',Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#7A7790;">
-              You're receiving this because this email was used to sign up for HyperChat.<br />
+              You're receiving this because a HyperChat administrator invited this address.<br />
               <a href="https://www.hyperchat.space" style="color:#A855F7;text-decoration:none;">hyperchat.space</a>
               &nbsp;&middot;&nbsp; Real-Time Interaction Infrastructure
             </td>
