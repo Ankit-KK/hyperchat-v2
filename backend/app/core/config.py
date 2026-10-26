@@ -30,6 +30,8 @@ PUSHER_GROUPS = (1, 2, 3, 4)  # configurable Pusher apps (streamers.pusher_group
 EMAIL_DEV_DOMAINS = {"onboarding": "onboarding.quicktestspace.site", "authentication": "auth.quicktestspace.site",
                      "notifications": "notifications.quicktestspace.site",
                      "payments": "payments.quicktestspace.site", "support": "support.quicktestspace.site"}
+# One plain ASCII address (no display name, list, wildcard or whitespace): an allowlist entry and an allowed recipient.
+EMAIL_ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'+/=?^_`{|}~-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
 _PUSHER_APP_ID = re.compile(r"^[0-9]{1,20}$")
 _PUSHER_KEY = re.compile(r"^[A-Za-z0-9]{1,64}$")
 _PUSHER_CLUSTER = re.compile(r"^[a-z0-9]{1,20}$")  # becomes part of a host name (api-<cluster>.pusher.com)
@@ -155,6 +157,9 @@ class Settings(BaseSettings):
     email_support_from: str = ""
     email_support_resend_api_key: SecretStr | None = None
     email_support_verified_domain: str = ""
+    # Outside production, the ONLY recipients any category may send to: comma-separated addresses, matched exactly after
+    # lower-casing (no wildcard; a plus-address is another address). Empty = every email is refused. Production: empty.
+    email_recipient_allowlist: str = ""
 
     google_client_id: str | None = None
     google_client_secret: SecretStr | None = None
@@ -451,6 +456,28 @@ class Settings(BaseSettings):
     def email_categories(self) -> tuple[str, ...]:
         """The activated email categories, as listed (names checked at startup)."""
         return tuple(dict.fromkeys(c.strip().lower() for c in self.email_active_categories.split(",") if c.strip()))
+
+    @property
+    def email_allowed_recipients(self) -> frozenset[str] | None:
+        """None in production (no restriction); elsewhere the normalized allowlist (empty: nothing may be sent)."""
+        if self.app_env == "production":
+            return None
+        return frozenset(e.strip().lower() for e in self.email_recipient_allowlist.split(",") if e.strip())
+
+    @model_validator(mode="after")
+    def _validate_email_recipient_allowlist(self) -> "Settings":
+        """Entry positions only in the refusal, never addresses."""
+        raw = self.email_recipient_allowlist.strip()
+        if not raw:
+            return self
+        if self.app_env == "production":
+            raise ValueError("Refusing to start: HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST is for DEV and test only "
+                             "(it must be empty in production)")
+        bad = [i for i, entry in enumerate(raw.split(","), 1) if not EMAIL_ADDRESS.fullmatch(entry.strip())]
+        if bad:
+            raise ValueError(f"Refusing to start: HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST entries {bad} are not plain "
+                             "email addresses (comma-separated, no names, wildcards or empty entries)")
+        return self
 
     def email_category(self, category: str) -> tuple[str, str, str]:
         """(from, Resend key, verified domain) of a category in EMAIL_DEV_DOMAINS; "" for unset values."""

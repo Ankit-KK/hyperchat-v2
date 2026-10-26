@@ -35,6 +35,8 @@ AUTHENTICATION = {"email_authentication_from": "HyperChat Security <no-reply@aut
 
 
 def settings(active="", app_env="test", **fields) -> Settings:
+    if app_env != "production":  # the recipient allowlist has its own tests (test_email_allowlist.py)
+        fields.setdefault("email_recipient_allowlist", TO)
     return Settings(app_env=app_env, email_backend="resend", email_active_categories=active, **fields)
 
 
@@ -245,6 +247,6 @@ async def test_closing_is_safe_for_every_sender_kind():
             pass
 
     await CategorySender({"onboarding": NoClose()}).aclose()
-    alone = ResendSender(ONB_KEY, ONBOARDING["email_onboarding_from"])
+    alone = ResendSender(ONB_KEY, ONBOARDING["email_onboarding_from"], allowed_recipients=frozenset())
     await alone.aclose()
     assert alone._client.is_closed

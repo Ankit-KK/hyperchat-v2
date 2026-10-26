@@ -29,6 +29,7 @@ def settings(key_id=TEST_KEY, app_env="development", backend="resend", resend=RE
     creds = {"primary": (key_id, SECRET if key_id else "", WEBHOOK if key_id else "")}
     return SimpleNamespace(app_env=app_env, email_backend=backend, email_from=sender,
                            resend_api_key=SecretStr(resend) if resend else None,
+                           email_allowed_recipients=None if app_env == "production" else frozenset({OWNER}),
                            razorpay_credentials=lambda name: creds[name])
 
 
@@ -64,8 +65,9 @@ class FakeSender:
     sent: list = []
     fail = False
 
-    def __init__(self, key, sender):
+    def __init__(self, key, sender, *, allowed_recipients):
         FakeSender.sent.append(("init", key, sender))
+        FakeSender.allowed = allowed_recipients
 
     async def send(self, email):
         if FakeSender.fail:
@@ -327,6 +329,7 @@ def test_the_real_settings_loader_reads_only_the_approved_file(real_env_file):
     text = "\n".join(out)
     assert code == 0 and rp.calls == [("probe", TEST_KEY)], text
     assert FakeSender.sent[0][1:] == (RESEND, "HyperChat <no-reply@onboarding.quicktestspace.site>")
+    assert FakeSender.allowed == frozenset()  # the file has no recipient allowlist: the real sender would refuse
     no_secret(text)
 
 

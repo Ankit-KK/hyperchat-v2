@@ -6,7 +6,8 @@ existing branded HTML files with their single {{ .ConfirmationURL }} placeholder
 
 With "resend", every template belongs to exactly one category (TEMPLATE_CATEGORY, fixed in code). A category sends
 only when activated, from its own sender with its own domain-restricted key; an inactive category is refused before
-any HTTP call and never re-routed through another one (docs/email-architecture-proposal.md).
+any HTTP call and never re-routed through another one (docs/email-architecture-proposal.md). Outside production,
+ResendSender also refuses, before any HTTP call, every recipient that is not on HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST.
 """
 
 import hashlib
@@ -19,7 +20,7 @@ from typing import Protocol
 
 import httpx
 
-from app.core.config import EMAIL_DEV_DOMAINS, Settings
+from app.core.config import EMAIL_ADDRESS, EMAIL_DEV_DOMAINS, Settings
 
 log = logging.getLogger("hyperchat.email")
 TEMPLATES = Path(__file__).parent / "templates"
@@ -66,6 +67,17 @@ class EmailCategoryInactive(RuntimeError):
     """The template's category is not activated: nothing was sent, and nothing is sent from another category."""
 
 
+class EmailRecipientNotAllowed(RuntimeError):
+    """Outside production, the recipient is not on the allowlist: nothing was sent."""
+
+
+def recipient_allowed(to: object, allowed: frozenset[str] | None) -> bool:
+    """Production (None): any recipient. Elsewhere: exactly one plain address that is on the (lower-cased) allowlist."""
+    if allowed is None:
+        return True
+    return isinstance(to, str) and EMAIL_ADDRESS.fullmatch(to) is not None and to.lower() in allowed
+
+
 class EmailDeliveryError(RuntimeError):
     """The provider did not accept the message. reason: refused_auth | rejected | transient."""
 
@@ -108,7 +120,9 @@ class DisabledSender:
 
 class ResendSender:
     def __init__(self, api_key: str, sender: str, client: httpx.AsyncClient | None = None,
-                 category: str | None = None) -> None:
+                 category: str | None = None, *, allowed_recipients: frozenset[str] | None) -> None:
+        # Required: None (production, no restriction) or the allowlist; Settings.email_allowed_recipients picks it.
+        self._allowed = allowed_recipients
         self._key = api_key
         self._from = sender
         self._owns_client = client is None  # an injected client belongs to the caller, who closes it
@@ -122,6 +136,9 @@ class ResendSender:
     async def send(self, email: Email) -> None:
         # No recipient identifier in P0: an unkeyed hash of an address is reversible by guessing (owner review).
         fields = {"category": self._category, "template": email.template}
+        if not recipient_allowed(email.to, self._allowed):  # before any HTTP: the provider never sees the address
+            log.warning("email refused: recipient not on the allowlist", extra=fields)
+            raise EmailRecipientNotAllowed()
         # The same message (same link) always carries the same key, so a repeated send is not delivered twice.
         idempotency = hashlib.sha256(f"{email.template}\0{email.to}\0{email.text}".encode()).hexdigest()
         try:
@@ -166,7 +183,10 @@ def sender_from_settings(settings: Settings, client: httpx.AsyncClient | None = 
     if settings.email_backend != "resend":
         return DisabledSender()
     senders: dict[str, EmailSender] = {}
+    allowed = settings.email_allowed_recipients
     for category in settings.email_categories:  # each checked at startup (Settings._validate_email_categories)
         sender, key, _ = settings.email_category(category)
-        senders[category] = ResendSender(key, sender, client, category=category)
+        senders[category] = ResendSender(key, sender, client, category=category, allowed_recipients=allowed)
+    if senders and allowed == frozenset():
+        log.warning("email recipient allowlist is empty: every email is refused (HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST)")
     return CategorySender(senders)

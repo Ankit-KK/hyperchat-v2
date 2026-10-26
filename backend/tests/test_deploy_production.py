@@ -238,6 +238,7 @@ def test_production_env_template_values():
         "HYPERCHAT_SESSION_ABSOLUTE_DAYS": "30", "HYPERCHAT_ADMIN_SESSION_IDLE_HOURS": "2",
         "HYPERCHAT_ADMIN_SESSION_ABSOLUTE_HOURS": "12", "HYPERCHAT_AUTH_RETURN_INVITE_LINKS": "false",
         "HYPERCHAT_EMAIL_BACKEND": "disabled", "HYPERCHAT_EMAIL_ACTIVE_CATEGORIES": "",
+        "HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST": "",
         "HYPERCHAT_EMAIL_FROM": "HyperChat <no-reply@hyperchat.space>",
         # the worker (hyperchat-prod-worker.service): every integration explicitly off until approved
         "HYPERCHAT_WORKER_CONCURRENCY": "2", "HYPERCHAT_AUDIO_PROVIDERS_ENABLED": "false",
