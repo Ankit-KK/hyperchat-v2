@@ -16,7 +16,7 @@
 | KYC (Didit) | yes | read-only paths only | Didit sandbox, then live [APPROVAL] |
 | Payments (Razorpay) | yes | validation and refusals only; no order, no payment | §4 |
 | Payment health (D7) | yes | CLI installed; the probe was BLOCKED | §4 |
-| Email (Resend), five categories (#105, #106) | yes (merged at `a9b9486`) | code deployed on DEV (`a9b9486efd86`, 2026-10-25); no key installed; `disabled`; no category active | §4 |
+| Email (Resend), five categories (#105, #106) | yes (merged at `a9b9486`) | DEV: five keys installed; **onboarding active**, and onboarding **email delivery verified** (one message, 2026-10-26). Not verified: the full invitation workflow and password reset (authentication inactive) | §4 |
 | Uploads and storage (R2), upload cleanup (D9) | yes | BLOCKED (R2 writes not approved) | `HYPERCHAT_SMOKE_R2=1` run [APPROVAL] |
 | TTS, transcription, bots, Google sign-in | yes | not configured | per product scope |
 | Backups and restore checks | yes | yes (DEV: two sets, scratch restores) | A3 install on production (§5) |
@@ -79,7 +79,7 @@ Locally (#101) the same functions already ran against a real PostgreSQL 16 throw
 | D7 payment health: `python -m app.cli --env-file /etc/hyperchat/api.env payment-health` and the admin result | Razorpay test key id, secret, webhook secret | **set**, key mode `test` | one Razorpay API call (`GET /payments?count=1`) |
 | Checkout / order creation | the same | set | creating test-mode orders |
 | PAY-7: a real test payment, status poll and confirm, webhook | the same, plus a test payment through Razorpay's test checkout | set | an owner-run test payment; the webhook URL in the Razorpay **test** dashboard pointing at the DEV API |
-| Email: reset and invite delivery | per category: `HYPERCHAT_EMAIL_<CATEGORY>_FROM`, `_VERIFIED_DOMAIN`, `_RESEND_API_KEY` (one domain-restricted key each); `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES`; `HYPERCHAT_EMAIL_BACKEND=resend` | **unset** (`disabled`; DEV runs `a9b9486efd86`, which has the categories, none active) | install the five keys (`docs/operations/email-category-keys.md`); activate `onboarding`, then `authentication`, each with a restart and one owner-inbox send |
+| Email: reset and invite delivery | per category: `HYPERCHAT_EMAIL_<CATEGORY>_FROM`, `_VERIFIED_DOMAIN`, `_RESEND_API_KEY` (one domain-restricted key each); `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES`; `HYPERCHAT_EMAIL_BACKEND=resend` | **set** (all five keys; `HYPERCHAT_EMAIL_BACKEND=resend`, `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES=onboarding`) | Step 4 (authentication activation and reset delivery) needs separate approval; the invitation workflow needs a usable DEV admin (below) |
 
 **Email status (2026-10-25):**
 - **Code:** merged (`a9b9486`) and deployed on DEV (release `a9b9486efd86`). Production still runs `940137070657`.
@@ -90,16 +90,18 @@ Locally (#101) the same functions already ran against a real PostgreSQL 16 throw
   - a 2xx is always success;
   - logs carry no recipient identifier;
   - F1 fixed (#105): an unconfirmed invitation send answers a neutral 502 and its link is revoked.
-- **Resend:** all five DEV domains (`*.quicktestspace.site`) are verified, each with its own key. **Nothing is installed or active on DEV or production.**
+- **Resend:** all five DEV domains (`*.quicktestspace.site`) are verified, each with its own key.
+  - **DEV:** all five keys are installed and **onboarding is the only active category** (since 2026-10-26).
+  - **Production:** nothing installed or active.
 
 **Email readiness checklist:**
 
 | Step | What | Status |
 |---|---|---|
 | 1 | DEV application deployment (`a9b9486efd86`) | **COMPLETE** (2026-10-25, 16:32 UTC; results below) |
-| 2 | Secure Resend credential installation (`docs/operations/email-category-keys.md` steps 1–6) | **PENDING OWNER APPROVAL** |
-| 3 | Onboarding email activation and delivery testing | **NOT AUTHORIZED** |
-| 4 | Authentication email activation and delivery testing | **NOT AUTHORIZED** |
+| 2 | Secure Resend credential installation (`docs/operations/email-category-keys.md` steps 1–6) | **COMPLETE** (2026-10-26; results below) |
+| 3 | Onboarding email activation and delivery testing | **PASSED** (2026-10-26). Onboarding **email delivery** is verified; the account-invitation workflow is **not** tested end to end (below) |
+| 4 | Authentication email activation and delivery testing | **NOT STARTED**: needs separate owner approval |
 
 **DEV deployment of `a9b9486` (2026-10-25, 16:32 UTC; verified):**
 - **Releases:** previous `c2fe883be71d`, new `a9b9486efd86`.
@@ -143,6 +145,53 @@ Locally (#101) the same functions already ran against a real PostgreSQL 16 throw
   - its isolation audit identical.
 - **Rollback:** not required. The previous release `/opt/hyperchat/releases/c2fe883be71d` is kept. The application-only rollback is to point `current` back to it and restart the API and worker; the database is never touched.
 - **Record (root-only):** `/root/deploy-dev-a9b9486/` holds the before-snapshots, the pinned archive and the step markers.
+**Step 2: Resend credential installation (2026-10-26; verified):**
+- **Procedure:** the owner entered the five category-specific, domain-restricted keys at hidden prompts, using `install_email_keys` from the merged runbook (`docs/operations/email-category-keys.md` at `ad3f7e2`, including the #110 memfd fix). The functions file was staged root-only and checked against its SHA-256 (`656246d6…`).
+- **Preflight:** 38 checks passed, among them:
+  - health and release, email disabled;
+  - no stale candidate;
+  - no shell tracing, keystroke audit or terminal recorder;
+  - no concurrent writer;
+  - protected files pinned;
+  - the memfd validator exercised with synthetic values.
+- **Post-installation: 20 checks passed.**
+  - **Variables:** all 15 category variables are present exactly once, and the five keys are distinct and Resend-shaped. Key values were never displayed.
+  - **Validation:** all five categories pass the application's own startup validation, run as `hyperchat` with an empty environment.
+  - **`api.env`:** still `root:hyperchat 600`. It equals the previous content plus exactly the 15 category lines; the backend stayed `disabled` with no active category.
+  - **Leftovers:** no candidate file.
+  - **Protected files:** `api.env.before-C` and the Batch B files are unchanged.
+  - **Services:** not restarted.
+  - **Production:** unchanged.
+- **Rollback copy:** `/root/api.env.before-email-keys.20261026T070154.588123Z.278907` (root 0600). Kept until the owner removes it.
+
+**Step 3: onboarding activation and delivery (2026-10-26; passed):**
+- **Activation:**
+  - **The change:** exactly two lines in `api.env`, `HYPERCHAT_EMAIL_BACKEND=resend` and `HYPERCHAT_EMAIL_ACTIVE_CATEGORIES=onboarding`. The candidate was validated in memory first, and the write was atomic, with owner and mode kept.
+  - **The restart:** `hyperchat-api` only, once.
+  - **The startup log** shows only `{"onboarding": "onboarding.quicktestspace.site"}`.
+  - **Unaffected:** the worker was not restarted, the database stayed at 0028, and the logs have no errors and no key-shaped strings.
+  - **Production:** unchanged.
+  - **Rollback (tested):** set the backend back to `disabled`, remove the `ACTIVE_CATEGORIES` line, and restart the API.
+- **Delivery test:** exactly one message, sent on 2026-10-26 at 07:36:15 UTC.
+  - **Path:** the application's own send path (`sender_from_settings` → `CategorySender` → the onboarding `ResendSender`), using the installed onboarding key and sender `no-reply@onboarding.quicktestspace.site`.
+  - **Recipient:** the owner-approved address only, hard-coded in a reviewed, hash-pinned script (`/root/email-keys-install/delivery_check.py` and `delivery_wrapper.sh`). The test link was a deliberately invalid placeholder token.
+  - **Result:** Resend accepted the message with HTTP 200. Provider message ID: `01a17723-7ac2-73be-a5ed-9a4fc94dd278`. The owner confirmed receipt in Gmail.
+  - **The single-send marker** (`/root/email-keys-install/delivery-check-sent`) is retained, so no retry is possible.
+  - **Nothing else changed:** no invitation and no user account were created, no other category was activated, and production is unchanged.
+- **What is verified, and what is not:**
+  - **Verified:** onboarding **email delivery** (configuration, routing, key, sender domain, Resend acceptance and inbox receipt).
+  - **Not verified:** the **account-invitation workflow end to end**: an admin creating an invitation through `POST /auth/invites`, the emailed link, and acceptance.
+  - **Why it wasn't run:** DEV has no usable admin sign-in (below). The approved test sent the invitation template with a placeholder link and created no invitation.
+
+**DEV admin sign-in: currently unusable (needs a separate readiness decision).** A read-only check (2026-10-26) found:
+- DEV has two active admin accounts;
+- **neither has a password or a linked Google identity**;
+- Google sign-in is not configured on DEV.
+
+Admin-only DEV flows can't be exercised until the owner decides how a DEV administrator should sign in: the invitation workflow, the admin API, and the step-up (passkey) enrollment. This document does not propose creating or resetting an admin account.
+
+**Step 4: not started.** Authentication email activation and password-reset delivery need separate owner approval.
+
 - **Not implemented** (P1/P2, `docs/email-architecture-proposal.md` §6): the reset retry, the domain-check CLI, delivery records and any new email trigger.
 - **Before relying on the opt-in check:** the #103 delivery check (`tests/e2e/smoke_integrations.py`) still reads the legacy `HYPERCHAT_RESEND_API_KEY` / `HYPERCHAT_EMAIL_FROM`, not the onboarding category settings. Moving it onto the category settings is a small code follow-up; until then, prove delivery through the activation step in the key runbook.
 
@@ -169,7 +218,7 @@ Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, 
 |---|---|---|
 | 1 | Review and merge #100 (restore_check early error) and #101 (redirectable F3–F4) | code / docs review |
 | 2 | D7 payment-health probe and test-mode order on DEV | [APPROVAL] (credentials already present) |
-| 3 | Email: DEV deployment of `a9b9486` **done** (2026-10-25). Next: install the five category keys, then activate `onboarding`, then `authentication`, with one owner-inbox send each (DNS and domains already verified) | [APPROVAL] at each step |
+| 3 | Email: DEV deploy, key installation and onboarding activation **done**, with onboarding delivery verified (2026-10-25/26). Next: Step 4, authentication activation with one owner-inbox reset send; a decision on DEV admin sign-in, so the invitation workflow can be tested end to end | [APPROVAL] at each step |
 | 4 | `hyperchat_restore_test` R0 → R2 (→ R4) | [APPROVAL] |
 | 5 | Opt-in smoke sections for Razorpay and email: merged (#103); move the email check onto the onboarding category settings | code |
 | 6 | Disposable F3–F4 rehearsal on the VPS | [APPROVAL] |
