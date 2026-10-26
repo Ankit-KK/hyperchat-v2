@@ -33,13 +33,13 @@ The other three keys can be installed, but nothing sends through them.
 | Copy | When | Protection |
 |---|---|---|
 | Subshell variable and pipe (memory) | while the function runs | ends with the function, on success, STOP or Ctrl-C |
-| Validation input (memory, stdin of the check) | during the check | never written to disk; the check runs with an empty environment (below) |
+| Validation input (memory: a pipe into the check, then a `memfd` owned by the check's own process) | during the check | never written to disk; the check runs with an empty environment (below). The pipe is root's, so the check copies it into its own `memfd` instead of reopening `/dev/stdin` (which the kernel refuses to `hyperchat`) |
 | **Unnamed** candidate (`O_TMPFILE` in `/etc/hyperchat`) | while it is written and fsynced | no directory entry, mode 0600, root. If the process dies (including SIGKILL or a crash), the kernel frees it: no file is left to find |
 | **Named** candidate `/etc/hyperchat/.api.env.email-keys-candidate.<pid>` | only between `link` and `rename`, a few system calls | already complete and fsynced, with `api.env`'s owner and mode, created with `O_EXCL`. Removed by `finally` on any Python failure |
 | `/etc/hyperchat/api.env` | from the rename on | the intended copy; existing owner and mode kept |
 
 **Validation is isolated.**
-- The deployed code checks the complete candidate in memory, as `hyperchat`, through `env -i` (an empty environment, plus a fixed `PATH` and `PYTHONDONTWRITEBYTECODE=1`). It runs `python -E -s`, so no `PYTHON*` variables and no user site.
+- The deployed code checks the complete candidate in memory (an anonymous `memfd`, no file name), as `hyperchat`, through `env -i` (an empty environment, plus a fixed `PATH` and `PYTHONDONTWRITEBYTECODE=1`). It runs `python -E -s`, so no `PYTHON*` variables and no user site.
 - The check itself refuses to run if any `HYPERCHAT_*` variable is present. So no exported variable, and no `sudo` environment policy, can override a candidate value: pydantic would otherwise prefer the environment over the file.
 - The application needs no other runtime configuration to build its settings: everything comes from the candidate.
 
@@ -99,8 +99,10 @@ CATS = {"ONBOARDING": ("HyperChat", "onboarding"), "AUTHENTICATION": ("HyperChat
 VALIDATE = ("import os, sys\n"
             "leak = sorted(k for k in os.environ if k.upper().startswith('HYPERCHAT_'))\n"
             "if leak: sys.exit('STOP: HYPERCHAT_ variables in the validation environment: ' + ' '.join(leak))\n"
+            # the stdin pipe belongs to root, so hyperchat cannot reopen /dev/stdin: copy it into this process's memfd
+            "fd = os.memfd_create('candidate'); os.write(fd, sys.stdin.buffer.read())\n"
             "from app.core.config import Settings\n"
-            "s = Settings(_env_file='/dev/stdin', email_active_categories=sys.argv[1])\n"
+            "s = Settings(_env_file=f'/proc/self/fd/{fd}', email_active_categories=sys.argv[1])\n"
             "print('ok', sorted(s.email_categories))")
 folder = os.path.dirname(ENV)
 CAND = f".api.env.email-keys-candidate.{os.getpid()}"   # relative to the directory fd below
