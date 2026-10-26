@@ -39,10 +39,26 @@ class Email:
     text: str
 
 
+# Plain-text fallback: (what the link does, what to know). The link stays on line 4 (tests and operators read it there).
+# The durations match the defaults reset_token_ttl_minutes=60 and invite_ttl_days=7 (pinned by tests).
+TEXTS = {
+    "invite": ("Open this link to accept the invitation and set your password:",
+               "This invitation is for {to}. The link works once and expires in 7 days. If you weren't expecting "
+               "it, ignore this email: nothing changes unless the link is used."),
+    "reset-password": ("Open this link to choose a new password:",
+                       "The link expires in 1 hour. If you didn't request a password reset, ignore this email: "
+                       "your password won't change."),
+}
+
+
 def render(template: str, to: str, url: str) -> Email:
     body = (TEMPLATES / f"{template}.html").read_text(encoding="utf-8")
     body = body.replace("{{ .ConfirmationURL }}", html.escape(url, quote=True))
-    text = f"{SUBJECTS[template]}\n\nOpen this link to continue:\n{url}\n\nIf you did not request this, ignore this email."
+    body = body.replace("{{ .Email }}", html.escape(to, quote=True))
+    if "{{" in body:  # a placeholder render() does not fill would reach the recipient verbatim
+        raise ValueError(f"unfilled placeholder in the {template} template")
+    action, note = TEXTS[template]
+    text = f"{SUBJECTS[template]}\n\n{action}\n{url}\n\n{note.format(to=to)}"
     return Email(to=to, template=template, subject=SUBJECTS[template], html=body, text=text)
 
 
