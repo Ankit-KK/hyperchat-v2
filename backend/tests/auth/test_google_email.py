@@ -129,7 +129,8 @@ async def test_resend_sender_posts_and_fails_closed():
         return httpx.Response(200 if len(seen) == 1 else 500, json={})
 
     sender = ResendSender("TEST-ONLY-resend-key", "HyperChat <no-reply@example.invalid>",
-                          client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+                          client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                          allowed_recipients=frozenset({"a@example.invalid"}))
     await sender.send(render("invite", "a@example.invalid", "https://x.invalid/invite?token=t"))
     assert seen[0].headers["authorization"] == "Bearer TEST-ONLY-resend-key"
     with pytest.raises(RuntimeError):

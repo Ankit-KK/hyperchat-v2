@@ -94,7 +94,7 @@ async def check_email(settings, env, report: Report, sender_factory, tag: str) -
     subject = f"[HyperChat DEV] delivery check {tag}"
     body = f"HyperChat DEV email delivery check, run {tag}. No action is needed."
     try:
-        await sender_factory(key, settings.email_from).send(
+        await sender_factory(key, settings.email_from, allowed_recipients=settings.email_allowed_recipients).send(
             Email(to=to, template="delivery-check", subject=subject, html=f"<p>{body}</p>", text=body))
     except Exception as exc:  # noqa: BLE001 - reported, never retried
         report.line("FAIL", "email", f"provider refused the message ({reason_of(exc)}) to {ip.mask(to)}")

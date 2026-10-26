@@ -506,6 +506,20 @@ def test_an_invite_is_never_sent_from_another_category(app, monkeypatch):
                             ("wrong-category" + DOMAIN,)).fetchone() == (True,)
 
 
+def test_an_invite_to_an_address_off_the_allowlist_never_reaches_the_provider(app, monkeypatch):
+    """A1: outside production the recipient must be on the allowlist; otherwise no HTTP call, a neutral 502 and the
+    invitation is withdrawn (its link never existed outside the database)."""
+    headers, seen = _admin(app), []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: seen.append(request)))
+    resend = ResendSender("re_TEST_onboarding_flow", "HyperChat <no-reply@onboarding.quicktestspace.site>", client,
+                          category="onboarding", allowed_recipients=frozenset({"someone-else" + DOMAIN}))
+    r = _invite_with(app, monkeypatch, headers, CategorySender({"onboarding": resend}), "not-allowed" + DOMAIN)
+    assert (r.status_code, r.json()) == (502, UNCONFIRMED) and seen == []
+    with _db() as conn:
+        assert conn.execute("SELECT revoked_at IS NOT NULL FROM public.user_invites WHERE email = %s",
+                            ("not-allowed" + DOMAIN,)).fetchone() == (True,)
+
+
 def test_an_accepted_invite_with_unreadable_provider_metadata_keeps_its_link(app, monkeypatch):
     """Resend answers 2xx with a body that is not the expected JSON: the invitation succeeded (201) and its link
     works; it is never treated as failed (which would revoke it)."""
@@ -517,7 +531,7 @@ def test_an_accepted_invite_with_unreadable_provider_metadata_keeps_its_link(app
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(accepted))
     resend = ResendSender("re_TEST_onboarding_flow", "HyperChat <no-reply@onboarding.quicktestspace.site>", client,
-                          category="onboarding")
+                          category="onboarding", allowed_recipients=frozenset({"accepted-odd" + DOMAIN}))
     r = _invite_with(app, monkeypatch, headers, CategorySender({"onboarding": resend}), "accepted-odd" + DOMAIN)
     assert r.status_code == 201 and len(seen) == 1
     token = parse_qs(urlparse(json.loads(seen[0].content)["text"].split("\n")[3]).query)["token"][0]

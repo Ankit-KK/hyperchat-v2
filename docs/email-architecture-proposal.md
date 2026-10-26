@@ -90,6 +90,12 @@ The service:
 ### 2.3 Configuration: off by default, fail closed
 - **`HYPERCHAT_EMAIL_BACKEND=disabled|resend`** stays the global switch. With `disabled`, behaviour stays as today (dev convenience; nothing is sent).
 - **`HYPERCHAT_EMAIL_ACTIVE_CATEGORIES=`** (empty by default) lists the categories explicitly activated, for example `onboarding`.
+- **`HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST=`** (DEV and test only, implemented in A1) lists the only addresses any category may send to:
+  - comma-separated plain addresses, matched exactly after lower-casing; no wildcards, and a plus-address is a different address;
+  - enforced in `ResendSender` before any request to Resend, for every category and for the opt-in delivery check;
+  - empty or missing: every email is refused (the API still starts and logs one warning);
+  - malformed: the API refuses to start, naming entry positions only, never addresses;
+  - production: never restricted, and the API refuses to start if the variable is set.
 - **Per category `X`:**
   - `HYPERCHAT_EMAIL_X_FROM`;
   - `HYPERCHAT_EMAIL_X_RESEND_API_KEY`: a **domain-restricted sending key** for that category's domain; recommended one key per domain;
