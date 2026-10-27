@@ -813,4 +813,14 @@ def test_the_suites_assert_configuration_aware_email_and_google_behaviour():
     assert "Google sign-in disabled -> 404" not in auth and "google_start_ok(" in auth
     assert "smoke_policy.email_mode(" in backend and "invite_delivery_unconfirmed" in backend
     for src in (backend, auth):  # both suites prove that no email left the server during the run
-        assert "no email left the server during the run" in src
+        assert "no email left the server during the run" in src and "email_provider_contacts(" in src
+
+
+def test_a_failed_provider_attempt_counts_as_an_email_that_left():
+    from smoke_policy import email_provider_contacts
+    line = lambda m: '{"level": "INFO", "message": "%s", "category": "onboarding"}' % m
+    assert not any(email_provider_contacts(line("email refused: recipient not on the allowlist")).values())
+    assert not any(email_provider_contacts(line("email refused: category inactive")).values())
+    assert email_provider_contacts(line("email sent"))["email sent"] == 1
+    assert email_provider_contacts(line("email send failed"))["email send failed"] == 1  # never hidden
+    assert email_provider_contacts("") == {"email sent": 0, "email send failed": 0}

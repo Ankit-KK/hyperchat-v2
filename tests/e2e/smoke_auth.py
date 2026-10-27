@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.auth.passwords import hash_password  # noqa: E402
 from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
-from smoke_policy import config_values, google_start_ok, rate_limit_keys, refusal, suite_ip  # noqa: E402
+from smoke_policy import (  # noqa: E402
+    config_values, email_provider_contacts, google_start_ok, rate_limit_keys, refusal, suite_ip)
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
@@ -140,7 +141,8 @@ journal = subprocess.run(["journalctl", "-u", "hyperchat-api", "--since", "-15mi
                          capture_output=True, text=True).stdout
 check("no session token, CSRF token or password in the service journal",
       all(t and t not in journal for t in seen_tokens) and PASSWORD not in journal)
-check("no email left the server during the run (no 'email sent' in the journal)", '"email sent"' not in journal)
+check("no email left the server during the run (no 'email sent' or 'email send failed' in the journal)",
+      not any(email_provider_contacts(journal).values()))
 failed = [n for n, ok in results if not ok]
 print(f"{len(results) - len(failed)}/{len(results)} passed")
 sys.exit(1 if failed else 0)

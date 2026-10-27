@@ -156,6 +156,16 @@ def email_mode(cfg: dict[str, str], synthetic: list[str]) -> str:
     return "guarded"
 
 
+# app.auth.email logs these only after a request to the provider (Resend): a delivered and a failed attempt alike
+PROVIDER_CONTACT = ("email sent", "email send failed")
+
+
+def email_provider_contacts(journal: str) -> dict[str, int]:
+    """How often the JSON journal shows a provider request; any non-zero count means an email left (or tried to leave)
+    the server. A failed attempt counts too: it still handed an address to the provider."""
+    return {m: journal.count(f'"{m}"') for m in PROVIDER_CONTACT}
+
+
 def google_enabled(cfg: dict[str, str]) -> bool:
     """The API enables Google sign-in when the client id, secret and redirect URI are all set (Settings.google_enabled);
     the secret is never read here, so a set client id AND redirect URI stand for the three."""

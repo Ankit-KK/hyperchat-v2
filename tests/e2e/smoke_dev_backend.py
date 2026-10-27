@@ -1316,8 +1316,9 @@ for path in ("/var/log/nginx/access.log", "/var/log/nginx/error.log"):
         pass
 leaks = [s for s in secrets_seen if s and (s in journal or s in nginx)]
 check("logs", "no secret in the API/worker journal or the nginx logs (F1/F1-R)", not leaks, f"{len(leaks)} leaked")
-check("logs", "no email left the server during the run (no 'email sent' in the journal)", '"email sent"' not in journal,
-      f"{journal.count(chr(34) + 'email sent' + chr(34))} sent")
+contacts = smoke_policy.email_provider_contacts(journal)
+check("logs", "no email left the server during the run (no 'email sent' or 'email send failed' in the journal)",
+      not any(contacts.values()), str(contacts))
 if EMAIL_MODE == "guarded":
     check("logs", "the synthetic invitation was refused by the recipient allowlist ('email refused' logged, no address)",
           "email refused: recipient not on the allowlist" in journal and not any(e in journal for e in EMAILS),
