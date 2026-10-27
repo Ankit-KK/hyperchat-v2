@@ -814,6 +814,10 @@ def test_the_suites_assert_configuration_aware_email_and_google_behaviour():
     assert "smoke_policy.email_mode(" in backend and "invite_delivery_unconfirmed" in backend
     for src in (backend, auth):  # both suites prove that no email left the server during the run
         assert "no email left the server during the run" in src and "email_provider_contacts(" in src
+        assert "'\"email sent\"' not in journal" not in src  # never back to the sent-only check
+    # the check's verdict is the provider-contact count itself, not just a call next to it
+    assert "not any(contacts.values())" in backend
+    assert "not any(email_provider_contacts(journal).values())" in auth
 
 
 def test_a_failed_provider_attempt_counts_as_an_email_that_left():
