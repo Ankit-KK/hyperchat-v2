@@ -65,6 +65,7 @@ STARTED = datetime.now(UTC)
 
 secrets_seen: list[str] = []  # tokens and passwords that must never appear in a log
 EMAILS: set[str] = set()  # every synthetic address this run used: its rate-limit keys derive from them
+REFUSED_INVITE: str | None = None  # guarded email: the invitation the allowlist refused (its id, for the log check)
 SUITE_IP: str | None = None  # the address the API sees for this host (from the run's own probe row)
 
 
@@ -377,14 +378,16 @@ try:
         check(S, "invite created with email disabled; no accept link returned (links off on DEV)",
               r.status_code in (200, 201) and not leaked, r.text)
     else:  # Resend on: the synthetic address is not allow-listed, so nothing is sent and the link is withdrawn
-        reason = (body.get("error") or {}).get("code") if isinstance(body.get("error"), dict) else body.get("reason")
-        check(S, "invite to a non-allow-listed address: refused before any send (502 invite_delivery_unconfirmed), "
-              "no accept link", r.status_code == 502 and "invite_delivery_unconfirmed" in r.text and not leaked,
-              f"{r.status_code} {reason} {r.text[:200]}")
+        # the reason code is never in the response (generic public error); the logs section proves it from the
+        # security log (smoke_policy.invite_refusal_logged)
+        ok, detail = smoke_policy.invite_refusal_response_ok(r.status_code, r.text)
+        check(S, "invite to a non-allow-listed address: 502 with only the generic public error (no invite, link, "
+              "reason code or address)", ok and not leaked, detail)
         r = admin.get("/api/v1/admin/invites", params={"status": "all", "limit": 200})
         sent = [i for i in r.json().get("invites", []) if i.get("email") == email("invitee")]
         check(S, "the undeliverable invitation exists once and was withdrawn (revoked)",
               r.status_code == 200 and [i.get("status") for i in sent] == ["revoked"], r.text[:300])
+        REFUSED_INVITE = sent[0].get("id") if len(sent) == 1 else None
         # the admin list and revoke paths, on a pending invitation issued here as the mailer would (no email involved)
         with db() as c:
             c.execute("INSERT INTO public.user_invites (email, role, token_hash, invited_by, expires_at) VALUES "
@@ -1323,6 +1326,9 @@ if EMAIL_MODE == "guarded":
     check("logs", "the synthetic invitation was refused by the recipient allowlist ('email refused' logged, no address)",
           "email refused: recipient not on the allowlist" in journal and not any(e in journal for e in EMAILS),
           "refusal line missing, or a synthetic address in the journal")
+    ok, detail = smoke_policy.invite_refusal_logged(journal, ids.get("admin"), REFUSED_INVITE)
+    check("logs", "the security log records the refusal reason: invite_delivery_unconfirmed (EmailRecipientNotAllowed) "
+          "for this invitation, withdrawn, never created", ok, detail)
 
 # ── checks this environment cannot run (credentials / approval) ─────────────
 for name, why in (

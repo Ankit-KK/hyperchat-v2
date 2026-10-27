@@ -9,6 +9,7 @@ Without it the suite keeps its earlier behaviour: any known head passes, undeplo
 """
 
 import hashlib
+import json
 import re
 from datetime import datetime
 
@@ -164,6 +165,68 @@ def email_provider_contacts(journal: str) -> dict[str, int]:
     """How often the JSON journal shows a provider request; any non-zero count means an email left (or tried to leave)
     the server. A failed attempt counts too: it still handed an address to the provider."""
     return {m: journal.count(f'"{m}"') for m in PROVIDER_CONTACT}
+
+
+# app.auth.service.create_invite when the email cannot be confirmed: the API answers only this generic message
+# (app.main AuthError handler: {"error": ...}); the reason code is recorded in the security log, never in the response.
+INVITE_UNCONFIRMED_ERROR = "Invitation delivery could not be confirmed. Please retry."
+
+
+def invite_refusal_response_ok(status: int, text: str) -> tuple[bool, str]:
+    """POST /api/v1/auth/invites to a non-allow-listed address: exactly 502 {"error": <the generic message>}. The exact
+    body excludes everything else: an invitation (other status or invite id), a link or token, the reason code, an
+    address. The detail names the status and the body's keys only."""
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = None
+    ok = status == 502 and body == {"error": INVITE_UNCONFIRMED_ERROR}
+    keys = sorted(body) if isinstance(body, dict) else type(body).__name__
+    return ok, f"{status} body keys {keys}"
+
+
+def journal_events(journal: str) -> list[dict]:
+    """The JSON lines of a journal read with -o cat (app.core.logging); anything else is skipped."""
+    events = []
+    for line in journal.splitlines():
+        if line.startswith("{"):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def invite_refusal_logged(journal: str, admin_id: str | None, invite_id: str | None) -> tuple[bool, str]:
+    """The security log proves why the invitation was refused (app.auth.service.create_invite, app.auth.email): for THIS
+    admin and THIS invitation exactly one invite_delivery_unconfirmed with reason EmailRecipientNotAllowed (the
+    allowlist refused before any provider request; any other reason means the provider was tried) and one
+    invite_withdrawn; no invite_created and no invite_withdraw_failed by this admin; the 'email refused' line for the
+    invite template; and the public 502 recorded as auth_unavailable with the reason code. Detail: counts only."""
+    events = journal_events(journal)
+    mine = [e for e in events if admin_id and e.get("user_id") == admin_id]
+    count = lambda name, **want: sum(1 for e in mine if e.get("security_event") == name
+                                     and all(e.get(k) == v for k, v in want.items()))
+    unconfirmed = [e for e in mine if e.get("security_event") == "invite_delivery_unconfirmed"]
+    refused = sum(1 for e in events if e.get("msg") == "email refused: recipient not on the allowlist"
+                  and e.get("template") == "invite")
+    public = sum(1 for e in events if e.get("security_event") == "auth_unavailable"
+                 and e.get("reason") == "invite_delivery_unconfirmed" and e.get("status") == 502
+                 and e.get("path") == "/api/v1/auth/invites")
+    seen = {
+        "unconfirmed": len(unconfirmed),
+        "unconfirmed_allowlist_this_invite": count("invite_delivery_unconfirmed", reason="EmailRecipientNotAllowed",
+                                                   invite_id=invite_id),
+        "withdrawn_this_invite": count("invite_withdrawn", invite_id=invite_id),
+        "created": count("invite_created"), "withdraw_failed": count("invite_withdraw_failed"),
+        "email_refused": refused, "public_502": public,
+    }
+    ok = (bool(admin_id) and bool(invite_id) and seen["unconfirmed"] == 1 and seen["unconfirmed_allowlist_this_invite"] == 1
+          and seen["withdrawn_this_invite"] == 1 and seen["created"] == 0 and seen["withdraw_failed"] == 0
+          and refused >= 1 and public >= 1)
+    return ok, str(seen)
 
 
 def google_enabled(cfg: dict[str, str]) -> bool:

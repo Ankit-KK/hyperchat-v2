@@ -828,3 +828,90 @@ def test_a_failed_provider_attempt_counts_as_an_email_that_left():
     assert email_provider_contacts(line("email sent"))["email sent"] == 1
     assert email_provider_contacts(line("email send failed"))["email send failed"] == 1  # never hidden
     assert email_provider_contacts("") == {"email sent": 0, "email send failed": 0}
+
+
+# ── invitation refused by the allowlist: generic public error, reason proved from the security log ──
+ADMIN_ID, INVITE_ID = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+GENERIC_INVITE_ERROR = '{"error":"Invitation delivery could not be confirmed. Please retry."}'
+
+
+def _log(msg, **fields):
+    import json
+    return json.dumps({"ts": "2026-10-27T18:00:00.000+00:00", "level": "WARNING", "logger": "x", "msg": msg, **fields})
+
+
+def _refusal_journal(**override):
+    lines = {
+        "refused": _log("email refused: recipient not on the allowlist", category="onboarding", template="invite"),
+        "unconfirmed": _log("invite_delivery_unconfirmed", security_event="invite_delivery_unconfirmed",
+                            reason="EmailRecipientNotAllowed", user_id=ADMIN_ID, invite_id=INVITE_ID),
+        "withdrawn": _log("invite_withdrawn", security_event="invite_withdrawn", user_id=ADMIN_ID, invite_id=INVITE_ID),
+        "public": _log("auth_unavailable", security_event="auth_unavailable", reason="invite_delivery_unconfirmed",
+                       status=502, path="/api/v1/auth/invites"),
+        "noise": "uvicorn started (not json)",
+    }
+    lines.update(override)
+    return "\n".join(v for v in lines.values() if v)
+
+
+def test_invite_refusal_response_accepts_only_the_generic_502():
+    from smoke_policy import invite_refusal_response_ok
+    assert invite_refusal_response_ok(502, GENERIC_INVITE_ERROR)[0]
+    bad = [
+        (201, '{"invite_id": "x", "expires_at": "y"}'),  # the invitation was created
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry.","reason":"invite_delivery_unconfirmed"}'),
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry.","invite_id":"x"}'),
+        (502, '{"error":"Something else"}'),
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry. token=abc"}'),
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry.","to":"authtest-sm1-invitee@authtest.invalid"}'),
+        (502, "Bad Gateway"),  # a proxy error, not the API's refusal
+        (500, GENERIC_INVITE_ERROR),
+    ]
+    for status, text in bad:
+        ok, detail = invite_refusal_response_ok(status, text)
+        assert not ok, (status, text)
+        assert "authtest" not in detail and "token" not in detail  # the detail never echoes the body
+
+
+def test_invite_refusal_reason_is_proved_from_the_security_log():
+    from smoke_policy import invite_refusal_logged
+    assert invite_refusal_logged(_refusal_journal(), ADMIN_ID, INVITE_ID)[0]
+    wrong = {
+        "no unconfirmed event": ({"unconfirmed": None}, ADMIN_ID, INVITE_ID),
+        "provider was tried": ({"unconfirmed": _log("invite_delivery_unconfirmed", security_event="invite_delivery_unconfirmed",
+                                                   reason="EmailDeliveryError", user_id=ADMIN_ID, invite_id=INVITE_ID)},
+                               ADMIN_ID, INVITE_ID),
+        "another invitation": ({}, ADMIN_ID, "33333333-3333-3333-3333-333333333333"),
+        "another admin": ({}, "44444444-4444-4444-4444-444444444444", INVITE_ID),
+        "unknown admin": ({}, None, INVITE_ID),
+        "unknown invitation": ({}, ADMIN_ID, None),
+        "two refusals": ({"extra": _log("invite_delivery_unconfirmed", security_event="invite_delivery_unconfirmed",
+                                        reason="EmailRecipientNotAllowed", user_id=ADMIN_ID, invite_id="x")},
+                         ADMIN_ID, INVITE_ID),
+        "an invitation was created": ({"created": _log("invite_created", security_event="invite_created",
+                                                       user_id=ADMIN_ID)}, ADMIN_ID, INVITE_ID),
+        "not withdrawn": ({"withdrawn": None}, ADMIN_ID, INVITE_ID),
+        "withdraw failed": ({"failed": _log("invite_withdraw_failed", security_event="invite_withdraw_failed",
+                                            reason="not_open", user_id=ADMIN_ID, invite_id=INVITE_ID)},
+                            ADMIN_ID, INVITE_ID),
+        "no allowlist refusal line": ({"refused": None}, ADMIN_ID, INVITE_ID),
+        "refusal of another template": ({"refused": _log("email refused: recipient not on the allowlist",
+                                                         template="reset-password")}, ADMIN_ID, INVITE_ID),
+        "public 502 not recorded": ({"public": None}, ADMIN_ID, INVITE_ID),
+        "public 502 for another path": ({"public": _log("auth_unavailable", security_event="auth_unavailable",
+                                                        reason="invite_delivery_unconfirmed", status=502,
+                                                        path="/api/v1/admin/applications/x/invite")},
+                                        ADMIN_ID, INVITE_ID),
+    }
+    for name, (override, admin, invite) in wrong.items():
+        ok, detail = invite_refusal_logged(_refusal_journal(**override), admin, invite)
+        assert not ok, name
+        assert ADMIN_ID not in detail and INVITE_ID not in detail  # counts only
+
+
+def test_the_backend_suite_checks_the_generic_response_and_the_logged_reason():
+    backend = SUITE.read_text(encoding="utf-8")
+    assert '"invite_delivery_unconfirmed" in r.text' not in backend  # the reason code is never in the response
+    assert "smoke_policy.invite_refusal_response_ok(r.status_code, r.text)" in backend
+    assert 'REFUSED_INVITE = sent[0].get("id") if len(sent) == 1 else None' in backend
+    assert 'smoke_policy.invite_refusal_logged(journal, ids.get("admin"), REFUSED_INVITE)' in backend
