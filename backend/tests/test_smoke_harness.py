@@ -742,3 +742,75 @@ def test_no_smoke_script_deletes_rate_limits_without_this_runs_keys():
         for m in re.finditer(r"DELETE FROM public\.rate_limits", src):
             statement = src[m.start():m.start() + 250]  # the statement and its scope, written on the next lines
             assert "ANY(%(exact)s)" in statement or "OWNED_RATE_LIMITS" in statement, (script.name, statement[:120])
+
+
+# ── the DEV email and Google configuration (smoke_policy.config_values / email_mode / google_start_ok) ──────────
+CID = "123456789012-abcdefghij0123456789.apps.googleusercontent.com"
+REDIR = "https://api.quicktestspace.site/api/v1/auth/google/callback"
+DEV_ENV = "\n".join([
+    "HYPERCHAT_EMAIL_BACKEND=resend", "HYPERCHAT_EMAIL_ACTIVE_CATEGORIES=onboarding",
+    "HYPERCHAT_BOT_RECIPIENT_ALLOWLIST=tg:1,dc:2",
+    "HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST=a@example.invalid,B@example.invalid",
+    f"HYPERCHAT_GOOGLE_CLIENT_ID={CID}", "HYPERCHAT_GOOGLE_CLIENT_SECRET=GOCSPX-never-read-value",
+    f"HYPERCHAT_GOOGLE_REDIRECT_URI={REDIR}", "HYPERCHAT_EMAIL_ONBOARDING_RESEND_API_KEY=re_never_read"])
+SYN = ["authtest-x1-invitee@authtest.invalid"]
+
+
+def test_config_values_reads_only_the_listed_non_secret_names():
+    cfg = sp.config_values(DEV_ENV)
+    assert set(cfg) == set(sp.CONFIG_NAMES)
+    assert "GOCSPX-never-read-value" not in repr(cfg) and "re_never_read" not in repr(cfg)
+    assert cfg["HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST"] == "a@example.invalid,B@example.invalid"  # never the BOT_ one
+    assert sp.config_values("HYPERCHAT_EMAIL_BACKEND=disabled\nHYPERCHAT_EMAIL_BACKEND=resend")["HYPERCHAT_EMAIL_BACKEND"] == "resend"
+
+
+def test_email_mode_disabled_guarded_and_fail_closed():
+    assert sp.email_mode({}, SYN) == "disabled"
+    assert sp.email_mode({"HYPERCHAT_EMAIL_BACKEND": "disabled"}, SYN) == "disabled"
+    assert sp.email_mode(sp.config_values(DEV_ENV), SYN) == "guarded"
+    with pytest.raises(ValueError, match="allowlist"):  # a synthetic address deliverable: the suite must not run
+        sp.email_mode({"HYPERCHAT_EMAIL_BACKEND": "resend", "HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST": "x@y.invalid," + SYN[0].upper()}, SYN)
+    with pytest.raises(ValueError, match="unknown"):
+        sp.email_mode({"HYPERCHAT_EMAIL_BACKEND": "smtp"}, SYN)
+
+
+def _start(**over):
+    q = {"client_id": CID, "redirect_uri": REDIR, "response_type": "code", "scope": "openid email profile",
+         "state": "s" * 32, "nonce": "n" * 32, "code_challenge": "c" * 43, "code_challenge_method": "S256",
+         "prompt": "select_account", **over}
+    from urllib.parse import urlencode
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({k: v for k, v in q.items() if v is not None})
+
+
+COOKIE = "__Host-hc_oauth=abc.def; HttpOnly; Max-Age=600; Path=/; SameSite=lax; Secure"
+
+
+def test_google_start_expectation_follows_the_configuration():
+    on, off = sp.config_values(DEV_ENV), {}
+    assert sp.google_enabled(on) and not sp.google_enabled(off)
+    assert sp.google_start_ok(404, "", "", off)[0]
+    assert not sp.google_start_ok(302, _start(), COOKIE, off)[0]  # Google on although the file says off
+    assert sp.google_start_ok(302, _start(), COOKIE, on)[0]
+    assert not sp.google_start_ok(404, "", "", on)[0]  # configured but not answering
+
+
+@pytest.mark.parametrize("location, cookie", [
+    (_start(client_id="999-other.apps.googleusercontent.com"), COOKIE), (_start(redirect_uri="https://evil.example/cb"), COOKIE),
+    (_start(code_challenge_method="plain"), COOKIE), (_start(code_challenge=None), COOKIE), (_start(nonce=None), COOKIE),
+    (_start(state="short"), COOKIE), (_start(prompt=None), COOKIE), (_start(scope="openid"), COOKIE),
+    (_start().replace("accounts.google.com", "accounts.google.com.evil.example"), COOKIE),
+    (_start(), COOKIE.replace("; Secure", "")), (_start(), COOKIE.replace("; HttpOnly", "")),
+    (_start(), COOKIE + "; Domain=quicktestspace.site"), (_start(), COOKIE.replace("SameSite=lax", "SameSite=none")),
+    (_start(), COOKIE.replace("__Host-hc_oauth=abc.def", "hc_oauth=abc.def")), (_start(), "")])
+def test_google_start_refuses_every_weakened_redirect_or_cookie(location, cookie):
+    ok, detail = sp.google_start_ok(302, location, cookie, sp.config_values(DEV_ENV))
+    assert not ok and CID not in detail and "abc.def" not in detail
+
+
+def test_the_suites_assert_configuration_aware_email_and_google_behaviour():
+    backend = SUITE.read_text(encoding="utf-8")
+    auth = (SUITE.parent / "smoke_auth.py").read_text(encoding="utf-8")
+    assert "Google sign-in disabled -> 404" not in auth and "google_start_ok(" in auth
+    assert "smoke_policy.email_mode(" in backend and "invite_delivery_unconfirmed" in backend
+    for src in (backend, auth):  # both suites prove that no email left the server during the run
+        assert "no email left the server during the run" in src

@@ -125,6 +125,63 @@ def enforcement_draft(kyc_row: str, mfa_row: str) -> tuple[bool, str]:
     return kyc_row == "draft|0" and mfa_row == "draft", f"kyc={kyc_row!r} mfa={mfa_row!r}"
 
 
+# ── the DEV email and Google configuration the suites must expect (read from api.env, names listed here only) ──
+# Only these non-secret settings are ever read; client secrets and API keys are never parsed or printed.
+CONFIG_NAMES = ("HYPERCHAT_EMAIL_BACKEND", "HYPERCHAT_EMAIL_ACTIVE_CATEGORIES", "HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST",
+                "HYPERCHAT_GOOGLE_CLIENT_ID", "HYPERCHAT_GOOGLE_REDIRECT_URI")
+
+
+def config_values(env_text: str) -> dict[str, str]:
+    """The CONFIG_NAMES settings of an api.env text (exact names; the last assignment wins, as dotenv does)."""
+    found: dict[str, str] = {}
+    for line in env_text.splitlines():
+        name, sep, value = line.strip().partition("=")
+        if sep and name in CONFIG_NAMES:
+            found[name] = value.strip()
+    return found
+
+
+def email_mode(cfg: dict[str, str], synthetic: list[str]) -> str:
+    """"disabled": nothing can be sent. "guarded": Resend, and every synthetic address is off the recipient allowlist,
+    so an invitation to one is refused before any provider call and withdrawn (502 invite_delivery_unconfirmed).
+    Raises when a synthetic address would be deliverable or the backend is unknown: the suite must never send."""
+    backend = (cfg.get("HYPERCHAT_EMAIL_BACKEND") or "disabled").lower()
+    if backend == "disabled":
+        return "disabled"
+    if backend != "resend":
+        raise ValueError(f"unknown email backend {backend!r}")
+    allowed = {a.strip().lower() for a in (cfg.get("HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST") or "").split(",") if a.strip()}
+    if any(s.strip().lower() in allowed for s in synthetic):
+        raise ValueError("a synthetic address is on the email recipient allowlist; the suite would send email")
+    return "guarded"
+
+
+def google_enabled(cfg: dict[str, str]) -> bool:
+    """The API enables Google sign-in when the client id, secret and redirect URI are all set (Settings.google_enabled);
+    the secret is never read here, so a set client id AND redirect URI stand for the three."""
+    return bool(cfg.get("HYPERCHAT_GOOGLE_CLIENT_ID")) and bool(cfg.get("HYPERCHAT_GOOGLE_REDIRECT_URI"))
+
+
+def google_start_ok(status: int, location: str, set_cookie: str, cfg: dict[str, str]) -> tuple[bool, str]:
+    """GET /api/v1/auth/google/start, logged out. Google off: 404. Google on: 302 to Google's authorization endpoint for
+    THIS client and redirect URI, code flow, openid email profile, PKCE S256, state and nonce, account chooser, and the
+    state cookie __Host-hc_oauth (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain). The detail never holds a value."""
+    if not google_enabled(cfg):
+        return status == 404, f"{status} (Google off: expected 404)"
+    from urllib.parse import parse_qsl, urlsplit
+    p = urlsplit(location or "")
+    q = dict(parse_qsl(p.query))
+    attrs = [a.strip().lower() for a in (set_cookie or "").split(";")]
+    ok = (status == 302 and (p.scheme, p.netloc, p.path) == ("https", "accounts.google.com", "/o/oauth2/v2/auth")
+          and q.get("client_id") == cfg["HYPERCHAT_GOOGLE_CLIENT_ID"] and q.get("redirect_uri") == cfg["HYPERCHAT_GOOGLE_REDIRECT_URI"]
+          and q.get("response_type") == "code" and q.get("scope") == "openid email profile"
+          and q.get("code_challenge_method") == "S256" and len(q.get("code_challenge", "")) == 43
+          and len(q.get("state", "")) >= 30 and len(q.get("nonce", "")) >= 30 and q.get("prompt") == "select_account"
+          and attrs[:1] and attrs[0].startswith("__host-hc_oauth=") and len(attrs[0]) > len("__host-hc_oauth=")
+          and {"secure", "httponly", "samesite=lax", "path=/"} <= set(attrs) and not any(a.startswith("domain") for a in attrs))
+    return bool(ok), f"{status} (Google on: expected 302 to Google with this client, PKCE and a __Host- state cookie)"
+
+
 # ── this run's own rate-limit state ───────────────────────────────────────────────────────────────────────
 # public.rate_limits is keyed by (ip_address, endpoint), where ip_address holds the limiter key (app.auth.service,
 # app.obs, app.realtime, app.kyc, app.stepup, app.payments, app.uploads, app.routers): ip:<addr>,

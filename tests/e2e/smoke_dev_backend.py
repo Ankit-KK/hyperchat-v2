@@ -192,6 +192,13 @@ env_text = Path(ENV_FILE).read_text() if Path(ENV_FILE).exists() else ""
 bots_flag = re.search(r"^HYPERCHAT_BOTS_ENABLED=(.*)$", env_text, re.M)
 if bots_flag and bots_flag.group(1).strip().lower() in ("1", "true", "yes", "on"):
     refuse("bots are enabled on DEV; this suite only runs with bots disabled")
+# the deployed email and Google configuration decides what the invitation and sign-in checks must see; the suite never
+# sends email: with Resend on, every synthetic address must be off the recipient allowlist (smoke_policy.email_mode)
+CFG = smoke_policy.config_values(env_text)
+try:
+    EMAIL_MODE = smoke_policy.email_mode(CFG, [email("invitee"), email("pending"), email("reset")])
+except ValueError as exc:
+    refuse(str(exc))
 with db() as c:
     if c.execute("SELECT current_database()").fetchone()[0] != DB_NAME:
         refuse("connected to an unexpected database")
@@ -337,7 +344,8 @@ try:
                   "(%s, %s, now() + interval '30 minutes'), (%s, %s, now() - interval '1 minute')",
                   (ids["reset"], sha256_hex(link), ids["reset"], sha256_hex(expired)))
     r = httpx.post(API + "/api/v1/auth/password/forgot", json={"email": email("reset")}, timeout=15)
-    check(S, "forgot password with email disabled -> 202, nothing sent", r.status_code == 202, r.text)
+    check(S, "forgot password -> 202 (nothing sent: email disabled, or the address is not allow-listed / the "
+             "category inactive; 'logs' checks no email left)", r.status_code == 202, r.text)
     r = httpx.post(API + "/api/v1/auth/password/reset", json={"token": expired, "new_password": "Reset-Pass-4242"},
                    timeout=15)
     check(S, "expired reset link -> 400", r.status_code == 400, r.text)
@@ -365,10 +373,26 @@ try:
     r = admin.write("POST", "/api/v1/auth/invites", json={"email": email("invitee"), "role": "streamer"})
     body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
     leaked = [k for k, v in (body.get("invite", body) or {}).items() if isinstance(v, str) and "token=" in v]
-    check(S, "invite created with email disabled; no accept link returned (links off on DEV)",
-          r.status_code in (200, 201) and not leaked, r.text)
+    if EMAIL_MODE == "disabled":
+        check(S, "invite created with email disabled; no accept link returned (links off on DEV)",
+              r.status_code in (200, 201) and not leaked, r.text)
+    else:  # Resend on: the synthetic address is not allow-listed, so nothing is sent and the link is withdrawn
+        reason = (body.get("error") or {}).get("code") if isinstance(body.get("error"), dict) else body.get("reason")
+        check(S, "invite to a non-allow-listed address: refused before any send (502 invite_delivery_unconfirmed), "
+              "no accept link", r.status_code == 502 and "invite_delivery_unconfirmed" in r.text and not leaked,
+              f"{r.status_code} {reason} {r.text[:200]}")
+        r = admin.get("/api/v1/admin/invites", params={"status": "all", "limit": 200})
+        sent = [i for i in r.json().get("invites", []) if i.get("email") == email("invitee")]
+        check(S, "the undeliverable invitation exists once and was withdrawn (revoked)",
+              r.status_code == 200 and [i.get("status") for i in sent] == ["revoked"], r.text[:300])
+        # the admin list and revoke paths, on a pending invitation issued here as the mailer would (no email involved)
+        with db() as c:
+            c.execute("INSERT INTO public.user_invites (email, role, token_hash, invited_by, expires_at) VALUES "
+                      "(%s, 'streamer', %s, %s, now() + interval '1 day')",
+                      (email("pending"), sha256_hex(secrets.token_urlsafe(32)), ids["admin"]))
+    target = email("invitee") if EMAIL_MODE == "disabled" else email("pending")
     r = admin.get("/api/v1/admin/invites")
-    invites = [i for i in r.json().get("invites", []) if i.get("email") == email("invitee")]
+    invites = [i for i in r.json().get("invites", []) if i.get("email") == target]
     check(S, "admin lists the invite", r.status_code == 200 and len(invites) == 1, r.text)
     if invites:
         r = admin.write("POST", f"/api/v1/admin/invites/{invites[0]['id']}/revoke")
@@ -1292,11 +1316,17 @@ for path in ("/var/log/nginx/access.log", "/var/log/nginx/error.log"):
         pass
 leaks = [s for s in secrets_seen if s and (s in journal or s in nginx)]
 check("logs", "no secret in the API/worker journal or the nginx logs (F1/F1-R)", not leaks, f"{len(leaks)} leaked")
+check("logs", "no email left the server during the run (no 'email sent' in the journal)", '"email sent"' not in journal,
+      f"{journal.count(chr(34) + 'email sent' + chr(34))} sent")
+if EMAIL_MODE == "guarded":
+    check("logs", "the synthetic invitation was refused by the recipient allowlist ('email refused' logged, no address)",
+          "email refused: recipient not on the allowlist" in journal and not any(e in journal for e in EMAILS),
+          "refusal line missing, or a synthetic address in the journal")
 
 # ── checks this environment cannot run (credentials / approval) ─────────────
 for name, why in (
-        ("email delivery (reset, invites)", "Resend API key and DEV sender domain not configured (D8)"),
-        ("Google OAuth sign-in", "no DEV Google OAuth client (D8)"),
+        ("email delivery (reset, invites)", "this suite never sends email; real delivery is owner-run (C1, C2 on DEV)"),
+        ("Google OAuth sign-in", "the interactive Google sign-in is owner-run (C3 on DEV); smoke_auth checks /start"),
         ("TTS generation (MiniMax / ElevenLabs), !sfx, !testmusic", "provider keys and budget not configured (D8)"),
         ("voice transcription (Sarvam)", "Sarvam key not configured (D8)"),
         ("Razorpay checkout / order creation", "creates Razorpay test-mode orders: needs owner approval"),
