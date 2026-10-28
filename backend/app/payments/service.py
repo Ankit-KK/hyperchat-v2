@@ -245,16 +245,17 @@ class PaymentService:
     # ── POST /api/v1/public/donations/{order_id}/confirm ────────────────────
     async def confirm(self, order_id: str, token: str | None, body: ConfirmRequest, client_ip: str | None) -> dict:
         row = await self._donation(order_id, token, client_ip)
-        if row["payment_status"] == "success":
-            return self._status(row)
         account = self.accounts.for_payments(row["account"])
         if account is None:
             raise ApiError(503, "Payment verification unavailable", "razorpay_not_configured")
         payment_id = body.razorpay_payment_id
+        # S-1: the signature is checked in every state, an already-paid order included (signature first)
         if not PAYMENT_ID.match(payment_id) or not checkout_signature_matches(
                 account.key_secret.get_secret_value(), row["provider_order_id"], payment_id, body.razorpay_signature):
             security_event("payment_confirm_rejected", reason="bad_signature", order_id=order_id, client_ip=client_ip)
             raise rules.bad_request("Invalid payment signature", "bad_signature")
+        if row["payment_status"] == "success":
+            return self._status(row)  # a valid repeat: no Razorpay call, no write
         try:
             payment = await self.client.fetch_payment(account, payment_id)
         except RazorpayError as exc:
