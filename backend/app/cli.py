@@ -23,11 +23,19 @@ by mistake, D14) and the URL is this API's https webhook path. Tokens and secret
 seed-platform-soundboard [--dry-run] fills the empty platform soundboard from this environment's R2 library
 (hypersounds/ + hypersound-thumbs/, see app.soundboard.seed); it does nothing once any platform slot exists.
 --dry-run lists what would be inserted and writes nothing.
+
+payment-reconcile [--apply --confirm-database DB] [--min-age-minutes N] [--max-age-days N] [--limit N]
+[--report-file PATH] checks V2 pending/failed donations against Razorpay (see app.payments.reconcile). It is
+report-only unless --apply AND --confirm-database names the connected database; the window can only be narrowed
+from the approved 15 minutes .. 7 days, 200 orders. The JSON report goes to stdout and, with --report-file, to a
+new 0600 file (never overwritten).
 """
 
 import argparse
 import asyncio
 import getpass
+import json
+import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -42,7 +50,9 @@ from app.core.logging import configure_logging
 from app.jobs.queue import enqueue
 from app.maintenance import run_cleanup
 from app.payments.accounts import AccountHealth, PaymentAccounts, health_report
+from app.payments import reconcile
 from app.payments.razorpay import RazorpayClient
+from app.payments.repository import PaymentRepository
 from app.security.audit import security_event
 from app.soundboard import seed
 from app.storage.r2 import StorageError, build_object_store
@@ -204,6 +214,38 @@ async def payment_health(settings: Settings) -> int:
     return 0 if report["status"] == "ok" else 1
 
 
+async def payment_reconcile(settings: Settings, args, client=None) -> int:
+    """Step G1: manual reconciliation of V2 pending/failed orders with Razorpay (report-only unless --apply)."""
+    if not (reconcile.MIN_AGE_MINUTES <= args.min_age_minutes and 0 < args.max_age_days <= reconcile.MAX_AGE_DAYS
+            and args.min_age_minutes < args.max_age_days * 1440 and 0 < args.limit <= reconcile.LIMIT):
+        print("Refused: the window can only be narrowed (min age >= 15 minutes, max age <= 7 days, limit 1..200).",
+              file=sys.stderr)
+        return 2
+    factory = connection_factory(settings)
+    if args.apply:
+        async with factory() as conn:
+            database = (await (await conn.execute("SELECT current_database()")).fetchone())[0]
+        if args.confirm_database != database:
+            print("Refused: --apply needs --confirm-database naming the connected database.", file=sys.stderr)
+            return 2
+    report_fd = None
+    if args.report_file:  # created before any work: never overwritten, readable by its owner only
+        try:
+            report_fd = os.open(args.report_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            print(f"Refused: cannot create the report file ({exc.strerror}).", file=sys.stderr)
+            return 2
+    report = await reconcile.run_cli(PaymentRepository(factory), PaymentAccounts.from_settings(settings),
+                                     client or RazorpayClient(), apply=args.apply, min_age_minutes=args.min_age_minutes,
+                                     max_age_days=args.max_age_days, limit=args.limit)
+    text = json.dumps(report.as_dict(), indent=2, sort_keys=True)
+    print(text)
+    if report_fd is not None:
+        with os.fdopen(report_fd, "w") as f:
+            f.write(text + "\n")
+    return report.exit_code()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--env-file", help="read HYPERCHAT_* settings from this file (e.g. /etc/hyperchat/api.env)")
@@ -224,6 +266,13 @@ def main(argv: list[str] | None = None) -> int:
     sb = sub.add_parser("seed-platform-soundboard", help="fill the empty platform soundboard from the R2 library")
     sb.add_argument("--dry-run", action="store_true", help="only list what would be inserted")
     sub.add_parser("payment-health", help="check the Razorpay credentials, no order created (exit 1 if unusable)")
+    rec = sub.add_parser("payment-reconcile", help="check V2 pending/failed orders with Razorpay (report-only)")
+    rec.add_argument("--apply", action="store_true", help="complete verified captures (needs --confirm-database)")
+    rec.add_argument("--confirm-database", help="the connected database's name, typed out (required with --apply)")
+    rec.add_argument("--min-age-minutes", type=int, default=reconcile.MIN_AGE_MINUTES)
+    rec.add_argument("--max-age-days", type=int, default=reconcile.MAX_AGE_DAYS)
+    rec.add_argument("--limit", type=int, default=reconcile.LIMIT)
+    rec.add_argument("--report-file", help="also write the JSON report to this NEW file (mode 0600)")
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
@@ -241,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "cleanup":
         return asyncio.run(run_cleanup(settings, connection_factory(settings), dry_run=args.dry_run))
+    if args.command == "payment-reconcile":
+        return asyncio.run(payment_reconcile(settings, args))
     if args.command == "seed-platform-soundboard":
         return asyncio.run(seed_platform_soundboard(settings, args.dry_run))
     if args.command == "enqueue-donation-audio":

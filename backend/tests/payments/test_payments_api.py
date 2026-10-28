@@ -79,6 +79,7 @@ class FakePaymentRepo:
         self.rows: dict[str, dict] = {}
         self.applied: list[tuple] = []
         self.events: list[tuple] = []
+        self.paid_with: dict[str, str] = {}  # donation id -> the payment already stored (apply answers already_paid)
 
     async def payment_settings(self, sid):
         return dict(self.settings[sid])
@@ -110,6 +111,8 @@ class FakePaymentRepo:
 
     async def apply(self, donation_id, outcome, payment_id, event=None):
         self.applied.append((donation_id, outcome, payment_id, event.event_id if event else None))
+        if donation_id in self.paid_with:
+            return Applied("already_paid", "success", paid_with=self.paid_with[donation_id])
         return Applied("completed" if outcome == "captured" else "failed",
                        "success" if outcome == "captured" else "failed")
 
@@ -698,6 +701,48 @@ def test_webhook_captured_is_verified_server_side(client, world):
     assert (r.status_code, r.json()) == (200, {"status": "completed"})
     assert world.razorpay.calls[-1] == ("fetch_payment", "primary", payment.id)
     assert world.repo.applied == [("don-1", "captured", payment.id, "authtest-evt-1")]
+
+
+def duplicate_events(caplog) -> list[str]:
+    return [getattr(r, "order_id", None) for r in caplog.records
+            if r.name == "hyperchat.security" and r.getMessage() == "payment_duplicate_capture"]
+
+
+def test_g3_a_second_captured_payment_on_a_paid_order_is_flagged_never_credited(client, world, caplog):
+    """G3 via the webhook: the order was paid with payment A; a captured webhook for payment B answers already_paid
+    (no credit, same answer as before) and logs payment_duplicate_capture once. A redelivered A logs nothing."""
+    out = paid_order(client, world)
+    first = world.razorpay.captured(out["razorpay_order_id"], 10000)
+    second = world.razorpay.captured(out["razorpay_order_id"], 10000)
+    world.repo.paid_with["don-1"] = first.id
+    raw = webhook_body("payment.captured", out["razorpay_order_id"], first.id, 10000)
+    r = post_webhook(client, raw, world.secret("PRIMARY_WEBHOOK_SECRET"), event_id="authtest-evt-a")
+    assert r.json() == {"status": "already_paid"} and duplicate_events(caplog) == []
+    raw = webhook_body("payment.captured", out["razorpay_order_id"], second.id, 10000)
+    r = post_webhook(client, raw, world.secret("PRIMARY_WEBHOOK_SECRET"), event_id="authtest-evt-b")
+    assert (r.status_code, r.json()) == (200, {"status": "already_paid"})
+    assert duplicate_events(caplog) == [out["order_id"]]
+
+
+def test_g3_poll_and_confirm_flag_another_payment_but_not_the_same_one(client, world, caplog):
+    """The poll and confirm paths race a webhook that completed the order: the same payment is quiet, another one is
+    a duplicate capture. Answers are unchanged (success)."""
+    out = paid_order(client, world)
+    token = {"x-status-token": out["status_token"]}
+    payment = world.razorpay.captured(out["razorpay_order_id"], 10000)
+    world.repo.paid_with["don-1"] = payment.id
+    assert client.get(f"{D}/{out['order_id']}/status", headers=token).json()["payment_status"] == "success"
+    good = sign(world.secret("PRIMARY_KEY_SECRET"), f"{out['razorpay_order_id']}|{payment.id}".encode())
+    r = client.post(f"{D}/{out['order_id']}/confirm", json={"razorpay_payment_id": payment.id, "razorpay_signature": good},
+                    headers={**ORIGIN, **token})
+    assert r.json()["payment_status"] == "success" and duplicate_events(caplog) == []
+    world.repo.paid_with["don-1"] = "pay_TESTstoredelse"
+    world.clock[0] += 10_000
+    world.limiter.counts.clear()  # past the 5 s poll cooldown
+    assert client.get(f"{D}/{out['order_id']}/status", headers=token).json()["payment_status"] == "success"
+    r = client.post(f"{D}/{out['order_id']}/confirm", json={"razorpay_payment_id": payment.id, "razorpay_signature": good},
+                    headers={**ORIGIN, **token})
+    assert r.json()["payment_status"] == "success" and duplicate_events(caplog) == [out["order_id"]] * 2
 
 
 @pytest.mark.parametrize("reason", ["network", "auth", "bad_response"])
