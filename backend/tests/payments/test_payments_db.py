@@ -380,6 +380,35 @@ def test_confirm_completes_the_donation(client):
     assert r.json() == {"status": "already_paid"} and totals(sid) == [("Ravi", 100, 1)]
 
 
+def test_confirm_after_webhook_first_checks_the_signature_and_changes_nothing(client):
+    """S-1 on real rows: the webhook completed the order; a forged confirm is refused, a valid repeat writes nothing."""
+    sid = make_streamer("authtest-pay-s1")
+    out = checkout(client, "authtest-pay-s1")
+    payment = client.fake.captured(out["razorpay_order_id"], 10000)
+    r = webhook(client, "payment.captured", out, payment.id, event_id="authtest-s1-1")
+    assert r.json() == {"status": "completed"}
+
+    def state():
+        with db() as conn:
+            jobs = conn.execute("SELECT kind, status FROM public.jobs WHERE dedupe_key = %s ORDER BY kind",
+                                (donation(out["order_id"])["id"],)).fetchall()
+            outbox = conn.execute("SELECT channel, event FROM public.realtime_outbox WHERE streamer_id = %s "
+                                  "ORDER BY id", (sid,)).fetchall()
+        return (donation(out["order_id"]), totals(sid), events("authtest-s1-"), jobs, outbox,
+                client.fake.count("fetch_payment"))
+
+    before = state()
+    assert before[1] == [("Ravi", 100, 1)] and len(before[3]) >= 1 and before[4]
+    for pid, sig in ((payment.id, "0" * 64), ("pay_TESTforged1", None)):
+        r = confirm(client, out, pid, signature=sig or sign(secret(client, "PRIMARY_KEY_SECRET"),
+                                                            f"{out['razorpay_order_id']}|{payment.id}".encode()))
+        assert (r.status_code, r.json()) == (400, {"error": "Invalid payment signature"})
+    for _ in range(2):
+        r = confirm(client, out, payment.id)
+        assert (r.status_code, r.json()["payment_status"]) == (200, "success")
+    assert state() == before  # no credit, webhook row, job, outbox event or Razorpay call from any confirm
+
+
 def test_polling_completes_the_donation_with_a_cooldown(client):
     sid = make_streamer("authtest-pay-poll")
     out = checkout(client, "authtest-pay-poll")

@@ -575,6 +575,61 @@ def test_confirm_provider_failure_is_502(client, world):
     assert world.repo.applied == []
 
 
+def test_confirm_on_an_already_paid_order_checks_the_signature_first(client, world, caplog):
+    """S-1: the webhook completed the order first; confirm still verifies the handler signature before answering."""
+    out = paid_order(client, world)
+    url = f"{D}/{out['order_id']}/confirm"
+    headers = {**ORIGIN, "x-status-token": out["status_token"]}
+    payment = world.razorpay.captured(out["razorpay_order_id"], 10000)
+    world.repo.rows[out["order_id"]].update(payment_status="success", provider_payment_id=payment.id)
+    good = sign(world.secret("PRIMARY_KEY_SECRET"), f"{out['razorpay_order_id']}|{payment.id}".encode())
+    flipped = good[:-1] + ("1" if good[-1] == "0" else "0")
+    for sig, pid in ((flipped, payment.id), ("0" * 64, payment.id), (good, "pay_OTHER123"), (good, "not-a-payment"),
+                     (sign(world.secret("PRIMARY_WEBHOOK_SECRET"), f"{out['razorpay_order_id']}|{payment.id}".encode()),
+                      payment.id)):
+        r = client.post(url, json={"razorpay_payment_id": pid, "razorpay_signature": sig}, headers=headers)
+        assert (r.status_code, r.json()) == (400, {"error": "Invalid payment signature"})
+    security = [r.getMessage() for r in caplog.records if r.name == "hyperchat.security"]
+    assert security.count("payment_confirm_rejected") == 5
+    # the status token and the trusted Origin still come first: a wrong token is 404, not a signature verdict
+    r = client.post(url, json={"razorpay_payment_id": payment.id, "razorpay_signature": "0" * 64},
+                    headers={**ORIGIN, "x-status-token": "0" * 64})
+    assert r.status_code == 404
+    r = client.post(url, json={"razorpay_payment_id": payment.id, "razorpay_signature": good},
+                    headers={"x-status-token": out["status_token"]})
+    assert r.status_code == 403
+    for _ in range(2):  # a valid repeat: the stored status, no Razorpay call, no write
+        r = client.post(url, json={"razorpay_payment_id": payment.id, "razorpay_signature": good}, headers=headers)
+        assert (r.status_code, r.json()) == (200, {"order_id": out["order_id"], "payment_status": "success",
+                                                   "amount": 100.0, "currency": "INR"})
+    assert world.razorpay.count("fetch_payment") == 0 and world.repo.applied == []
+
+
+def test_confirm_on_a_failed_order_checks_the_signature_then_reverifies(client, world):
+    out = paid_order(client, world)
+    url = f"{D}/{out['order_id']}/confirm"
+    headers = {**ORIGIN, "x-status-token": out["status_token"]}
+    payment = world.razorpay.captured(out["razorpay_order_id"], 10000, status="failed")
+    world.repo.rows[out["order_id"]]["payment_status"] = "failed"
+    r = client.post(url, json={"razorpay_payment_id": payment.id, "razorpay_signature": "0" * 64}, headers=headers)
+    assert r.status_code == 400 and world.razorpay.count("fetch_payment") == 0 and world.repo.applied == []
+    good = sign(world.secret("PRIMARY_KEY_SECRET"), f"{out['razorpay_order_id']}|{payment.id}".encode())
+    r = client.post(url, json={"razorpay_payment_id": payment.id, "razorpay_signature": good}, headers=headers)
+    assert r.json()["payment_status"] == "failed"
+    assert world.razorpay.count("fetch_payment") == 1 and world.repo.applied == [("don-1", "failed", None, None)]
+
+
+def test_confirm_on_a_paid_order_of_an_unconfigured_account_is_503(client, world):
+    """Compatibility note: without the account's key secret the signature cannot be checked, so even an
+    already-paid order answers 503 (before S-1 it answered 200 without checking anything)."""
+    out = paid_order(client, world)
+    world.repo.rows[out["order_id"]].update(payment_status="success", account="secondary")
+    r = client.post(f"{D}/{out['order_id']}/confirm", json={"razorpay_payment_id": "pay_TESTabc",
+                                                            "razorpay_signature": "0" * 64},
+                    headers={**ORIGIN, "x-status-token": out["status_token"]})
+    assert (r.status_code, r.json()) == (503, {"error": "Payment verification unavailable"})
+
+
 # ── webhook ─────────────────────────────────────────────────────────────────
 
 def post_webhook(client, raw: bytes, secret: str | None, event_id="authtest-evt-1", **headers):

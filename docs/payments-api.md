@@ -77,7 +77,7 @@ It is compared in constant time against the stored hash and is never logged.
 ## 3. Confirm: `POST /api/v1/public/donations/{order_id}/confirm`
 Header `X-Status-Token`; body = Razorpay Checkout's handler result:
 `{"razorpay_payment_id": "pay_…", "razorpay_signature": "<hex>"}`.
-1. **Signature**: HMAC-SHA256(key secret, `"<razorpay order id>|<payment id>"`), compared with `hmac.compare_digest`. A mismatch gives 400 `Invalid payment signature` and nothing else happens.
+1. **Signature**: HMAC-SHA256(key secret, `"<razorpay order id>|<payment id>"`), compared with `hmac.compare_digest`. It is checked in **every** state, an already-paid order included (S-1). A mismatch gives 400 `Invalid payment signature` plus a `payment_confirm_rejected` security event, and nothing else happens. If the order's account has no key secret configured, the answer is 503 (also for a paid order: nothing can be verified). An **already-paid** order with a valid signature answers 200 with the stored status, with no Razorpay call and no write (a repeat, or a confirm after the webhook won).
 2. **Fetch**: the payment is fetched from Razorpay server-side. `created`/`authorized` keep the order `pending` (the page keeps polling). `failed` fails the order. `captured` must pay exactly this order.
 3. **Complete**: section 5. A Razorpay error gives 502, so the page can retry.
 
