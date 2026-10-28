@@ -129,6 +129,41 @@ For a webhook the event row is inserted in the same transaction. A concurrent de
 waits on the lock and then rolls back as `duplicate`, and a racing confirm or poll sees `success`. A donation is
 completed and credited at most once.
 
+**Duplicate capture (G3):**
+- When a webhook, confirm or poll brings a captured payment for an order that is **already paid with another payment**, the answer and the state are unchanged (`already_paid`, no credit).
+- The case is logged as the security event `payment_duplicate_capture` (order id and account name only), for manual investigation: possibly a second charge.
+- The stored payment id is read under the row lock, so two paths racing with the **same** payment never trigger it.
+- Refunds are manual (no refund flow yet).
+
+## 6. Reconciliation (Step G1): `python -m app.cli payment-reconcile`
+**A manual operator command. No timer runs it** (owner decisions D-G1 to D-G7, 2026-10-28). It completes donations whose capture never arrived through the webhook, confirm or poll paths (lost webhook, donor closed the page). It is **report-only** unless `--apply` **and** `--confirm-database <name of the connected database>` are both given.
+
+**What it selects:**
+- **V2 donations only:** `payment_account` set (the checkout writes it) **and** no `legacy_source_table` (the import writes that, and never `payment_account`). Rows with neither or both markers are *ambiguous provenance*: never selected, counted as a finding.
+- In state `pending` or `failed`.
+- Created between 15 minutes and 7 days ago, at most 200 per run, oldest first. The window and the limit can only be narrowed.
+- Selection uses `donations.provider_order_id`, so it survives the 30-day `order_lookup` prune.
+
+**How it verifies each order:**
+- With the order's **own** account keys, it calls `GET /orders/{id}/payments`, the call the status poll makes. Nothing from a client is used.
+- **`verified`:** exactly one captured payment that pays exactly this order (order id, `captured`, exact subunit amount, currency). With `--apply`, the existing completion transaction (§5) applies it, giving `completed`, or `already_paid` if another path won.
+- **`no_capture`:** none, `created`, `authorized`, `failed` or `refunded`. Nothing changes; an order is never failed or expired here.
+- **`multiple`** (more than one capture) and **`mismatch`:** reported and logged (`payment_reconcile_exception`), never applied, never refunded.
+- **`inconclusive`:** the account is not configured here. Reported.
+- **Any Razorpay error** (auth, not found, 429, 5xx, timeout, malformed answer) **stops the run** (fail closed). Unexamined orders are counted as `stopped_before`.
+- Calls are paced (2 per second). SIGINT and SIGTERM stop between orders, never inside a completion. A re-run is idempotent.
+
+**The report:**
+- JSON on stdout. With `--report-file PATH`, also a **new** file with mode 0600 (refused if the file exists).
+- It holds the mode, window, outcome counts, and what was **not** examined: `too_recent`, `too_old`, `legacy_excluded`, `ambiguous_provenance`, `beyond_limit`, `stopped_before`. Per order: order id, state, outcome, Razorpay payment id, reason, number of attempts and result.
+- No donor data, tokens, keys or signatures.
+- Each applied completion is also logged as `payment_reconciled`.
+
+**Exit codes:**
+- `0`: clean.
+- `1`: completed with findings (verified-but-not-applied, multiple, mismatch, inconclusive, ambiguous provenance).
+- `2`: stopped (a Razorpay error or an interruption) or refused.
+
 ## Configuration (`/etc/hyperchat/api.env`, names only; see `deploy/api.env.example`)
 `HYPERCHAT_RAZORPAY_PRIMARY_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`.
 - **One account, `primary` (D6)**: test vs live is the environment's job. **DEV: Razorpay test-mode keys. Production: live keys.** The `secondary` account was retired (migration 0018); a leftover `HYPERCHAT_RAZORPAY_SECONDARY_*` variable configures nothing.

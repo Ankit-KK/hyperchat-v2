@@ -230,12 +230,22 @@ class PaymentService:
         captured = [p for p in payments if p.status == "captured"]
         for payment in captured:
             if self._mismatch(row, payment) is None:
-                return self._status(row, (await self.repo.apply(row["id"], "captured", payment.id)).payment_status)
+                applied = self._captured(row, await self.repo.apply(row["id"], "captured", payment.id), payment.id)
+                return self._status(row, applied.payment_status)
         if captured:  # captured, but not exactly this order's amount/currency
             outcome = self._mismatch(row, captured[0])
             security_event("payment_mismatch", reason=outcome, order_id=order_id, account=account.name)
             return self._status(row, (await self.repo.apply(row["id"], outcome, None)).payment_status)
         return self._status(row)
+
+    @staticmethod
+    def _captured(row: dict, applied, payment_id: str | None):
+        """G3: a captured payment other than the one stored on an already-paid donation is a second charge for one
+        donation. Nothing changes (no credit, same answer), but it is logged for manual investigation. The stored id
+        comes from apply's row lock, so a race of two paths with the SAME payment never counts."""
+        if applied.result == "already_paid" and payment_id and applied.paid_with != payment_id:
+            security_event("payment_duplicate_capture", order_id=row["order_id"], account=row["account"])
+        return applied
 
     @staticmethod
     def _mismatch(row: dict, payment: Payment) -> str | None:
@@ -268,7 +278,8 @@ class PaymentService:
             else (self._mismatch(row, payment) or "captured")
         if outcome in rules.MISMATCHES:
             security_event("payment_mismatch", reason=outcome, order_id=order_id, account=account.name)
-        applied = await self.repo.apply(row["id"], outcome, payment.id if outcome == "captured" else None)
+        captured_id = payment.id if outcome == "captured" else None
+        applied = self._captured(row, await self.repo.apply(row["id"], outcome, captured_id), captured_id)
         return self._status(row, applied.payment_status)
 
     # ── POST /api/v1/webhooks/razorpay ──────────────────────────────────────
@@ -331,8 +342,9 @@ class PaymentService:
             outcome = self._mismatch(row, payment) or "captured"
         if outcome in rules.MISMATCHES:
             security_event("payment_mismatch", reason=outcome, order_id=row["order_id"], account=account_name)
-        return self._result(await self.repo.apply(row["id"], outcome,
-                                                  event.provider_payment_id if outcome == "captured" else None, event))
+        captured_id = event.provider_payment_id if outcome == "captured" else None
+        applied = await self.repo.apply(row["id"], outcome, captured_id, event)
+        return self._result(self._captured(row, applied, captured_id))
 
     async def _record(self, event: WebhookEvent, outcome: str, donation_id: str | None = None) -> dict:
         return {"status": outcome if await self.repo.record_event(event, outcome, donation_id) else "duplicate"}

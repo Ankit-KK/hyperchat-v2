@@ -22,7 +22,9 @@ from app.storage.memory import InMemoryObjectStore, StoredObject
 from tests.integration import (
     ORIGIN,
     creator_state,
+    current_database,
     db,
+    fixture_db,
     make_donation,
     make_streamer,
     make_user,
@@ -407,6 +409,195 @@ def test_confirm_after_webhook_first_checks_the_signature_and_changes_nothing(cl
         r = confirm(client, out, payment.id)
         assert (r.status_code, r.json()["payment_status"]) == (200, "success")
     assert state() == before  # no credit, webhook row, job, outbox event or Razorpay call from any confirm
+
+
+# ── Step G1 reconciliation on real rows ─────────────────────────────────────
+
+def reconciler(client):
+    from app.payments.accounts import PaymentAccounts
+    from app.payments.reconcile import Reconciler
+    from app.payments.repository import PaymentRepository
+
+    async def no_wait(_):
+        pass
+    return Reconciler(PaymentRepository(connection_factory(Settings())), PaymentAccounts.from_settings(Settings()),
+                      client.fake, sleep=no_wait)
+
+
+def aged(order_id: str, minutes: int = 60) -> None:
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.donations SET created_at = now() - make_interval(mins => %s) WHERE order_id = %s",
+                     (minutes, order_id))
+
+
+def outcomes(report, *order_ids) -> dict:
+    return {o["order_id"]: (o["outcome"], o.get("result")) for o in report.orders if o["order_id"] in order_ids}
+
+
+def side_effects(sid: str, order_id: str):
+    with db() as conn:
+        did = conn.execute("SELECT id FROM public.donations WHERE order_id = %s", (order_id,)).fetchone()[0]
+        jobs = conn.execute("SELECT kind, status FROM public.jobs WHERE dedupe_key = %s ORDER BY kind", (str(did),)).fetchall()
+        outbox = conn.execute("SELECT channel, event FROM public.realtime_outbox WHERE streamer_id = %s ORDER BY id",
+                              (sid,)).fetchall()
+    return donation(order_id), totals(sid), jobs, outbox
+
+
+def test_reconcile_report_mode_changes_nothing_apply_completes_once_and_rerun_is_idempotent(client):
+    sid = make_streamer("authtest-pay-rec")
+    out = checkout(client, "authtest-pay-rec")
+    payment = client.fake.captured(out["razorpay_order_id"], 10000)  # captured, but the webhook never came
+    aged(out["order_id"])
+    before = side_effects(sid, out["order_id"])
+    report = asyncio.run(reconciler(client).run(apply=False))
+    assert outcomes(report, out["order_id"]) == {out["order_id"]: ("verified", None)}
+    assert side_effects(sid, out["order_id"]) == before and before[0]["payment_status"] == "pending"
+    report = asyncio.run(reconciler(client).run(apply=True))
+    assert outcomes(report, out["order_id"]) == {out["order_id"]: ("verified", "completed")}
+    row = donation(out["order_id"])
+    assert (row["payment_status"], row["provider_payment_id"]) == ("success", payment.id)
+    assert totals(sid) == [("Ravi", 100, 1)]
+    report = asyncio.run(reconciler(client).run(apply=True))
+    assert out["order_id"] not in outcomes(report, out["order_id"])  # success: no longer a candidate
+    r = webhook(client, "payment.captured", out, payment.id, event_id="authtest-rec-late")  # the webhook finally lands
+    assert r.json() == {"status": "already_paid"} and totals(sid) == [("Ravi", 100, 1)]
+    logged = "\n".join(client.app_state.log_capture.records)
+    assert "payment_duplicate_capture" not in logged  # same payment: the stored id is read under the row lock
+    other = client.fake.captured(out["razorpay_order_id"], 10000)  # a genuinely second capture
+    r = webhook(client, "payment.captured", out, other.id, event_id="authtest-rec-dup")
+    assert r.json() == {"status": "already_paid"} and totals(sid) == [("Ravi", 100, 1)]
+    assert "\n".join(client.app_state.log_capture.records).count("payment_duplicate_capture") >= 1
+
+
+def test_reconcile_only_selects_v2_rows_in_the_window_and_counts_the_rest(client):
+    sid = make_streamer("authtest-pay-recsel")
+    fresh = checkout(client, "authtest-pay-recsel")                       # younger than 15 min
+    old = checkout(client, "authtest-pay-recsel")
+    aged(old["order_id"], 8 * 1440)                                       # older than 7 days
+    legacy, ambiguous = make_donation(sid, payment="pending"), make_donation(sid, payment="pending")
+    both = make_donation(sid, payment="failed")  # both markers: ambiguous too, whichever guard alone is removed
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.donations SET legacy_source_table = 'authtest_donations', payment_account = 'primary', "
+                     "provider_order_id = 'order_TESTboth0001', created_at = now() - interval '1 hour' WHERE id = %s",
+                     (both,))
+        conn.execute("UPDATE public.donations SET legacy_source_table = 'authtest_donations', provider_order_id = "
+                     "'order_TESTlegacy01', created_at = now() - interval '1 hour' WHERE id = %s", (legacy,))
+        conn.execute("UPDATE public.donations SET provider_order_id = 'order_TESTambig001', "
+                     "created_at = now() - interval '1 hour' WHERE id = %s", (ambiguous,))  # neither marker
+        legacy_order = conn.execute("SELECT order_id FROM public.donations WHERE id = %s", (legacy,)).fetchone()[0]
+    for order in ("order_TESTlegacy01", "order_TESTambig001", "order_TESTboth0001", fresh["razorpay_order_id"],
+                  old["razorpay_order_id"]):
+        client.fake.captured(order, 10000)
+    base = asyncio.run(reconciler(client).repo.reconcile_candidates(15 * 60, 7 * 86400, 200))[1]
+    report = asyncio.run(reconciler(client).run(apply=True))
+    examined = {o["order_id"] for o in report.orders}
+    assert not examined & {fresh["order_id"], old["order_id"], legacy_order}
+    assert not [c for c in client.fake.calls if c[0] == "order_payments" and c[2] in (
+        "order_TESTlegacy01", "order_TESTambig001", "order_TESTboth0001", fresh["razorpay_order_id"],
+        old["razorpay_order_id"])]
+    assert base["too_recent"] >= 1 and base["too_old"] >= 1 and base["legacy_excluded"] >= 1
+    assert base["ambiguous_provenance"] >= 2 and report.exit_code() == 1  # ambiguous rows are a finding
+    assert {donation(o["order_id"])["payment_status"] for o in (fresh, old)} == {"pending"}
+
+
+def test_reconcile_limit_counts_what_was_left(client):
+    make_streamer("authtest-pay-reclim")
+    orders = [checkout(client, "authtest-pay-reclim") for _ in range(3)]
+    for o in orders:
+        aged(o["order_id"], 30)
+    rows, counts = asyncio.run(reconciler(client).repo.reconcile_candidates(15 * 60, 7 * 86400, 1))
+    assert len(rows) == 1 and counts["beyond_limit"] >= 2
+
+
+def test_reconcile_recovers_a_failed_order_paid_by_a_later_attempt_and_survives_a_pruned_lookup(client):
+    sid = make_streamer("authtest-pay-recfail")
+    out = checkout(client, "authtest-pay-recfail")
+    client.fake.captured(out["razorpay_order_id"], 10000, status="failed")
+    assert webhook(client, "payment.failed", out, "pay_TESTrecfail1", event_id="authtest-recf-1").json() == {"status": "failed"}
+    later = client.fake.captured(out["razorpay_order_id"], 10000)  # D-F1 shape: a second attempt, webhook lost
+    aged(out["order_id"])
+    with fixture_db() as conn:
+        conn.execute("DELETE FROM public.order_lookup WHERE order_id = %s", (out["order_id"],))  # the 30-day prune
+    report = asyncio.run(reconciler(client).run(apply=True))
+    assert outcomes(report, out["order_id"]) == {out["order_id"]: ("verified", "completed")}
+    assert donation(out["order_id"])["provider_payment_id"] == later.id and totals(sid) == [("Ravi", 100, 1)]
+
+
+def test_reconcile_never_credits_mismatched_or_multiple_captures(client):
+    sid = make_streamer("authtest-pay-recbad")
+    bad, two = checkout(client, "authtest-pay-recbad"), checkout(client, "authtest-pay-recbad")
+    client.fake.captured(bad["razorpay_order_id"], 9999)
+    client.fake.captured(two["razorpay_order_id"], 10000)
+    client.fake.captured(two["razorpay_order_id"], 10000)
+    for o in (bad, two):
+        aged(o["order_id"])
+    before = [side_effects(sid, o["order_id"]) for o in (bad, two)]
+    report = asyncio.run(reconciler(client).run(apply=True))
+    assert outcomes(report, bad["order_id"], two["order_id"]) == {
+        bad["order_id"]: ("mismatch", None), two["order_id"]: ("multiple", None)}
+    assert [side_effects(sid, o["order_id"]) for o in (bad, two)] == before
+
+
+def test_concurrent_reconcile_runs_complete_exactly_once(client):
+    sid = make_streamer("authtest-pay-recrace")
+    out = checkout(client, "authtest-pay-recrace")
+    client.fake.captured(out["razorpay_order_id"], 10000)
+    aged(out["order_id"])
+
+    async def both():
+        return await asyncio.gather(reconciler(client).run(apply=True), reconciler(client).run(apply=True))
+    results = [outcomes(r, out["order_id"]).get(out["order_id"]) for r in asyncio.run(both())]
+    assert sorted(r[1] for r in results if r) in (["already_paid", "completed"], ["completed"])
+    assert totals(sid) == [("Ravi", 100, 1)] and len(side_effects(sid, out["order_id"])[2]) == 2  # jobs once
+
+
+def test_reconcile_interrupted_then_rerun_finishes_the_rest(client):
+    sid = make_streamer("authtest-pay-recint")
+    orders = [checkout(client, "authtest-pay-recint") for _ in range(2)]
+    for o in orders:
+        client.fake.captured(o["razorpay_order_id"], 10000)
+        aged(o["order_id"])
+    first = reconciler(client)
+    original = client.fake.order_payments
+
+    async def stop_after_one(account, order_id):
+        first.request_stop()
+        return await original(account, order_id)
+    client.fake.order_payments = stop_after_one
+    report = asyncio.run(first.run(apply=True))
+    client.fake.order_payments = original
+    assert report.stopped == "interrupted" and len(report.orders) == 1
+    asyncio.run(reconciler(client).run(apply=True))
+    assert {donation(o["order_id"])["payment_status"] for o in orders} == {"success"}
+    assert totals(sid) == [("Ravi", 200, 2)]
+
+
+def test_reconcile_cli_needs_the_typed_database_for_apply_and_never_overwrites_a_report(client, tmp_path, capsys):
+    import argparse
+    import json
+    import os
+
+    from app.cli import payment_reconcile
+    make_streamer("authtest-pay-reccli")
+    out = checkout(client, "authtest-pay-reccli")
+    client.fake.captured(out["razorpay_order_id"], 10000)
+    aged(out["order_id"])
+
+    def args(**kw):
+        return argparse.Namespace(**{"apply": False, "confirm_database": None, "min_age_minutes": 15, "max_age_days": 7,
+                                     "limit": 200, "report_file": None, **kw})
+    run = lambda **kw: asyncio.run(payment_reconcile(Settings(), args(**kw), client=client.fake))  # noqa: E731
+    assert run(apply=True) == 2 and run(apply=True, confirm_database="not_this_one") == 2
+    assert run(min_age_minutes=5) == 2 and run(max_age_days=30) == 2 and run(limit=500) == 2
+    assert donation(out["order_id"])["payment_status"] == "pending"
+    path = tmp_path / "report.json"
+    capsys.readouterr()
+    assert run(report_file=str(path)) == 1  # report mode with a verified capture: a finding, nothing applied
+    assert os.stat(path).st_mode & 0o777 == 0o600 and json.loads(path.read_text())["mode"] == "report"
+    assert run(report_file=str(path)) == 2  # never overwritten
+    assert donation(out["order_id"])["payment_status"] == "pending"
+    assert run(apply=True, confirm_database=current_database()) in (0, 1)
+    assert donation(out["order_id"])["payment_status"] == "success"
 
 
 def test_polling_completes_the_donation_with_a_cooldown(client):

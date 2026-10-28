@@ -50,6 +50,7 @@ class Applied:
     result: str  # completed | failed | already_paid | already_failed | duplicate | unknown_order
     payment_status: str | None
     auto_approved: bool = False
+    paid_with: str | None = None  # already_paid: the payment id stored on the donation (read under the row lock)
 
 
 class _Duplicate(Exception):
@@ -120,6 +121,39 @@ class PaymentRepository:
             rows = await cur.fetchall()
         return rows[0] if len(rows) == 1 else None  # ambiguous legacy duplicates are never guessed
 
+    # ── reconciliation (Step G1) ────────────────────────────────────────────
+    async def reconcile_candidates(self, min_age_seconds: int, max_age_seconds: int,
+                                   limit: int) -> tuple[list[dict], dict]:
+        """V2 pending/failed donations created between max_age and min_age ago, oldest first, at most `limit`,
+        and the counts of everything NOT examined, in one read-only snapshot. V2 means created by the checkout
+        API: payment_account set (create_donation always writes it) AND no legacy_source_table (the ETL writes
+        that and never payment_account). A row matching neither or both is ambiguous: never eligible, counted."""
+        v2 = "d.legacy_source_table IS NULL AND d.payment_account IS NOT NULL AND d.provider_order_id IS NOT NULL"
+        legacy = "d.legacy_source_table IS NOT NULL AND d.payment_account IS NULL"
+        window = ("d.created_at <= now() - make_interval(secs => %(min)s) "
+                  "AND d.created_at >= now() - make_interval(secs => %(max)s)")
+        params = {"min": min_age_seconds, "max": max_age_seconds, "limit": limit}
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SET TRANSACTION READ ONLY")
+            await cur.execute(f"""
+                SELECT {_DONATION}, d.payment_account AS own_account FROM public.donations d
+                JOIN public.streamers s ON s.id = d.streamer_id
+                WHERE d.payment_status IN ('pending', 'failed') AND {v2} AND {window}
+                ORDER BY d.created_at, d.id LIMIT %(limit)s
+            """, params)
+            rows = await cur.fetchall()
+            await cur.execute(f"""
+                SELECT count(*) FILTER (WHERE {v2} AND {window}) AS in_window,
+                       count(*) FILTER (WHERE {v2} AND d.created_at > now() - make_interval(secs => %(min)s)) AS too_recent,
+                       count(*) FILTER (WHERE {v2} AND d.created_at < now() - make_interval(secs => %(max)s)) AS too_old,
+                       count(*) FILTER (WHERE {legacy}) AS legacy_excluded,
+                       count(*) FILTER (WHERE NOT ({v2}) AND NOT ({legacy})) AS ambiguous_provenance
+                FROM public.donations d WHERE d.payment_status IN ('pending', 'failed')
+            """, params)
+            counts = await cur.fetchone()
+        counts["beyond_limit"] = max(counts.pop("in_window") - len(rows), 0)
+        return rows, counts
+
     # ── webhook events ──────────────────────────────────────────────────────
     async def event_seen(self, event_id: str) -> bool:
         row = await self._one("SELECT 1 AS seen FROM public.payment_webhook_events "
@@ -156,7 +190,7 @@ class PaymentRepository:
             async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("""
                     SELECT d.streamer_id::text AS streamer_id, d.donor_name, d.amount_inr, d.payment_status,
-                           d.is_hyperemote, d.voice_message_url IS NOT NULL AS has_voice,
+                           d.provider_payment_id, d.is_hyperemote, d.voice_message_url IS NOT NULL AS has_voice,
                            d.hypersound_url IS NOT NULL AS has_hypersound, d.media_url IS NOT NULL AS has_media,
                            s.moderation_mode, s.media_moderation_enabled, s.streamer_slug, d.message
                     FROM public.donations d JOIN public.streamers s ON s.id = d.streamer_id
@@ -178,7 +212,7 @@ class PaymentRepository:
     async def _transition(self, cur, donation_id: str, row: dict, outcome: str, payment_id: str | None) -> Applied:
         status = row["payment_status"]
         if status == "success":
-            return Applied("already_paid", "success")
+            return Applied("already_paid", "success", paid_with=row["provider_payment_id"])
         if outcome != "captured":
             if status == "failed":
                 return Applied("already_failed", "failed")
