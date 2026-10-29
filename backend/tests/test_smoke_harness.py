@@ -22,11 +22,12 @@ GOOD_STATUS = {"enforcement": "draft", "aal": 1, "mfa_required": False, "verifie
 def test_every_merged_revision_is_a_known_head_and_0028_is_accepted():
     versions = sorted(p.name.split("_", 1)[0] for p in
                       (Path(__file__).resolve().parents[2] / "database/migrations/versions").glob("[0-9]*_*.py"))
-    assert versions[-1] == "0028" and sp.KNOWN_HEADS[-1] == versions[-1]  # a new migration must be added here
-    assert sp.head_check("0028", None)[0] and sp.head_check("0028", "0028")[0]
+    assert versions[-1] == "0029" and sp.KNOWN_HEADS[-1] == versions[-1]  # a new migration must be added here
+    assert sp.head_check("0028", None)[0] and sp.head_check("0028", "0028")[0]  # DEV today
+    assert sp.head_check("0029", None)[0] and sp.head_check("0029", "0029")[0]
 
 
-@pytest.mark.parametrize("head", ["0029", "0016", "", "abcd", "0028 ", "ERROR:  relation does not exist"])
+@pytest.mark.parametrize("head", ["0030", "0016", "", "abcd", "0028 ", "ERROR:  relation does not exist"])
 def test_unknown_heads_always_fail(head):
     assert sp.head_check(head, None)[0] is False and sp.head_check(head, "0028")[0] is False
 
@@ -42,7 +43,7 @@ def test_the_expected_head_must_be_known(value, expected):
     assert sp.parse_expect_head(value) == expected
 
 
-@pytest.mark.parametrize("value", ["0029", "28", "latest", "0028;"])
+@pytest.mark.parametrize("value", ["0030", "28", "latest", "0028;"])
 def test_an_unknown_expected_head_is_refused(value):
     with pytest.raises(sp.SmokeError):
         sp.parse_expect_head(value)
@@ -152,7 +153,7 @@ SUITE = Path(__file__).resolve().parents[2] / "tests" / "e2e" / "smoke_dev_backe
     {"HYPERCHAT_SMOKE_LOCAL": "https://api.hyperchat.space"},
     {"HYPERCHAT_SMOKE_DB": "hyperchat:5432"},
     {"HYPERCHAT_SMOKE_DB": "hyperchat_restore_test:5433"},
-    {"HYPERCHAT_SMOKE_EXPECT_HEAD": "0029"}])
+    {"HYPERCHAT_SMOKE_EXPECT_HEAD": "0030"}])
 def test_the_suite_refuses_production_and_unknown_targets_before_any_request(env):
     """The real script, run as on the server: it must exit 2 (refused) before reading /health or touching a database
     (HYPERCHAT_SMOKE_LOCAL points at a closed port, so reaching the network would give another message)."""
@@ -570,7 +571,7 @@ def test_a_gated_section_runs_at_its_revision_and_every_later_head(section):
     for i, head in enumerate(sp.KNOWN_HEADS):
         assert sp.head_at_least(head, sp.FEATURE_HEADS[section]) is (i >= first), head
     assert sp.head_at_least("0028", sp.FEATURE_HEADS[section]) is True
-    assert sp.head_at_least("0029", sp.FEATURE_HEADS[section]) is False  # an unknown head never opens a gate
+    assert sp.head_at_least("0030", sp.FEATURE_HEADS[section]) is False  # an unknown head never opens a gate
 
 
 def _d6_section(head, strict, gate):

@@ -150,6 +150,39 @@ def creator_state(streamer_id: str) -> str:
             )::text""", {"s": streamer_id}).fetchone()[0]
 
 
+SYNTHETIC_DONATIONS = ("(SELECT d.id FROM public.donations d JOIN public.streamers s ON s.id = d.streamer_id "
+                       "WHERE s.streamer_slug LIKE %(slug)s)")
+EVIDENCE_GUARDS = (("payment_integrity_events", "payment_integrity_events_guard"),
+                   ("payment_webhook_events", "payment_webhook_events_guard"))
+
+
+def drop_synthetic_payment_evidence() -> None:
+    """Synthetic payment evidence (migration 0029: append-only for every role, RESTRICT on donations) goes before the
+    synthetic donations. The evidence guards are lifted ONLY here, as the schema owner, inside one transaction (no
+    other session can see them off), and ONLY on a scratch database: never production, the restore source or the
+    dev API's database (there, existing synthetic evidence stops the cleanup instead)."""
+    synthetic_events = (f"(SELECT id FROM public.payment_webhook_events WHERE event_id LIKE %(slug)s "
+                        f"OR donation_id IN {SYNTHETIC_DONATIONS})")
+    params = {"slug": SLUG_PREFIX + "%"}
+    with fixture_db() as owner:
+        name = owner.execute("SELECT current_database()").fetchone()[0]
+        found = owner.execute(f"SELECT EXISTS {synthetic_events} OR EXISTS (SELECT 1 FROM public.payment_integrity_events "
+                              f"WHERE donation_id IN {SYNTHETIC_DONATIONS})", params).fetchone()[0]
+        if not found:
+            return
+        if name in NEVER_TOUCH or name == "hyperchat_dev":
+            raise RuntimeError(f"synthetic payment evidence exists in {name}: the evidence guards are only ever lifted "
+                               "on a scratch database")
+        with owner.transaction():
+            for table, guard in EVIDENCE_GUARDS:
+                owner.execute(f"ALTER TABLE public.{table} DISABLE TRIGGER {guard}")
+            owner.execute(f"DELETE FROM public.payment_integrity_events WHERE webhook_event_id IN {synthetic_events} "
+                          f"OR donation_id IN {SYNTHETIC_DONATIONS}", params)
+            owner.execute(f"DELETE FROM public.payment_webhook_events WHERE id IN {synthetic_events}", params)
+            for table, guard in EVIDENCE_GUARDS:
+                owner.execute(f"ALTER TABLE public.{table} ENABLE TRIGGER {guard}")
+
+
 def cleanup_synthetic_rows() -> None:
     with db() as conn:
         conn.execute("DELETE FROM public.user_invites WHERE email::text LIKE %s", ("%" + DOMAIN,))
@@ -164,6 +197,7 @@ def cleanup_synthetic_rows() -> None:
         conn.execute("DELETE FROM public.jobs WHERE dedupe_key IN (SELECT d.id::text FROM public.donations d "
                      "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s) "
                      "OR dedupe_key LIKE %s", (SLUG_PREFIX + "%", SLUG_PREFIX + "%"))
+        drop_synthetic_payment_evidence()  # RESTRICT on donations (0029): evidence before the donations
         # donations.streamer_id is ON DELETE RESTRICT: synthetic donations go first.
         conn.execute("DELETE FROM public.donations WHERE streamer_id IN "
                      "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))
@@ -194,8 +228,6 @@ def cleanup_synthetic_rows() -> None:
                      "OR endpoint LIKE 'upload:%' OR endpoint LIKE 'soundboard:%' OR endpoint LIKE 'payment:%' "
                      "OR endpoint LIKE 'transcription:%' OR endpoint LIKE 'realtime:%' OR endpoint LIKE 'obs:%' "
                      "OR endpoint LIKE 'bot:%' OR endpoint LIKE 'signup:%'")
-        # Webhook events of synthetic deliveries (their donations are gone already: donation_id SET NULL).
-        conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
 
 
 def login(client, email, password=PASSWORD, headers=ORIGIN):

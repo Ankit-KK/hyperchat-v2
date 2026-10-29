@@ -161,7 +161,8 @@ class PaymentRepository:
         return row is not None
 
     @staticmethod
-    async def _insert_event(cur, event: WebhookEvent, outcome: str, donation_id: str | None) -> bool:
+    async def _insert_event(cur, event: WebhookEvent, outcome: str, donation_id: str | None) -> str | None:
+        """The new event row's id, or None when the event id was already recorded."""
         await cur.execute("""
             INSERT INTO public.payment_webhook_events (event_id, event_type, account, provider_order_id,
                 provider_payment_id, donation_id, outcome, received_at)
@@ -169,12 +170,61 @@ class PaymentRepository:
             ON CONFLICT (provider, event_id) DO NOTHING RETURNING id
         """, (event.event_id, event.event_type, event.account, event.provider_order_id, event.provider_payment_id,
               donation_id, outcome, event.received_at))
-        return await cur.fetchone() is not None
+        row = await cur.fetchone()
+        return str(row["id"]) if row is not None else None
 
     async def record_event(self, event: WebhookEvent, outcome: str, donation_id: str | None = None) -> bool:
         """An event that changes no donation. False when the event id was already recorded."""
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            return await self._insert_event(cur, event, outcome, donation_id)
+            return await self._insert_event(cur, event, outcome, donation_id) is not None
+
+    # ── integrity evidence (C1, migration 0029: append-only, never changes a donation) ─────
+    async def integrity_target(self, payment_id: str, order_id: str | None) -> tuple[dict | None, str]:
+        """(donation, match_type): the donation this payment completed ("payment"), else the donation of the
+        payment's Razorpay order ("order": another payment of that order), else (None, "none")."""
+        row = await self._one(f"SELECT {_DONATION} FROM public.donations d JOIN public.streamers s "
+                              "ON s.id = d.streamer_id WHERE d.provider_payment_id = %s", (payment_id,))
+        if row is not None:
+            return row, "payment"
+        if order_id is not None and (row := await self.by_provider_order(order_id)) is not None:
+            return row, "order"
+        return None, "none"
+
+    async def record_integrity(self, event: WebhookEvent, outcome: str, evidence, donation_id: str | None,
+                               match_type: str, consistent: bool) -> bool:
+        """The webhook event and its evidence row in ONE transaction. False (nothing written) for a repeated event."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            event_row = await self._insert_event(cur, event, outcome, donation_id)
+            if event_row is None:
+                return False
+            e = evidence
+            await cur.execute("""
+                INSERT INTO public.payment_integrity_events (webhook_event_id, donation_id, match_type, account, kind,
+                    event_type, provider_ref, provider_payment_id, provider_order_id, phase, status, amount_paise,
+                    currency, amount_deducted_paise, reason_code, respond_by, provider_event_at, consistent, received_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (event_row, donation_id, match_type, event.account, e.kind, e.event_type, e.provider_ref,
+                  e.payment_id, e.order_id, e.phase, e.status, e.amount_paise, e.currency, e.amount_deducted_paise,
+                  e.reason_code, e.respond_by, e.provider_event_at, consistent, event.received_at))
+            return True
+
+    async def integrity_report(self, since) -> list[dict]:
+        """Current state per dispute / refund (payment_integrity_current), oldest deadline first. Read-only."""
+        async with self._conn() as conn:
+            await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("""
+                    SELECT c.provider_ref, c.kind, c.account, c.match_type, c.donation_id::text AS donation_id,
+                           d.order_id, s.streamer_slug, c.phase, c.status, c.amount_paise, c.currency,
+                           c.amount_deducted_paise, c.reason_code, c.respond_by, c.events, c.all_consistent,
+                           c.conflicting, c.received_at
+                    FROM public.payment_integrity_current c
+                    LEFT JOIN public.donations d ON d.id = c.donation_id
+                    LEFT JOIN public.streamers s ON s.id = d.streamer_id
+                    WHERE %(since)s::timestamptz IS NULL OR c.received_at >= %(since)s::timestamptz
+                    ORDER BY c.respond_by NULLS LAST, c.received_at, c.provider_ref
+                """, {"since": since})
+                return await cur.fetchall()
 
     # ── completion ──────────────────────────────────────────────────────────
     async def apply(self, donation_id: str, outcome: str, payment_id: str | None,

@@ -13,8 +13,10 @@ import re
 from datetime import datetime
 
 # Every Alembic revision a DEV database may legitimately be at; anything else FAILs.
-KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028")
-# 0018 D6, 0019 D13, 0020-0023 KYC PR1-PR4, 0024 admin auth boundary, 0025-0028 admin step-up (S1-S3, A5)
+KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
+               "0029")
+# 0018 D6, 0019 D13, 0020-0023 KYC PR1-PR4, 0024 admin auth boundary, 0025-0028 admin step-up (S1-S3, A5),
+# 0029 payment integrity evidence (C1)
 PRODUCTION_DATABASES = ("hyperchat", "hyperchat_restore_test")
 PRODUCTION_HOSTS = ("api.hyperchat.space", "hyperchat.space")
 

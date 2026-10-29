@@ -676,10 +676,19 @@ def test_webhook_needs_no_origin_and_signed_garbage_is_400(client, world):
 
 
 def test_webhook_other_events_are_acknowledged(client, world):
-    raw = b'{"event": "refund.processed", "payload": {}}'
+    raw = b'{"event": "order.paid", "payload": {}}'
     r = post_webhook(client, raw, world.secret("PRIMARY_WEBHOOK_SECRET"))
     assert (r.status_code, r.json()) == (200, {"status": "ignored"})
     assert world.repo.events == [("authtest-evt-1", "ignored", None)]
+
+
+def test_integrity_events_without_a_usable_entity_are_no_order(client, world):
+    """C1 (0029): refunds and disputes are integrity evidence; one without a usable payment id or reference is
+    recorded like a payment event without ids (no_order), never as evidence."""
+    raw = b'{"event": "refund.processed", "payload": {}}'
+    r = post_webhook(client, raw, world.secret("PRIMARY_WEBHOOK_SECRET"))
+    assert (r.status_code, r.json()) == (200, {"status": "no_order"})
+    assert world.repo.events == [("authtest-evt-1", "no_order", None)]
 
 
 def test_webhook_unknown_order_and_wrong_account(client, world):
