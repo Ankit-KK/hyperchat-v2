@@ -3,7 +3,7 @@
 import base64
 import csv
 import io
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -75,12 +75,13 @@ def test_writable_settings_are_the_legacy_allowlist_minus_the_read_only_amounts(
               "media_min_amount", "tts_language_boost", "alert_overlay_id", "leaderboard_overlay_id",
               "overlay_adjust_mode", "leaderboard_bg_enabled", "goal_overlay_id", "brand_color",
               "leaderboard_widget_enabled", "el_voice_id"}  # update-streamer-settings/index.ts:132
-    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 21
-    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.READ_ONLY_SETTINGS)
+    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 20
+    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.READ_ONLY_SETTINGS) - set(v.SERVER_OWNED_SETTINGS)
     assert set(models.SettingsPatch.model_fields) == set(v.WRITABLE_SETTINGS)
     assert tuple(SETTINGS_SQL_TYPES) == v.WRITABLE_SETTINGS
     shown = set(models.DashboardSettings.model_fields)
-    assert set(v.WRITABLE_SETTINGS) | set(v.READ_ONLY_SETTINGS) | {"slug", "name", "status"} == shown
+    assert (set(v.WRITABLE_SETTINGS) | set(v.READ_ONLY_SETTINGS) | set(v.SERVER_OWNED_SETTINGS)
+            | {"slug", "name", "status"}) == shown
     for private in ("id", "user_id", "rejection_reason", "order_prefix", "pusher_group", "razorpay_key_ref",
                     "razorpay_secret_ref", "discord_moderation_channel_id", "api_enabled", "custom_page_path"):
         assert private not in shown
@@ -105,7 +106,6 @@ VALID = [
     ({"goal_target_amount": 1}, 1),
     ({"goal_target_amount": 0.01}, 0.01),
     ({"goal_target_amount": 100_000_000}, 100_000_000),
-    ({"goal_activated_at": None}, None),
     ({"tts_language_boost": "hindi"}, "Hindi"),
     ({"tts_language_boost": "VIETNAMESE"}, "Vietnamese"),
     ({"tts_language_boost": "Portuguese"}, "Portuguese"),
@@ -127,13 +127,6 @@ def test_valid_settings(body, expected):
     assert _patch(body) == {next(iter(body)): expected}
 
 
-def test_goal_activated_at_needs_a_timezone():
-    assert _patch({"goal_activated_at": "2026-10-01T10:00:00+05:30"}) == {
-        "goal_activated_at": datetime(2026, 10, 1, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))}
-    assert _patch({"goal_activated_at": "2026-10-01T04:30:00Z"})["goal_activated_at"] == datetime(
-        2026, 10, 1, 4, 30, tzinfo=UTC)
-
-
 INVALID = [
     {"moderation_mode": "MANUAL"}, {"moderation_mode": "auto"}, {"moderation_mode": None},
     {"tts_enabled": "true"}, {"tts_enabled": 1}, {"tts_enabled": 0}, {"tts_enabled": None},
@@ -144,8 +137,9 @@ INVALID = [
     {"goal_target_amount": 0}, {"goal_target_amount": -5}, {"goal_target_amount": 100_000_000.01},
     {"goal_target_amount": "100"}, {"goal_target_amount": True}, {"goal_target_amount": float("nan")},
     {"goal_target_amount": float("inf")}, {"goal_target_amount": None},
-    {"goal_activated_at": "2026-10-01"}, {"goal_activated_at": "2026-10-01T10:00:00"},
-    {"goal_activated_at": "yesterday"}, {"goal_activated_at": 1700000000}, {"goal_activated_at": ""},
+    # D-G: server-owned, so every client value is refused, valid timestamps and null included
+    {"goal_activated_at": "2026-10-01T10:00:00+05:30"}, {"goal_activated_at": "2026-10-01T04:30:00Z"},
+    {"goal_activated_at": None}, {"goal_activated_at": "2026-10-01"}, {"goal_activated_at": 1700000000},
     {"tts_language_boost": "Klingon"}, {"tts_language_boost": ""}, {"tts_language_boost": "Hindi "},
     {"tts_language_boost": None}, {"tts_language_boost": 5},
     {"alert_overlay_id": -1}, {"alert_overlay_id": 17}, {"alert_overlay_id": "3"}, {"alert_overlay_id": 3.0},

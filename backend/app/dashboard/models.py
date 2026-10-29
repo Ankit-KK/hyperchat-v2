@@ -10,7 +10,6 @@ from typing import Annotated, Literal
 from pydantic import (
     AfterValidator,
     BaseModel,
-    BeforeValidator,
     ConfigDict,
     Field,
     StrictBool,
@@ -63,7 +62,7 @@ def _overlay(maximum: int):
 
 class SettingsPatch(_Model):  # D-M1 body
     """Any subset of the writable settings; an absent field is left unchanged. JSON null is only
-    accepted for the nullable settings (goal_activated_at, el_voice_id)."""
+    accepted for the nullable setting el_voice_id. goal_activated_at is server-owned (D-G): not a field here."""
 
     moderation_mode: Literal["auto_approve", "manual"] | None = None
     telegram_moderation_enabled: StrictBool | None = None
@@ -76,7 +75,6 @@ class SettingsPatch(_Model):  # D-M1 body
     goal_name: Annotated[StrictStr, AfterValidator(v.goal_name)] | None = None
     goal_target_amount: Annotated[float, Field(strict=True, gt=0, le=v.GOAL_TARGET_MAX,
                                                allow_inf_nan=False)] | None = None
-    goal_activated_at: Annotated[datetime | None, BeforeValidator(v.aware_timestamp)] = None
     media_upload_enabled: StrictBool | None = None
     media_moderation_enabled: StrictBool | None = None
     tts_language_boost: Annotated[StrictStr, AfterValidator(v.tts_language)] | None = None
