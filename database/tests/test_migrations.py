@@ -32,7 +32,7 @@ EXPECTED_TABLES = {
     "kyc_events", "kyc_provider_config", "kyc_enforcement", "kyc_grace_grants", "kyc_restrictions",
     "kyc_enforcement_events", "webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
     "session_assurance",
-    "stepup_events", "stepup_rate_limits", "stepup_enforcement",
+    "stepup_events", "stepup_rate_limits", "stepup_enforcement", "payment_integrity_events",
 }
 
 
@@ -705,15 +705,18 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
     cfg = _cfg()
     command.upgrade(cfg, "head")
     assert _stepup_guards() == (6, 10)
-    with_guards = _api_role_privileges()
+    # 0029's downgrade (on the way to 0026) restores the payment evidence grants: not 0027's concern
+    evidence = ("payment_webhook_events", "payment_integrity_events")
+    with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
-        assert _api_role_privileges() == with_guards  # 0027 neither granted nor restored anything to any API role
+        # 0027 neither granted nor restored anything to any API role
+        assert {p for p in _api_role_privileges() if p[1] not in evidence} == with_guards
         assert _stepup_privileges()[1] == "draft"  # the enforcement state is 0025's and survives
     finally:
         command.upgrade(cfg, "head")
-    assert _stepup_guards() == (6, 10) and _api_role_privileges() == with_guards
+    assert _stepup_guards() == (6, 10) and {p for p in _api_role_privileges() if p[1] not in evidence} == with_guards
 
 
 def _rollback_function() -> tuple[bool, bool]:
@@ -744,6 +747,126 @@ def test_0028_stepup_enforcement_rollback_round_trip(monkeypatch):
     finally:
         command.upgrade(cfg, "head")
     assert _rollback_function() == (True, True) and _api_role_privileges() == with_function
+
+
+def _evidence_shape() -> tuple:
+    """(webhook FK on-delete action, outcome CHECK has the 0029 outcomes, app privileges, worker privileges, guards)."""
+    with _owner() as conn:
+        fk = conn.execute("SELECT confdeltype::text FROM pg_constraint "
+                          "WHERE conname = 'payment_webhook_events_donation_id_fkey'").fetchone()[0]
+        check = conn.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                             "WHERE conname = 'payment_webhook_events_outcome_check'").fetchone()[0]
+        privileges = tuple(
+            tuple(p for p in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE")
+                  if conn.execute("SELECT has_table_privilege(%s, 'public.payment_webhook_events', %s)",
+                                  (role, p)).fetchone()[0])
+            for role in ("hyperchat_app", "hyperchat_worker"))
+        guards = {r[0] for r in conn.execute("SELECT tgname FROM pg_trigger WHERE tgname LIKE 'payment_%%_guard%%'")}
+    return fk, "integrity_recorded" in check, *privileges, guards
+
+
+def _webhook_rows(conn) -> list[tuple]:
+    return conn.execute("SELECT id, event_id, event_type, account, provider_order_id, provider_payment_id, donation_id, "
+                        "outcome, received_at, processed_at FROM public.payment_webhook_events "
+                        "WHERE event_id LIKE 'migtest29-%%' ORDER BY event_id").fetchall()
+
+
+GUARDS_0029 = ("payment_integrity_events_guard", "payment_webhook_events_guard")
+
+
+def _clean_0029(conn) -> None:
+    """Scratch only: lift the evidence guards (owner, one transaction), remove the synthetic evidence and rows."""
+    with conn.transaction():
+        present = [r[0] for r in conn.execute("SELECT tgname FROM pg_trigger WHERE tgname = ANY(%s)",
+                                              (list(GUARDS_0029),))]
+        for name in present:
+            conn.execute(f"ALTER TABLE public.{name.removesuffix('_guard')} DISABLE TRIGGER {name}")
+        if "payment_integrity_events" in _tables():
+            conn.execute("DELETE FROM public.payment_integrity_events WHERE webhook_event_id IN (SELECT id FROM "
+                         "public.payment_webhook_events WHERE event_id LIKE 'migtest29-%%')")
+        conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE 'migtest29-%%'")
+        for name in present:
+            conn.execute(f"ALTER TABLE public.{name.removesuffix('_guard')} ENABLE TRIGGER {name}")
+        conn.execute("DELETE FROM public.donations WHERE order_id LIKE 'migtest29-%%'")
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest29-%%'")
+        conn.execute("DELETE FROM public.users WHERE email::text LIKE 'migtest29-%%'")
+
+
+def test_0029_payment_integrity_keeps_existing_evidence_and_refuses_to_lose_it(monkeypatch):
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0028")
+    full = ("SELECT", "INSERT", "UPDATE", "DELETE")
+    try:
+        with _owner() as conn:
+            _clean_0029(conn)
+            uid = conn.execute("INSERT INTO public.users (email) VALUES ('migtest29-u@x.invalid') RETURNING id"
+                               ).fetchone()[0]
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id, status, kyc_track, "
+                               "kyc_baseline_owner_id) VALUES ('migtest29-c', 'C', %s, 'active', 'legacy', %s) "
+                               "RETURNING id", (uid, uid)).fetchone()[0]
+            did = conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                               "amount_inr, payment_status) VALUES (%s, 'migtest29-o', 'D', 5, 'INR', 5, 'success') "
+                               "RETURNING id", (sid,)).fetchone()[0]
+            for event_id, donation_id, outcome in (("migtest29-a-linked", did, "completed"),
+                                                   ("migtest29-b-unlinked", None, "unknown_order"),
+                                                   ("migtest29-c-ignored", None, "ignored")):
+                conn.execute("INSERT INTO public.payment_webhook_events (event_id, event_type, account, donation_id, "
+                             "outcome, received_at) VALUES (%s, 'payment.captured', 'primary', %s, %s, now())",
+                             (event_id, donation_id, outcome))
+            before = _webhook_rows(conn)
+        assert _evidence_shape() == ("n", False, full, full, set())
+
+        command.upgrade(cfg, "0029")
+        assert _evidence_shape() == ("r", True, ("SELECT", "INSERT"), (), {
+            "payment_webhook_events_guard", "payment_webhook_events_guard_truncate",
+            "payment_integrity_events_guard", "payment_integrity_events_guard_truncate"})
+        with _owner() as conn:
+            assert _webhook_rows(conn) == before  # ids, links and timestamps untouched; nothing backfilled
+            assert conn.execute("SELECT count(*) FROM public.payment_integrity_events").fetchone()[0] == 0
+            for sql, state in (("UPDATE public.payment_webhook_events SET outcome = 'ignored' "
+                                "WHERE event_id = 'migtest29-a-linked'", "42501"),
+                               ("DELETE FROM public.payment_webhook_events WHERE event_id = 'migtest29-b-unlinked'",
+                                "42501"),
+                               # refused by PostgreSQL itself (the integrity table references it) before any
+                               # trigger; the CASCADE form below reaches the guard
+                               ("TRUNCATE public.payment_webhook_events", "0A000"),
+                               ("TRUNCATE public.payment_webhook_events CASCADE", "42501"),
+                               ("TRUNCATE public.donations CASCADE", "42501"),
+                               ("DELETE FROM public.donations WHERE order_id = 'migtest29-o'", "23503")):
+                with pytest.raises(psycopg.Error) as exc, conn.transaction(force_rollback=True):
+                    conn.execute(sql)
+                assert exc.value.sqlstate == state, sql
+            with conn.transaction(force_rollback=True):  # an EMPTY evidence table may be truncated (cutover target)
+                conn.execute("TRUNCATE public.payment_integrity_events")
+            assert _webhook_rows(conn) == before
+            conn.execute("INSERT INTO public.payment_webhook_events (event_id, event_type, account, outcome, received_at) "
+                         "VALUES ('migtest29-d-new', 'payment.dispute.created', 'primary', 'integrity_unknown_payment', "
+                         "now())")
+        with pytest.raises(Exception, match="downgrade of 0029 stopped"):
+            command.downgrade(cfg, "0028")  # never drops or rewrites evidence
+        assert _version() == "0029"
+
+        from etl.rehearsal import Loader  # the cutover / rehearsal load refuses BEFORE changing anything
+        tgt = psycopg.connect(_libpq(DSN))
+        try:
+            with pytest.raises(SystemExit, match="holds payment evidence"):
+                Loader(None, tgt).prepare_target()
+            tgt.rollback()
+        finally:
+            tgt.close()
+        with _owner() as conn:
+            assert _webhook_rows(conn)[:3] == before
+            assert conn.execute("SELECT count(*) FROM public.donations WHERE order_id = 'migtest29-o'").fetchone()[0] == 1
+            assert conn.execute("SELECT count(*) FROM public.streamers").fetchone()[0] > 0  # nothing truncated
+            _clean_0029(conn)
+        command.downgrade(cfg, "0028")  # no 0029 evidence left: the round trip works
+        assert _evidence_shape()[:4] == ("n", False, full, full)
+    finally:
+        with _owner() as conn:
+            _clean_0029(conn)
+        command.upgrade(cfg, "head")
 
 
 def test_0011_jobs_round_trip_and_constraints(monkeypatch):

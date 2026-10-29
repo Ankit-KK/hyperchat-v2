@@ -38,6 +38,35 @@ def webhook_body(event: str, order_id: str | None, payment_id: str | None, amoun
                        "payload": {"payment": {"entity": entity}}, "created_at": 1_800_000_000}).encode()
 
 
+DISPUTE_STATUS = {"created": "open", "under_review": "under_review", "action_required": "open", "won": "won",
+                  "lost": "lost", "closed": "closed"}
+REFUND_STATUS = {"created": "pending", "processed": "processed", "failed": "failed", "speed_changed": "pending"}
+
+
+def integrity_body(event: str, *, ref: str, payment_id: str, order_id: str | None, amount: int = 10000,
+                   currency: str = "INR", status: str | None = None, phase: str = "chargeback",
+                   amount_deducted: int = 0, created_at: int = 1_800_000_000, omit: tuple = ()) -> bytes:
+    """A Razorpay dispute / refund webhook as documented (payload.<dispute|refund>.entity next to the payment entity,
+    which carries the payer's contact details: they must never be stored or logged)."""
+    kind = "dispute" if event.startswith("payment.dispute.") else "refund"
+    suffix = event.rsplit(".", 1)[1]
+    if kind == "dispute":
+        entity = {"id": ref, "entity": "dispute", "payment_id": payment_id, "amount": amount, "currency": currency,
+                  "amount_deducted": amount_deducted, "reason_code": "chargeback_fraud", "respond_by": 1_800_600_000,
+                  "status": status or DISPUTE_STATUS[suffix], "phase": phase, "created_at": created_at}
+    else:
+        entity = {"id": ref, "entity": "refund", "payment_id": payment_id, "amount": amount, "currency": currency,
+                  "status": status or REFUND_STATUS[suffix], "speed_requested": "normal", "notes": []}
+    for key in omit:
+        entity.pop(key, None)
+    payment = {"id": payment_id, "entity": "payment", "amount": amount, "currency": currency, "status": "captured",
+               "order_id": order_id, "method": "card", "email": PAYER_EMAIL, "contact": PAYER_CONTACT,
+               "amount_refunded": amount if kind == "refund" else 0}
+    return json.dumps({"entity": "event", "account_id": "acc_TESTONLY", "event": event, "contains": [kind, "payment"],
+                       "payload": {kind: {"entity": entity}, "payment": {"entity": payment}},
+                       "created_at": created_at}).encode()
+
+
 class FakeRazorpay:
     """Orders get ids order_TEST<n>; payments are scripted per id. `barrier` (an asyncio.Barrier created in the
     app's loop) makes concurrent fetches line up so their completions really race."""

@@ -23,7 +23,7 @@ from decimal import Decimal
 import psycopg
 
 from app.core.errors import ApiError
-from app.payments import rules
+from app.payments import integrity, rules
 from app.payments.accounts import HEALTH_TTL_SECONDS, AccountHealth, PaymentAccounts
 from app.payments.models import CheckoutRequest, ConfirmRequest
 from app.payments.razorpay import (
@@ -310,6 +310,8 @@ class PaymentService:
                              order_ref if isinstance(order_ref, str) and ORDER_ID.match(order_ref) else None,
                              payment_ref if isinstance(payment_ref, str) and PAYMENT_ID.match(payment_ref) else None,
                              received_at)
+        if event_type in integrity.INTEGRITY_EVENTS:  # C1: disputes / provider refunds: evidence only (0029)
+            return {"status": await integrity.record(self.repo, event, integrity.parse(event_type, payload), signed_by)}
         if event_type not in HANDLED_EVENTS:
             return await self._record(event, "ignored")
         if event.provider_order_id is None or event.provider_payment_id is None:

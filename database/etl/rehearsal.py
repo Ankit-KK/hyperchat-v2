@@ -6,6 +6,8 @@
 
 * Source is read in ONE read-only REPEATABLE READ snapshot; nothing is ever written to it.
 * Target is loaded in ONE transaction as hyperchat_owner: TRUNCATE everything, then COPY.
+  Payment evidence (migration 0029: payment_webhook_events, payment_integrity_events) is never wiped: the load
+  refuses, before any statement changes the target, when either table holds a row.
   User triggers are disabled during the load (data already passed them in the source);
   FK constraints stay enforced.
 * Strict: unexpected NULLs or values make the load fail instead of inventing defaults.
@@ -37,6 +39,8 @@ from etl.mapping import (
     user_role,
 )
 from etl.reconcile import reconcile
+
+EVIDENCE_TABLES = ("payment_webhook_events", "payment_integrity_events")
 
 DONATION_COLUMNS = (
     "id", "streamer_id", "order_id", "payment_provider", "provider_order_id", "donor_name", "amount", "currency",
@@ -117,6 +121,12 @@ class Loader:
             cur.execute("SET ROLE hyperchat_owner")
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'alembic_version'")
             tables = [r[0] for r in cur.fetchall()]
+            for table in EVIDENCE_TABLES:  # checked before the TRUNCATE: a refused load changes nothing
+                if table in tables:
+                    cur.execute(sql.SQL("SELECT EXISTS (SELECT 1 FROM {})").format(sql.Identifier("public", table)))
+                    if cur.fetchone()[0]:
+                        raise SystemExit(f"refusing to load: public.{table} holds payment evidence (migration 0029 "
+                                         "keeps it); nothing was changed")
             cur.execute(sql.SQL("TRUNCATE {} CASCADE").format(
                 sql.SQL(", ").join(sql.Identifier("public", t) for t in tables)))
             for t in tables:

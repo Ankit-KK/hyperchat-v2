@@ -84,7 +84,9 @@ Header `X-Status-Token`; body = Razorpay Checkout's handler result:
 ## 4. Webhook: `POST /api/v1/webhooks/razorpay`
 Configure in the Razorpay dashboard (test mode for development):
 - **URL**: the one above.
-- **Events**: `payment.captured`, `payment.failed`.
+- **Events**: `payment.captured`, `payment.failed`; for integrity evidence (section 7) also `payment.dispute.created`,
+  `.under_review`, `.action_required`, `.won`, `.lost`, `.closed`, `refund.created`, `refund.processed`, `refund.failed`
+  (subscribing is an owner action in the Razorpay dashboard).
 - **Secret**: `HYPERCHAT_RAZORPAY_<ACCOUNT>_WEBHOOK_SECRET`.
 
 Processing:
@@ -92,8 +94,9 @@ Processing:
 2. **Signature**: `X-Razorpay-Signature` is checked against every configured account's webhook secret (HMAC-SHA256 over the raw bytes, constant time). No match gives 401, and nothing is parsed or stored.
 3. **Parse**: JSON is parsed only after a valid signature; malformed gives 400.
 4. **Idempotency**: by `X-Razorpay-Event-Id` (or the SHA-256 of the body if absent). An already processed event gives 200 `{"status": "duplicate"}`.
-5. **Other events**: `200 {"status": "ignored"}`, recorded.
-6. **Payment events**:
+5. **Dispute and refund events**: recorded as integrity evidence only (section 7).
+6. **Other events**: `200 {"status": "ignored"}`, recorded.
+7. **Payment events**:
    - **Lookup**: the donation is found via `order_lookup` (else a unique `donations.provider_order_id` match). Unknown orders give 200 `unknown_order`, recorded (D6).
    - **Account binding**: the order's account must be one whose secret signed the body; otherwise 200 `account_mismatch`, recorded, donation untouched.
    - **`payment.failed`**: fails a pending order (section 5).
@@ -106,6 +109,12 @@ donation and the outcome:
 - **Completed or not**: `completed`, `failed`, `already_paid`, `already_failed`, `ignored`.
 - **Not ours or unusable**: `no_order`, `unknown_order`, `account_mismatch`.
 - **Mismatches**: `amount_mismatch`, `currency_mismatch`, `payment_mismatch`, `payment_not_found`.
+- **Integrity evidence (section 7)**: `integrity_recorded`, `integrity_unknown_payment`, `integrity_mismatch`.
+
+Since migration 0029 the log is **append-only for every role**:
+- `hyperchat_app` may SELECT and INSERT; `hyperchat_worker` has no access.
+- A guard trigger refuses UPDATE and DELETE, and TRUNCATE (direct or cascaded) while the table holds rows.
+- `donation_id` is `ON DELETE RESTRICT`: a donation with webhook evidence can't be deleted.
 
 ## 5. Completion: one transaction for webhook, confirm and polling
 `PaymentRepository.apply` locks the donation row (`FOR UPDATE`), then:
@@ -163,6 +172,50 @@ completed and credited at most once.
 - `0`: clean.
 - `1`: completed with findings (verified-but-not-applied, multiple, mismatch, inconclusive, ambiguous provenance).
 - `2`: stopped (a Razorpay error or an interruption) or refused.
+
+## 7. Dispute and provider-refund evidence (C1, migration 0029)
+**Record only.** Provider-initiated disputes (chargebacks) and refunds made at Razorpay are stored as evidence.
+- Nothing changes a donation, a donor total, a goal, the leaderboard or stats.
+- There is no refund endpoint, no refund call and no Razorpay API call.
+- A compensating accounting entry would be a separate, approved change (D-C1b).
+
+**Handled events and payloads:**
+- `payment.dispute.created`, `.under_review`, `.action_required`, `.won`, `.lost`, `.closed`, from `payload.dispute.entity`;
+- `refund.created`, `.processed`, `.failed`, from `payload.refund.entity`;
+- the order id comes from `payload.payment.entity`;
+- `refund.speed_changed` stays `ignored`.
+
+**Processing** (after the usual signature, parse and dedupe steps; `app/payments/integrity.py`):
+1. **Parse.** Only ids, enums, amounts in paise, currency, reason code and times are kept. Never the payload, the payer's
+   contact details or card data. An unusable payment id or reference is `no_order` and stores no evidence.
+2. **Match.** `payment` means the donation completed by this payment (`donations.provider_payment_id`). `order` means the
+   donation of this Razorpay order, but another payment (for example a duplicate capture). `none` means no donation was
+   found. **Only `payment` matches may be attributed to a donation.**
+3. **Account.** A matched donation's account (`COALESCE(order account, creator account)`) must have signed the body.
+   Otherwise the event is recorded as `account_mismatch`, a security event is logged, and **no evidence row is
+   written**. Unknown payments are recorded under the signing account.
+4. **Consistency.** Same currency, an amount within the payment, a paid donation, and no essential field missing.
+   Otherwise the outcome is `integrity_mismatch`; the evidence is still recorded, with `consistent = false`.
+5. **Record.** The webhook event and the `payment_integrity_events` row are written in one transaction. A repeated
+   event id gives `duplicate` and writes nothing. Distinct events about the same dispute are all kept.
+
+**Current state** (`payment_integrity_current` view): computed, never stored. Per dispute or refund, the event with the
+highest rank wins. The order is:
+1. phase: fraud = retrieval < chargeback < pre_arbitration < arbitration;
+2. status: open / pending < under_review / action_required / failed < won / lost / closed / processed;
+3. then the provider's event time, receipt time, record time and id.
+
+So a won chargeback that reopens in pre-arbitration is open again, and a late `created` never undoes a later state.
+`conflicting` marks another event of the same rank with a different status (for example won vs lost).
+
+**Report:** `python -m app.cli payment-integrity-report [--since YYYY-MM-DD]`.
+- Read-only (`READ ONLY` session), no Razorpay call, JSON on stdout.
+- Exit 0 when nothing needs attention, 1 when something does, 2 on a refused argument.
+- Needing attention means open or lost disputes, refunds, mismatches, conflicts, or a non-`payment` match.
+- No timer.
+
+**Cutover / rehearsal ETL:** `database/etl/rehearsal.py` refuses to load, before changing anything, when either
+evidence table holds a row.
 
 ## Configuration (`/etc/hyperchat/api.env`, names only; see `deploy/api.env.example`)
 `HYPERCHAT_RAZORPAY_PRIMARY_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`.

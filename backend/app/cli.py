@@ -29,10 +29,15 @@ payment-reconcile [--apply --confirm-database DB] [--min-age-minutes N] [--max-a
 report-only unless --apply AND --confirm-database names the connected database; the window can only be narrowed
 from the approved 15 minutes .. 7 days, 200 orders. The JSON report goes to stdout and, with --report-file, to a
 new 0600 file (never overwritten).
+payment-integrity-report [--since YYYY-MM-DD] lists the current state of every recorded dispute and provider-side
+refund (C1, see app.payments.integrity) as JSON: read-only, no Razorpay call, no change to any donation. Exit 0 when
+nothing needs attention, 1 when something does (open or lost disputes, refunds, mismatches, conflicts, payments not
+matched to a donation), 2 on a refused argument.
 """
 
 import argparse
 import asyncio
+import datetime
 import getpass
 import json
 import os
@@ -246,6 +251,27 @@ async def payment_reconcile(settings: Settings, args, client=None) -> int:
     return report.exit_code()
 
 
+ATTENTION_STATES = frozenset({"open", "under_review", "action_required", "lost", "pending", "processed", "failed"})
+
+
+async def payment_integrity_report(settings: Settings, args) -> int:
+    """C1: read-only report of dispute / provider-refund evidence (payment_integrity_current). Never writes."""
+    try:
+        since = datetime.date.fromisoformat(args.since) if args.since else None
+    except ValueError:
+        print("Refused: --since must be a date (YYYY-MM-DD).", file=sys.stderr)
+        return 2
+    rows = await PaymentRepository(connection_factory(settings)).integrity_report(since)
+    items = [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()} for row in rows]
+    for item in items:
+        item["attention"] = (item["status"] in ATTENTION_STATES or not item["all_consistent"] or item["conflicting"]
+                             or item["match_type"] != "payment")
+    attention = sum(item["attention"] for item in items)
+    print(json.dumps({"report": "payment-integrity", "read_only": True, "since": args.since, "items": items,
+                      "total": len(items), "attention": attention}, indent=2, sort_keys=True))
+    return 1 if attention else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description=__doc__.split("\n\n")[0])
     parser.add_argument("--env-file", help="read HYPERCHAT_* settings from this file (e.g. /etc/hyperchat/api.env)")
@@ -273,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--max-age-days", type=int, default=reconcile.MAX_AGE_DAYS)
     rec.add_argument("--limit", type=int, default=reconcile.LIMIT)
     rec.add_argument("--report-file", help="also write the JSON report to this NEW file (mode 0600)")
+    pir = sub.add_parser("payment-integrity-report", help="list recorded disputes / provider refunds (read-only)")
+    pir.add_argument("--since", help="only items received on or after this date (YYYY-MM-DD)")
     args = parser.parse_args(argv)
 
     settings = Settings(_env_file=args.env_file) if args.env_file else Settings()
@@ -292,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(run_cleanup(settings, connection_factory(settings), dry_run=args.dry_run))
     if args.command == "payment-reconcile":
         return asyncio.run(payment_reconcile(settings, args))
+    if args.command == "payment-integrity-report":
+        return asyncio.run(payment_integrity_report(settings, args))
     if args.command == "seed-platform-soundboard":
         return asyncio.run(seed_platform_soundboard(settings, args.dry_run))
     if args.command == "enqueue-donation-audio":
