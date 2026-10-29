@@ -44,6 +44,21 @@ moderation/TTS internals, `custom_page_path`, `pusher_group`, Discord/Telegram i
 the goal's aggregate progress (E6).
 `sounds[].id` is the opaque soundboard slot id (needed later to choose a sound when donating).
 
+## Creator pages are provisioned automatically (CRE-9)
+There is no per-creator code or route.
+
+**Backend (in place):**
+- **Lookup:** every public route resolves `{slug}` from the database on each request and serves only `active` creators (`app/public/repository.py`).
+- **Hidden states:** unknown, pending, rejected, suspended and malformed slugs all get the same uncached 404.
+- **Activation:** `POST /api/v1/admin/creators/{id}/activate` makes the page appear on its next request; successful responses are cached for at most 60 s.
+- **Suspension:** hides the page the same way.
+- **Donations:** gated separately at checkout (eligibility, payment readiness, KYC enforcement).
+- **Slugs:**
+  - new slugs refuse the site's own top-level paths (`RESERVED_SLUGS` in `app/admin/service.py`);
+  - slugs cannot be changed afterwards.
+
+**Frontend (phase 13):** one dynamic `/:slug` route that calls `GET /api/v1/public/streamers/{slug}`, with no creator-specific pages or bundled per-creator assets. Its top-level routes must be kept within `RESERVED_SLUGS`.
+
 ## Intentional differences from the legacy Edge Functions (decisions D1-D10)
 | Topic | Legacy | v2 |
 |---|---|---|
