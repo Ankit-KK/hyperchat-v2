@@ -23,13 +23,16 @@ def parse_uuid(value: str | None) -> str | None:
 WRITABLE_SETTINGS = (
     "moderation_mode", "telegram_moderation_enabled", "discord_moderation_enabled", "tts_enabled",
     "hyperemotes_enabled", "alert_box_scale", "goal_is_active", "goal_name", "goal_target_amount",
-    "goal_activated_at", "media_upload_enabled", "media_moderation_enabled", "tts_language_boost",
+    "media_upload_enabled", "media_moderation_enabled", "tts_language_boost",
     "alert_overlay_id", "leaderboard_overlay_id", "overlay_adjust_mode", "leaderboard_bg_enabled",
     "goal_overlay_id", "brand_color", "leaderboard_widget_enabled", "el_voice_id",
 )
 # Shown by GET but not writable until limits are approved (A1): no legacy UI ever wrote them.
 READ_ONLY_SETTINGS = ("hyperemotes_min_amount", "media_min_amount")
-NULLABLE_SETTINGS = frozenset({"goal_activated_at", "el_voice_id"})
+# Shown by GET, never accepted from clients (D-G): the server stamps each goal activation, so progress cannot be
+# backdated. Sending it is an unknown field (422).
+SERVER_OWNED_SETTINGS = ("goal_activated_at",)
+NULLABLE_SETTINGS = frozenset({"el_voice_id"})
 
 # The 16 values of the legacy dashboard select (SettingsPanel.tsx); stored with this capitalisation (A2).
 TTS_LANGUAGES = ("Hindi", "English", "Arabic", "Chinese", "French", "German", "Indonesian", "Italian",
@@ -80,21 +83,6 @@ def goal_name(value: str) -> str:
     if not 1 <= len(value) <= GOAL_NAME_MAX:
         raise ValueError(f"must be 1-{GOAL_NAME_MAX} characters")
     return value
-
-
-def aware_timestamp(value: object) -> datetime | None:
-    """An ISO 8601 timestamp WITH a timezone offset (or null). Numbers are not timestamps here."""
-    if value is None:
-        return None
-    if not isinstance(value, str) or len(value) > 64:
-        raise ValueError("must be an ISO 8601 timestamp with a timezone offset")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        raise ValueError("must be an ISO 8601 timestamp with a timezone offset") from None
-    if parsed.tzinfo is None:
-        raise ValueError("must include a timezone offset, e.g. Z or +05:30")
-    return parsed
 
 
 # ── moderators (A7) ─────────────────────────────────────────────────────────────

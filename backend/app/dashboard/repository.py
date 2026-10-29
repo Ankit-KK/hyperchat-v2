@@ -43,7 +43,7 @@ SETTINGS_SQL_TYPES = {
     "moderation_mode": "text", "telegram_moderation_enabled": "boolean", "discord_moderation_enabled": "boolean",
     "tts_enabled": "boolean", "hyperemotes_enabled": "boolean", "alert_box_scale": "numeric",
     "goal_is_active": "boolean", "goal_name": "text", "goal_target_amount": "numeric",
-    "goal_activated_at": "timestamptz", "media_upload_enabled": "boolean", "media_moderation_enabled": "boolean",
+    "media_upload_enabled": "boolean", "media_moderation_enabled": "boolean",
     "tts_language_boost": "text", "alert_overlay_id": "smallint", "leaderboard_overlay_id": "smallint",
     "overlay_adjust_mode": "boolean", "leaderboard_bg_enabled": "boolean", "goal_overlay_id": "smallint",
     "brand_color": "text", "leaderboard_widget_enabled": "boolean", "el_voice_id": "text",
@@ -115,19 +115,27 @@ class DashboardRepository:
 
         Returns (settings row, changed fields). When nothing differs, no UPDATE runs, so updated_at
         is untouched.
+
+        D-G: goal_activated_at is stamped here with the database clock (now(), timestamptz) on a real
+        activation only: goal_is_active set to true while it was false/NULL, or while no activation time
+        exists (imported rows). It is never taken from the client and never moved by other edits.
         """
         cols = [c for c in WRITABLE_SETTINGS if c in changes]
         params = {**{c: _db_value(changes[c]) for c in cols}, "id": streamer_id}
         differs = ", ".join(f"({c} IS DISTINCT FROM %({c})s::{SETTINGS_SQL_TYPES[c]}) AS {c}" for c in cols)
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(f"SELECT {differs} FROM public.streamers WHERE id = %(id)s FOR UPDATE", params)
+            await cur.execute(f"SELECT {differs}, goal_activated_at IS NULL AS unstamped "
+                              "FROM public.streamers WHERE id = %(id)s FOR UPDATE", params)
             diff = await cur.fetchone()
             if diff is None:
                 return None, []
             changed = [c for c in cols if diff[c]]
+            sets = [f"{c} = %({c})s::{SETTINGS_SQL_TYPES[c]}" for c in changed]
+            if changes.get("goal_is_active") is True and ("goal_is_active" in changed or diff["unstamped"]):
+                sets.append("goal_activated_at = now()")
+                changed.append("goal_activated_at")
             if changed:
-                sets = ", ".join(f"{c} = %({c})s::{SETTINGS_SQL_TYPES[c]}" for c in changed)
-                await cur.execute(f"UPDATE public.streamers SET {sets} WHERE id = %(id)s", params)
+                await cur.execute(f"UPDATE public.streamers SET {', '.join(sets)} WHERE id = %(id)s", params)
                 await outbox.emit_settings_changed(cur, streamer_id, changed)  # Phase 9: live overlay settings
             await cur.execute(f"SELECT {_SETTINGS_COLS} FROM public.streamers WHERE id = %(id)s", params)
             return await cur.fetchone(), changed

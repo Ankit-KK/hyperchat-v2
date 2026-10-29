@@ -1,12 +1,29 @@
 """G1 creator settings (D-R1 GET, D-M1 PATCH) through the real app against a scratch database."""
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
+from app.cli import connection_factory
+from app.core.config import Settings
+from app.dashboard.repository import DashboardRepository
 from app.dashboard.validation import WRITABLE_SETTINGS
-from tests.integration import DOMAIN, ORIGIN, db, owned_creator, requires_db
+from app.realtime import outbox
+from tests.integration import (
+    DOMAIN,
+    ORIGIN,
+    csrf_headers,
+    db,
+    login,
+    make_donation,
+    make_streamer,
+    make_user,
+    new_browser,
+    owned_creator,
+    requires_db,
+)
 
 pytestmark = requires_db
 S = "/api/v1/dashboard/streamers"
@@ -24,7 +41,7 @@ DEFAULTS = {  # a new creator row, as served (nullable booleans get their column
 EVERYTHING = {
     "moderation_mode": "manual", "telegram_moderation_enabled": False, "discord_moderation_enabled": True,
     "tts_enabled": False, "hyperemotes_enabled": False, "alert_box_scale": 1.25, "goal_is_active": True,
-    "goal_name": "  New mic  ", "goal_target_amount": 2500.5, "goal_activated_at": "2026-10-01T10:00:00+05:30",
+    "goal_name": "  New mic  ", "goal_target_amount": 2500.5,
     "media_upload_enabled": True, "media_moderation_enabled": False, "tts_language_boost": "english",
     "alert_overlay_id": 16, "leaderboard_overlay_id": 15, "overlay_adjust_mode": True, "leaderboard_bg_enabled": False,
     "goal_overlay_id": 6, "brand_color": "#ABCDEF", "leaderboard_widget_enabled": False, "el_voice_id": "Voice123456",
@@ -63,10 +80,10 @@ def test_patch_every_writable_field_then_idempotent(app):
     r = app.patch(url, json=EVERYTHING, headers=headers)
     assert r.status_code == 200 and r.headers["cache-control"] == "no-store", r.text
     body = r.json()
-    assert body["changed"] == list(WRITABLE_SETTINGS)
+    assert body["changed"] == [*WRITABLE_SETTINGS, "goal_activated_at"]  # the activation was stamped (D-G)
     s = body["settings"]
     assert s["goal_name"] == "New mic" and s["tts_language_boost"] == "English" and s["el_voice_id"] == "Voice123456"
-    assert datetime.fromisoformat(s["goal_activated_at"]) == datetime(2026, 10, 1, 4, 30, tzinfo=UTC)
+    assert _db(sid, "goal_activated_at IS NOT NULL") == (True,)
     assert (s["alert_overlay_id"], s["leaderboard_overlay_id"], s["goal_overlay_id"]) == (16, 15, 6)
     assert s["alert_box_scale"] == 1.25 and s["goal_target_amount"] == 2500.5 and s["moderation_mode"] == "manual"
     assert app.get(url).json() == s
@@ -82,17 +99,13 @@ def test_patch_every_writable_field_then_idempotent(app):
 def test_patch_is_partial_and_clears_nullable_fields(app):
     sid, headers = owned_creator(app, "authtest-partial")
     url = f"{S}/authtest-partial/settings"
-    app.patch(url, json={"el_voice_id": "Voice123456", "goal_activated_at": "2026-10-01T00:00:00Z"}, headers=headers)
+    app.patch(url, json={"el_voice_id": "Voice123456"}, headers=headers)
     r = app.patch(url, json={"goal_overlay_id": 3}, headers=headers)
     assert r.json()["changed"] == ["goal_overlay_id"]
-    settings = r.json()["settings"]
-    assert datetime.fromisoformat(settings.pop("goal_activated_at")) == datetime(2026, 10, 1, tzinfo=UTC)
     expected = {**DEFAULTS, "slug": "authtest-partial", "el_voice_id": "Voice123456", "goal_overlay_id": 3}
-    del expected["goal_activated_at"]
-    assert settings == expected  # everything not sent is unchanged
+    assert r.json()["settings"] == expected  # everything not sent is unchanged
     assert app.patch(url, json={"el_voice_id": ""}, headers=headers).json()["changed"] == ["el_voice_id"]
     assert app.patch(url, json={"el_voice_id": None}, headers=headers).json()["changed"] == []
-    assert app.patch(url, json={"goal_activated_at": None}, headers=headers).json()["changed"] == ["goal_activated_at"]
     assert _db(sid, "el_voice_id", "goal_activated_at") == (None, None)
 
 
@@ -116,6 +129,10 @@ def test_lowercase_language_is_canonicalised_only_when_saved(app):
     ({"status": "active"}, 422),
     ({"user_id": "00000000-0000-4000-8000-000000000000"}, 422),
     ({"goal_overlay_id": 2, "unknown": 1}, 422),  # one bad field rejects the whole patch
+    ({"goal_activated_at": "2020-01-01T00:00:00Z"}, 422),  # server-owned (D-G), in any form
+    ({"goal_activated_at": None}, 422),
+    ({"goal_activated_at": "2020-01-01T00:00:00Z", "goal_is_active": True}, 422),
+    ({"goal_is_active": True, "goal_activated_at": 0}, 422),
 ])
 def test_patch_rejections_change_nothing(app, body, status):
     sid, headers = owned_creator(app, "authtest-bad")
@@ -144,3 +161,125 @@ def test_changes_are_audited_without_secrets(app):
     records = app.app_state.log_capture.records
     assert any("streamer_settings_updated" in r and sid in r and "tts_enabled,brand_color" in r for r in records)
     assert all(app.cookies.get("__Host-hc_session") not in r and DOMAIN not in r for r in records)
+
+
+# ── D-G: goal_activated_at is server-owned ──────────────────────────────────────
+
+GOAL = "/api/v1/public/streamers/{}/goal"
+
+
+def _activated(sid: str) -> datetime | None:
+    return _db(sid, "goal_activated_at")[0]
+
+
+def _goal_events(sid: str) -> int:
+    with db() as conn:
+        return conn.execute("SELECT count(*) FROM public.realtime_outbox WHERE streamer_id = %s "
+                            "AND event = 'goal-progress'", (sid,)).fetchone()[0]
+
+
+def _db_now() -> datetime:
+    with db() as conn:
+        return conn.execute("SELECT now()").fetchone()[0]
+
+
+def test_activation_is_stamped_by_the_server_and_progress_starts_there(app):
+    sid, headers = owned_creator(app, "authtest-dg", goal_name="Mic", goal_target_amount=1000)
+    make_donation(sid, 500, moderation="auto_approved", at=datetime.now(UTC) - timedelta(days=3))  # before
+    before = _db_now()
+    r = app.patch(f"{S}/authtest-dg/settings", json={"goal_is_active": True}, headers=headers)
+    assert r.status_code == 200 and r.json()["changed"] == ["goal_is_active", "goal_activated_at"], r.text
+    stamped = _activated(sid)
+    assert stamped.tzinfo is not None and before <= stamped <= _db_now()
+    assert datetime.fromisoformat(r.json()["settings"]["goal_activated_at"]) == stamped
+    assert app.get(GOAL.format("authtest-dg")).json()["progress_inr"] == 0.0  # the old donation never counts
+    make_donation(sid, 120, moderation="auto_approved")
+    assert app.get(GOAL.format("authtest-dg")).json()["progress_inr"] == 120.0
+    assert _goal_events(sid) == 1
+
+
+def test_other_edits_and_repeated_activation_keep_the_stamp(app):
+    stamped = datetime(2026, 10, 2, 8, 0, tzinfo=UTC)
+    sid, headers = owned_creator(app, "authtest-dg-keep", goal_is_active=True, goal_activated_at=stamped,
+                                 goal_name="Mic", goal_target_amount=1000)
+    url = f"{S}/authtest-dg-keep/settings"
+    for body in ({"goal_name": "Chair"}, {"goal_target_amount": 5000}, {"brand_color": "#000000"},
+                 {"goal_is_active": True}, {"goal_is_active": True, "goal_name": "Desk"}, {"tts_enabled": False}):
+        r = app.patch(url, json=body, headers=headers)
+        assert r.status_code == 200 and "goal_activated_at" not in r.json()["changed"], (body, r.text)
+        assert _activated(sid) == stamped, body
+
+
+def test_unrelated_edit_emits_no_goal_event(app):
+    sid, headers = owned_creator(app, "authtest-dg-quiet", goal_is_active=True, goal_name="Mic",
+                                 goal_target_amount=10, goal_activated_at=datetime(2026, 10, 2, tzinfo=UTC))
+    app.patch(f"{S}/authtest-dg-quiet/settings", json={"brand_color": "#000000", "tts_enabled": False},
+              headers=headers)
+    assert _goal_events(sid) == 0
+
+
+def test_deactivation_keeps_the_stamp_and_reactivation_restamps(app):
+    old = datetime(2026, 10, 2, 8, 0, tzinfo=UTC)
+    sid, headers = owned_creator(app, "authtest-dg-cycle", goal_is_active=True, goal_activated_at=old,
+                                 goal_name="Mic", goal_target_amount=1000)
+    url = f"{S}/authtest-dg-cycle/settings"
+    off = app.patch(url, json={"goal_is_active": False}, headers=headers)
+    assert off.json()["changed"] == ["goal_is_active"] and _activated(sid) == old
+    assert app.get(GOAL.format("authtest-dg-cycle")).json()["active"] is False
+    on = app.patch(url, json={"goal_is_active": True}, headers=headers)
+    assert on.json()["changed"] == ["goal_is_active", "goal_activated_at"] and _activated(sid) > old
+
+
+def test_imported_active_goal_without_a_stamp_is_stamped_on_activation(app):
+    sid, headers = owned_creator(app, "authtest-dg-import", goal_is_active=True, goal_activated_at=None,
+                                 goal_name="Mic", goal_target_amount=1000)
+    assert app.get(GOAL.format("authtest-dg-import")).json()["active"] is False  # unchanged legacy behaviour
+    assert app.patch(f"{S}/authtest-dg-import/settings", json={"goal_name": "Chair"},
+                     headers=headers).json()["changed"] == ["goal_name"]
+    assert _activated(sid) is None  # only an activation stamps
+    r = app.patch(f"{S}/authtest-dg-import/settings", json={"goal_is_active": True}, headers=headers)
+    assert r.json()["changed"] == ["goal_activated_at"] and _activated(sid) is not None
+    assert app.get(GOAL.format("authtest-dg-import")).json()["active"] is True
+
+
+def test_a_null_goal_is_active_counts_as_inactive(app):
+    sid, headers = owned_creator(app, "authtest-dg-null", goal_is_active=None, goal_activated_at=None)
+    r = app.patch(f"{S}/authtest-dg-null/settings", json={"goal_is_active": True}, headers=headers)
+    assert r.json()["changed"] == ["goal_is_active", "goal_activated_at"] and _activated(sid) is not None
+
+
+def test_linked_account_gets_the_same_rule_and_strangers_change_nothing(app):
+    sid = make_streamer("authtest-dg-auth", user_id=make_user("owner" + DOMAIN))
+    make_user("linked" + DOMAIN, streamer_id=sid)
+    make_user("stranger" + DOMAIN)
+    url = f"{S}/authtest-dg-auth/settings"
+    stranger = new_browser(app)
+    s_headers = csrf_headers(login(stranger, "stranger" + DOMAIN))
+    assert stranger.patch(url, json={"goal_is_active": True}, headers=s_headers).status_code == 403
+    assert _db(sid, "COALESCE(goal_is_active, false)", "goal_activated_at") == (False, None)
+    linked = new_browser(app)
+    l_headers = csrf_headers(login(linked, "linked" + DOMAIN))
+    assert linked.patch(url, json={"goal_is_active": True, "goal_activated_at": "2020-01-01T00:00:00Z"},
+                        headers=l_headers).status_code == 422
+    assert _activated(sid) is None
+    assert linked.patch(url, json={"goal_is_active": True}, headers=l_headers).status_code == 200
+    assert _activated(sid) is not None
+
+
+def test_concurrent_activations_stamp_once(env, monkeypatch):
+    sid = make_streamer("authtest-dg-race", user_id=make_user("owner" + DOMAIN))
+    repo = DashboardRepository(connection_factory(Settings()))
+    original = outbox.emit_settings_changed
+
+    async def slow(*args, **kwargs):  # holds the row lock inside the transaction, so the calls overlap
+        await original(*args, **kwargs)
+        await asyncio.sleep(0.4)
+
+    monkeypatch.setattr(outbox, "emit_settings_changed", slow)
+
+    async def race():
+        return await asyncio.gather(*(repo.update_settings(sid, {"goal_is_active": True}) for _ in range(2)))
+
+    results = asyncio.run(race())
+    assert sorted(changed for _, changed in results) == [[], ["goal_is_active", "goal_activated_at"]]
+    assert results[0][0]["goal_activated_at"] == results[1][0]["goal_activated_at"] == _activated(sid)

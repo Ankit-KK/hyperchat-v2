@@ -56,8 +56,19 @@ leaderboard_bg_enabled, leaderboard_widget_enabled, goal_name, goal_target_amoun
 goal_activated_at`. Nullable booleans and `moderation_mode` are served with their column default.
 `status` is shown, `rejection_reason` never is.
 
-**D-M1** accepts any subset of the 21 writable fields (the legacy `update-streamer-settings`
-allowlist minus the two read-only amounts):
+**`goal_activated_at` is server-owned (D-G, 2026-10-29).**
+- **Who sets it:** only the server, from the database clock, stored as `timestamptz`, ISO 8601 with an offset in responses. It is never taken from a client.
+- **When it is stamped:** in the same locked UPDATE, when a PATCH sets `goal_is_active: true` while the goal was inactive (false or NULL), or while it has no activation time yet (imported rows).
+- **When it is left alone:**
+  - every other edit, including `goal_name` / `goal_target_amount` changes while the goal is active;
+  - a repeated `goal_is_active: true`;
+  - deactivation, which keeps the old time.
+- **Starting a new goal:** deactivate, then activate again. That restamps it, so public progress counts from the new activation.
+- **Sending `goal_activated_at`** (any value, including null) is an unknown field: 422, nothing changed.
+- **`changed`** lists `goal_activated_at` when it was stamped, and the realtime `goal-progress` event follows as for any goal setting.
+
+**D-M1** accepts any subset of the 20 writable fields (the legacy `update-streamer-settings`
+allowlist minus the two read-only amounts and the server-owned `goal_activated_at`):
 
 | Field | Rule |
 |---|---|
@@ -66,7 +77,6 @@ allowlist minus the two read-only amounts):
 | `alert_box_scale` | one of 0.75, 1.0, 1.25, 1.5 |
 | `goal_name` | trimmed, 1–120 characters |
 | `goal_target_amount` | number, > 0 and ≤ 100,000,000 |
-| `goal_activated_at` | ISO 8601 timestamp **with** a timezone offset, or null |
 | `tts_language_boost` | one of Hindi, English, Arabic, Chinese, French, German, Indonesian, Italian, Japanese, Korean, Portuguese, Russian, Spanish, Thai, Turkish, Vietnamese; case-insensitive, stored with this capitalisation (A2) |
 | `alert_overlay_id` | integer 0–16 |
 | `leaderboard_overlay_id` | integer 0–15 (the database trigger `validate_overlay_ids` is authoritative, A8) |
