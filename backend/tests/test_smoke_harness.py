@@ -915,3 +915,31 @@ def test_the_backend_suite_checks_the_generic_response_and_the_logged_reason():
     assert "smoke_policy.invite_refusal_response_ok(r.status_code, r.text)" in backend
     assert 'REFUSED_INVITE = sent[0].get("id") if len(sent) == 1 else None' in backend
     assert 'smoke_policy.invite_refusal_logged(journal, ids.get("admin"), REFUSED_INVITE)' in backend
+
+
+# ── D-G (#117): goal_activated_at is server-owned; the suite only activates the goal and checks the server's stamp ──
+_START = datetime(2026, 11, 2, 15, 0, tzinfo=UTC)
+_NOW = datetime(2026, 11, 2, 15, 5, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("value, ok", [
+    ("2026-11-02T15:02:00+00:00", True),             # stamped inside this run
+    ("2026-11-02T14:59:00+00:00", True),             # inside the clock slack before the start
+    ("2026-11-02T14:00:00+00:00", False),            # backdated (what a client could have sent before D-G)
+    ("2026-11-02T16:00:00+00:00", False),            # in the future
+    ("2026-11-02T15:02:00", False),                  # no time zone
+    (None, False), ("", False), ("not a time", False),
+])
+def test_the_goal_activation_must_be_the_servers_stamp_within_this_run(value, ok):
+    assert sp.goal_stamped_by_server(value, _START, _NOW)[0] is ok
+
+
+def test_the_suite_never_sends_goal_activated_at_except_to_check_the_422_refusal():
+    backend = SUITE.read_text(encoding="utf-8")
+    writes = [line for line in backend.splitlines() if "goal_activated_at" in line and ".write(" in line]
+    assert len(writes) == 1 and 'json={"goal_activated_at"' in writes[0]   # only the refusal probe sends it
+    refusal = backend[backend.index(writes[0]):]
+    assert 'r.status_code == 422' in refusal[:400]                       # ... and it must be refused
+    assert "smoke_policy.goal_stamped_by_server(got.get(\"goal_activated_at\"), STARTED, datetime.now(UTC))" in backend
+    activation = backend[backend.index('"goal_is_active": True, "goal_name": "Smoke goal"') - 200:][:400]
+    assert "goal_activated_at" not in activation.split("check(S")[0]    # the activation PATCH carries no time

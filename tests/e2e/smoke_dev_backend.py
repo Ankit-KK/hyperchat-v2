@@ -495,14 +495,21 @@ try:
 
     # ── creator dashboard ───────────────────────────────────────────────────
     S = "dashboard"
+    # D-G (#117): goal_activated_at is server-owned; the client only activates the goal and the server stamps the time
     r = owner_a.write("PATCH", settings_a, json={"moderation_mode": "manual", "brand_color": "#123456",
                                                  "goal_is_active": True, "goal_name": "Smoke goal",
-                                                 "goal_target_amount": 1000,
-                                                 "goal_activated_at": (STARTED - timedelta(hours=1)).isoformat()})
+                                                 "goal_target_amount": 1000})
     check(S, "settings update (moderation, colour, goal)", r.is_success, r.text)
     got = owner_a.get(settings_a).json()
     check(S, "settings read back", str(got.get("brand_color", "")).lower() == "#123456"
           and got.get("moderation_mode") == "manual", str(got)[:200])
+    ok, detail = smoke_policy.goal_stamped_by_server(got.get("goal_activated_at"), STARTED, datetime.now(UTC))
+    check(S, "D-G: the goal activation time was stamped by the server (this run's window, never client-chosen)",
+          ok and got.get("goal_is_active") is True, detail)
+    r = owner_a.write("PATCH", settings_a, json={"goal_activated_at": (STARTED - timedelta(hours=1)).isoformat()})
+    check(S, "D-G: a client-sent goal_activated_at is refused (422) and the stamped time is unchanged",
+          r.status_code == 422 and owner_a.get(settings_a).json().get("goal_activated_at") == got.get("goal_activated_at"),
+          str(r.status_code))
     r = owner_a.write("PATCH", settings_a, json={"brand_color": "red"})
     check(S, "invalid settings value refused", r.status_code in (400, 422), r.text)
     d_ok = make_donation(ids["a"], "Smoke Supporter", 500)

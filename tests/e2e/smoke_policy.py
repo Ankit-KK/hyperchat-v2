@@ -255,6 +255,20 @@ def google_start_ok(status: int, location: str, set_cookie: str, cfg: dict[str, 
     return bool(ok), f"{status} (Google on: expected 302 to Google with this client, PKCE and a __Host- state cookie)"
 
 
+def goal_stamped_by_server(value: object, started: datetime, now: datetime, slack_s: int = 120) -> tuple[bool, str]:
+    """D-G (#117): after this run activates its goal, goal_activated_at must be the server's activation time: set,
+    and between this run's start and now (minus/plus a small clock slack; the suite runs on the API's host). A backdated
+    or client-chosen time, a missing one or garbage fails. The detail names only the verdict."""
+    try:
+        stamped = datetime.fromisoformat(str(value))
+    except ValueError:
+        return False, "goal_activated_at missing or not a timestamp"
+    if stamped.tzinfo is None:
+        return False, "goal_activated_at has no time zone"
+    lo, hi = started.timestamp() - slack_s, now.timestamp() + slack_s
+    return lo <= stamped.timestamp() <= hi, "inside this run's window" if lo <= stamped.timestamp() <= hi else "outside this run's window"
+
+
 # ── this run's own rate-limit state ───────────────────────────────────────────────────────────────────────
 # public.rate_limits is keyed by (ip_address, endpoint), where ip_address holds the limiter key (app.auth.service,
 # app.obs, app.realtime, app.kyc, app.stepup, app.payments, app.uploads, app.routers): ip:<addr>,
