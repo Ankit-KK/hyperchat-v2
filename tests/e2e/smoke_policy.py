@@ -9,6 +9,7 @@ Without it the suite keeps its earlier behaviour: any known head passes, undeplo
 """
 
 import hashlib
+import json
 import re
 from datetime import datetime
 
@@ -123,6 +124,149 @@ def ceremony_refused_safely(status: int, body) -> tuple[bool, str]:
 def enforcement_draft(kyc_row: str, mfa_row: str) -> tuple[bool, str]:
     """Rows read with psql -At: kyc_enforcement 'state|generation', stepup_enforcement 'state'."""
     return kyc_row == "draft|0" and mfa_row == "draft", f"kyc={kyc_row!r} mfa={mfa_row!r}"
+
+
+# ── the DEV email and Google configuration the suites must expect (read from api.env, names listed here only) ──
+# Only these non-secret settings are ever read; client secrets and API keys are never parsed or printed.
+CONFIG_NAMES = ("HYPERCHAT_EMAIL_BACKEND", "HYPERCHAT_EMAIL_ACTIVE_CATEGORIES", "HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST",
+                "HYPERCHAT_GOOGLE_CLIENT_ID", "HYPERCHAT_GOOGLE_REDIRECT_URI")
+
+
+def config_values(env_text: str) -> dict[str, str]:
+    """The CONFIG_NAMES settings of an api.env text (exact names; the last assignment wins, as dotenv does)."""
+    found: dict[str, str] = {}
+    for line in env_text.splitlines():
+        name, sep, value = line.strip().partition("=")
+        if sep and name in CONFIG_NAMES:
+            found[name] = value.strip()
+    return found
+
+
+def email_mode(cfg: dict[str, str], synthetic: list[str]) -> str:
+    """"disabled": nothing can be sent. "guarded": Resend, and every synthetic address is off the recipient allowlist,
+    so an invitation to one is refused before any provider call and withdrawn (502 invite_delivery_unconfirmed).
+    Raises when a synthetic address would be deliverable or the backend is unknown: the suite must never send."""
+    backend = (cfg.get("HYPERCHAT_EMAIL_BACKEND") or "disabled").lower()
+    if backend == "disabled":
+        return "disabled"
+    if backend != "resend":
+        raise ValueError(f"unknown email backend {backend!r}")
+    allowed = {a.strip().lower() for a in (cfg.get("HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST") or "").split(",") if a.strip()}
+    if any(s.strip().lower() in allowed for s in synthetic):
+        raise ValueError("a synthetic address is on the email recipient allowlist; the suite would send email")
+    return "guarded"
+
+
+# app.auth.email logs these only after a request to the provider (Resend): a delivered and a failed attempt alike
+PROVIDER_CONTACT = ("email sent", "email send failed")
+
+
+def email_provider_contacts(journal: str) -> dict[str, int]:
+    """How often the JSON journal shows a provider request; any non-zero count means an email left (or tried to leave)
+    the server. A failed attempt counts too: it still handed an address to the provider."""
+    return {m: journal.count(f'"{m}"') for m in PROVIDER_CONTACT}
+
+
+# app.auth.service.create_invite when the email cannot be confirmed: the API answers only this generic message
+# (app.main AuthError handler: {"error": ...}); the reason code is recorded in the security log, never in the response.
+INVITE_UNCONFIRMED_ERROR = "Invitation delivery could not be confirmed. Please retry."
+
+
+def invite_refusal_response_ok(status: int, text: str) -> tuple[bool, str]:
+    """POST /api/v1/auth/invites to a non-allow-listed address: exactly 502 {"error": <the generic message>}. The exact
+    body excludes everything else: an invitation (other status or invite id), a link or token, the reason code, an
+    address. The detail names the status and the body's keys only."""
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = None
+    ok = status == 502 and body == {"error": INVITE_UNCONFIRMED_ERROR}
+    keys = sorted(body) if isinstance(body, dict) else type(body).__name__
+    return ok, f"{status} body keys {keys}"
+
+
+def journal_events(journal: str) -> list[dict]:
+    """The JSON lines of a journal read with -o cat (app.core.logging); anything else is skipped."""
+    events = []
+    for line in journal.splitlines():
+        if line.startswith("{"):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def invite_refusal_logged(journal: str, admin_id: str | None, invite_id: str | None) -> tuple[bool, str]:
+    """The security log proves why the invitation was refused (app.auth.service.create_invite, app.auth.email): for THIS
+    admin and THIS invitation exactly one invite_delivery_unconfirmed with reason EmailRecipientNotAllowed (the
+    allowlist refused before any provider request; any other reason means the provider was tried) and one
+    invite_withdrawn; no invite_created and no invite_withdraw_failed by this admin; the 'email refused' line for the
+    invite template; and the public 502 recorded as auth_unavailable with the reason code. Detail: counts only."""
+    events = journal_events(journal)
+    mine = [e for e in events if admin_id and e.get("user_id") == admin_id]
+    count = lambda name, **want: sum(1 for e in mine if e.get("security_event") == name
+                                     and all(e.get(k) == v for k, v in want.items()))
+    unconfirmed = [e for e in mine if e.get("security_event") == "invite_delivery_unconfirmed"]
+    refused = sum(1 for e in events if e.get("msg") == "email refused: recipient not on the allowlist"
+                  and e.get("template") == "invite")
+    public = sum(1 for e in events if e.get("security_event") == "auth_unavailable"
+                 and e.get("reason") == "invite_delivery_unconfirmed" and e.get("status") == 502
+                 and e.get("path") == "/api/v1/auth/invites")
+    seen = {
+        "unconfirmed": len(unconfirmed),
+        "unconfirmed_allowlist_this_invite": count("invite_delivery_unconfirmed", reason="EmailRecipientNotAllowed",
+                                                   invite_id=invite_id),
+        "withdrawn_this_invite": count("invite_withdrawn", invite_id=invite_id),
+        "created": count("invite_created"), "withdraw_failed": count("invite_withdraw_failed"),
+        "email_refused": refused, "public_502": public,
+    }
+    ok = (bool(admin_id) and bool(invite_id) and seen["unconfirmed"] == 1 and seen["unconfirmed_allowlist_this_invite"] == 1
+          and seen["withdrawn_this_invite"] == 1 and seen["created"] == 0 and seen["withdraw_failed"] == 0
+          and refused >= 1 and public >= 1)
+    return ok, str(seen)
+
+
+def google_enabled(cfg: dict[str, str]) -> bool:
+    """The API enables Google sign-in when the client id, secret and redirect URI are all set (Settings.google_enabled);
+    the secret is never read here, so a set client id AND redirect URI stand for the three."""
+    return bool(cfg.get("HYPERCHAT_GOOGLE_CLIENT_ID")) and bool(cfg.get("HYPERCHAT_GOOGLE_REDIRECT_URI"))
+
+
+def google_start_ok(status: int, location: str, set_cookie: str, cfg: dict[str, str]) -> tuple[bool, str]:
+    """GET /api/v1/auth/google/start, logged out. Google off: 404. Google on: 302 to Google's authorization endpoint for
+    THIS client and redirect URI, code flow, openid email profile, PKCE S256, state and nonce, account chooser, and the
+    state cookie __Host-hc_oauth (Secure, HttpOnly, SameSite=Lax, Path=/, no Domain). The detail never holds a value."""
+    if not google_enabled(cfg):
+        return status == 404, f"{status} (Google off: expected 404)"
+    from urllib.parse import parse_qsl, urlsplit
+    p = urlsplit(location or "")
+    q = dict(parse_qsl(p.query))
+    attrs = [a.strip().lower() for a in (set_cookie or "").split(";")]
+    ok = (status == 302 and (p.scheme, p.netloc, p.path) == ("https", "accounts.google.com", "/o/oauth2/v2/auth")
+          and q.get("client_id") == cfg["HYPERCHAT_GOOGLE_CLIENT_ID"] and q.get("redirect_uri") == cfg["HYPERCHAT_GOOGLE_REDIRECT_URI"]
+          and q.get("response_type") == "code" and q.get("scope") == "openid email profile"
+          and q.get("code_challenge_method") == "S256" and len(q.get("code_challenge", "")) == 43
+          and len(q.get("state", "")) >= 30 and len(q.get("nonce", "")) >= 30 and q.get("prompt") == "select_account"
+          and attrs[:1] and attrs[0].startswith("__host-hc_oauth=") and len(attrs[0]) > len("__host-hc_oauth=")
+          and {"secure", "httponly", "samesite=lax", "path=/"} <= set(attrs) and not any(a.startswith("domain") for a in attrs))
+    return bool(ok), f"{status} (Google on: expected 302 to Google with this client, PKCE and a __Host- state cookie)"
+
+
+def goal_stamped_by_server(value: object, started: datetime, now: datetime, slack_s: int = 120) -> tuple[bool, str]:
+    """D-G (#117): after this run activates its goal, goal_activated_at must be the server's activation time: set,
+    and between this run's start and now (minus/plus a small clock slack; the suite runs on the API's host). A backdated
+    or client-chosen time, a missing one or garbage fails. The detail names only the verdict."""
+    try:
+        stamped = datetime.fromisoformat(str(value))
+    except ValueError:
+        return False, "goal_activated_at missing or not a timestamp"
+    if stamped.tzinfo is None:
+        return False, "goal_activated_at has no time zone"
+    lo, hi = started.timestamp() - slack_s, now.timestamp() + slack_s
+    return lo <= stamped.timestamp() <= hi, "inside this run's window" if lo <= stamped.timestamp() <= hi else "outside this run's window"
 
 
 # ── this run's own rate-limit state ───────────────────────────────────────────────────────────────────────

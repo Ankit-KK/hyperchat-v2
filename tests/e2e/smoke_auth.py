@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 from app.auth.passwords import hash_password  # noqa: E402
 from app.auth.service import GENERIC_LOGIN_ERROR as GENERIC  # noqa: E402
 from app.auth.tokens import sha256_hex  # noqa: E402
-from smoke_policy import rate_limit_keys, refusal, suite_ip  # noqa: E402
+from smoke_policy import (  # noqa: E402
+    config_values, email_provider_contacts, google_start_ok, rate_limit_keys, refusal, suite_ip)
 
 API = os.environ.get("HYPERCHAT_SMOKE_API", "https://api.quicktestspace.site").rstrip("/")
 DB_NAME, DB_PORT = os.environ.get("HYPERCHAT_SMOKE_DB", "hyperchat_dev:5433").split(":")
@@ -35,6 +36,9 @@ if DB_NAME in ("hyperchat", "hyperchat_restore_test"):
     sys.exit("refusing to create test accounts in production or the restore source")
 if refusal(DB_NAME, API, {"environment": "development"}):  # the production API host, whatever the database
     sys.exit("refusing the production API")
+# the deployed Google configuration decides what /google/start must answer (only non-secret names are read)
+ENV_FILE = os.environ.get("HYPERCHAT_SMOKE_ENV_FILE", "/etc/hyperchat/api.env")
+CFG = config_values(Path(ENV_FILE).read_text()) if Path(ENV_FILE).exists() else {}
 SAMESITE = os.environ.get("HYPERCHAT_SMOKE_SAMESITE", "lax").strip().lower()
 if SAMESITE not in ("lax", "strict", "none"):
     sys.exit("HYPERCHAT_SMOKE_SAMESITE must be lax, strict or none")
@@ -106,8 +110,10 @@ try:
         r2 = c.post("/api/v1/auth/password/forgot", json={"email": "nobody@authtest.invalid"})
         check("forgot password -> 202, identical for unknown email",
               r.status_code == r2.status_code == 202 and r.json() == r2.json())
-        check("Google sign-in disabled -> 404",
-              c.get("/api/v1/auth/google/start", follow_redirects=False).status_code == 404)
+        g = httpx.get(API + "/api/v1/auth/google/start", follow_redirects=False, timeout=15)
+        ok, _ = google_start_ok(g.status_code, g.headers.get("location", ""), g.headers.get("set-cookie", ""), CFG)
+        check("Google sign-in start as configured (on: 302 to Google with this client, PKCE, __Host- state cookie;"
+              " off: 404)", ok)
         r = c.post("/api/v1/auth/logout", headers={**ORIGIN, "x-csrf-token": csrf})
         check("POST /logout with Origin + CSRF -> 200", r.status_code == 200)
         check("session revoked after logout -> 401", c.get("/api/v1/auth/session").status_code == 401)
@@ -135,6 +141,8 @@ journal = subprocess.run(["journalctl", "-u", "hyperchat-api", "--since", "-15mi
                          capture_output=True, text=True).stdout
 check("no session token, CSRF token or password in the service journal",
       all(t and t not in journal for t in seen_tokens) and PASSWORD not in journal)
+check("no email left the server during the run (no 'email sent' or 'email send failed' in the journal)",
+      not any(email_provider_contacts(journal).values()))
 failed = [n for n, ok in results if not ok]
 print(f"{len(results) - len(failed)}/{len(results)} passed")
 sys.exit(1 if failed else 0)

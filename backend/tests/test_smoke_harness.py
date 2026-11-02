@@ -742,3 +742,204 @@ def test_no_smoke_script_deletes_rate_limits_without_this_runs_keys():
         for m in re.finditer(r"DELETE FROM public\.rate_limits", src):
             statement = src[m.start():m.start() + 250]  # the statement and its scope, written on the next lines
             assert "ANY(%(exact)s)" in statement or "OWNED_RATE_LIMITS" in statement, (script.name, statement[:120])
+
+
+# ── the DEV email and Google configuration (smoke_policy.config_values / email_mode / google_start_ok) ──────────
+CID = "123456789012-abcdefghij0123456789.apps.googleusercontent.com"
+REDIR = "https://api.quicktestspace.site/api/v1/auth/google/callback"
+DEV_ENV = "\n".join([
+    "HYPERCHAT_EMAIL_BACKEND=resend", "HYPERCHAT_EMAIL_ACTIVE_CATEGORIES=onboarding",
+    "HYPERCHAT_BOT_RECIPIENT_ALLOWLIST=tg:1,dc:2",
+    "HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST=a@example.invalid,B@example.invalid",
+    f"HYPERCHAT_GOOGLE_CLIENT_ID={CID}", "HYPERCHAT_GOOGLE_CLIENT_SECRET=GOCSPX-never-read-value",
+    f"HYPERCHAT_GOOGLE_REDIRECT_URI={REDIR}", "HYPERCHAT_EMAIL_ONBOARDING_RESEND_API_KEY=re_never_read"])
+SYN = ["authtest-x1-invitee@authtest.invalid"]
+
+
+def test_config_values_reads_only_the_listed_non_secret_names():
+    cfg = sp.config_values(DEV_ENV)
+    assert set(cfg) == set(sp.CONFIG_NAMES)
+    assert "GOCSPX-never-read-value" not in repr(cfg) and "re_never_read" not in repr(cfg)
+    assert cfg["HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST"] == "a@example.invalid,B@example.invalid"  # never the BOT_ one
+    assert sp.config_values("HYPERCHAT_EMAIL_BACKEND=disabled\nHYPERCHAT_EMAIL_BACKEND=resend")["HYPERCHAT_EMAIL_BACKEND"] == "resend"
+
+
+def test_email_mode_disabled_guarded_and_fail_closed():
+    assert sp.email_mode({}, SYN) == "disabled"
+    assert sp.email_mode({"HYPERCHAT_EMAIL_BACKEND": "disabled"}, SYN) == "disabled"
+    assert sp.email_mode(sp.config_values(DEV_ENV), SYN) == "guarded"
+    with pytest.raises(ValueError, match="allowlist"):  # a synthetic address deliverable: the suite must not run
+        sp.email_mode({"HYPERCHAT_EMAIL_BACKEND": "resend", "HYPERCHAT_EMAIL_RECIPIENT_ALLOWLIST": "x@y.invalid," + SYN[0].upper()}, SYN)
+    with pytest.raises(ValueError, match="unknown"):
+        sp.email_mode({"HYPERCHAT_EMAIL_BACKEND": "smtp"}, SYN)
+
+
+def _start(**over):
+    q = {"client_id": CID, "redirect_uri": REDIR, "response_type": "code", "scope": "openid email profile",
+         "state": "s" * 32, "nonce": "n" * 32, "code_challenge": "c" * 43, "code_challenge_method": "S256",
+         "prompt": "select_account", **over}
+    from urllib.parse import urlencode
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({k: v for k, v in q.items() if v is not None})
+
+
+COOKIE = "__Host-hc_oauth=abc.def; HttpOnly; Max-Age=600; Path=/; SameSite=lax; Secure"
+
+
+def test_google_start_expectation_follows_the_configuration():
+    on, off = sp.config_values(DEV_ENV), {}
+    assert sp.google_enabled(on) and not sp.google_enabled(off)
+    assert sp.google_start_ok(404, "", "", off)[0]
+    assert not sp.google_start_ok(302, _start(), COOKIE, off)[0]  # Google on although the file says off
+    assert sp.google_start_ok(302, _start(), COOKIE, on)[0]
+    assert not sp.google_start_ok(404, "", "", on)[0]  # configured but not answering
+
+
+@pytest.mark.parametrize("location, cookie", [
+    (_start(client_id="999-other.apps.googleusercontent.com"), COOKIE), (_start(redirect_uri="https://evil.example/cb"), COOKIE),
+    (_start(code_challenge_method="plain"), COOKIE), (_start(code_challenge=None), COOKIE), (_start(nonce=None), COOKIE),
+    (_start(state="short"), COOKIE), (_start(prompt=None), COOKIE), (_start(scope="openid"), COOKIE),
+    (_start().replace("accounts.google.com", "accounts.google.com.evil.example"), COOKIE),
+    (_start(), COOKIE.replace("; Secure", "")), (_start(), COOKIE.replace("; HttpOnly", "")),
+    (_start(), COOKIE + "; Domain=quicktestspace.site"), (_start(), COOKIE.replace("SameSite=lax", "SameSite=none")),
+    (_start(), COOKIE.replace("__Host-hc_oauth=abc.def", "hc_oauth=abc.def")), (_start(), "")])
+def test_google_start_refuses_every_weakened_redirect_or_cookie(location, cookie):
+    ok, detail = sp.google_start_ok(302, location, cookie, sp.config_values(DEV_ENV))
+    assert not ok and CID not in detail and "abc.def" not in detail
+
+
+def test_the_suites_assert_configuration_aware_email_and_google_behaviour():
+    backend = SUITE.read_text(encoding="utf-8")
+    auth = (SUITE.parent / "smoke_auth.py").read_text(encoding="utf-8")
+    assert "Google sign-in disabled -> 404" not in auth and "google_start_ok(" in auth
+    assert "smoke_policy.email_mode(" in backend and "invite_delivery_unconfirmed" in backend
+    for src in (backend, auth):  # both suites prove that no email left the server during the run
+        assert "no email left the server during the run" in src and "email_provider_contacts(" in src
+        assert "'\"email sent\"' not in journal" not in src  # never back to the sent-only check
+    # the check's verdict is the provider-contact count itself, not just a call next to it
+    assert "not any(contacts.values())" in backend
+    assert "not any(email_provider_contacts(journal).values())" in auth
+
+
+def test_a_failed_provider_attempt_counts_as_an_email_that_left():
+    from smoke_policy import email_provider_contacts
+    line = lambda m: '{"level": "INFO", "message": "%s", "category": "onboarding"}' % m
+    assert not any(email_provider_contacts(line("email refused: recipient not on the allowlist")).values())
+    assert not any(email_provider_contacts(line("email refused: category inactive")).values())
+    assert email_provider_contacts(line("email sent"))["email sent"] == 1
+    assert email_provider_contacts(line("email send failed"))["email send failed"] == 1  # never hidden
+    assert email_provider_contacts("") == {"email sent": 0, "email send failed": 0}
+
+
+# ── invitation refused by the allowlist: generic public error, reason proved from the security log ──
+ADMIN_ID, INVITE_ID = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+GENERIC_INVITE_ERROR = '{"error":"Invitation delivery could not be confirmed. Please retry."}'
+
+
+def _log(msg, **fields):
+    import json
+    return json.dumps({"ts": "2026-10-27T18:00:00.000+00:00", "level": "WARNING", "logger": "x", "msg": msg, **fields})
+
+
+def _refusal_journal(**override):
+    lines = {
+        "refused": _log("email refused: recipient not on the allowlist", category="onboarding", template="invite"),
+        "unconfirmed": _log("invite_delivery_unconfirmed", security_event="invite_delivery_unconfirmed",
+                            reason="EmailRecipientNotAllowed", user_id=ADMIN_ID, invite_id=INVITE_ID),
+        "withdrawn": _log("invite_withdrawn", security_event="invite_withdrawn", user_id=ADMIN_ID, invite_id=INVITE_ID),
+        "public": _log("auth_unavailable", security_event="auth_unavailable", reason="invite_delivery_unconfirmed",
+                       status=502, path="/api/v1/auth/invites"),
+        "noise": "uvicorn started (not json)",
+    }
+    lines.update(override)
+    return "\n".join(v for v in lines.values() if v)
+
+
+def test_invite_refusal_response_accepts_only_the_generic_502():
+    from smoke_policy import invite_refusal_response_ok
+    assert invite_refusal_response_ok(502, GENERIC_INVITE_ERROR)[0]
+    bad = [
+        (201, '{"invite_id": "x", "expires_at": "y"}'),  # the invitation was created
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry.","reason":"invite_delivery_unconfirmed"}'),
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry.","invite_id":"x"}'),
+        (502, '{"error":"Something else"}'),
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry. token=abc"}'),
+        (502, '{"error":"Invitation delivery could not be confirmed. Please retry.","to":"authtest-sm1-invitee@authtest.invalid"}'),
+        (502, "Bad Gateway"),  # a proxy error, not the API's refusal
+        (500, GENERIC_INVITE_ERROR),
+    ]
+    for status, text in bad:
+        ok, detail = invite_refusal_response_ok(status, text)
+        assert not ok, (status, text)
+        assert "authtest" not in detail and "token" not in detail  # the detail never echoes the body
+
+
+def test_invite_refusal_reason_is_proved_from_the_security_log():
+    from smoke_policy import invite_refusal_logged
+    assert invite_refusal_logged(_refusal_journal(), ADMIN_ID, INVITE_ID)[0]
+    wrong = {
+        "no unconfirmed event": ({"unconfirmed": None}, ADMIN_ID, INVITE_ID),
+        "provider was tried": ({"unconfirmed": _log("invite_delivery_unconfirmed", security_event="invite_delivery_unconfirmed",
+                                                   reason="EmailDeliveryError", user_id=ADMIN_ID, invite_id=INVITE_ID)},
+                               ADMIN_ID, INVITE_ID),
+        "another invitation": ({}, ADMIN_ID, "33333333-3333-3333-3333-333333333333"),
+        "another admin": ({}, "44444444-4444-4444-4444-444444444444", INVITE_ID),
+        "unknown admin": ({}, None, INVITE_ID),
+        "unknown invitation": ({}, ADMIN_ID, None),
+        "two refusals": ({"extra": _log("invite_delivery_unconfirmed", security_event="invite_delivery_unconfirmed",
+                                        reason="EmailRecipientNotAllowed", user_id=ADMIN_ID, invite_id="x")},
+                         ADMIN_ID, INVITE_ID),
+        "an invitation was created": ({"created": _log("invite_created", security_event="invite_created",
+                                                       user_id=ADMIN_ID)}, ADMIN_ID, INVITE_ID),
+        "not withdrawn": ({"withdrawn": None}, ADMIN_ID, INVITE_ID),
+        "withdraw failed": ({"failed": _log("invite_withdraw_failed", security_event="invite_withdraw_failed",
+                                            reason="not_open", user_id=ADMIN_ID, invite_id=INVITE_ID)},
+                            ADMIN_ID, INVITE_ID),
+        "no allowlist refusal line": ({"refused": None}, ADMIN_ID, INVITE_ID),
+        "refusal of another template": ({"refused": _log("email refused: recipient not on the allowlist",
+                                                         template="reset-password")}, ADMIN_ID, INVITE_ID),
+        "public 502 not recorded": ({"public": None}, ADMIN_ID, INVITE_ID),
+        "public 502 for another path": ({"public": _log("auth_unavailable", security_event="auth_unavailable",
+                                                        reason="invite_delivery_unconfirmed", status=502,
+                                                        path="/api/v1/admin/applications/x/invite")},
+                                        ADMIN_ID, INVITE_ID),
+    }
+    for name, (override, admin, invite) in wrong.items():
+        ok, detail = invite_refusal_logged(_refusal_journal(**override), admin, invite)
+        assert not ok, name
+        assert ADMIN_ID not in detail and INVITE_ID not in detail  # counts only
+
+
+def test_the_backend_suite_checks_the_generic_response_and_the_logged_reason():
+    backend = SUITE.read_text(encoding="utf-8")
+    assert '"invite_delivery_unconfirmed" in r.text' not in backend  # the reason code is never in the response
+    assert "smoke_policy.invite_refusal_response_ok(r.status_code, r.text)" in backend
+    assert 'REFUSED_INVITE = sent[0].get("id") if len(sent) == 1 else None' in backend
+    assert 'smoke_policy.invite_refusal_logged(journal, ids.get("admin"), REFUSED_INVITE)' in backend
+
+
+# ── D-G (#117): goal_activated_at is server-owned; the suite only activates the goal and checks the server's stamp ──
+_START = datetime(2026, 11, 2, 15, 0, tzinfo=UTC)
+_NOW = datetime(2026, 11, 2, 15, 5, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("value, ok", [
+    ("2026-11-02T15:02:00+00:00", True),             # stamped inside this run
+    ("2026-11-02T14:59:00+00:00", True),             # inside the clock slack before the start
+    ("2026-11-02T14:00:00+00:00", False),            # backdated (what a client could have sent before D-G)
+    ("2026-11-02T16:00:00+00:00", False),            # in the future
+    ("2026-11-02T15:02:00", False),                  # no time zone
+    (None, False), ("", False), ("not a time", False),
+])
+def test_the_goal_activation_must_be_the_servers_stamp_within_this_run(value, ok):
+    assert sp.goal_stamped_by_server(value, _START, _NOW)[0] is ok
+
+
+def test_the_suite_never_sends_goal_activated_at_except_to_check_the_422_refusal():
+    backend = SUITE.read_text(encoding="utf-8")
+    writes = [line for line in backend.splitlines() if "goal_activated_at" in line and ".write(" in line]
+    assert len(writes) == 1 and 'json={"goal_activated_at"' in writes[0]   # only the refusal probe sends it
+    refusal = backend[backend.index(writes[0]):]
+    assert 'r.status_code == 422' in refusal[:400]                       # ... and it must be refused
+    assert "smoke_policy.goal_stamped_by_server(got.get(\"goal_activated_at\"), STARTED, datetime.now(UTC))" in backend
+    activation = backend[backend.index('"goal_is_active": True, "goal_name": "Smoke goal"') - 200:][:400]
+    assert "goal_activated_at" not in activation.split("check(S")[0]    # the activation PATCH carries no time
