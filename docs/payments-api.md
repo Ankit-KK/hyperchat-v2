@@ -149,6 +149,7 @@ completed and credited at most once.
 
 **What it selects:**
 - **V2 donations only:** `payment_account` set (the checkout writes it) **and** no `legacy_source_table` (the import writes that, and never `payment_account`). Rows with neither or both markers are *ambiguous provenance*: never selected, counted as a finding.
+  Since migration 0030 neither marker can be forged by an API role: `legacy_source_table` (and `is_hyperemote`) are written only by the legacy import, so a runtime role cannot hide a V2 row from reconciliation by setting it.
 - In state `pending` or `failed`.
 - Created between 15 minutes and 7 days ago, at most 200 per run, oldest first. The window and the limit can only be narrowed.
 - Selection uses `donations.provider_order_id`, so it survives the 30-day `order_lookup` prune.

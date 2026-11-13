@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests.integration import db, make_donation, make_streamer, owned_creator, requires_db
+from tests.integration import db, fixture_db, make_donation, make_streamer, owned_creator, requires_db
 
 pytestmark = requires_db
 S = "/api/v1/dashboard/streamers"
@@ -32,7 +32,7 @@ def test_list_shows_paid_approved_donations_newest_first(app):
                    {"payment": "failed", "moderation": "auto_approved"}):
         make_donation(sid, 7, at=t + timedelta(minutes=5), **kwargs)
     make_donation(other, 999, moderation="approved", at=t + timedelta(minutes=9))
-    with db() as conn:
+    with fixture_db() as conn:  # is_hyperemote is import history: only the migrator writes it (0030)
         conn.execute("UPDATE public.donations SET provider_order_id = 'authtest-rzp', status_token_hash = 'authtest-h', "
                      "is_hyperemote = true, media_url = 'https://cdn.example.test/m.gif', media_type = 'gif' "
                      "WHERE id = %s", (auto,))
