@@ -49,9 +49,12 @@ SETTINGS_SQL_TYPES = {
 }
 
 
-_DONATION_COLS = """d.id::text AS donation_id, d.donor_name, d.amount, d.currency, d.amount_inr, d.message,
+# PAY-15 stage 5 (S5-D1): reversed_inr / net_inr (stage 4 figures) and the coarse reversal_flag, from the donation's
+# accounting state; every query selecting these columns joins it (figures.REVERSAL_JOIN) inside its creator scope.
+_DONATION_COLS = f"""d.id::text AS donation_id, d.donor_name, d.amount, d.currency, d.amount_inr, d.message,
     d.message_visible, d.voice_message_url, d.tts_audio_url, d.hypersound_url, d.media_url,
-    d.media_type, d.moderation_status, d.created_at"""
+    d.media_type, d.moderation_status, d.created_at, {figures.REVERSED_INR} AS reversed_inr,
+    {figures.NET_INR} AS net_inr, {figures.REVERSAL_FLAG} AS reversal_flag"""
 _QUEUE_COLS = _DONATION_COLS + """, d.approved_at, d.approved_by_label,
     EXISTS (SELECT 1 FROM public.banned_donors b WHERE b.streamer_id = d.streamer_id AND b.is_active = true
             AND b.donor_name_lower = lower(d.donor_name)) AS is_donor_banned"""
@@ -153,7 +156,8 @@ class DashboardRepository:
             where.append("(d.created_at, d.id) < (%(after_at)s, %(after_id)s::uuid)")
             params.update(after_at=after[0], after_id=after[1])
         columns = _QUEUE_COLS if queue else _DONATION_COLS
-        return await self._all(f"SELECT {columns} FROM public.donations d WHERE {' AND '.join(where)} "
+        return await self._all(f"SELECT {columns} FROM public.donations d {figures.REVERSAL_JOIN} "
+                               f"WHERE {' AND '.join(where)} "
                                "ORDER BY d.created_at DESC, d.id DESC LIMIT %(limit)s", params)
 
     async def donation_stats(self, streamer_id: str, *, day: tuple[datetime, datetime],
@@ -238,7 +242,8 @@ class DashboardRepository:
                 else:
                     await self._record_bot_action(cur, streamer_id, donation_id, action, current["moderation_status"],
                                                   step.new_status, bot, actor_label)
-            await cur.execute(f"SELECT {_QUEUE_COLS} FROM public.donations d WHERE d.id = %s", (donation_id,))
+            await cur.execute(f"SELECT {_QUEUE_COLS} FROM public.donations d {figures.REVERSAL_JOIN} "
+                              "WHERE d.id = %s", (donation_id,))
             return current["moderation_status"], step, await cur.fetchone()
 
     @staticmethod

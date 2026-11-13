@@ -262,15 +262,25 @@ async def payment_integrity_report(settings: Settings, args) -> int:
     except ValueError:
         print("Refused: --since must be a date (YYYY-MM-DD).", file=sys.stderr)
         return 2
-    rows = await PaymentRepository(connection_factory(settings)).integrity_report(since)
+    repo = PaymentRepository(connection_factory(settings))
+    rows = await repo.integrity_report(since)
     items = [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()} for row in rows]
     for item in items:
+        # PAY-15 stage 5 (D6): the evidence's donation's accounting state (None: never evaluated)
+        applied, hold, flags = (item.pop(k) for k in ("applied_reversed_paise", "accounting_hold", "accounting_flags"))
+        item["accounting"] = None if applied is None else {"applied_reversed_paise": applied, "hold": hold,
+                                                           "flags": flags}
         item["attention"] = (item["status"] in ATTENTION_STATES or not item["all_consistent"] or item["conflicting"]
-                             or item["match_type"] != "payment")
+                             or item["match_type"] != "payment" or hold is not None)
     attention = sum(item["attention"] for item in items)
+    state = await repo.accounting_report()
+    accounting = {k: [{c: (v.isoformat() if hasattr(v, "isoformat") else v) for c, v in r.items()} for r in rows]
+                  for k, rows in state.items()}
+    accounting["counts"] = {k: len(v) for k, v in state.items()}
     print(json.dumps({"report": "payment-integrity", "read_only": True, "since": args.since, "items": items,
-                      "total": len(items), "attention": attention}, indent=2, sort_keys=True))
-    return 1 if attention else 0
+                      "total": len(items), "attention": attention, "accounting": accounting},
+                     indent=2, sort_keys=True))
+    return 1 if attention or state["held"] else 0
 
 
 def main(argv: list[str] | None = None) -> int:

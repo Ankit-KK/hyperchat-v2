@@ -26,6 +26,13 @@ REVERSED_INR = (f"(CASE WHEN COALESCE(dr.applied_reversed_paise, 0) <= 0 OR COAL
                 f"{_CAPTURED}), {_CAPTURED}) / 100 END)::numeric(12,2)")
 NET_INR = f"(d.amount_inr - {REVERSED_INR})"
 
+# PAY-15 stage 5 (D6, D2; S5-D1, S5-D2): the creator's coarse per-donation flag, from the accounting state only (never
+# the evidence tables). A hold wins over an applied reversal, which wins over an open dispute; no hold code, F-BOTH
+# or provider detail is ever exposed. NULL without a reversal row (always while the accounting switch is off).
+REVERSAL_FLAG = ("(CASE WHEN dr.hold IS NOT NULL THEN 'under_review' "
+                 "WHEN COALESCE(dr.applied_reversed_paise, 0) > 0 THEN 'reversed' "
+                 "WHEN 'F-OPEN' = ANY (COALESCE(dr.flags, '{}'::text[])) THEN 'dispute_open' END)")
+
 # Goal progress (D5: the active goal window only; ended goals are not rewritten): paid and approved donations since
 # the goal was activated. One query for the public page and the realtime / OBS goal-progress event.
 GOAL_PROGRESS = (f"SELECT COALESCE(sum({NET_INR}), 0) AS total FROM public.donations d {REVERSAL_JOIN} "

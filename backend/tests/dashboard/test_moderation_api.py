@@ -27,7 +27,8 @@ pytestmark = requires_db
 S = "/api/v1/dashboard/streamers"
 QUEUE_FIELDS = {"donation_id", "donor_name", "amount", "currency", "amount_inr", "message", "message_visible",
                 "voice_message_url", "tts_audio_url", "hypersound_url", "media_url", "media_type",
-                "moderation_status", "created_at", "approved_at", "approved_by_label", "is_donor_banned"}
+                "moderation_status", "created_at", "approved_at", "approved_by_label", "is_donor_banned",
+                "reversed_inr", "net_inr", "reversal_flag"}  # PAY-15 stage 5 (additive)
 
 
 def _moderate(client, ref, donation_id, action, headers, **extra):

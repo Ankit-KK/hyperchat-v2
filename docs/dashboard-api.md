@@ -99,6 +99,8 @@ patch writes nothing (`updated_at` is untouched). Changes are logged as
   moderation_status, created_at`. Hidden messages are included (the creator moderates them).
   Keyset pagination on `(created_at DESC, id DESC)`: `limit` 1–100 (default 20); `next_cursor` is
   opaque and only valid as returned (a tampered cursor is `400 {"error": "Invalid cursor"}`).
+- **Donation list (D-R2) and moderation queue (D-R5) rows, and the moderation result:**
+  **PAY-15 stage 5 (additive):** `reversed_inr`, `net_inr` (the stage 4 per-donation figures) and `reversal_flag`: `null`, `reversed` (money was reversed), `dispute_open` (a dispute is open, nothing applied) or `under_review` (held: the frozen `reversed_inr` still counts). Precedence: under_review > reversed > dispute_open. From the donation's accounting state only; never provider references, payment or order ids, reason codes, hold codes or internal flags. All `null` / 0 while accounting is off.
 - **D-R3 stats:** `total_revenue_inr, total_donations, today_revenue_inr, month_revenue_inr,
   total_reversed_inr, today_reversed_inr, month_reversed_inr, timezone ("Asia/Kolkata"), as_of` over **every
   paid donation, any moderation status** (legacy semantics). The `*_revenue_inr` fields are **net**

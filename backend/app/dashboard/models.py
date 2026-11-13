@@ -121,6 +121,11 @@ class DonationItem(_Model):  # D-R2 row (hidden messages included: the creator m
     media_type: str | None
     moderation_status: str
     created_at: datetime
+    # PAY-15 stage 5 (S5-D1): the donation's own reversal figures and a coarse flag; never hold codes, F-BOTH,
+    # provider references or reasons (operators see those in payment-integrity-report)
+    reversed_inr: float
+    net_inr: float
+    reversal_flag: Literal["reversed", "dispute_open", "under_review"] | None
 
 
 class DonationPage(_Model):  # D-R2
