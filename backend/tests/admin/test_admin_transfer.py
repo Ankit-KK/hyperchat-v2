@@ -17,6 +17,7 @@ from tests.integration import (
     ORIGIN,
     accept_soundboard_terms,
     db,
+    fixture_db,
     login,
     make_donation,
     make_streamer,
@@ -68,7 +69,7 @@ def _creator_with_history(owner: str) -> str:
                      "'https://x.invalid/i.png', 'png', true, 1)", (SLUG,))
     for amount in (100, 250):
         make_donation(sid, amount)
-    with db() as conn:
+    with fixture_db() as conn:  # checkout provenance: written at checkout only, fixed for runtime roles (0032)
         conn.execute("UPDATE public.donations SET payment_account = 'primary', provider_order_id = 'order_d13' || "
                      "amount::int WHERE streamer_id = %s", (sid,))
     return sid

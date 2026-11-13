@@ -201,6 +201,10 @@ def cleanup_synthetic_rows() -> None:
         # donations.streamer_id is ON DELETE RESTRICT: synthetic donations go first, credited ones included: the
         # owner lifts the 0031 delete guard for this transaction only (the creators and their totals go next)
         with fixture_db() as owner, owner.transaction():
+            # 0032: a synthetic donation's reversal state references it (ON DELETE RESTRICT, no runtime DELETE): the
+            # owner removes exactly the synthetic donations' rows; their history stays in donation_credit_events
+            owner.execute(f"DELETE FROM public.donation_reversals WHERE donation_id IN {SYNTHETIC_DONATIONS}",
+                          {"slug": SLUG_PREFIX + "%"})
             owner.execute("ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard")
             owner.execute("DELETE FROM public.donations WHERE streamer_id IN "
                           "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))

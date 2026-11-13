@@ -240,7 +240,8 @@ async def payment_reconcile(settings: Settings, args, client=None) -> int:
         except OSError as exc:
             print(f"Refused: cannot create the report file ({exc.strerror}).", file=sys.stderr)
             return 2
-    report = await reconcile.run_cli(PaymentRepository(factory), PaymentAccounts.from_settings(settings),
+    report = await reconcile.run_cli(PaymentRepository(factory, accounting=settings.payment_accounting_enabled),
+                                     PaymentAccounts.from_settings(settings),
                                      client or RazorpayClient(), apply=args.apply, min_age_minutes=args.min_age_minutes,
                                      max_age_days=args.max_age_days, limit=args.limit)
     text = json.dumps(report.as_dict(), indent=2, sort_keys=True)

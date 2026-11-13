@@ -34,7 +34,7 @@ EXPECTED_TABLES = {
     "kyc_enforcement_events", "webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
     "session_assurance",
     "stepup_events", "stepup_rate_limits", "stepup_enforcement", "payment_integrity_events",
-    "donation_credit_events",
+    "donation_credit_events", "donation_reversals",
 }
 
 
@@ -709,7 +709,9 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
     assert _stepup_guards() == (6, 10)
     # 0029's downgrade (on the way to 0026) restores the payment evidence grants, and 0031's restores the 0007
     # grants on donor totals and drops the credit audit: not 0027's concern (test_0029 / test_0031 pin those)
-    evidence = ("payment_webhook_events", "payment_integrity_events", "streamer_donator_totals",
+    # 0032's (reversal state, its function's EXECUTE for the API role) likewise
+    evidence = ("payment_webhook_events", "payment_integrity_events", "streamer_donator_totals", "donation_reversals",
+                "donation_accounting_apply(uuid,bigint,text,text[],text[])",
                 "donation_credit_events")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     command.downgrade(cfg, "0026")
@@ -1388,3 +1390,102 @@ def test_0031_capped_backfill_keeps_every_donor_total_and_refuses_to_lose_its_au
             _clean_0031(conn)
         command.upgrade(cfg, "head")
     assert _credit_shape()[:2] == (2, 3)
+
+
+def _reversal_shape() -> tuple:
+    """(reversal table, apply function, roles that may EXECUTE it, app privileges on the table, ledger columns)."""
+    with _owner() as conn:
+        table = conn.execute("SELECT to_regclass('public.donation_reversals') IS NOT NULL").fetchone()[0]
+        fn = "public.donation_accounting_apply(uuid, bigint, text, text[], text[])"
+        exists = conn.execute("SELECT to_regprocedure(%s) IS NOT NULL", (fn,)).fetchone()[0]
+        callers = tuple(r for r in ("hyperchat_app", "hyperchat_worker", "hyperchat_auth", "hyperchat_lifecycle",
+                                    "hyperchat_stepup", "hyperchat_readonly")
+                        if exists and conn.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                                                   (r, fn)).fetchone()[0])
+        app = tuple(p for p in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE")
+                    if table and conn.execute("SELECT has_table_privilege('hyperchat_app', 'public.donation_reversals', "
+                                              "%s)", (p,)).fetchone()[0])
+        cols = conn.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND "
+                            "table_name = 'donation_credit_events' AND column_name IN ('reversed_before_paise', "
+                            "'reversed_after_paise', 'hold_before', 'hold_after', 'evidence_refs', 'txid')"
+                            ).fetchone()[0]
+    return table, exists, callers, app, cols
+
+
+def _clean_0032(conn) -> None:
+    """Scratch only (owner, one transaction, guards lifted explicitly): this test's reversal state, history, rows."""
+    with conn.transaction():
+        if "donation_reversals" in _tables():
+            conn.execute("DELETE FROM public.donation_reversals WHERE donation_id IN (SELECT id FROM public.donations "
+                         "WHERE order_id LIKE 'migtest32-%%')")
+        if "donation_credit_events" in _tables():
+            conn.execute("ALTER TABLE public.donation_credit_events DISABLE TRIGGER donation_credit_events_guard")
+            conn.execute("DELETE FROM public.donation_credit_events WHERE streamer_id IN "
+                         "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'migtest32-%%')")
+            conn.execute("ALTER TABLE public.donation_credit_events ENABLE TRIGGER donation_credit_events_guard")
+        conn.execute("DELETE FROM public.streamer_donator_totals WHERE streamer_id IN "
+                     "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'migtest32-%%')")
+        guarded = conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname = 'donations_credit_delete_guard'"
+                               ).fetchone()[0]
+        if guarded:
+            conn.execute("ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard")
+        conn.execute("DELETE FROM public.donations WHERE order_id LIKE 'migtest32-%%'")
+        if guarded:
+            conn.execute("ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard")
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest32-%%'")
+
+
+def test_0032_reversal_accounting_keeps_0031_history_changes_no_money_and_refuses_to_lose_state(monkeypatch):
+    """0032 adds the reversal state, its function and the ledger columns; 0031's ledger rows stay valid and
+    unchanged; with no reversal the writer moves exactly what 0031's did; the downgrade refuses while reversal state
+    or accounting history exists, otherwise restores 0031 exactly."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0031")
+    try:
+        assert _reversal_shape() == (False, False, (), (), 0)
+        with _owner() as conn:
+            _clean_0032(conn)
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
+                               "VALUES ('migtest32-c', 'C', 'active', 'legacy') RETURNING id").fetchone()[0]
+            for order_id, moderation in (("migtest32-a", "approved"), ("migtest32-b", "pending")):
+                conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                             "amount_inr, payment_status, moderation_status, provider_payment_id, payment_account, "
+                             "provider_order_id) VALUES (%s, %s, 'Fan', 100, 'INR', 100, 'success', %s, %s, 'primary', %s)",
+                             (sid, order_id, moderation, "pay_MIG" + order_id[-1], "order_MIG" + order_id[-1]))
+            history_sql = ("SELECT e.id, e.cause, e.delta_inr, e.total_after, e.created_at FROM public.donation_credit_events e "
+                           "WHERE e.streamer_id = %s ORDER BY e.id")
+            history = conn.execute(history_sql, (sid,)).fetchall()  # 0031's writer row for the approved donation
+            assert [r[1] for r in history] == ["writer"]
+
+        command.upgrade(cfg, "0032")
+        assert _reversal_shape() == (True, True, ("hyperchat_app",), ("SELECT",), 6)
+        with _owner() as conn:
+            assert conn.execute(history_sql, (sid,)).fetchall() == history  # 0031's rows unchanged and still valid
+            assert conn.execute("SELECT reversed_before_paise, hold_after, txid FROM public.donation_credit_events "
+                                "WHERE streamer_id = %s", (sid,)).fetchall() == [(None, None, None)]
+            conn.execute("UPDATE public.donations SET moderation_status = 'approved' WHERE order_id = 'migtest32-b'")
+            assert conn.execute("SELECT total_amount, donation_count FROM public.streamer_donator_totals WHERE "
+                                "streamer_id = %s", (sid,)).fetchone() == (200, 2)  # no reversal: 0031's amounts
+            writer = conn.execute("SELECT reversed_before_paise, reversed_after_paise, txid IS NOT NULL FROM "
+                                  "public.donation_credit_events WHERE streamer_id = %s ORDER BY id DESC LIMIT 1",
+                                  (sid,)).fetchone()
+            assert writer == (0, 0, True)
+            did = conn.execute("SELECT id FROM public.donations WHERE order_id = 'migtest32-a'").fetchone()[0]
+            assert conn.execute("SELECT public.donation_accounting_apply(%s, NULL, 'H-CONFLICT', '{}', '{}')",
+                                (did,)).fetchone()[0] == "hold"
+
+        with pytest.raises(Exception, match="downgrade of 0032 stopped"):
+            command.downgrade(cfg, "0031")
+        assert _version() == "0032"
+        with _owner() as conn:
+            _clean_0032(conn)
+        command.downgrade(cfg, "0031")  # nothing left: 0031 exactly (no columns, no table, no function)
+        assert _reversal_shape() == (False, False, (), (), 0)
+        assert _credit_shape() == (2, 3, ("SELECT",), ("SELECT",))  # 0031's writer and guards are back
+    finally:
+        with _owner() as conn:
+            _clean_0032(conn)
+        command.upgrade(cfg, "head")
+    assert _reversal_shape()[:3] == (True, True, ("hyperchat_app",))
