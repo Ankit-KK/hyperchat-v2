@@ -48,7 +48,8 @@ def test_the_postgres15_job_excludes_only_the_postgres17_importer():
     runs = "\n".join(str(s.get("run", "")) for s in steps)
     assert "postgres:15" in runs and "'^15\\.'" in runs
     assert "--deselect tests/test_auth_hash_import.py" in runs and runs.count("--deselect") == 1
-    for suite in ("tests/auth", "tests/kyc", "tests/stepup", "tests/admin", "tests/backup"):
+    for suite in ("tests/auth", "tests/kyc", "tests/stepup", "tests/admin", "tests/backup",
+                  "tests/payments/test_donation_history_guard_db.py"):  # 0030: the per-role guard on DEV's PG 15
         assert suite in runs
     gated = [s for s in steps if s.get("id") != "scope" and "actions/checkout" not in str(s.get("uses"))]
     assert all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in gated)
@@ -87,6 +88,8 @@ def _scope(repo_dir: Path, base: str) -> str:
     ("deploy/postgres/roles.sql", "run=true"),
     ("backend/app/kyc/service.py", "run=true"),
     ("backend/tests/stepup/test_x.py", "run=true"),
+    ("backend/tests/payments/test_donation_history_guard_db.py", "run=true"),
+    ("backend/tests/payments/test_x.py", "run=false"),
     (".github/workflows/ci.yml", "run=true"),
     ("backend/requirements.txt", "run=true"),
 ])

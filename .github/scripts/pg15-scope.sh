@@ -7,7 +7,7 @@
 # permission-sensitive SQL. Fails OPEN: without a usable base (manual run, first push, a base it cannot fetch) it runs.
 set -euo pipefail
 
-RELEVANT='^(database/|deploy/postgres/|\.github/|backend/app/(db|auth|kyc|stepup|admin|backup)/|backend/tests/(auth|kyc|stepup|admin|backup)/|backend/requirements)'
+RELEVANT='^(database/|deploy/postgres/|\.github/|backend/app/(db|auth|kyc|stepup|admin|backup)/|backend/tests/(auth|kyc|stepup|admin|backup)/|backend/tests/payments/test_donation_history_guard_db\.py|backend/requirements)'
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 base="${1:-}"
 

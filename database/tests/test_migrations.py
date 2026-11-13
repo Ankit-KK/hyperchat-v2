@@ -1201,3 +1201,60 @@ def test_everything_owned_by_owner_and_public_locked_down():
         """).fetchone()[0]
     assert foreign == 0
     assert public_table_privs == 0
+
+
+def _history_guard() -> tuple:
+    """(trigger present, function present, any API role may execute the function) for migration 0030."""
+    with _owner() as conn:
+        trigger = conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname = 'donations_protect_history_columns' "
+                               "AND tgrelid = 'public.donations'::regclass").fetchone()[0] == 1
+        fn = conn.execute("SELECT to_regprocedure('public.donations_protect_history_columns()')").fetchone()[0]
+        executable = fn is not None and any(
+            conn.execute("SELECT has_function_privilege(%s, 'public.donations_protect_history_columns()', 'EXECUTE')",
+                         (role,)).fetchone()[0]
+            for role in ("hyperchat_app", "hyperchat_worker", "hyperchat_auth", "hyperchat_lifecycle",
+                         "hyperchat_stepup", "hyperchat_readonly"))
+    return trigger, fn is not None, executable
+
+
+def _clean_0030(conn) -> None:
+    conn.execute("DELETE FROM public.donations WHERE order_id LIKE 'migtest30-%%'")
+    conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest30-%%'")
+
+
+def test_0030_donation_history_guard_round_trip_keeps_every_row(monkeypatch):
+    """0030 adds only a trigger: imported HyperEmote history and V2 rows are read, never changed; the downgrade
+    removes exactly the trigger and its function."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0029")
+    try:
+        assert _history_guard() == (False, False, False)
+        with _owner() as conn:
+            _clean_0030(conn)
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
+                               "VALUES ('migtest30-c', 'C', 'active', 'legacy') RETURNING id").fetchone()[0]
+            for order_id, emote, source in (("migtest30-imported", True, "migtest30_donations"),
+                                            ("migtest30-v2", False, None)):
+                conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                             "amount_inr, payment_status, is_hyperemote, legacy_source_table) "
+                             "VALUES (%s, %s, 'D', 5, 'INR', 5, 'success', %s, %s)", (sid, order_id, emote, source))
+            before = conn.execute("SELECT order_id, is_hyperemote, legacy_source_table, updated_at FROM public.donations "
+                                  "WHERE order_id LIKE 'migtest30-%%' ORDER BY order_id").fetchall()
+
+        command.upgrade(cfg, "0030")
+        assert _history_guard() == (True, True, False)
+        with _owner() as conn:  # the owner (migrations, the legacy import) is not an API role: still free
+            assert conn.execute("SELECT order_id, is_hyperemote, legacy_source_table, updated_at FROM public.donations "
+                                "WHERE order_id LIKE 'migtest30-%%' ORDER BY order_id").fetchall() == before
+            conn.execute("UPDATE public.donations SET is_hyperemote = false WHERE order_id = 'migtest30-imported'")
+            conn.execute("UPDATE public.donations SET is_hyperemote = true WHERE order_id = 'migtest30-imported'")
+
+        command.downgrade(cfg, "0029")
+        assert _history_guard() == (False, False, False)
+    finally:
+        with _owner() as conn:
+            _clean_0030(conn)
+        command.upgrade(cfg, "head")
+    assert _history_guard() == (True, True, False)

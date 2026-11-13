@@ -13,6 +13,7 @@ from tests.integration import (
     creator_state,
     csrf_headers,
     db,
+    fixture_db,
     login,
     make_donation,
     make_streamer,
@@ -48,9 +49,10 @@ def _fixtures(sid: str) -> dict:
     """Rows of this creator that the endpoints act on (with internal columns that must never be served)."""
     donation = make_donation(sid, 50, moderation="approved", at=datetime(2026, 10, 1, 12, tzinfo=UTC), name="Fan",
                              message="authtest message")
-    with db() as conn:
+    with fixture_db() as conn:  # legacy_source_table is import history: only the migrator writes it (0030)
         conn.execute("UPDATE public.donations SET provider_order_id = %s, status_token_hash = %s, "
                      "upload_token_hash = %s, legacy_source_table = %s WHERE id = %s", (*PLANTED, donation))
+    with db() as conn:
         moderator = conn.execute("INSERT INTO public.streamers_moderators (streamer_id, mod_name, telegram_user_id) "
                                  "VALUES (%s, 'Fixture mod', '12345') RETURNING id::text", (sid,)).fetchone()[0]
     return {"donation": donation, "moderator": moderator}
