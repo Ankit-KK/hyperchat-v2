@@ -268,14 +268,48 @@ class PaymentRepository:
                     SELECT c.provider_ref, c.kind, c.account, c.match_type, c.donation_id::text AS donation_id,
                            d.order_id, s.streamer_slug, c.phase, c.status, c.amount_paise, c.currency,
                            c.amount_deducted_paise, c.reason_code, c.respond_by, c.events, c.all_consistent,
-                           c.conflicting, c.received_at
+                           c.conflicting, c.received_at,
+                           r.applied_reversed_paise, r.hold AS accounting_hold, r.flags AS accounting_flags,
+                           d.legacy_source_table IS NOT NULL AS imported
                     FROM public.payment_integrity_current c
                     LEFT JOIN public.donations d ON d.id = c.donation_id
                     LEFT JOIN public.streamers s ON s.id = d.streamer_id
+                    LEFT JOIN public.donation_reversals r ON r.donation_id = c.donation_id
                     WHERE %(since)s::timestamptz IS NULL OR c.received_at >= %(since)s::timestamptz
                     ORDER BY c.respond_by NULLS LAST, c.received_at, c.provider_ref
                 """, {"since": since})
                 return await cur.fetchall()
+
+    async def accounting_report(self) -> dict:
+        """PAY-15 stage 5 (D6): the accounting state an operator reviews, read-only and complete (not limited by
+        --since): held donations, F-BOTH review items, imported donations with evidence (D8, report only). Ids, enums
+        and amounts only, never donor names or evidence payloads."""
+        async with self._conn() as conn:
+            await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("""
+                    SELECT r.donation_id::text AS donation_id, d.order_id, s.streamer_slug, r.hold,
+                           r.applied_reversed_paise, r.captured_paise, r.flags, r.evaluated_at
+                    FROM public.donation_reversals r
+                    JOIN public.donations d ON d.id = r.donation_id
+                    JOIN public.streamers s ON s.id = d.streamer_id
+                    WHERE r.hold IS NOT NULL OR 'F-BOTH' = ANY (r.flags)
+                    ORDER BY r.evaluated_at, r.donation_id
+                """)
+                review = await cur.fetchall()
+                await cur.execute("""
+                    SELECT d.id::text AS donation_id, d.order_id, s.streamer_slug, count(*) AS evidence
+                    FROM public.payment_integrity_current c
+                    JOIN public.donations d ON d.id = c.donation_id
+                    JOIN public.streamers s ON s.id = d.streamer_id
+                    WHERE d.legacy_source_table IS NOT NULL
+                    GROUP BY d.id, d.order_id, s.streamer_slug
+                    ORDER BY d.order_id
+                """)
+                imported = await cur.fetchall()
+        return {"held": [r for r in review if r["hold"] is not None],
+                "review_both": [r for r in review if "F-BOTH" in (r["flags"] or [])],
+                "imported_with_evidence": imported}
 
     # ── completion ──────────────────────────────────────────────────────────
     async def apply(self, donation_id: str, outcome: str, payment_id: str | None,

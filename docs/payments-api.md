@@ -212,6 +212,11 @@ So a won chargeback that reopens in pre-arbitration is open again, and a late `c
 
 **Report:** `python -m app.cli payment-integrity-report [--since YYYY-MM-DD]`.
 - Read-only (`READ ONLY` session), no Razorpay call, JSON on stdout.
+- PAY-15 stage 5: each item carries its donation's `accounting` state (`applied_reversed_paise`, `hold`, `flags`;
+  `null` when never evaluated) and `imported`; a held item needs attention. A top-level `accounting` section lists
+  every `held` donation, the `review_both` (F-BOTH) items and `imported_with_evidence` (D8, report only), with
+  `counts`, regardless of `--since`. Exit 1 also when any donation is held. Ids, codes and amounts only: no donor
+  names, no payloads.
 - Exit 0 when nothing needs attention, 1 when something does, 2 on a refused argument.
 - Needing attention means open or lost disputes, refunds, mismatches, conflicts, or a non-`payment` match.
 - No timer.
