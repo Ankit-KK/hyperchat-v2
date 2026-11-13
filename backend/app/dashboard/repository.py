@@ -20,6 +20,7 @@ from psycopg.rows import dict_row
 from app.dashboard.moderation import Step, transition
 from app.dashboard.validation import WRITABLE_SETTINGS
 from app.jobs.queue import enqueue
+from app.payments import figures
 from app.realtime import outbox
 
 # Nullable booleans / mode are served with their column default, as Phase 4 does for the public API.
@@ -157,22 +158,32 @@ class DashboardRepository:
 
     async def donation_stats(self, streamer_id: str, *, day: tuple[datetime, datetime],
                              month: tuple[datetime, datetime]) -> dict:
-        return await self._one("""
-            SELECT COALESCE(sum(amount_inr), 0) AS total_revenue_inr, count(*) AS total_donations,
-                   COALESCE(sum(amount_inr) FILTER (WHERE created_at >= %(day_start)s
-                                                     AND created_at < %(day_end)s), 0) AS today_revenue_inr,
-                   COALESCE(sum(amount_inr) FILTER (WHERE created_at >= %(month_start)s
-                                                     AND created_at < %(month_end)s), 0) AS month_revenue_inr
-            FROM public.donations WHERE streamer_id = %(sid)s AND payment_status = 'success'
+        # PAY-15 stage 4 (S4-D2, S4-D4): revenue is NET of applied reversals; the reversed sums are reported next to
+        # it. Each donation's reversal is rounded down to the paisa before any sum, in the bucket of its created_at.
+        in_day = "x.created_at >= %(day_start)s AND x.created_at < %(day_end)s"
+        in_month = "x.created_at >= %(month_start)s AND x.created_at < %(month_end)s"
+        return await self._one(f"""
+            SELECT COALESCE(sum(x.net), 0) AS total_revenue_inr, count(*) AS total_donations,
+                   COALESCE(sum(x.net) FILTER (WHERE {in_day}), 0) AS today_revenue_inr,
+                   COALESCE(sum(x.net) FILTER (WHERE {in_month}), 0) AS month_revenue_inr,
+                   COALESCE(sum(x.reversed), 0) AS total_reversed_inr,
+                   COALESCE(sum(x.reversed) FILTER (WHERE {in_day}), 0) AS today_reversed_inr,
+                   COALESCE(sum(x.reversed) FILTER (WHERE {in_month}), 0) AS month_reversed_inr
+            FROM (SELECT d.created_at, {figures.REVERSED_INR} AS reversed, {figures.NET_INR} AS net
+                  FROM public.donations d {figures.REVERSAL_JOIN}
+                  WHERE d.streamer_id = %(sid)s AND d.payment_status = 'success') x
         """, {"sid": streamer_id, "day_start": day[0], "day_end": day[1], "month_start": month[0],
               "month_end": month[1]})
 
     async def export_rows(self, streamer_id: str, *, start: datetime, end: datetime, limit: int) -> list[dict]:
-        """Paid donations with start <= created_at < end, newest first (no order ids: D6)."""
-        return await self._all("""
-            SELECT created_at, donor_name, amount, currency, amount_inr FROM public.donations
-            WHERE streamer_id = %s AND payment_status = 'success' AND created_at >= %s AND created_at < %s
-            ORDER BY created_at DESC, id DESC LIMIT %s
+        """Paid donations with start <= created_at < end, newest first (no order ids: D6). amount_inr stays gross;
+        reversed_inr and net_inr (PAY-15 stage 4, S4-D3) come from app.payments.figures."""
+        return await self._all(f"""
+            SELECT d.created_at, d.donor_name, d.amount, d.currency, d.amount_inr,
+                   {figures.REVERSED_INR} AS reversed_inr, {figures.NET_INR} AS net_inr
+            FROM public.donations d {figures.REVERSAL_JOIN}
+            WHERE d.streamer_id = %s AND d.payment_status = 'success' AND d.created_at >= %s AND d.created_at < %s
+            ORDER BY d.created_at DESC, d.id DESC LIMIT %s
         """, (streamer_id, start, end, limit))
 
     # ── G3 moderation ──────────────────────────────────────────────────────

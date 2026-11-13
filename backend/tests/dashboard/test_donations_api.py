@@ -107,7 +107,8 @@ def test_stats_bucket_paid_donations_by_ist_day_and_month(app):
     body = r.json()
     assert datetime.fromisoformat(body.pop("as_of")) == NOW
     assert body == {"total_revenue_inr": 31.0, "total_donations": 5, "today_revenue_inr": 3.0,
-                    "month_revenue_inr": 15.0, "timezone": "Asia/Kolkata"}
+                    "month_revenue_inr": 15.0, "total_reversed_inr": 0.0, "today_reversed_inr": 0.0,
+                    "month_reversed_inr": 0.0, "timezone": "Asia/Kolkata"}  # no reversal: net = gross (stage 4)
     app.app_state.dashboard.clock = lambda: NOW - timedelta(microseconds=1)  # 5 Oct 23:59:59.999999 IST
     body = app.get(f"{S}/authtest-stats/donations/stats").json()
     assert (body["today_revenue_inr"], body["month_revenue_inr"]) == (4.0, 15.0)
@@ -142,9 +143,9 @@ def test_export_whole_ist_days_columns_and_formula_safety(app):
     assert r.headers["content-type"] == "text/csv; charset=utf-8"
     assert r.headers["content-disposition"] == 'attachment; filename="authtest-csv-donations-2026-10-01-2026-10-31.csv"'
     assert list(csv.reader(io.StringIO(r.text))) == [   # newest first; any moderation status; IST timestamps
-        ["created_at", "donor_name", "amount", "currency", "amount_inr"],
-        ["2026-10-31T23:59:59+05:30", "'+Last", "0.05", "USD", "3.00"],
-        ["2026-10-01T00:00:00+05:30", "'=HYPERLINK(\"http://x\")", "2", "INR", "2.00"],
+        ["created_at", "donor_name", "amount", "currency", "amount_inr", "reversed_inr", "net_inr"],
+        ["2026-10-31T23:59:59+05:30", "'+Last", "0.05", "USD", "3.00", "0.00", "3.00"],
+        ["2026-10-01T00:00:00+05:30", "'=HYPERLINK(\"http://x\")", "2", "INR", "2.00", "0.00", "2.00"],
     ]
     with db() as conn:
         order_ids = [o for (o,) in conn.execute("SELECT order_id FROM public.donations WHERE streamer_id = %s", (sid,))]

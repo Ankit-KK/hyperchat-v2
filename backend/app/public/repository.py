@@ -11,6 +11,7 @@ from datetime import datetime
 
 from psycopg.rows import dict_row
 
+from app.payments import figures
 from app.soundboard import terms
 
 # soundboard_enabled means the Custom Soundboard is USABLE (eligible AND current terms accepted, D3), not the raw flag.
@@ -70,10 +71,8 @@ class PublicRepository:
         return platform, own
 
     async def goal_progress_inr(self, streamer_id: str, since: datetime) -> float:
-        rows = await self._all("SELECT COALESCE(SUM(amount_inr), 0) AS total FROM public.donations "
-                               "WHERE streamer_id = %s AND payment_status = 'success' "
-                               "AND moderation_status IN ('approved', 'auto_approved') AND created_at >= %s",
-                               (streamer_id, since))
+        """Net of applied refunds / lost disputes (PAY-15 stage 4: app.payments.figures)."""
+        rows = await self._all(figures.GOAL_PROGRESS, (streamer_id, since))
         return float(rows[0]["total"])
 
     async def platform_metrics(self) -> dict:

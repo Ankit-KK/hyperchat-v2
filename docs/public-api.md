@@ -67,7 +67,7 @@ There is no per-creator code or route.
 | Latest-donations feed | with OBS token | not in Phase 4 (Phase 10, OBS endpoints) (D2) |
 | Inactive creators | pricing/config/goal served for any existing slug | `pending`/`rejected` give the same 404 as unknown slugs (D3) |
 | Currency | unknown currency priced as INR | only the 8 legacy currencies; others 400 (D4) |
-| Goal progress | re-converted each donation with the fixed rate table | sums the stored `donations.amount_inr` (D4) |
+| Goal progress | re-converted each donation with the fixed rate table | sums the stored `donations.amount_inr` (D4), net of applied refunds / lost disputes (PAY-15 stage 4: Σ `net_inr` of `app/payments/figures.py`; paid and approved donations since the goal was activated) |
 | Field names | camelCase (`minText`, `topDonator`, `currentProgress`) | snake_case (D5) |
 | Overlay config | included the creator `id` | no ids (privacy) |
 | Request format | `POST` with JSON body (`streamer_slug`) | `GET` with the slug in the path |

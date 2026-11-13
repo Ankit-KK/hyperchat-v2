@@ -269,14 +269,17 @@ def test_formula_cells_are_neutralised(text, expected):
 
 def test_csv_encoding_columns_values_and_quoting():
     rows = [{"created_at": _utc(2026, 10, 5, 18, 30, 15, 123456), "donor_name": 'Quote "me", =now',
-             "amount": Decimal("10.50"), "currency": "USD", "amount_inr": Decimal("934.50"), "order_id": "secret"},
+             "amount": Decimal("10.50"), "currency": "USD", "amount_inr": Decimal("934.50"),
+             "reversed_inr": Decimal("0.00"), "net_inr": Decimal("934.50"), "order_id": "secret"},
             {"created_at": _utc(2026, 10, 5, 18, 29, 59), "donor_name": "=cmd|' /C calc'!A0", "amount": Decimal("1E+2"),
-             "currency": "INR", "amount_inr": Decimal("100"), "order_id": "secret"}]
+             "currency": "INR", "amount_inr": Decimal("100"), "reversed_inr": Decimal("25.00"),
+             "net_inr": Decimal("75.00"), "order_id": "secret"}]
     text = "".join(csv_export.encode(rows))
     parsed = list(csv.reader(io.StringIO(text)))
-    assert parsed == [["created_at", "donor_name", "amount", "currency", "amount_inr"],
-                      ["2026-10-06T00:00:15+05:30", 'Quote "me", =now', "10.50", "USD", "934.50"],
-                      ["2026-10-05T23:59:59+05:30", "'=cmd|' /C calc'!A0", "100", "INR", "100"]]
+    # PAY-15 stage 4: the five original columns first and unchanged (amount_inr gross), then reversed_inr, net_inr
+    assert parsed == [["created_at", "donor_name", "amount", "currency", "amount_inr", "reversed_inr", "net_inr"],
+                      ["2026-10-06T00:00:15+05:30", 'Quote "me", =now', "10.50", "USD", "934.50", "0.00", "934.50"],
+                      ["2026-10-05T23:59:59+05:30", "'=cmd|' /C calc'!A0", "100", "INR", "100", "25.00", "75.00"]]
     assert "secret" not in text and text.endswith("\r\n")
 
 
@@ -288,10 +291,10 @@ def test_export_file_name_is_header_safe():
 
 def test_csv_streams_in_chunks():
     row = {"created_at": _utc(2026, 1, 1), "donor_name": "D", "amount": Decimal(1), "currency": "INR",
-           "amount_inr": Decimal(1)}
+           "amount_inr": Decimal(1), "reversed_inr": Decimal(0), "net_inr": Decimal(1)}
     chunks = list(csv_export.encode([row] * 1201))
     assert len(chunks) == 3 and sum(c.count("\r\n") for c in chunks) == 1202
-    assert list(csv_export.encode([])) == ["created_at,donor_name,amount,currency,amount_inr\r\n"]
+    assert list(csv_export.encode([])) == ["created_at,donor_name,amount,currency,amount_inr,reversed_inr,net_inr\r\n"]
 
 
 # ── G3 moderation state machine (approved plan section 9) ───────────────────────

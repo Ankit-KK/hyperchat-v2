@@ -100,15 +100,19 @@ patch writes nothing (`updated_at` is untouched). Changes are logged as
   Keyset pagination on `(created_at DESC, id DESC)`: `limit` 1–100 (default 20); `next_cursor` is
   opaque and only valid as returned (a tampered cursor is `400 {"error": "Invalid cursor"}`).
 - **D-R3 stats:** `total_revenue_inr, total_donations, today_revenue_inr, month_revenue_inr,
-  timezone ("Asia/Kolkata"), as_of` over **every paid donation, any moderation status** (legacy
-  semantics), summed from the stored `amount_inr`. Today/month are IST calendar buckets. The
+  total_reversed_inr, today_reversed_inr, month_reversed_inr, timezone ("Asia/Kolkata"), as_of` over **every
+  paid donation, any moderation status** (legacy semantics). The `*_revenue_inr` fields are **net**
+  (Σ `net_inr`), the `*_reversed_inr` fields Σ `reversed_inr`: revenue + reversed = gross. `total_donations` is a
+  count and never changes for a reversal. A reversal reduces the bucket of the donation's own `created_at`.
+  **Gross, reversed, net (PAY-15 stage 4, `app/payments/figures.py`):** per donation, `reversed_inr = floor(amount_inr_paise × min(applied, captured) / captured) / 100` from the applied refund / lost-dispute reversal of migration 0032 (0 when none: always while `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED` is off, and for imported donations), rounded down to the paisa before any sum; `net_inr = amount_inr − reversed_inr`. `amount_inr` (gross) is the stored checkout-time value, never re-converted. Today/month are IST calendar buckets. The
   boundaries are computed in Python with the fixed +05:30 offset (Asia/Kolkata has had no DST since
   1945; the legacy dashboard did the same) and passed to SQL: an IST day starts at 18:30:00 UTC on
   the previous day.
 - **D-R4 export:** `from` and `to` are `YYYY-MM-DD` IST dates, both included
   (`[from 00:00 IST, to + 1 day 00:00 IST)`), at most 366 days. Paid donations, any moderation
   status, newest first. Columns: `created_at` (ISO 8601 with `+05:30`), `donor_name`, `amount`,
-  `currency`, `amount_inr` — no order ids (D6). More than 10,000 rows is
+  `currency`, `amount_inr` (gross), then `reversed_inr` and `net_inr` (PAY-15 stage 4, appended so the first five
+  columns are unchanged; rows are never removed for a reversal) — no order ids (D6). More than 10,000 rows is
   `400 {"error": "More than 10000 donations in this range: choose a shorter range"}` — the file is
   never truncated (A4). Text cells starting with `=`, `+`, `-`, `@`, TAB or CR get a leading `'`
   (formula injection). Rows are fetched first (the database connection is released) and then

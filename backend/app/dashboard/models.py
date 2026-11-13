@@ -130,10 +130,13 @@ class DonationPage(_Model):  # D-R2
 
 
 class DonationStats(_Model):  # D-R3: every paid donation, any moderation status
-    total_revenue_inr: float
-    total_donations: int
+    total_revenue_inr: float   # PAY-15 stage 4: NET of applied refunds / lost disputes (app.payments.figures)
+    total_donations: int       # a count: reversals never change it (D1)
     today_revenue_inr: float
     month_revenue_inr: float
+    total_reversed_inr: float  # what was reversed from those donations (revenue + reversed = gross)
+    today_reversed_inr: float
+    month_reversed_inr: float
     timezone: str
     as_of: datetime
 

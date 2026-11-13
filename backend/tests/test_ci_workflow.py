@@ -51,7 +51,8 @@ def test_the_postgres15_job_excludes_only_the_postgres17_importer():
     for suite in ("tests/auth", "tests/kyc", "tests/stepup", "tests/admin", "tests/backup",
                   "tests/payments/test_donation_history_guard_db.py",  # 0030: the per-role guard on DEV's PG 15
                   "tests/payments/test_donation_credit_db.py", "tests/dashboard/test_moderation_api.py",  # 0031
-                  "tests/payments/test_accounting_db.py"):  # 0032 reversal accounting
+                  "tests/payments/test_accounting_db.py",  # 0032 reversal accounting
+                  "tests/payments/test_figures_db.py"):  # PAY-15 stage 4 live figures
         assert suite in runs
     gated = [s for s in steps if s.get("id") != "scope" and "actions/checkout" not in str(s.get("uses"))]
     assert all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in gated)
@@ -93,6 +94,8 @@ def _scope(repo_dir: Path, base: str) -> str:
     ("backend/tests/payments/test_donation_history_guard_db.py", "run=true"),
     ("backend/tests/payments/test_donation_credit_db.py", "run=true"),
     ("backend/tests/payments/test_accounting_db.py", "run=true"),
+    ("backend/tests/payments/test_figures_db.py", "run=true"),
+    ("backend/app/payments/figures.py", "run=true"),
     ("backend/tests/payments/test_accounting_units.py", "run=false"),
     ("backend/tests/dashboard/test_moderation_api.py", "run=true"),
     ("backend/tests/dashboard/test_x.py", "run=false"),

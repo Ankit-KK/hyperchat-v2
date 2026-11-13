@@ -238,6 +238,12 @@ With it off, evidence changes no money (as above). The code path it will enable:
 - Known PAY-13 semantics: a loss and a win in the **same phase** are `conflicting` in the current-state view, so the
   applied reversal stays frozen (held) until resolved; a win at a later phase restores it exactly.
 
+**Live figures (PAY-15 stage 4).** Goal progress (public and realtime), dashboard revenue and the CSV export read the
+applied reversal through `app/payments/figures.py`: per donation `reversed_inr` = the pro-rata share of the stored
+`amount_inr`, rounded down to the paisa (exact integer division), and `net_inr = amount_inr − reversed_inr`; sums are
+of per-donation values. The leaderboard reads donor totals, which the credit writer already reduces. With no
+reversal (the switch off), every figure equals the gross figure exactly.
+
 ## Configuration (`/etc/hyperchat/api.env`, names only; see `deploy/api.env.example`)
 `HYPERCHAT_RAZORPAY_PRIMARY_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`. `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED` stays unset
 or `false` (section 7: the API refuses `true` at this stage).

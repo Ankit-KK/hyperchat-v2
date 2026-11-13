@@ -62,7 +62,7 @@ responses; moderator identities.
   moderation API.
 - `goal-progress` (public): `{event_id, v, active, name, target_amount_inr, progress_inr, brand_color,
   goal_overlay_id}`, exactly the public goal endpoint (every field but `active` is `null` while no goal is
-  active). Only for `active` creators: nothing is published on the public channel of a `pending` or `rejected`
+  active; `progress_inr` is net of applied reversals, the same query: `app/payments/figures.py`). Only for `active` creators: nothing is published on the public channel of a `pending` or `rejected`
   creator.
 - `leaderboard-updated`: `{event_id, v, enabled, top_donor: {name, total_amount} | null,
   latest: {name, amount, currency, created_at} | null}` (approved donations only; both null while the widget is
