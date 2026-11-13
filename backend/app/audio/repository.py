@@ -45,7 +45,7 @@ class AudioRepository:
         return await self._one("""
             SELECT d.id::text AS id, d.streamer_id::text AS streamer_id, d.donor_name, d.amount,
                    d.currency::text AS currency, d.amount_inr, d.message, d.payment_status, d.moderation_status,
-                   d.tts_audio_url, d.voice_message_url, d.hypersound_url, d.media_url, d.media_type, d.is_hyperemote,
+                   d.tts_audio_url, d.voice_message_url, d.hypersound_url, d.media_url, d.media_type,
                    s.streamer_slug, s.streamer_name, s.tts_enabled, s.min_tts_amount_inr, s.tts_voice_id,
                    s.el_voice_id, s.tts_language_boost,
                    EXISTS (SELECT 1 FROM public.donation_transcripts t WHERE t.donation_id = d.id) AS transcribed

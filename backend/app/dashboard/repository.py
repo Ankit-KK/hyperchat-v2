@@ -30,7 +30,6 @@ _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
     COALESCE(discord_moderation_enabled, false) AS discord_moderation_enabled,
     COALESCE(media_moderation_enabled, true) AS media_moderation_enabled,
     COALESCE(tts_enabled, true) AS tts_enabled, tts_language_boost, el_voice_id,
-    COALESCE(hyperemotes_enabled, true) AS hyperemotes_enabled, hyperemotes_min_amount,
     COALESCE(media_upload_enabled, false) AS media_upload_enabled, media_min_amount,
     brand_color, alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id,
     overlay_adjust_mode, leaderboard_bg_enabled,
@@ -41,7 +40,7 @@ _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
 # exactly as stored (e.g. numeric 1.00 equals 1.0).
 SETTINGS_SQL_TYPES = {
     "moderation_mode": "text", "telegram_moderation_enabled": "boolean", "discord_moderation_enabled": "boolean",
-    "tts_enabled": "boolean", "hyperemotes_enabled": "boolean", "alert_box_scale": "numeric",
+    "tts_enabled": "boolean", "alert_box_scale": "numeric",
     "goal_is_active": "boolean", "goal_name": "text", "goal_target_amount": "numeric",
     "media_upload_enabled": "boolean", "media_moderation_enabled": "boolean",
     "tts_language_boost": "text", "alert_overlay_id": "smallint", "leaderboard_overlay_id": "smallint",
@@ -51,7 +50,7 @@ SETTINGS_SQL_TYPES = {
 
 
 _DONATION_COLS = """d.id::text AS donation_id, d.donor_name, d.amount, d.currency, d.amount_inr, d.message,
-    d.message_visible, d.is_hyperemote, d.voice_message_url, d.tts_audio_url, d.hypersound_url, d.media_url,
+    d.message_visible, d.voice_message_url, d.tts_audio_url, d.hypersound_url, d.media_url,
     d.media_type, d.moderation_status, d.created_at"""
 _QUEUE_COLS = _DONATION_COLS + """, d.approved_at, d.approved_by_label,
     EXISTS (SELECT 1 FROM public.banned_donors b WHERE b.streamer_id = d.streamer_id AND b.is_active = true

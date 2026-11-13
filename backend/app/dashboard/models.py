@@ -38,8 +38,6 @@ class DashboardSettings(_Model):  # D-R1
     tts_enabled: bool
     tts_language_boost: str | None
     el_voice_id: str | None
-    hyperemotes_enabled: bool
-    hyperemotes_min_amount: float | None  # read-only (A1)
     media_upload_enabled: bool
     media_min_amount: float | None  # read-only (A1)
     brand_color: str | None
@@ -68,7 +66,6 @@ class SettingsPatch(_Model):  # D-M1 body
     telegram_moderation_enabled: StrictBool | None = None
     discord_moderation_enabled: StrictBool | None = None
     tts_enabled: StrictBool | None = None
-    hyperemotes_enabled: StrictBool | None = None
     alert_box_scale: Annotated[float, Field(strict=True, allow_inf_nan=False),
                                AfterValidator(v.alert_box_scale)] | None = None
     goal_is_active: StrictBool | None = None
@@ -117,7 +114,6 @@ class DonationItem(_Model):  # D-R2 row (hidden messages included: the creator m
     amount_inr: float
     message: str | None
     message_visible: bool
-    is_hyperemote: bool
     voice_message_url: str | None
     tts_audio_url: str | None
     hypersound_url: str | None

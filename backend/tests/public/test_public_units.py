@@ -109,7 +109,7 @@ def test_soundboard_merge_rules():
 
 EXPECTED_FIELDS = {
     models.PublicStreamer: {"slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled",
-                            "hyperemotes_enabled", "media_upload_enabled", "media_max_file_size_mb",
+                            "media_upload_enabled", "media_max_file_size_mb",
                             "soundboard_enabled"},
     models.Pricing: {"currency", "min_text", "min_tts", "min_voice", "min_hypersound", "min_media", "tts_enabled",
                      "message_char_tiers", "voice_duration_tiers"},

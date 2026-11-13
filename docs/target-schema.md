@@ -55,5 +55,5 @@ Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):
 
 ## Deferred to the phases that use them
 Business functions (`claim_next_audio`, donor totals, soundboard RPCs, rate-limit and metrics functions) and
-the HyperEmote auto-approve rules are rewritten against `donations` with their endpoints. Legacy custom-auth
+the HyperEmote auto-approve rules are not ported (HyperEmotes are discontinued (owner decision D16, 2026-11-13); `donations.is_hyperemote` stays as imported history, the unused `streamers.hyperemotes_*` columns until a later forward-only migration). Legacy custom-auth
 and Supabase-only functions, RLS policies, publications and roles are not recreated.

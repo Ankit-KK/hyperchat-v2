@@ -231,6 +231,40 @@ def test_captured_webhook_completes_once_and_is_idempotent(client):
         ("authtest-wh-2", "payment.captured", "primary", "already_paid", out["razorpay_order_id"], payment.id, True)]
 
 
+# ── HyperEmotes are discontinued (owner decision 2026-11-13) ──────────────────
+
+def _hyperemote(order_id: str) -> bool:
+    with db() as conn:
+        return conn.execute("SELECT is_hyperemote FROM public.donations WHERE order_id = %s", (order_id,)).fetchone()[0]
+
+
+def test_checkout_never_creates_a_hyperemote(client):
+    make_streamer("authtest-pay-noemote")
+    out = checkout(client, "authtest-pay-noemote", message="an emote-only message")
+    assert _hyperemote(out["order_id"]) is False  # the column default: no V2 path writes it
+    r = client.post(f"{P}/authtest-pay-noemote/donations", json={"name": "Ravi", "amount": 100, "is_hyperemote": True},
+                    headers=ORIGIN)
+    assert r.status_code == 422 and client.fake.count("create_order") == 1  # refused before Razorpay
+
+
+def test_an_imported_hyperemote_completes_under_the_ordinary_moderation_rule(client):
+    """An imported row may still carry is_hyperemote = true (history). A late capture of it is no longer
+    auto-approved: a creator in manual moderation gets it in the queue, and no donor total is credited."""
+    sid = make_streamer("authtest-pay-oldemote")
+    update_streamer(sid, moderation_mode="manual")
+    out = checkout(client, "authtest-pay-oldemote")
+    with fixture_db() as conn:  # make it look imported (the ETL writes legacy_source_table and keeps the flag)
+        conn.execute("UPDATE public.donations SET is_hyperemote = true, legacy_source_table = 'authtest_donations' "
+                     "WHERE order_id = %s", (out["order_id"],))
+    payment = client.fake.captured(out["razorpay_order_id"], 10000)
+    r = webhook(client, "payment.captured", out, payment.id, event_id="authtest-wh-oldemote")
+    assert (r.status_code, r.json()) == (200, {"status": "completed"})
+    row = donation(out["order_id"])
+    assert (row["payment_status"], row["moderation_status"], row["approved"]) == ("success", "pending", False)
+    assert totals(sid) == []
+    assert _hyperemote(out["order_id"]) is True  # history is kept as it was
+
+
 def test_webhook_still_completes_after_the_order_lookup_row_was_cleaned_up(client):
     """maintenance deletes order_lookup rows after 30 days (legacy cleanup-order-lookup); a late webhook for such an
     order still finds its donation through donations.provider_order_id."""

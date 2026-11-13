@@ -11,7 +11,7 @@ from tests.integration import db, make_donation, make_streamer, owned_creator, r
 pytestmark = requires_db
 S = "/api/v1/dashboard/streamers"
 ITEM_FIELDS = {"donation_id", "donor_name", "amount", "currency", "amount_inr", "message", "message_visible",
-               "is_hyperemote", "voice_message_url", "tts_audio_url", "hypersound_url", "media_url", "media_type",
+               "voice_message_url", "tts_audio_url", "hypersound_url", "media_url", "media_type",
                "moderation_status", "created_at"}
 
 
@@ -46,12 +46,13 @@ def test_list_shows_paid_approved_donations_newest_first(app):
     first, second = body["donations"]
     assert first["message"] == "hidden one" and first["message_visible"] is False  # hidden messages shown (D8)
     assert second == {"donation_id": auto, "donor_name": "Auto", "amount": 100.0, "currency": "INR",
-                      "amount_inr": 100.0, "message": "hi", "message_visible": True, "is_hyperemote": True,
+                      "amount_inr": 100.0, "message": "hi", "message_visible": True,
                       "voice_message_url": None, "tts_audio_url": None, "hypersound_url": None,
                       "media_url": "https://cdn.example.test/m.gif", "media_type": "gif",
                       "moderation_status": "auto_approved", "created_at": second["created_at"]}
     assert datetime.fromisoformat(second["created_at"]) == t
     assert "authtest-rzp" not in r.text and "authtest-h" not in r.text and "order" not in r.text
+    assert "hyperemote" not in r.text.lower()  # the imported row's flag is history only (discontinued 2026-11-13)
 
 
 def test_pagination_walks_every_row_once_with_equal_timestamps(app):

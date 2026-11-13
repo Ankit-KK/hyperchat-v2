@@ -99,7 +99,7 @@ class PublicService:
         return PublicStreamer(
             slug=s["streamer_slug"], name=s["streamer_name"], brand_color=s["brand_color"],
             brand_logo_url=s["brand_logo_url"], background_url=s["background_url"], tts_enabled=s["tts_enabled"],
-            hyperemotes_enabled=s["hyperemotes_enabled"], media_upload_enabled=s["media_upload_enabled"],
+            media_upload_enabled=s["media_upload_enabled"],
             media_max_file_size_mb=s["media_max_file_size_mb"], soundboard_enabled=s["soundboard_enabled"])
 
     async def pricing(self, slug: str, currency: str | None) -> Pricing:

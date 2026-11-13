@@ -185,7 +185,7 @@ def _creator(slug: str) -> dict | None:
     with db() as conn:
         cur = conn.execute("""
             SELECT streamer_name, user_id, status, moderation_mode, tts_enabled, telegram_moderation_enabled,
-                   discord_moderation_enabled, leaderboard_widget_enabled, hyperemotes_enabled, media_upload_enabled,
+                   discord_moderation_enabled, leaderboard_widget_enabled, media_upload_enabled,
                    media_moderation_enabled, min_text_amount_inr::int, min_tts_amount_inr::int,
                    min_voice_amount_inr::int, min_hypersound_amount_inr::int, media_min_amount::int,
                    media_max_file_size_mb::int, message_char_tiers, goal_is_active, custom_page_path, razorpay_account,
@@ -215,7 +215,7 @@ def test_admin_onboards_a_creator_with_the_legacy_launch_defaults(app):
     assert _creator("authtest-new_one") == {
         "streamer_name": "New One", "user_id": None, "status": "pending", "moderation_mode": "auto_approve",
         "tts_enabled": True, "telegram_moderation_enabled": False, "discord_moderation_enabled": False,
-        "leaderboard_widget_enabled": True, "hyperemotes_enabled": True, "media_upload_enabled": True,
+        "leaderboard_widget_enabled": True, "media_upload_enabled": True,
         "media_moderation_enabled": False, "min_text_amount_inr": 40, "min_tts_amount_inr": 40,
         "min_voice_amount_inr": 150, "min_hypersound_amount_inr": 30, "media_min_amount": 100,
         "media_max_file_size_mb": 10,

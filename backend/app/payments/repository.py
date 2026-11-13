@@ -90,11 +90,11 @@ class PaymentRepository:
             await cur.execute("""
                 INSERT INTO public.donations (streamer_id, order_id, payment_provider, provider_order_id,
                     payment_account, donor_name, amount, currency, amount_inr, message, payment_status,
-                    moderation_status, is_hyperemote, voice_message_url, hypersound_url, media_url, media_type,
+                    moderation_status, voice_message_url, hypersound_url, media_url, media_type,
                     status_token_hash)
                 VALUES (%(streamer_id)s, %(order_id)s, 'razorpay', %(provider_order_id)s, %(payment_account)s,
                     %(donor_name)s, %(amount)s, %(currency)s, %(amount_inr)s, %(message)s, 'pending', 'pending',
-                    false, %(voice_message_url)s, %(hypersound_url)s, %(media_url)s, %(media_type)s,
+                    %(voice_message_url)s, %(hypersound_url)s, %(media_url)s, %(media_type)s,
                     %(status_token_hash)s)
                 RETURNING id::text AS id
             """, row)
@@ -240,7 +240,7 @@ class PaymentRepository:
             async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("""
                     SELECT d.streamer_id::text AS streamer_id, d.donor_name, d.amount_inr, d.payment_status,
-                           d.provider_payment_id, d.is_hyperemote, d.voice_message_url IS NOT NULL AS has_voice,
+                           d.provider_payment_id, d.voice_message_url IS NOT NULL AS has_voice,
                            d.hypersound_url IS NOT NULL AS has_hypersound, d.media_url IS NOT NULL AS has_media,
                            s.moderation_mode, s.media_moderation_enabled, s.streamer_slug, d.message
                     FROM public.donations d JOIN public.streamers s ON s.id = d.streamer_id
@@ -275,7 +275,7 @@ class PaymentRepository:
         if vaani:
             return await self._vaani(cur, donation_id, row, payment_id)
         auto = rules.auto_approves(
-            is_hyperemote=row["is_hyperemote"], has_hypersound=row["has_hypersound"], has_voice=row["has_voice"],
+            has_hypersound=row["has_hypersound"], has_voice=row["has_voice"],
             has_media=row["has_media"], moderation_mode=row["moderation_mode"],
             media_moderation_enabled=row["media_moderation_enabled"])
         await cur.execute("""

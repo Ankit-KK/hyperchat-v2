@@ -26,7 +26,7 @@ from tests.integration import (
 pytestmark = requires_db
 P = "/api/v1/public/streamers"
 NOT_FOUND = {"error": "Streamer not found"}
-E1_FIELDS = {"slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled", "hyperemotes_enabled",
+E1_FIELDS = {"slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled",
              "media_upload_enabled", "media_max_file_size_mb", "soundboard_enabled"}
 GOAL_FIELDS = {"active", "name", "target_amount_inr", "progress_inr", "brand_color", "goal_overlay_id"}
 INACTIVE_GOAL = {"active": False, "name": None, "target_amount_inr": None, "progress_inr": None, "brand_color": None, "goal_overlay_id": None}
@@ -77,7 +77,7 @@ def test_profile_exact_fields_values_and_cache(app):
     assert set(body) == E1_FIELDS and "leaderboard_widget_enabled" not in body  # OBS-only (owner decision)
     assert body == {"slug": "authtest-prof", "name": "Prof Creator", "brand_color": "#112233", "brand_logo_url": None,
                     "background_url": "https://cdn.example.test/bg.png", "tts_enabled": True,
-                    "hyperemotes_enabled": True, "media_upload_enabled": False, "media_max_file_size_mb": 25.0,
+                    "media_upload_enabled": False, "media_max_file_size_mb": 25.0,
                     "soundboard_enabled": True}
     assert app.get(f"{P}/AUTHTEST-PROF").json()["slug"] == "authtest-prof"  # slugs are case-insensitive
 

@@ -35,7 +35,7 @@ def donation(**kw) -> dict:
     row = dict(id=DID, streamer_id=SID, donor_name="Ravi", amount=Decimal("100.00"), currency="INR",
                amount_inr=Decimal("100.00"), message=SECRET_MESSAGE, payment_status="success",
                moderation_status="auto_approved", tts_audio_url=None, voice_message_url=None, hypersound_url=None,
-               media_url=None, media_type=None, is_hyperemote=False, streamer_slug="creator-a",
+               media_url=None, media_type=None, streamer_slug="creator-a",
                streamer_name="Creator A", tts_enabled=True, min_tts_amount_inr=None,
                tts_voice_id="moss_audio_creator", el_voice_id=None, tts_language_boost="Hindi", transcribed=False)
     row.update(kw)

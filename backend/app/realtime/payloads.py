@@ -6,8 +6,8 @@ ids, emails, secrets, provider responses, moderator identities.
 
   new-donation / donation-updated (private dashboard)
       {event_id, v, action?, previous_status?, donation{id, name, amount, currency, message, message_visible,
-       moderation_status, is_hyperemote, voice_message_url, tts_audio_url, hypersound_url, media_url,
-       media_type, created_at}}       message is null while hidden (message_visible = false)
+       moderation_status, voice_message_url, tts_audio_url, hypersound_url, media_url, media_type,
+       created_at}}       message is null while hidden (message_visible = false)
   goal-progress (PUBLIC {slug}-goal)  {event_id, v, active, name, target_amount_inr, progress_inr, brand_color,
                                        goal_overlay_id}: exactly GET /api/v1/public/streamers/{slug}/goal (all
                                       null while no goal is active); active creators only
@@ -35,8 +35,7 @@ VERSION = 1
 SIZE_LIMIT = 9_000
 APPROVED = ("approved", "auto_approved")
 _DONATION_FIELDS = ("id", "name", "amount", "currency", "message", "message_visible", "moderation_status",
-                    "is_hyperemote", "voice_message_url", "tts_audio_url", "hypersound_url", "media_url", "media_type",
-                    "created_at")
+                    "voice_message_url", "tts_audio_url", "hypersound_url", "media_url", "media_type", "created_at")
 
 
 @dataclass(frozen=True)
@@ -73,7 +72,7 @@ def now_playing(d: dict, kind: str, audio_url: str | None) -> dict:
     """The donation as the alerts overlay shows it while its audio plays (claim response and audio-now-playing).
     A hidden message is null."""
     return {"id": d["id"], "name": d["name"], "amount": _number(d["amount"]), "currency": d["currency"],
-            "message": d["message"] if d["message_visible"] else None, "is_hyperemote": bool(d["is_hyperemote"]),
+            "message": d["message"] if d["message_visible"] else None,
             "kind": kind, "audio_url": audio_url, "voice_message_url": d["voice_message_url"],
             "hypersound_url": d["hypersound_url"], "media_url": d["media_url"], "media_type": d["media_type"],
             "created_at": _time(d["created_at"])}
@@ -107,7 +106,7 @@ class RealtimeRepository:
     async def donation(self, donation_id: str, streamer_id: str) -> dict | None:
         return await self._one("""
             SELECT id::text AS id, donor_name AS name, amount, currency::text AS currency, message, message_visible,
-                   moderation_status, payment_status, is_hyperemote, voice_message_url, tts_audio_url, hypersound_url,
+                   moderation_status, payment_status, voice_message_url, tts_audio_url, hypersound_url,
                    media_url, media_type, created_at
             FROM public.donations WHERE id = %s AND streamer_id = %s
         """, (donation_id, streamer_id))
