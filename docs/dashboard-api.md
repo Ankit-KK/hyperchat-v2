@@ -150,8 +150,11 @@ Each action is **one transaction**:
 2. it must be paid, otherwise `409 {"error": "Donation is not paid"}` and nothing is written;
 3. the pure `transition()` decides (`backend/app/dashboard/moderation.py`); for `ban_donor` the
    donor's existing ban is checked under a per-creator, per-name advisory lock;
-4. update the donation; 5. credit (upsert) or debit (floored at 0) `streamer_donator_totals` by
-   `amount_inr`, keyed by `(streamer_id, lower(donor_name))`; 6. insert the ban;
+4. update the donation; 5. in that same UPDATE the database credit writer (migration 0031, PAY-15) moves
+   `streamer_donator_totals`, keyed by `(streamer_id, lower(donor_name))`, by the donation's credit change
+   (its ceiling `COALESCE(creditable_inr, amount_inr)` when it becomes approved, what it had contributed when it
+   stops); a debit larger than the total is never floored: the action fails (SQLSTATE `HC002`) and nothing is
+   written. Application code never writes totals; 6. insert the ban;
 7. insert `moderation_actions` (`action_source = 'dashboard'`, `moderator_name` = the label,
    `notes` = ban reason, `actor_user_id` = the signed-in user, migration 0009); 8. commit.
 

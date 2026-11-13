@@ -37,7 +37,7 @@ class Step:
     new_status: str
     message_visible: bool
     approve: bool = False  # stamp approved_at, audio_scheduled_at and approved_by_label
-    totals_delta: int = 0  # +1 credit / -1 debit of the donor's total (amount_inr and count)
+    totals_delta: int = 0  # +1 credit / -1 debit of the donor's total: the 0031 DB writer applies it; here it emits
     ban: bool = False      # add an active ban for the donor name
 
 

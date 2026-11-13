@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import psycopg
 import pytest
 
 from app.cli import connection_factory
@@ -49,9 +50,13 @@ def _totals(sid: str, name: str = "Fan") -> tuple | None:
 
 
 def _seed_totals(sid: str, name: str, total, count: int) -> None:
-    with db() as conn:
-        conn.execute("INSERT INTO public.streamer_donator_totals (streamer_id, donator_name, donator_name_lower, "
-                     "total_amount, donation_count) VALUES (%s, %s, lower(%s), %s, %s)", (sid, name, name, total, count))
+    """Add what the donor's OTHER donations contributed (fixture, as the migrator: since migration 0031 only the
+    donations credit writer changes a total, and a fixture donation inserted paid + approved is credited by it)."""
+    with fixture_db() as conn:
+        conn.execute("INSERT INTO public.streamer_donator_totals AS t (streamer_id, donator_name, donator_name_lower, "
+                     "total_amount, donation_count) VALUES (%s, %s, lower(%s), %s, %s) ON CONFLICT (streamer_id, "
+                     "donator_name_lower) DO UPDATE SET total_amount = t.total_amount + EXCLUDED.total_amount, "
+                     "donation_count = t.donation_count + EXCLUDED.donation_count", (sid, name, name, total, count))
 
 
 def _actions(sid: str) -> list[dict]:
@@ -107,7 +112,7 @@ def test_state_machine_through_the_api(app, status, action):
     sid, headers = owned_creator(app, "authtest-mod")
     owner = _user_id("owner" + DOMAIN)
     did = make_donation(sid, 250, moderation=status, name="Fan", message="hello")
-    _seed_totals(sid, "Fan", 1000, 5)  # what the donor's other (and this, if credited) donations add up to
+    _seed_totals(sid, "Fan", 1000, 5)  # the donor's other donations (this one is credited by the writer if approved)
     result, new_status, visible, delta, ban = EXPECTED[(status, action)]
 
     r = _moderate(app, "authtest-mod", did, action, headers)
@@ -121,7 +126,9 @@ def test_state_machine_through_the_api(app, status, action):
 
     row = _donation(did)
     assert (row["status"], row["visible"]) == (new_status, visible)
-    assert _totals(sid) == (Decimal(1000 + delta * 250), 5 + delta)
+    credited_after = int(new_status in ("approved", "auto_approved"))
+    assert credited_after - int(status in ("approved", "auto_approved")) == delta
+    assert _totals(sid) == (Decimal(1000 + credited_after * 250), 5 + credited_after)
     assert len(_bans(sid)) == (1 if ban else 0)
     actions = _actions(sid)
     if result == U:
@@ -237,7 +244,6 @@ def test_totals_match_the_approved_donations_after_mixed_sequences(app):
     sid, headers = owned_creator(app, "authtest-totals")
     auto = make_donation(sid, 100, moderation="auto_approved", name="Fan")
     approved = make_donation(sid, 400, moderation="approved", name="fan")
-    _seed_totals(sid, "Fan", 500, 2)  # credited when they were paid / approved
     p1 = make_donation(sid, 200, name="FAN")
     p2 = make_donation(sid, 300, name="Fan")
     for did, action in ((p1, "approve"), (auto, "reject"), (auto, "approve"), (approved, "ban_donor"), (p2, "approve"),
@@ -250,21 +256,26 @@ def test_totals_match_the_approved_donations_after_mixed_sequences(app):
     assert _totals(sid) == expected == (Decimal("600.00"), 3)
 
 
-def test_debits_never_go_below_zero(app):
+def test_a_debit_larger_than_the_donor_total_fails_closed_and_changes_nothing(app):
+    """PAY-15 (0031): a debit is never floored at 0 (that loses the exact amount); it fails and writes nothing."""
     sid, headers = owned_creator(app, "authtest-floor")
-    did = make_donation(sid, 250, moderation="approved", name="Fan")
-    _seed_totals(sid, "Fan", 100, 0)  # e.g. drifted legacy totals
-    _moderate(app, "authtest-floor", did, "reject", headers)
-    assert _totals(sid) == (Decimal("0.00"), 0)
-    lonely = make_donation(sid, 30, moderation="approved", name="Nobody")  # no totals row at all
+    did = make_donation(sid, 250, moderation="approved", name="Fan")  # credited 250 by the writer
+    assert _totals(sid) == (Decimal("250.00"), 1)
+    with fixture_db() as conn:  # a drifted total below its credits (the 0031 backfill never leaves one)
+        conn.execute("UPDATE public.streamer_donator_totals SET total_amount = 100 WHERE streamer_id = %s", (sid,))
+    before = creator_state(sid)
+    with pytest.raises(psycopg.Error) as refused:
+        _moderate(app, "authtest-floor", did, "reject", headers)
+    assert refused.value.sqlstate == "HC002"
+    assert creator_state(sid) == before and _donation(did)["status"] == "approved"
+    lonely = make_donation(sid, 30, moderation="approved", name="Nobody")  # its own total, credited on insert
     assert _moderate(app, "authtest-floor", lonely, "reject", headers).json()["result"] == "applied"
-    assert _totals(sid, "Nobody") is None
+    assert _totals(sid, "Nobody") == (Decimal("0.00"), 0)
 
 
 def test_a_failure_mid_transaction_rolls_everything_back(app):
     sid, headers = owned_creator(app, "authtest-rollback")
     did = make_donation(sid, 250, moderation="approved", name="Fan")
-    _seed_totals(sid, "Fan", 250, 1)
     before = creator_state(sid)
 
     async def boom(*args, **kwargs):  # after the donation, totals and ban were written

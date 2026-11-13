@@ -131,7 +131,8 @@ When a donation is paid:
 - **If auto-approved**:
   - `moderation_status = auto_approved`, `approved_by_label = system`;
   - `audio_scheduled_at = now + 10 s`;
-  - the donor total is credited once (`streamer_donator_totals`, as dashboard approval does).
+  - the donor total is credited once, by the database credit writer in the same UPDATE (migration 0031, as for
+    dashboard and bot approval; application code never writes `streamer_donator_totals`).
 - **If held**: the donation stays `pending` for moderation; the total is credited when a moderator approves it (Phase 5).
 
 For a webhook the event row is inserted in the same transaction. A concurrent delivery of the same event

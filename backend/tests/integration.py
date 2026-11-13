@@ -198,9 +198,13 @@ def cleanup_synthetic_rows() -> None:
                      "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s) "
                      "OR dedupe_key LIKE %s", (SLUG_PREFIX + "%", SLUG_PREFIX + "%"))
         drop_synthetic_payment_evidence()  # RESTRICT on donations (0029): evidence before the donations
-        # donations.streamer_id is ON DELETE RESTRICT: synthetic donations go first.
-        conn.execute("DELETE FROM public.donations WHERE streamer_id IN "
-                     "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))
+        # donations.streamer_id is ON DELETE RESTRICT: synthetic donations go first, credited ones included: the
+        # owner lifts the 0031 delete guard for this transaction only (the creators and their totals go next)
+        with fixture_db() as owner, owner.transaction():
+            owner.execute("ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard")
+            owner.execute("DELETE FROM public.donations WHERE streamer_id IN "
+                          "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))
+            owner.execute("ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard")
         with fixture_db() as owner:  # creator audits are RESTRICT / append-only for the runtime roles (0020, 0023)
             synthetic_creators = "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)"
             for table in ("kyc_enforcement_events", "kyc_grace_grants", "kyc_restrictions", "creator_status_events"):

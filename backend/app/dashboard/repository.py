@@ -19,7 +19,6 @@ from psycopg.rows import dict_row
 
 from app.dashboard.moderation import Step, transition
 from app.dashboard.validation import WRITABLE_SETTINGS
-from app.db.donor_totals import change_donor_total
 from app.jobs.queue import enqueue
 from app.realtime import outbox
 
@@ -212,9 +211,7 @@ class DashboardRepository:
                               message_visible=current["message_visible"], donor_banned=banned)
             if step.result == "applied":
                 await self._write_donation(cur, streamer_id, donation_id, current, step, actor_label)
-                if step.totals_delta:
-                    await self._change_totals(cur, streamer_id, current["donor_name"], current["amount_inr"],
-                                              step.totals_delta)
+                # the donor total follows from this UPDATE: the donations credit writer (migration 0031)
                 if step.ban:
                     await self._insert_ban(cur, streamer_id, current["donor_name"], actor_label, notes)
                 if step.approve:  # Phase 8: the audio job commits with the approval (or neither does)
@@ -251,9 +248,6 @@ class DashboardRepository:
         await cur.execute(f"UPDATE public.donations SET {', '.join(sets)} WHERE id = %(id)s AND streamer_id = %(sid)s",
                           {"status": step.new_status, "visible": step.message_visible, "label": actor_label,
                            "id": donation_id, "sid": streamer_id})
-
-    async def _change_totals(self, cur, streamer_id: str, donor_name: str, amount_inr, delta: int) -> None:
-        await change_donor_total(cur, streamer_id, donor_name, amount_inr, delta)
 
     async def _insert_ban(self, cur, streamer_id: str, donor_name: str, actor_label: str, notes: str | None) -> None:
         await cur.execute("INSERT INTO public.banned_donors (streamer_id, donor_name, banned_by_moderator_id, "

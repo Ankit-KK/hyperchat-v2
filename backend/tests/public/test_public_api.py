@@ -60,7 +60,7 @@ def donation(sid: str, amount_inr, *, payment="success", moderation="auto_approv
 
 
 def totals(sid: str, *rows) -> None:
-    with db() as conn:
+    with fixture_db() as conn:  # since migration 0031 only the donations credit writer (or the migrator) writes totals
         for name, amount in rows:
             conn.execute("INSERT INTO public.streamer_donator_totals (streamer_id, donator_name, donator_name_lower, "
                          "total_amount, donation_count) VALUES (%s, %s, %s, %s, 1)", (sid, name, name.lower(), amount))
