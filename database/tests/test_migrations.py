@@ -6,6 +6,7 @@ Enabled when HYPERCHAT_TEST_MIGRATION_DSN points at a scratch database, e.g.
 
 import io
 import os
+from decimal import Decimal
 from pathlib import Path
 
 import psycopg
@@ -706,8 +707,10 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
     cfg = _cfg()
     command.upgrade(cfg, "head")
     assert _stepup_guards() == (6, 10)
-    # 0029's downgrade (on the way to 0026) restores the payment evidence grants: not 0027's concern
-    evidence = ("payment_webhook_events", "payment_integrity_events")
+    # 0029's downgrade (on the way to 0026) restores the payment evidence grants, and 0031's restores the 0007
+    # grants on donor totals and drops the credit audit: not 0027's concern (test_0029 / test_0031 pin those)
+    evidence = ("payment_webhook_events", "payment_integrity_events", "streamer_donator_totals",
+                "donation_credit_events")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     command.downgrade(cfg, "0026")
     try:
@@ -1348,10 +1351,13 @@ def test_0031_capped_backfill_keeps_every_donor_total_and_refuses_to_lose_its_au
         with _owner() as conn:
             assert conn.execute(totals_sql, (sid,)).fetchall() == totals_before  # byte-identical donor totals
             assert conn.execute(rows_sql).fetchall() == rows_before              # no donation looks modified
-            got = dict(conn.execute("SELECT order_id, (credited_inr, creditable_inr) FROM public.donations "
-                                    "WHERE order_id LIKE 'migtest31-%%'").fetchall())
+            got = {r[0]: (r[1], r[2]) for r in conn.execute(
+                "SELECT order_id, credited_inr, creditable_inr FROM public.donations "
+                "WHERE order_id LIKE 'migtest31-%%'").fetchall()}
             for suffix, _, _, _, _, approved, credit in DONATIONS_0031:
-                assert got["migtest31-" + suffix] == ((credit, credit) if approved else (0, None)), suffix
+                want = (Decimal(credit), Decimal(credit)) if approved else (Decimal(0), None)
+                assert got["migtest31-" + suffix] == want, suffix  # exact numeric(12,2) values
+                assert all(v is None or isinstance(v, Decimal) for v in got["migtest31-" + suffix]), suffix
             audit = conn.execute("SELECT d.order_id, e.cause, e.delta_inr, e.delta_count, e.total_after FROM "
                                  "public.donation_credit_events e JOIN public.donations d ON d.id = e.donation_id "
                                  "WHERE e.streamer_id = %s", (sid,)).fetchall()
