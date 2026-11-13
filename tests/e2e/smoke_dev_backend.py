@@ -767,7 +767,7 @@ try:
                   r.status_code == 404 and "alert" not in r.text and "top_donor" not in r.text, str(r.status_code))
         profile = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}", timeout=15).json()
         check(S, "profile: donor-page fields only (no leaderboard_widget_enabled)", set(profile) == {
-            "slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled", "hyperemotes_enabled",
+            "slug", "name", "brand_color", "brand_logo_url", "background_url", "tts_enabled",
             "media_upload_enabled", "media_max_file_size_mb", "soundboard_enabled"}, str(sorted(profile)))
         g = httpx.get(f"{API}/api/v1/public/streamers/{slug_a}/goal", timeout=15).json()
         check(S, "goal: the public goal overlay's fields only (no goal_activated_at)", set(g) == {

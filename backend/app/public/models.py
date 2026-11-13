@@ -28,7 +28,6 @@ class PublicStreamer(_Model):  # E1
     brand_logo_url: str | None
     background_url: str | None
     tts_enabled: bool
-    hyperemotes_enabled: bool
     media_upload_enabled: bool
     media_max_file_size_mb: float | None
     soundboard_enabled: bool

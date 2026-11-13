@@ -1,4 +1,4 @@
-"""Request bodies. Unknown fields are refused (422), e.g. a client-chosen media_type or is_hyperemote."""
+"""Request bodies. Unknown fields are refused (422), e.g. a client-chosen media_type."""
 
 from decimal import Decimal
 

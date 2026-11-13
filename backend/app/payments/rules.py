@@ -246,15 +246,15 @@ def payment_mismatch(payment, *, provider_order_id: str | None, amount: Decimal,
     return None
 
 
-def auto_approves(*, is_hyperemote: bool, has_hypersound: bool, has_voice: bool, has_media: bool,
+def auto_approves(*, has_hypersound: bool, has_voice: bool, has_media: bool,
                   moderation_mode: str | None, media_moderation_enabled: bool | None) -> bool:
     """The single auto-approve rule applied when a payment completes.
 
-    HyperEmotes and HyperSounds are always auto-approved. Otherwise only creators in auto_approve mode
-    (the column default) auto-approve, except that with media moderation on (default true) a donation
-    carrying media OR a voice message waits for a moderator (D2).
+    HyperSounds are always auto-approved. Otherwise only creators in auto_approve mode (the column default)
+    auto-approve, except that with media moderation on (default true) a donation carrying media OR a voice
+    message waits for a moderator (D2). Every other donation, an imported one included, follows these rules.
     """
-    if is_hyperemote or has_hypersound:
+    if has_hypersound:
         return True
     if (moderation_mode or "auto_approve") != "auto_approve":
         return False

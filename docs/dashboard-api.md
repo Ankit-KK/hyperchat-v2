@@ -50,7 +50,7 @@ Errors use `{"error": "..."}` (FastAPI's `{"detail": [...]}` for 422): 401 `Not 
 ## G1 settings
 **D-R1 fields:** `slug, name, status, moderation_mode, telegram_moderation_enabled,
 discord_moderation_enabled, media_moderation_enabled, tts_enabled, tts_language_boost, el_voice_id,
-hyperemotes_enabled, hyperemotes_min_amount, media_upload_enabled, media_min_amount, brand_color,
+media_upload_enabled, media_min_amount, brand_color,
 alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id, overlay_adjust_mode,
 leaderboard_bg_enabled, leaderboard_widget_enabled, goal_name, goal_target_amount, goal_is_active,
 goal_activated_at`. Nullable booleans and `moderation_mode` are served with their column default.
@@ -73,7 +73,7 @@ allowlist minus the two read-only amounts and the server-owned `goal_activated_a
 | Field | Rule |
 |---|---|
 | `moderation_mode` | `auto_approve` or `manual` |
-| `telegram_moderation_enabled`, `discord_moderation_enabled`, `tts_enabled`, `hyperemotes_enabled`, `goal_is_active`, `media_upload_enabled`, `media_moderation_enabled`, `overlay_adjust_mode`, `leaderboard_bg_enabled`, `leaderboard_widget_enabled` | JSON boolean, not null |
+| `telegram_moderation_enabled`, `discord_moderation_enabled`, `tts_enabled`, `goal_is_active`, `media_upload_enabled`, `media_moderation_enabled`, `overlay_adjust_mode`, `leaderboard_bg_enabled`, `leaderboard_widget_enabled` | JSON boolean, not null |
 | `alert_box_scale` | one of 0.75, 1.0, 1.25, 1.5 |
 | `goal_name` | trimmed, 1–120 characters |
 | `goal_target_amount` | number, > 0 and ≤ 100,000,000 |
@@ -83,7 +83,8 @@ allowlist minus the two read-only amounts and the server-owned `goal_activated_a
 | `goal_overlay_id` | integer 0–6 |
 | `brand_color` | `#RRGGBB` |
 | `el_voice_id` | 10–64 letters/digits; `""` or null clears it (stored as NULL) |
-| `hyperemotes_min_amount`, `media_min_amount` | **read-only** in Phase 5 (A1): sending them is a 422 |
+| `media_min_amount` | **read-only** in Phase 5 (A1): sending it is a 422 |
+| `hyperemotes_enabled`, `hyperemotes_min_amount` | not fields: HyperEmotes are discontinued (owner decision D16, 2026-11-13); sending either is a 422 |
 
 An empty body is `400 {"error": "No settings to update"}`; one invalid or unknown field rejects the
 whole patch. PostgreSQL compares the new values with the stored ones under a row lock
@@ -94,7 +95,7 @@ patch writes nothing (`updated_at` is untouched). Changes are logged as
 ## G2 donations
 - **D-R2 list:** paid (`payment_status = 'success'`) and approved or auto-approved donations, newest
   first. Fields: `donation_id, donor_name, amount, currency, amount_inr, message, message_visible,
-  is_hyperemote, voice_message_url, tts_audio_url, hypersound_url, media_url, media_type,
+  voice_message_url, tts_audio_url, hypersound_url, media_url, media_type,
   moderation_status, created_at`. Hidden messages are included (the creator moderates them).
   Keyset pagination on `(created_at DESC, id DESC)`: `limit` 1–100 (default 20); `next_cursor` is
   opaque and only valid as returned (a tampered cursor is `400 {"error": "Invalid cursor"}`).

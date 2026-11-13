@@ -70,7 +70,7 @@ RETURNING …;                                -- index donations_audio_queue_idx
 
 | Event | Channel | Written | Payload |
 |---|---|---|---|
-| `audio-now-playing` | `private-{slug}-alerts` | in the claim transaction | `{event_id, v, donation: {id, name, amount, currency, message (null when hidden), is_hyperemote, kind, audio_url, voice_message_url, hypersound_url, media_url, media_type, created_at}}` |
+| `audio-now-playing` | `private-{slug}-alerts` | in the claim transaction | `{event_id, v, donation: {id, name, amount, currency, message (null when hidden), kind, audio_url, voice_message_url, hypersound_url, media_url, media_type, created_at}}` |
 | `vaani-celebration` | `private-{slug}-alerts` | in the payment-completion transaction | `{event_id, v, donation_id, name, amount, currency, created_at}` |
 | `audio-ready` | `private-{slug}-audio` | audio job completion (Phase 9) and replay | `{event_id, v, donation_id}` |
 
@@ -81,7 +81,7 @@ creator id (`tts-audio/<creator id>/…`, Phase 8 key layout); they are sent on 
 
 - **Alerts overlay:**
   - shows an alert on `audio-now-playing` and drops duplicates by `event_id` and `donation.id`
-  - legacy durations by type: hyperemote 8 s, hypersound 10 s, voice/TTS 15 s, text 10 s
+  - legacy durations by type: hypersound 10 s, voice/TTS 15 s, text 10 s (HyperEmotes are discontinued (owner decision D16, 2026-11-13))
   - shows no message when it is null
   - shows the `!sfx` / `!testmusic` labels
   - plays the celebration on `vaani-celebration`

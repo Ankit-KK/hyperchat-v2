@@ -18,17 +18,19 @@ def parse_uuid(value: str | None) -> str | None:
         return None
 
 
-# ── settings (legacy update-streamer-settings allowlist, minus the two read-only amounts) ──────
+# ── settings (legacy update-streamer-settings allowlist, minus the read-only amount and HyperEmotes) ──
 
 WRITABLE_SETTINGS = (
     "moderation_mode", "telegram_moderation_enabled", "discord_moderation_enabled", "tts_enabled",
-    "hyperemotes_enabled", "alert_box_scale", "goal_is_active", "goal_name", "goal_target_amount",
+    "alert_box_scale", "goal_is_active", "goal_name", "goal_target_amount",
     "media_upload_enabled", "media_moderation_enabled", "tts_language_boost",
     "alert_overlay_id", "leaderboard_overlay_id", "overlay_adjust_mode", "leaderboard_bg_enabled",
     "goal_overlay_id", "brand_color", "leaderboard_widget_enabled", "el_voice_id",
 )
 # Shown by GET but not writable until limits are approved (A1): no legacy UI ever wrote them.
-READ_ONLY_SETTINGS = ("hyperemotes_min_amount", "media_min_amount")
+READ_ONLY_SETTINGS = ("media_min_amount",)
+# HyperEmotes are discontinued (owner decision 2026-11-13): their streamer columns stay in the schema until a later
+# forward-only migration drops them, but no API reads or writes them. Sending one is an unknown field (422).
 # Shown by GET, never accepted from clients (D-G): the server stamps each goal activation, so progress cannot be
 # backdated. Sending it is an unknown field (422).
 SERVER_OWNED_SETTINGS = ("goal_activated_at",)

@@ -127,7 +127,7 @@ Since migration 0029 the log is **append-only for every role**:
 
 When a donation is paid:
 - **Payment id**: `provider_payment_id` is stored (unique).
-- **Auto-approve rule (D2, D7)**: HyperEmotes and HyperSounds are always auto-approved. Otherwise only creators in `auto_approve` mode auto-approve, and with media moderation on (default) a donation with **media or a voice message** waits for a moderator.
+- **Auto-approve rule (D2, D7)**: HyperSounds are always auto-approved. HyperEmotes are discontinued (owner decision D16, 2026-11-13): no donation is auto-approved for being one, an imported `is_hyperemote` row included. Otherwise only creators in `auto_approve` mode auto-approve, and with media moderation on (default) a donation with **media or a voice message** waits for a moderator.
 - **If auto-approved**:
   - `moderation_status = auto_approved`, `approved_by_label = system`;
   - `audio_scheduled_at = now + 10 s`;

@@ -75,8 +75,10 @@ def test_writable_settings_are_the_legacy_allowlist_minus_the_read_only_amounts(
               "media_min_amount", "tts_language_boost", "alert_overlay_id", "leaderboard_overlay_id",
               "overlay_adjust_mode", "leaderboard_bg_enabled", "goal_overlay_id", "brand_color",
               "leaderboard_widget_enabled", "el_voice_id"}  # update-streamer-settings/index.ts:132
-    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 20
-    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.READ_ONLY_SETTINGS) - set(v.SERVER_OWNED_SETTINGS)
+    retired = {"hyperemotes_enabled", "hyperemotes_min_amount"}  # HyperEmotes discontinued (owner, 2026-11-13)
+    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 19
+    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.READ_ONLY_SETTINGS) - set(v.SERVER_OWNED_SETTINGS) - retired
+    assert not retired & (set(v.WRITABLE_SETTINGS) | set(v.READ_ONLY_SETTINGS) | set(models.DashboardSettings.model_fields))
     assert set(models.SettingsPatch.model_fields) == set(v.WRITABLE_SETTINGS)
     assert tuple(SETTINGS_SQL_TYPES) == v.WRITABLE_SETTINGS
     shown = set(models.DashboardSettings.model_fields)
@@ -149,7 +151,8 @@ INVALID = [
     {"brand_color": "#3b82f6ff"}, {"brand_color": None},
     {"el_voice_id": "short"}, {"el_voice_id": "has space 123"}, {"el_voice_id": "a" * 65},
     {"el_voice_id": "abc-def-ghi-jk"}, {"el_voice_id": 1234567890},
-    {"hyperemotes_min_amount": 5}, {"media_min_amount": 5},  # read-only in Phase 5 (A1)
+    {"media_min_amount": 5},  # read-only in Phase 5 (A1)
+    {"hyperemotes_enabled": True}, {"hyperemotes_enabled": False}, {"hyperemotes_min_amount": 5},  # discontinued
     {"status": "active"}, {"slug": "x"}, {"user_id": "x"}, {"rejection_reason": "x"}, {"pusher_group": 2},
 ]
 

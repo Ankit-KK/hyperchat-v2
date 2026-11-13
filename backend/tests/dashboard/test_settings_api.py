@@ -31,8 +31,8 @@ S = "/api/v1/dashboard/streamers"
 DEFAULTS = {  # a new creator row, as served (nullable booleans get their column default)
     "slug": "authtest-set", "name": "Auth Test", "status": "active", "moderation_mode": "auto_approve",
     "telegram_moderation_enabled": True, "discord_moderation_enabled": False, "media_moderation_enabled": True,
-    "tts_enabled": True, "tts_language_boost": "Hindi", "el_voice_id": None, "hyperemotes_enabled": True,
-    "hyperemotes_min_amount": 1.0, "media_upload_enabled": False, "media_min_amount": 100.0,
+    "tts_enabled": True, "tts_language_boost": "Hindi", "el_voice_id": None,
+    "media_upload_enabled": False, "media_min_amount": 100.0,
     "brand_color": "#3b82f6", "alert_box_scale": 1.0, "alert_overlay_id": 0, "leaderboard_overlay_id": 0,
     "goal_overlay_id": 0, "overlay_adjust_mode": False, "leaderboard_bg_enabled": True,
     "leaderboard_widget_enabled": True, "goal_name": None, "goal_target_amount": None, "goal_is_active": False,
@@ -40,7 +40,7 @@ DEFAULTS = {  # a new creator row, as served (nullable booleans get their column
 }
 EVERYTHING = {
     "moderation_mode": "manual", "telegram_moderation_enabled": False, "discord_moderation_enabled": True,
-    "tts_enabled": False, "hyperemotes_enabled": False, "alert_box_scale": 1.25, "goal_is_active": True,
+    "tts_enabled": False, "alert_box_scale": 1.25, "goal_is_active": True,
     "goal_name": "  New mic  ", "goal_target_amount": 2500.5,
     "media_upload_enabled": True, "media_moderation_enabled": False, "tts_language_boost": "english",
     "alert_overlay_id": 16, "leaderboard_overlay_id": 15, "overlay_adjust_mode": True, "leaderboard_bg_enabled": False,
@@ -67,10 +67,11 @@ def test_read_settings_serves_stored_values_and_null_defaults(app):
                            goal_is_active=None, tts_language_boost="hindi", hyperemotes_min_amount=50,
                            media_min_amount=20, status="pending", rejection_reason="authtest-hidden")
     body = app.get(f"{S}/authtest-set2/settings").json()
-    assert body["tts_enabled"] is True and body["hyperemotes_enabled"] is True and body["goal_is_active"] is False
+    assert body["tts_enabled"] is True and body["goal_is_active"] is False
+    assert "hyperemote" not in str(body).lower()  # discontinued: the stored columns are never served
     assert body["moderation_mode"] == "auto_approve"
     assert body["tts_language_boost"] == "hindi"  # legacy lowercase row is served as stored (A2: no migration)
-    assert (body["hyperemotes_min_amount"], body["media_min_amount"]) == (50.0, 20.0)
+    assert body["media_min_amount"] == 20.0
     assert body["status"] == "pending" and "rejection_reason" not in body and "authtest-hidden" not in str(body)
 
 
@@ -125,7 +126,9 @@ def test_lowercase_language_is_canonicalised_only_when_saved(app):
     ({"goal_target_amount": 0}, 422),
     ({"tts_language_boost": "Klingon"}, 422),
     ({"media_min_amount": 10}, 422),              # read-only (A1)
-    ({"hyperemotes_min_amount": 10}, 422),
+    ({"hyperemotes_min_amount": 10}, 422),       # HyperEmotes discontinued (owner decision 2026-11-13)
+    ({"hyperemotes_enabled": True}, 422),
+    ({"hyperemotes_enabled": False}, 422),
     ({"status": "active"}, 422),
     ({"user_id": "00000000-0000-4000-8000-000000000000"}, 422),
     ({"goal_overlay_id": 2, "unknown": 1}, 422),  # one bad field rejects the whole patch

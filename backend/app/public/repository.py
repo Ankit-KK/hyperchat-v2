@@ -15,7 +15,7 @@ from app.soundboard import terms
 
 # soundboard_enabled means the Custom Soundboard is USABLE (eligible AND current terms accepted, D3), not the raw flag.
 _PUBLIC_STREAMER_COLS = f"""id::text AS id, streamer_slug, streamer_name, brand_color, brand_logo_url, background_url,
-    COALESCE(tts_enabled, true) AS tts_enabled, COALESCE(hyperemotes_enabled, true) AS hyperemotes_enabled,
+    COALESCE(tts_enabled, true) AS tts_enabled,
     COALESCE(media_upload_enabled, false) AS media_upload_enabled, media_max_file_size_mb,
     {terms.usable_sql("streamers")} AS soundboard_enabled,
     goal_overlay_id, goal_name, goal_target_amount, goal_activated_at, COALESCE(goal_is_active, false) AS goal_is_active,

@@ -124,7 +124,7 @@ def streamer_row(**kw):
 
 def donation_row(**kw):
     row = dict(id=DID, name=DONOR, amount=Decimal("100.00"), currency="INR", message=MESSAGE, message_visible=True,
-               moderation_status="approved", payment_status="success", is_hyperemote=False,
+               moderation_status="approved", payment_status="success",
                voice_message_url=None, tts_audio_url="https://cdn.example/tts.mp3", hypersound_url=None,
                media_url=None, media_type=None, created_at=datetime(2026, 1, 2, tzinfo=UTC))
     row.update(kw)
@@ -171,10 +171,18 @@ def test_dashboard_donation_payload_contract():
     assert r.channel == "private-ankit-dashboard" and r.event == "donation-updated" and r.pusher_group == 2
     assert set(r.data) == {"event_id", "v", "action", "previous_status", "donation"}
     assert set(r.data["donation"]) == {"id", "name", "amount", "currency", "message", "message_visible",
-                                       "moderation_status", "is_hyperemote", "voice_message_url", "tts_audio_url",
+                                       "moderation_status", "voice_message_url", "tts_audio_url",
                                        "hypersound_url", "media_url", "media_type", "created_at"}
     assert r.data["donation"]["amount"] == 100.0 and r.data["donation"]["message"] == MESSAGE and r.data["v"] == 1
     json.dumps(r.data)  # serialisable as is
+
+
+def test_a_historical_hyperemote_row_is_broadcast_without_any_hyperemote_field():
+    """HyperEmotes are discontinued (owner decision 2026-11-13): an imported row may still carry the database flag,
+    but the allow-listed payload never shows it."""
+    for name in ("new-donation", "donation-updated"):
+        r = render(make_event(name), donation=donation_row(is_hyperemote=True))
+        assert "hyperemote" not in json.dumps(r.data).lower()
 
 
 def test_hidden_message_is_never_broadcast():

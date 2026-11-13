@@ -307,7 +307,7 @@ sanitize, hypeLines, musicCommand, sfxCommand.
 | Checkout | create-razorpay-order-unified | POST /donations | Razorpay Checkout | order_lookup, donation tables, payment health |
 | Payment status | check-payment-status-unified | GET /donations/{id}/status (+ signature verify) | status page | donation tables |
 | Payment webhook | razorpay-webhook | /webhooks/razorpay | — | donation tables, order_lookup, totals |
-| Auto-approve / HyperEmotes | 4 DB triggers | keep triggers (later service rules) | — | trigger functions |
+| Auto-approve / HyperEmotes | 4 DB triggers | not ported: HyperEmotes are discontinued (owner decision D16, 2026-11-13); `donations.is_hyperemote` kept as history | — | trigger functions |
 | TTS / music / SFX | generate-donation-* | jobs (ElevenLabs/MiniMax → R2) | — | donation tables, tts_moderation_audit |
 | OBS audio player | get-current-audio | GET /obs/audio/next | new media-source URL | claim_next_audio |
 | OBS alerts / goal / leaderboard | get-overlay-config, get-leaderboard-data, Pusher | /overlays/{slug}/*, Pusher | overlay routes (same paths) | streamers, totals |

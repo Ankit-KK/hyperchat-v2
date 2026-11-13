@@ -136,14 +136,14 @@ def test_vaani_creators_setting():
 
 def donation(**kw):
     d = dict(id=DID, name="Ravi", amount=Decimal("100"), currency="INR", message="secret words", message_visible=True,
-             moderation_status="approved", payment_status="success", is_hyperemote=False, voice_message_url=None,
+             moderation_status="approved", payment_status="success", voice_message_url=None,
              tts_audio_url=TTS, hypersound_url=None, media_url=None, media_type=None,
              created_at=datetime(2026, 1, 1, tzinfo=UTC))
     d.update(kw)
     return d
 
 
-DISPLAY_KEYS = {"id", "name", "amount", "currency", "message", "is_hyperemote", "kind", "audio_url",
+DISPLAY_KEYS = {"id", "name", "amount", "currency", "message", "kind", "audio_url",
                 "voice_message_url", "hypersound_url", "media_url", "media_type", "created_at"}
 
 
@@ -171,6 +171,15 @@ def event(name, facts=None, subject=DID):
 
 def render(e, d):
     return asyncio.run(Renderer(Repo(d), silence_url=SILENCE).render(e))
+
+
+def test_a_historical_hyperemote_row_plays_without_any_hyperemote_field():
+    """HyperEmotes are discontinued (owner decision 2026-11-13): the claim display and audio-now-playing never carry
+    the flag, even for an imported row that still has it in the database."""
+    shown = now_playing(donation(is_hyperemote=True), "tts", TTS)
+    assert set(shown) == DISPLAY_KEYS and not any("hyperemote" in k for k in shown)
+    r = render(event("audio-now-playing", {"kind": "tts"}), donation(is_hyperemote=True))
+    assert "hyperemote" not in json.dumps(r.data).lower()
 
 
 def test_audio_now_playing_payload():

@@ -5,6 +5,7 @@ storage rule for head_upload. No network, no database; every secret here is a TE
 import asyncio
 import hashlib
 import hmac
+import inspect
 from decimal import Decimal
 
 import pytest
@@ -261,7 +262,7 @@ def test_status_token_hash_and_constant_time_check():
 # ── auto-approve (D2) ───────────────────────────────────────────────────────
 
 def approve(**kw):
-    base = dict(is_hyperemote=False, has_hypersound=False, has_voice=False, has_media=False,
+    base = dict(has_hypersound=False, has_voice=False, has_media=False,
                 moderation_mode="auto_approve", media_moderation_enabled=True)
     return rules.auto_approves(**{**base, **kw})
 
@@ -275,11 +276,18 @@ def approve(**kw):
     ({"has_voice": True, "media_moderation_enabled": False}, True),
     ({"has_voice": True, "media_moderation_enabled": None}, False),      # NULL = moderation on
     ({"has_hypersound": True, "moderation_mode": "manual"}, True),       # hypersounds always
-    ({"is_hyperemote": True, "moderation_mode": "manual", "has_media": True}, True),
     ({"has_voice": True, "moderation_mode": "manual", "media_moderation_enabled": False}, False),
 ])
 def test_auto_approve_rule(kw, expected):
     assert approve(**kw) is expected
+
+
+def test_hyperemotes_have_no_auto_approve_rule():
+    """HyperEmotes are discontinued (owner decision 2026-11-13): the rule has no HyperEmote input at all, so an
+    imported HyperEmote donation completes under the creator's ordinary moderation rule."""
+    assert "is_hyperemote" not in inspect.signature(rules.auto_approves).parameters
+    with pytest.raises(TypeError):
+        approve(is_hyperemote=True)
 
 
 # ── payment vs order ────────────────────────────────────────────────────────

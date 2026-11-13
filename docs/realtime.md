@@ -57,7 +57,7 @@ responses; moderator identities.
 
 - `new-donation` / `donation-updated`:
   `{event_id, v, action?, previous_status?, donation: {id, name, amount, currency, message, message_visible,
-  moderation_status, is_hyperemote, voice_message_url, tts_audio_url, hypersound_url, media_url, media_type,
+  moderation_status, voice_message_url, tts_audio_url, hypersound_url, media_url, media_type,
   created_at}}`. `message` is `null` while the message is hidden. The donation id is the key of the dashboard
   moderation API.
 - `goal-progress` (public): `{event_id, v, active, name, target_amount_inr, progress_inr, brand_color,
@@ -137,7 +137,7 @@ Phase 10 adds:
 - the OBS claim endpoint: the atomic queue pop, the v2 `claim_next_audio`, which writes `audio_played_at`.
 - `audio-now-playing` on `private-{slug}-alerts`, written by the claim transaction through this outbox
   (migration: add the `alerts` channel and the event to the CHECK constraints). Proposed payload:
-  `{event_id, v, donation: {id, name, amount, currency, message (only when visible), is_hyperemote, audio_url,
+  `{event_id, v, donation: {id, name, amount, currency, message (only when visible), audio_url,
   voice_message_url, hypersound_url, media_url, media_type, created_at}}`.
 - `vaani-celebration` (deferred from Phase 9, D4).
 - OBS-token management, replay, the overlay pages.

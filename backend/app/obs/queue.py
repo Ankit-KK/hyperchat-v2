@@ -28,7 +28,7 @@ MAX_SKIPS = 10
 RETRY_HINT_SECONDS = 60  # a 204 says when the next item is due if that is within this many seconds
 _DONATION = """d.id::text AS id, d.streamer_id::text AS streamer_id, d.donor_name AS name, d.amount,
     d.currency::text AS currency, d.message, d.message_visible, d.moderation_status, d.payment_status,
-    d.is_hyperemote, d.voice_message_url, d.tts_audio_url, d.hypersound_url, d.media_url, d.media_type,
+    d.voice_message_url, d.tts_audio_url, d.hypersound_url, d.media_url, d.media_type,
     d.created_at"""
 
 

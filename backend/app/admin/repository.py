@@ -48,7 +48,7 @@ class CreatorConflict(Exception):
 LAUNCH_DEFAULTS = {
     "status": "pending", "moderation_mode": "auto_approve", "tts_enabled": True,
     "telegram_moderation_enabled": False, "discord_moderation_enabled": False, "leaderboard_widget_enabled": True,
-    "hyperemotes_enabled": True, "media_upload_enabled": True, "media_moderation_enabled": False,
+    "media_upload_enabled": True, "media_moderation_enabled": False,
     "min_text_amount_inr": 40, "min_tts_amount_inr": 40, "min_voice_amount_inr": 150,
     "min_hypersound_amount_inr": 30, "media_min_amount": 100, "media_max_file_size_mb": 10,
     "message_char_tiers": [{"min_amount": 40, "max_chars": 200}, {"min_amount": 100, "max_chars": 300},
