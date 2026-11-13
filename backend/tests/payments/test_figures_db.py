@@ -301,8 +301,9 @@ def test_the_realtime_goal_payload_follows_an_evaluation_and_the_worker_can_read
     did, pid = _v2(sid, "100")
 
     def goal_payload():
-        event = Event(1, "evt-" + secrets.token_hex(4), sid, "goal", "goal-progress", None, {}, 1, 5,
-                      datetime.now(UTC))
+        event = Event(id=1, event_id="evt-" + secrets.token_hex(4), streamer_id=sid, channel="goal",
+                      event="goal-progress", subject_id=None, facts={}, attempts=1, max_attempts=5,
+                      created_at=datetime.now(UTC), locked_by="test", reclaimed=False)
         return run(Renderer(RealtimeRepository(factory())).render(event)).data
     assert goal_payload()["progress_inr"] == 100.0
     assert _refund(did, pid, 2500) == "evaluation"  # emits goal-progress + leaderboard-updated (PR 3)
