@@ -257,9 +257,9 @@ def donation_audio(did) -> str | None:
 
 def test_payment_auto_approval_enqueues_atomically_and_the_worker_speaks(clean):
     sid = make_streamer("authtest-p8-pay")
-    did = paid_donation(sid, moderation="pending")
-    with db() as conn:  # back to an unpaid order, then complete it through the Phase 7 repository
-        conn.execute("UPDATE public.donations SET payment_status = 'pending' WHERE id = %s", (did,))
+    # an unpaid order (same amount, donor and message as paid_donation), completed through the Phase 7 repository
+    did = make_donation(sid, Decimal("100"), payment="pending", moderation="pending", name="Ravi",
+                        message=SECRET_MESSAGE)
     applied = run(PaymentRepository(factory()).apply(did, "captured", "pay_TESTp8" + secrets.token_hex(4)))
     # Phase 11 also enqueues the moderator notification in the same transaction (tests/bots).
     audio_jobs = [j for j in jobs(did) if j[3] == "donation_audio"]
@@ -276,9 +276,8 @@ def test_payment_auto_approval_enqueues_atomically_and_the_worker_speaks(clean):
 
 def test_approval_rolls_back_when_the_enqueue_fails(clean, monkeypatch):
     sid = make_streamer("authtest-p8-atomic")
-    did = paid_donation(sid)
-    with db() as conn:
-        conn.execute("UPDATE public.donations SET payment_status = 'pending' WHERE id = %s", (did,))
+    did = make_donation(sid, Decimal("100"), payment="pending", moderation="pending", name="Ravi",
+                        message=SECRET_MESSAGE)  # an unpaid order (paid_donation's inputs)
 
     async def broken(*a, **k):
         raise psycopg.errors.CheckViolation("injected")
