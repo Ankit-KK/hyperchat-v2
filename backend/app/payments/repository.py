@@ -325,8 +325,8 @@ class PaymentRepository:
             FROM public.payment_integrity_events e WHERE e.payment_amount_refunded_paise IS NOT NULL
         ), refunds AS (
             SELECT c.provider_payment_id,
-                   COALESCE(sum(c.amount_paise) FILTER (WHERE c.status = 'processed'), 0) AS processed,
-                   COALESCE(sum(c.amount_paise) FILTER (WHERE c.status = 'pending'), 0) AS pending
+                   COALESCE(sum(c.amount_paise) FILTER (WHERE c.status = 'processed'), 0)::bigint AS processed,
+                   COALESCE(sum(c.amount_paise) FILTER (WHERE c.status = 'pending'), 0)::bigint AS pending
             FROM public.payment_integrity_current c WHERE c.kind = 'refund' GROUP BY c.provider_payment_id
         ), payments AS (
             SELECT DISTINCT provider_payment_id FROM public.payment_integrity_events

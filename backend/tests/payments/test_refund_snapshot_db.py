@@ -164,7 +164,7 @@ def test_the_report_exits_1_for_missing_refund_evidence_and_prints_no_names_or_p
     assert asyncio.run(payment_integrity_report(Settings(), Namespace(since="nope"))) == 2
 
 
-def test_the_snapshot_report_runs_on_a_read_only_session():
+def test_the_snapshot_report_runs_on_a_read_only_session(env):
     """Right after the report's own READ ONLY setting, a write on the same connection is refused (25006)."""
     refused: list[str] = []
     real = connection_factory(Settings())
