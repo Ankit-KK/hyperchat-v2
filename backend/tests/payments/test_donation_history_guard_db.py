@@ -18,6 +18,13 @@ API_ROLES = ("hyperchat_app", "hyperchat_worker", "hyperchat_auth", "hyperchat_l
 WRITERS = ("hyperchat_app", "hyperchat_worker")  # the roles that may otherwise write donations (0007 grants)
 GUARD = "imported history"
 REFUSED = psycopg.errors.InsufficientPrivilege
+# hyperchat_readonly is refused before privileges or the guard: deploy/postgres/roles.sql gives it
+# default_transaction_read_only = on (layer 1), 0007 grants it SELECT only (layer 2), 0030 is layer 3.
+READ_ONLY = psycopg.errors.ReadOnlySqlTransaction
+
+
+def _refusal(role: str) -> type[psycopg.Error]:
+    return READ_ONLY if role == "hyperchat_readonly" else REFUSED
 
 
 def _insert(conn, sid: str, **cols) -> None:
@@ -45,7 +52,7 @@ def _row(did: str) -> tuple:
 ])
 def test_no_api_role_inserts_a_hyperemote_or_import_provenance(role, cols):
     sid = _creator("ins")
-    with db(role) as conn, pytest.raises(REFUSED) as refused:
+    with db(role) as conn, pytest.raises(_refusal(role)) as refused:
         _insert(conn, sid, **cols)
     if role in WRITERS:  # the others lack INSERT altogether; the writers are stopped by the guard itself
         assert GUARD in str(refused.value)
@@ -65,11 +72,33 @@ def test_no_api_role_turns_a_v2_row_into_a_hyperemote_or_an_import(role, change)
     with fixture_db() as conn:  # make_donation writes as the migrator: clear the fields to look like V2
         conn.execute("UPDATE public.donations SET legacy_source_table = NULL, is_hyperemote = false WHERE id = %s",
                      (did,))
-    with db(role) as conn, pytest.raises(REFUSED) as refused:
+    with db(role) as conn, pytest.raises(_refusal(role)) as refused:
         conn.execute(f"UPDATE public.donations SET {change} WHERE id = %s", (did,))
     if role in WRITERS:
         assert GUARD in str(refused.value)
     assert _row(did) == (False, None)
+
+
+def test_the_readonly_role_stays_refused_even_after_switching_its_session_to_read_write():
+    """Layer 1 is only a session default the role may change; layer 2 (SELECT-only grants) still refuses every
+    forged write, and nothing is changed."""
+    sid = _creator("ro")
+    did = make_donation(sid)
+    with db("hyperchat_readonly") as conn:
+        assert conn.execute("SHOW transaction_read_only").fetchone()[0] == "on"  # layer 1 is in place
+        conn.execute("SET default_transaction_read_only = off")
+        assert conn.execute("SHOW transaction_read_only").fetchone()[0] == "off"
+        for statement, args in (
+                ("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, amount_inr, "
+                 "is_hyperemote, legacy_source_table) VALUES (%s, %s, 'D', 5, 'INR', 5, true, 'authtest_donations')",
+                 (sid, "authtest-guard-" + secrets.token_hex(6))),
+                ("UPDATE public.donations SET is_hyperemote = true, legacy_source_table = 'authtest_donations' "
+                 "WHERE id = %s", (did,))):
+            with pytest.raises(REFUSED):
+                conn.execute(statement, args)
+    assert _row(did) == (False, None)
+    with fixture_db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.donations WHERE streamer_id = %s", (sid,)).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("role", WRITERS)
