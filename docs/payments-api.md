@@ -219,8 +219,28 @@ So a won chargeback that reopens in pre-arbitration is open again, and a late `c
 **Cutover / rehearsal ETL:** `database/etl/rehearsal.py` refuses to load, before changing anything, when either
 evidence table holds a row.
 
+**Reversal accounting (PAY-15 stage 3, migration 0032), OFF.** `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED` defaults to
+`false` and the API **refuses to start** with it on until the live figures and activation tools (stages 4-6) exist.
+With it off, evidence changes no money (as above). The code path it will enable:
+- After recording evidence for a donation, and after a capture (evidence can arrive first), the repository locks the
+  donation (before the evidence insert, so concurrent deliveries cannot deadlock), reads its current evidence and
+  evaluates it with `app/payments/accounting.py` (PAY15-D2 to D4, D8).
+- It calls `public.donation_accounting_apply` (SECURITY DEFINER, `hyperchat_app` only). A clear result is accepted
+  only when it equals max(processed refunds, lost deductions) over **all** counted evidence of the donation's
+  completing payment, every counted reference named, and nothing that must be held (conflicting, a currency mismatch,
+  a non-INR or deduction-less loss); a hold freezes the applied reversal. Imported donations are refused (D8).
+- State: `donation_reversals` (runtime roles SELECT only). The donor total moves only through the credit writer:
+  target = paid and approved ? ceiling - floor(ceiling x reversed / captured) : 0, ceiling =
+  `COALESCE(creditable_inr, amount_inr)`.
+- History: `donation_credit_events` rows `evaluation` / `hold` / `resolved` (reversal and hold before and after, the
+  evidence references, no money of their own) next to the writer's row that moved the money (same `txid`). A replay
+  writes nothing.
+- Known PAY-13 semantics: a loss and a win in the **same phase** are `conflicting` in the current-state view, so the
+  applied reversal stays frozen (held) until resolved; a win at a later phase restores it exactly.
+
 ## Configuration (`/etc/hyperchat/api.env`, names only; see `deploy/api.env.example`)
-`HYPERCHAT_RAZORPAY_PRIMARY_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`.
+`HYPERCHAT_RAZORPAY_PRIMARY_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`. `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED` stays unset
+or `false` (section 7: the API refuses `true` at this stage).
 - **One account, `primary` (D6)**: test vs live is the environment's job. **DEV: Razorpay test-mode keys. Production: live keys.** The `secondary` account was retired (migration 0018); a leftover `HYPERCHAT_RAZORPAY_SECONDARY_*` variable configures nothing.
 - **Account mapping**: `streamers.razorpay_account` is `primary` or NULL (no payment account: on hold). Migration 0010 filled it from the legacy secret-name columns; since 0018 both legacy pairs (`razorpay-keyid`/`razorpay-keysecret` and the `(test)` pair, which held test-mode keys) are `primary`, anything else is NULL. Legacy orders keep `donations.payment_account` NULL (legacy never recorded one; the creator's account applies); V2 orders record the account they were created on.
 - **Mode guards (startup, both ways)**: the API refuses to start with an `rzp_live_` key id unless `HYPERCHAT_APP_ENV=production`, and with an `rzp_test_` key id when it is `production`. The error names the variable, never the value.

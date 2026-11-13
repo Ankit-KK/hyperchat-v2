@@ -252,6 +252,18 @@ class Settings(BaseSettings):
     # slugs; legacy: ankit and captain_vaani). Empty = nobody.
     vaani_creators: str = "ankit,captain_vaani"
 
+    # PAY-15 (D17, PAY15-D7): evidence-based refund / dispute accounting (migration 0032). OFF; this release refuses to
+    # start with it on: live goal / revenue / CSV figures and the activation tools (stages 4-6) do not exist yet.
+    payment_accounting_enabled: bool = False
+
+    @field_validator("payment_accounting_enabled")
+    @classmethod
+    def _accounting_stays_off(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("Refusing to start: HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED cannot be enabled before PAY-15 "
+                             "stages 4-6 (live figures and activation tools) are released")
+        return value
+
     @property
     def vaani_slugs(self) -> frozenset[str]:
         return frozenset(s.strip().lower() for s in self.vaani_creators.split(",") if s.strip())

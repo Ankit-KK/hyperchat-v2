@@ -61,7 +61,8 @@ OWNER_ONLY_FUNCTIONS = ("public.stepup_enforcement_draft(text, text)",
                         "public.donations_credit_backfill()")
 # Tables whose writes belong to one dedicated role or the owner only.
 NO_RUNTIME_WRITES = ("stepup_grants", "stepup_events", "stepup_enforcement", "webauthn_credentials",
-                     "kyc_enforcement", "kyc_enforcement_events", "streamer_donator_totals", "donation_credit_events")
+                     "kyc_enforcement", "kyc_enforcement_events", "streamer_donator_totals", "donation_credit_events",
+                     "donation_reversals")
 
 
 class CheckError(Exception):

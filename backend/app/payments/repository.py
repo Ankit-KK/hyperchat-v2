@@ -19,8 +19,15 @@ from datetime import datetime
 from psycopg.rows import dict_row
 
 from app.jobs.queue import enqueue
-from app.payments import rules
+from app.payments import accounting, rules
 from app.realtime import outbox
+
+# V2 provenance (the one rule): created by the checkout API, which always writes payment_account and
+# provider_order_id, and not imported (the ETL writes legacy_source_table and never payment_account; runtime roles
+# cannot set or clear legacy_source_table, migration 0030). A row matching neither this nor the imported form, or both,
+# is ambiguous: never reconciled, never reversed automatically. Migration 0032's accounting function checks the same.
+V2_PROVENANCE = "d.legacy_source_table IS NULL AND d.payment_account IS NOT NULL AND d.provider_order_id IS NOT NULL"
+LEGACY_PROVENANCE = "d.legacy_source_table IS NOT NULL AND d.payment_account IS NULL"
 
 _DONATION = """d.id::text AS id, d.order_id, d.provider_order_id, d.amount, d.currency::text AS currency,
     d.payment_status, d.status_token_hash, d.provider_payment_id,
@@ -57,8 +64,10 @@ class _Duplicate(Exception):
 
 
 class PaymentRepository:
-    def __init__(self, connection_factory, vaani_creators: frozenset[str] = rules.VAANI_CREATORS) -> None:
-        self._conn, self.vaani_creators = connection_factory, vaani_creators
+    def __init__(self, connection_factory, vaani_creators: frozenset[str] = rules.VAANI_CREATORS,
+                 accounting: bool = False) -> None:
+        # accounting: PAY-15 evidence evaluation (HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED, refused on at this stage)
+        self._conn, self.vaani_creators, self.accounting = connection_factory, vaani_creators, accounting
 
     async def _one(self, sql: str, params: tuple | dict) -> dict | None:
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -127,8 +136,7 @@ class PaymentRepository:
         and the counts of everything NOT examined, in one read-only snapshot. V2 means created by the checkout
         API: payment_account set (create_donation always writes it) AND no legacy_source_table (the ETL writes
         that and never payment_account). A row matching neither or both is ambiguous: never eligible, counted."""
-        v2 = "d.legacy_source_table IS NULL AND d.payment_account IS NOT NULL AND d.provider_order_id IS NOT NULL"
-        legacy = "d.legacy_source_table IS NOT NULL AND d.payment_account IS NULL"
+        v2, legacy = V2_PROVENANCE, LEGACY_PROVENANCE
         window = ("d.created_at <= now() - make_interval(secs => %(min)s) "
                   "AND d.created_at >= now() - make_interval(secs => %(max)s)")
         params = {"min": min_age_seconds, "max": max_age_seconds, "limit": limit}
@@ -193,6 +201,10 @@ class PaymentRepository:
                                match_type: str, consistent: bool) -> bool:
         """The webhook event and its evidence row in ONE transaction. False (nothing written) for a repeated event."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            if self.accounting and donation_id is not None:
+                # the donation row lock BEFORE the evidence insert: the insert's foreign key takes a share lock on
+                # it, and two deliveries upgrading that share lock would deadlock
+                await cur.execute("SELECT 1 FROM public.donations WHERE id = %s FOR UPDATE", (donation_id,))
             event_row = await self._insert_event(cur, event, outcome, donation_id)
             if event_row is None:
                 return False
@@ -205,7 +217,47 @@ class PaymentRepository:
             """, (event_row, donation_id, match_type, event.account, e.kind, e.event_type, e.provider_ref,
                   e.payment_id, e.order_id, e.phase, e.status, e.amount_paise, e.currency, e.amount_deducted_paise,
                   e.reason_code, e.respond_by, e.provider_event_at, consistent, event.received_at))
+            if donation_id is not None:
+                await self._settle_accounting(cur, donation_id)
             return True
+
+    async def _settle_accounting(self, cur, donation_id: str) -> str | None:
+        """PAY-15 stage 3 (migration 0032), only when accounting is enabled: evaluate the donation's CURRENT evidence
+        (payment_integrity_current) with the PR 1 evaluator under the donation row lock, then apply the result through
+        public.donation_accounting_apply, which re-derives a clear amount from the stored evidence it names (the
+        references are not trusted) and lets the one credit writer move the donor total. Read after the lock: an
+        evaluation committed later always sees every earlier delivery's evidence. Returns the function's outcome."""
+        if not self.accounting:
+            return None
+        await cur.execute(f"""
+            SELECT d.id::text AS id, d.streamer_id::text AS streamer_id, d.amount, d.amount_inr,
+                   d.currency::text AS currency, d.payment_status, d.provider_payment_id, d.legacy_source_table,
+                   ({V2_PROVENANCE}) AS v2
+            FROM public.donations d WHERE d.id = %s FOR UPDATE
+        """, (donation_id,))
+        donation = await cur.fetchone()
+        if donation is None or not donation["v2"]:
+            return None  # PAY15-D8: imported or ambiguous provenance: reported, never reversed automatically
+        await cur.execute("""
+            SELECT kind, provider_ref, provider_payment_id, donation_id::text AS donation_id, match_type, phase,
+                   status, amount_paise, currency, amount_deducted_paise, conflicting
+            FROM public.payment_integrity_current WHERE donation_id = %s
+        """, (donation_id,))
+        rows = await cur.fetchall()
+        result = accounting.evaluate(donation, rows)
+        # a clear result counts exactly the attributed processed refunds and lost disputes; the database checks it
+        refs = [] if result.hold else sorted(
+            r["provider_ref"] for r in rows
+            if r["donation_id"] == donation["id"] and donation["provider_payment_id"] is not None
+            and r["provider_payment_id"] == donation["provider_payment_id"]
+            and (r["kind"], r["status"]) in (("refund", "processed"), ("dispute", "lost")))
+        await cur.execute("SELECT public.donation_accounting_apply(%s, %s, %s, %s, %s) AS outcome",
+                          (donation_id, result.reversed_paise, result.hold,
+                           sorted(result.flags & {"F-BOTH", "F-OPEN"}), refs))
+        outcome = (await cur.fetchone())["outcome"]
+        if outcome in ("evaluation", "resolved"):  # the reversal changed: the writer may have moved the total
+            await outbox.emit_totals_changed(cur, donation["streamer_id"])
+        return outcome
 
     async def integrity_report(self, since) -> list[dict]:
         """Current state per dispute / refund (payment_integrity_current), oldest deadline first. Read-only."""
@@ -272,7 +324,9 @@ class PaymentRepository:
             slug=row["streamer_slug"], message=row["message"], has_voice=row["has_voice"],
             has_hypersound=row["has_hypersound"], has_media=row["has_media"], creators=self.vaani_creators)
         if vaani:
-            return await self._vaani(cur, donation_id, row, payment_id)
+            applied = await self._vaani(cur, donation_id, row, payment_id)
+            await self._settle_accounting(cur, donation_id)  # evidence may have arrived before the capture
+            return applied
         auto = rules.auto_approves(
             has_hypersound=row["has_hypersound"], has_voice=row["has_voice"],
             has_media=row["has_media"], moderation_mode=row["moderation_mode"],
@@ -296,6 +350,7 @@ class PaymentRepository:
             # Phase 8: the audio job commits with the approval (or neither does).
             await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
             await outbox.emit_totals_changed(cur, row["streamer_id"])
+        await self._settle_accounting(cur, donation_id)  # evidence may have arrived before the capture
         return Applied("completed", "success", auto)
 
     @staticmethod
