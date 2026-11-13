@@ -346,10 +346,33 @@ def test_a_refund_and_a_lost_dispute_apply_the_larger_never_the_sum():
     refund, lost = _ref("refund"), _ref("dispute")
     _evidence(did, pid, "refund", refund, "processed", 3000)
     _evidence(did, pid, "dispute", lost, "lost", deducted=10000)
-    with pytest.raises(REFUSED):
+    with pytest.raises(INVALID):  # the sum exceeds the captured 10000: refused by the bounds check first
         _apply(did, 13000, flags=("F-BOTH",), refs=(refund, lost))
     assert _apply(did, 10000, flags=("F-BOTH",), refs=(refund, lost)) == "evaluation"
     assert _state(did) == (10000, None, ["F-BOTH"], Decimal("0.00")) and _total(sid) == Decimal("0.00")
+
+
+def test_overlapping_partial_refund_and_loss_apply_the_larger_below_the_captured_amount():
+    """F11 on its own: refund 3000 and loss 4000 of a 10000 capture. Their sum (7000) is within the captured amount,
+    so only the evidence check can refuse it; the larger (4000) applies once, flagged F-BOTH; a replay writes nothing."""
+    sid = _creator()
+    did, pid = _paid(sid)
+    refund, lost = _ref("refund"), _ref("dispute")
+    _evidence(did, pid, "refund", refund, "processed", 3000)
+    _evidence(did, pid, "dispute", lost, "lost", deducted=4000)
+    with pytest.raises(REFUSED):  # the evidence control, not the captured-amount bound
+        _apply(did, 7000, flags=("F-BOTH",), refs=(refund, lost))
+    assert _state(did) == (0, None, [], Decimal("100.00")) and len(_ledger(did)) == 1
+    assert _apply(did, 4000, flags=("F-BOTH",), refs=(refund, lost)) == "evaluation"
+    assert _state(did) == (4000, None, ["F-BOTH"], Decimal("60.00")) and _total(sid) == Decimal("60.00")
+    history = _ledger(did)
+    assert [(r[0], r[1], r[2], r[3]) for r in history] == [
+        ("writer", Decimal("100.00"), 0, 0), ("evaluation", Decimal("0.00"), 0, 4000),
+        ("writer", Decimal("-40.00"), 4000, 4000)]
+    assert sorted(history[1][6]) == sorted([refund, lost]) and history[1][7] == history[2][7]
+    assert sum(r[1] for r in history) == _state(did)[3] == _total(sid)
+    assert _apply(did, 4000, flags=("F-BOTH",), refs=(refund, lost)) == "unchanged"
+    assert _ledger(did) == history and _total(sid) == Decimal("60.00")
 
 
 def test_a_hold_freezes_the_reversal_and_moderation_still_moves_the_frozen_credit():
