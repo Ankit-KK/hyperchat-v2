@@ -8,7 +8,9 @@ from decimal import Decimal
 
 from app.core.timezones import IST
 
-COLUMNS = ("created_at", "donor_name", "amount", "currency", "amount_inr")
+# amount_inr is gross (the checkout-time INR value); reversed_inr / net_inr (PAY-15 stage 4) are appended, never
+# reordered, so a reader of the first five columns is unaffected.
+COLUMNS = ("created_at", "donor_name", "amount", "currency", "amount_inr", "reversed_inr", "net_inr")
 CHUNK_ROWS = 500
 # Spreadsheet formula injection: a text cell starting with one of these is prefixed with "'".
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")

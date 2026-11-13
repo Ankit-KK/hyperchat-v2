@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from psycopg.rows import dict_row
 
+from app.payments import figures
 from app.public.models import goal_active, goal_view
 from app.realtime.channels import channel_name
 from app.realtime.outbox import OVERLAY_SETTINGS, Event
@@ -112,10 +113,8 @@ class RealtimeRepository:
         """, (donation_id, streamer_id))
 
     async def goal_progress_inr(self, streamer_id: str, since) -> float:
-        row = await self._one("SELECT COALESCE(SUM(amount_inr), 0) AS total FROM public.donations "
-                              "WHERE streamer_id = %s AND payment_status = 'success' "
-                              "AND moderation_status IN ('approved', 'auto_approved') AND created_at >= %s",
-                              (streamer_id, since))
+        """The public goal's figure (app.payments.figures.GOAL_PROGRESS): net of applied reversals."""
+        row = await self._one(figures.GOAL_PROGRESS, (streamer_id, since))
         return float(row["total"])
 
     async def top_donor(self, streamer_id: str) -> dict | None:
