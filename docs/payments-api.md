@@ -217,6 +217,16 @@ So a won chargeback that reopens in pre-arbitration is open again, and a late `c
   every `held` donation, the `review_both` (F-BOTH) items and `imported_with_evidence` (D8, report only), with
   `counts`, regardless of `--since`. Exit 1 also when any donation is held. Ids, codes and amounts only: no donor
   names, no payloads.
+- PAY-15 stage 5b (D9, migration 0033): every evidence row stores `payment_amount_refunded_paise`, Razorpay's
+  cumulative refunded amount from the signed payload's payment entity, only when that entity is the evidence's own
+  payment (`id` = `payment_id`), its amount a positive integer, the refunded amount an integer 0..amount and its
+  currency a supported one equal to the evidence currency; otherwise NULL (never 0). Rows recorded before 0033 are
+  NULL. The `refund_snapshots` section compares, per provider payment, the latest snapshot S (by provider event time,
+  then receipt / record time and id) with P / Q, the processed / pending amounts of that payment's current refund
+  references: `missing_refund_evidence` (S > P + Q, a likely missed refund webhook: exit 1), `pending_refunds`
+  (P < S <= P + Q), `snapshot_behind` (S < P); `consistent` and `no_snapshot` are counted. **Diagnostic only**: the
+  snapshot is not in `payment_integrity_current` and no evaluation, reversal, hold, credit, total or figure reads it.
+  Whether Razorpay counts a created (pending) refund, or a lost dispute, in `amount_refunded` is not yet confirmed.
 - Exit 0 when nothing needs attention, 1 when something does, 2 on a refused argument.
 - Needing attention means open or lost disputes, refunds, mismatches, conflicts, or a non-`payment` match.
 - No timer.

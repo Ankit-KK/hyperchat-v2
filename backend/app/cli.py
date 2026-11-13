@@ -277,10 +277,16 @@ async def payment_integrity_report(settings: Settings, args) -> int:
     accounting = {k: [{c: (v.isoformat() if hasattr(v, "isoformat") else v) for c, v in r.items()} for r in rows]
                   for k, rows in state.items()}
     accounting["counts"] = {k: len(v) for k, v in state.items()}
+    # PAY-15 stage 5b (D9): Razorpay's refunded-amount snapshot vs our refund evidence; consistent and no_snapshot are
+    # counted only, the other categories listed (ids, amounts, times; no names, no payloads)
+    snaps = await repo.refund_snapshot_report()
+    refund_snapshots = {k: [{c: (v.isoformat() if hasattr(v, "isoformat") else v) for c, v in r.items()}
+                            for r in snaps[k]] for k in ("missing_refund_evidence", "pending_refunds", "snapshot_behind")}
+    refund_snapshots["counts"] = {k: len(v) for k, v in snaps.items()}
     print(json.dumps({"report": "payment-integrity", "read_only": True, "since": args.since, "items": items,
-                      "total": len(items), "attention": attention, "accounting": accounting},
-                     indent=2, sort_keys=True))
-    return 1 if attention or state["held"] else 0
+                      "total": len(items), "attention": attention, "accounting": accounting,
+                      "refund_snapshots": refund_snapshots}, indent=2, sort_keys=True))
+    return 1 if attention or state["held"] or snaps["missing_refund_evidence"] else 0
 
 
 def main(argv: list[str] | None = None) -> int:

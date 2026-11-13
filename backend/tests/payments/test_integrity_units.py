@@ -172,3 +172,61 @@ def test_duplicates_and_unusable_events():
     assert _record((DONATION, "payment"), duplicate=True)[0] == "duplicate"
     outcome, repo = _record((DONATION, "payment"), event=None)
     assert outcome == "no_order" and repo.events == [("no_order", None)] and repo.recorded == []
+
+
+# ── PAY-15 stage 5b (D9): the payment's refunded-amount snapshot ───────────────
+
+@pytest.mark.parametrize("event", ["refund.processed", "refund.created", "payment.dispute.lost", "payment.dispute.created"])
+def test_a_valid_snapshot_is_captured_from_refund_and_dispute_events(event):
+    e = _parse(event, amount=2500, payment={"amount": 10000, "amount_refunded": 4000})
+    assert e.payment_amount_refunded_paise == 4000
+    assert _parse(event, amount=2500, payment={"amount": 10000, "amount_refunded": 0}).payment_amount_refunded_paise == 0
+
+
+@pytest.mark.parametrize("payment, omit_payment, note", [
+    ({"id": "pay_TESTsomeoneelse"}, (), "another payment's entity"),
+    ({}, ("id",), "no payment id"),
+    ({"amount_refunded": True}, (), "bool"),
+    ({"amount_refunded": -1}, (), "negative"),
+    ({"amount_refunded": "4000"}, (), "string"),
+    ({"amount_refunded": 4000.0}, (), "float"),
+    ({}, ("amount_refunded",), "missing"),
+    ({"amount_refunded": 10001, "amount": 10000}, (), "above the payment amount"),
+    ({"amount": 0, "amount_refunded": 0}, (), "zero payment amount"),
+    ({"amount": "10000"}, (), "string payment amount"),
+    ({}, ("amount",), "no payment amount"),
+    ({"currency": "USD"}, (), "currency differs from the evidence"),
+    ({"currency": None}, (), "no payment currency"),
+])
+def test_an_unusable_snapshot_is_none_never_zero(payment, omit_payment, note):
+    base = {"amount": 10000, "amount_refunded": 2500, **payment}
+    e = _parse("refund.processed", amount=2500, payment=base, omit_payment=omit_payment)
+    assert e.payment_amount_refunded_paise is None, note
+
+
+def test_unknown_or_missing_currency_gives_no_snapshot():
+    jpy = _parse("refund.processed", amount=2500, currency="JPY", payment={"amount": 10000, "amount_refunded": 2500})
+    assert jpy.payment_amount_refunded_paise is None  # not a supported 2-decimal currency
+    none = _parse("refund.processed", amount=2500, omit=("currency",), payment={"amount": 10000, "amount_refunded": 2500})
+    assert none.currency is None and none.payment_amount_refunded_paise is None
+
+
+def test_a_missing_payment_entity_gives_no_snapshot():
+    body = json.loads(integrity_body("refund.processed", ref="rfnd_TEST1", payment_id=PAY, order_id=ORDER, amount=2500))
+    del body["payload"]["payment"]
+    assert integrity.parse("refund.processed", body).payment_amount_refunded_paise is None
+
+
+@pytest.mark.parametrize("payment", [{"amount_refunded": 2500, "amount": 10000}, {"amount_refunded": True},
+                                     {"id": "pay_TESTother"}])
+def test_the_snapshot_never_changes_completeness_or_consistency(payment):
+    """Everything PAY-13 derives is the same with a usable, an unusable or another payment's snapshot."""
+    import dataclasses
+
+    plain = _parse("refund.processed", amount=2500)
+    shaped = _parse("refund.processed", amount=2500, payment=payment)
+    ignore = {"payment_amount_refunded_paise"}
+    assert {k: v for k, v in dataclasses.asdict(plain).items() if k not in ignore} == {
+        k: v for k, v in dataclasses.asdict(shaped).items() if k not in ignore}
+    donation = {"amount": Decimal("100.00"), "currency": "INR", "payment_status": "success"}
+    assert integrity.consistent(plain, donation) is integrity.consistent(shaped, donation) is True

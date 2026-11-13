@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from app.payments import rules
+from app.public import pricing
 from app.payments.razorpay import ORDER_ID, PAYMENT_ID
 from app.security.audit import security_event
 
@@ -58,6 +59,10 @@ class Evidence:
     respond_by: datetime | None
     provider_event_at: datetime | None
     complete: bool
+    # PAY-15 stage 5b (D9): the payment's cumulative refunded amount at this event (Razorpay's payment snapshot), or
+    # None when it is not this payment's, not usable or not in the evidence currency. Diagnostic only: it never
+    # changes `complete`, consistency, matching, the outcome or any money (payment-integrity-report reads it).
+    payment_amount_refunded_paise: int | None = None
 
 
 def _node(payload, *keys):
@@ -76,6 +81,21 @@ def _epoch(value) -> datetime | None:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 < value < _EPOCH_MAX:
         return None
     return datetime.fromtimestamp(value, UTC)
+
+
+def _refund_snapshot(payload: dict, payment_id: str, currency: str | None) -> int | None:
+    """payload.payment.entity.amount_refunded, only when the payment entity is the evidence's own payment
+    (id == payment_id), its amount is a positive integer, the refunded amount an integer 0..amount, and its currency
+    one of the supported (2-decimal) currencies equal to the evidence currency. Anything else: None, never 0."""
+    payment = _node(payload, "payload", "payment", "entity")
+    if not isinstance(payment, dict) or payment.get("id") != payment_id:
+        return None
+    amount, refunded, own = _paise(payment.get("amount")), _paise(payment.get("amount_refunded")), payment.get("currency")
+    if amount is None or amount <= 0 or refunded is None or refunded > amount:
+        return None
+    if not (isinstance(own, str) and own in pricing.EXCHANGE_RATES_TO_INR and currency is not None and own == currency):
+        return None
+    return refunded
 
 
 def parse(event_type: str, payload: dict) -> Evidence | None:
@@ -106,7 +126,7 @@ def parse(event_type: str, payload: dict) -> Evidence | None:
                 and (kind == "refund" or phase is not None))
     return Evidence(kind, event_type, ref, payment_id, order_id, phase, status, amount, currency, deducted, reason,
                     _epoch(entity.get("respond_by")) if kind == "dispute" else None, _epoch(payload.get("created_at")),
-                    complete)
+                    complete, payment_amount_refunded_paise=_refund_snapshot(payload, payment_id, currency))
 
 
 def consistent(evidence: Evidence, donation: dict | None) -> bool:

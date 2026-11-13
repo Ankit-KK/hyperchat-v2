@@ -1489,3 +1489,93 @@ def test_0032_reversal_accounting_keeps_0031_history_changes_no_money_and_refuse
             _clean_0032(conn)
         command.upgrade(cfg, "head")
     assert _reversal_shape()[:3] == (True, True, ("hyperchat_app",))
+
+
+def _snapshot_shape() -> tuple:
+    """(column present, CHECK present, app may SELECT / INSERT it, worker may SELECT it, readonly may SELECT it)."""
+    with _owner() as conn:
+        col = conn.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND "
+                           "table_name = 'payment_integrity_events' AND column_name = 'payment_amount_refunded_paise'"
+                           ).fetchone()[0] == 1
+        check = conn.execute("SELECT count(*) FROM pg_constraint WHERE conname = 'payment_integrity_refund_snapshot'"
+                             ).fetchone()[0] == 1
+        if not col:
+            return col, check, None, None, None
+        priv = lambda role, p: conn.execute(  # noqa: E731
+            "SELECT has_column_privilege(%s, 'public.payment_integrity_events', 'payment_amount_refunded_paise', %s)",
+            (role, p)).fetchone()[0]
+        return col, check, (priv("hyperchat_app", "SELECT"), priv("hyperchat_app", "INSERT")), \
+            priv("hyperchat_worker", "SELECT"), priv("hyperchat_readonly", "SELECT")
+
+
+def _clean_0033(conn) -> None:
+    """Scratch only: lift the 0029 evidence guards (owner, one transaction), remove this test's evidence and rows."""
+    with conn.transaction():
+        for name in GUARDS_0029:
+            conn.execute(f"ALTER TABLE public.{name.removesuffix('_guard')} DISABLE TRIGGER {name}")
+        conn.execute("DELETE FROM public.payment_integrity_events WHERE webhook_event_id IN (SELECT id FROM "
+                     "public.payment_webhook_events WHERE event_id LIKE 'migtest33-%%')")
+        conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE 'migtest33-%%'")
+        for name in GUARDS_0029:
+            conn.execute(f"ALTER TABLE public.{name.removesuffix('_guard')} ENABLE TRIGGER {name}")
+
+
+def _evidence33(conn, event_id: str, ref: str, snapshot=None, with_column: bool = True):
+    wid = conn.execute("INSERT INTO public.payment_webhook_events (event_id, event_type, account, outcome, received_at) "
+                       "VALUES (%s, 'refund.processed', 'primary', 'integrity_unknown_payment', now()) RETURNING id",
+                       (event_id,)).fetchone()[0]
+    cols = ", payment_amount_refunded_paise" if with_column else ""
+    vals = ", %s" if with_column else ""
+    conn.execute("INSERT INTO public.payment_integrity_events (webhook_event_id, match_type, account, kind, event_type, "
+                 f"provider_ref, provider_payment_id, status, amount_paise, currency, consistent, received_at{cols}) "
+                 "VALUES (%s, 'none', 'primary', 'refund', 'refund.processed', %s, 'pay_MIG33x', 'processed', 100, "
+                 f"'INR', true, now(){vals})", (wid, ref, *((snapshot,) if with_column else ())))
+
+
+def test_0033_refund_snapshot_column_keeps_evidence_append_only_and_refuses_to_lose_snapshots(monkeypatch):
+    """0033 adds one nullable, non-negative column: old rows stay NULL, the view and the append-only guard are
+    unchanged, table-level grants cover it; the downgrade refuses while any snapshot exists."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0032")
+    try:
+        assert _snapshot_shape()[:2] == (False, False)
+        with _owner() as conn:
+            _clean_0033(conn)
+            _evidence33(conn, "migtest33-old", "rfnd_MIG33old", with_column=False)  # recorded before 0033
+            view_cols = [r[0] for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND "
+                "table_name = 'payment_integrity_current' ORDER BY ordinal_position")]
+
+        command.upgrade(cfg, "0033")
+        assert _snapshot_shape() == (True, True, (True, True), False, True)
+        with _owner() as conn:
+            assert conn.execute("SELECT payment_amount_refunded_paise FROM public.payment_integrity_events e JOIN "
+                                "public.payment_webhook_events w ON w.id = e.webhook_event_id WHERE w.event_id = "
+                                "'migtest33-old'").fetchone()[0] is None  # no backfill
+            assert [r[0] for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND "
+                "table_name = 'payment_integrity_current' ORDER BY ordinal_position")] == view_cols  # view unchanged
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction(force_rollback=True):
+                _evidence33(conn, "migtest33-neg", "rfnd_MIG33neg", snapshot=-1)
+            _evidence33(conn, "migtest33-new", "rfnd_MIG33new", snapshot=100)
+            for sql in ("UPDATE public.payment_integrity_events SET payment_amount_refunded_paise = 0 "
+                        "WHERE provider_ref = 'rfnd_MIG33new'",
+                        "DELETE FROM public.payment_integrity_events WHERE provider_ref = 'rfnd_MIG33new'"):
+                with pytest.raises(psycopg.Error) as exc, conn.transaction(force_rollback=True):
+                    conn.execute(sql)
+                assert exc.value.sqlstate == "42501", sql  # still append-only for the owner
+
+        with pytest.raises(Exception, match="downgrade of 0033 stopped"):
+            command.downgrade(cfg, "0032")
+        assert _version() == "0033"
+        with _owner() as conn:
+            _clean_0033(conn)  # controlled scratch recovery: no snapshot left
+        command.downgrade(cfg, "0032")
+        assert _snapshot_shape()[:2] == (False, False)
+    finally:
+        with _owner() as conn:
+            _clean_0033(conn)
+        command.upgrade(cfg, "head")
+    assert _snapshot_shape()[:2] == (True, True)
