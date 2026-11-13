@@ -212,11 +212,13 @@ class PaymentRepository:
             await cur.execute("""
                 INSERT INTO public.payment_integrity_events (webhook_event_id, donation_id, match_type, account, kind,
                     event_type, provider_ref, provider_payment_id, provider_order_id, phase, status, amount_paise,
-                    currency, amount_deducted_paise, reason_code, respond_by, provider_event_at, consistent, received_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    currency, amount_deducted_paise, reason_code, respond_by, provider_event_at, consistent, received_at,
+                    payment_amount_refunded_paise)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (event_row, donation_id, match_type, event.account, e.kind, e.event_type, e.provider_ref,
                   e.payment_id, e.order_id, e.phase, e.status, e.amount_paise, e.currency, e.amount_deducted_paise,
-                  e.reason_code, e.respond_by, e.provider_event_at, consistent, event.received_at))
+                  e.reason_code, e.respond_by, e.provider_event_at, consistent, event.received_at,
+                  e.payment_amount_refunded_paise))
             if donation_id is not None:
                 await self._settle_accounting(cur, donation_id)
             return True
@@ -310,6 +312,61 @@ class PaymentRepository:
         return {"held": [r for r in review if r["hold"] is not None],
                 "review_both": [r for r in review if "F-BOTH" in (r["flags"] or [])],
                 "imported_with_evidence": imported}
+
+    # PAY-15 stage 5b (D9): per provider payment with evidence, the latest valid refund snapshot S (by the provider's
+    # event time, then receipt / record time and id, as the current-state view ranks), and P / Q = the processed /
+    # pending amounts of that payment's CURRENT refund references (one row per reference: the view). Diagnostic only.
+    REFUND_SNAPSHOT_SQL = """
+        WITH snapshots AS (
+            SELECT e.provider_payment_id, e.payment_amount_refunded_paise AS refunded, e.provider_event_at,
+                   row_number() OVER (PARTITION BY e.provider_payment_id
+                                      ORDER BY e.provider_event_at DESC NULLS LAST, e.received_at DESC,
+                                               e.recorded_at DESC, e.id DESC) AS n
+            FROM public.payment_integrity_events e WHERE e.payment_amount_refunded_paise IS NOT NULL
+        ), refunds AS (
+            SELECT c.provider_payment_id,
+                   COALESCE(sum(c.amount_paise) FILTER (WHERE c.status = 'processed'), 0) AS processed,
+                   COALESCE(sum(c.amount_paise) FILTER (WHERE c.status = 'pending'), 0) AS pending
+            FROM public.payment_integrity_current c WHERE c.kind = 'refund' GROUP BY c.provider_payment_id
+        ), payments AS (
+            SELECT DISTINCT provider_payment_id FROM public.payment_integrity_events
+        )
+        SELECT p.provider_payment_id, s.refunded AS snapshot_refunded_paise, s.provider_event_at AS snapshot_at,
+               COALESCE(r.processed, 0) AS processed_refunds_paise, COALESCE(r.pending, 0) AS pending_refunds_paise,
+               d.id::text AS donation_id, d.order_id, st.streamer_slug
+        FROM payments p
+        LEFT JOIN snapshots s ON s.provider_payment_id = p.provider_payment_id AND s.n = 1
+        LEFT JOIN refunds r ON r.provider_payment_id = p.provider_payment_id
+        LEFT JOIN public.donations d ON d.provider_payment_id = p.provider_payment_id
+        LEFT JOIN public.streamers st ON st.id = d.streamer_id
+        ORDER BY p.provider_payment_id
+    """
+
+    async def refund_snapshot_report(self) -> dict:
+        """PAY-15 stage 5b (D9): every provider payment with evidence, classified (read-only, report only):
+        consistent (S = P), pending_refunds (P < S <= P + Q), missing_refund_evidence (S > P + Q: Razorpay reports
+        more refunded than our refund evidence, a likely missed webhook), snapshot_behind (S < P), no_snapshot.
+        Ids, amounts and times only. Nothing here is read by any money path."""
+        async with self._conn() as conn:
+            await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(self.REFUND_SNAPSHOT_SQL)
+                rows = await cur.fetchall()
+        out = {k: [] for k in ("missing_refund_evidence", "pending_refunds", "snapshot_behind", "consistent",
+                               "no_snapshot")}
+        for row in rows:
+            s, p, q = row["snapshot_refunded_paise"], row["processed_refunds_paise"], row["pending_refunds_paise"]
+            if s is None:
+                out["no_snapshot"].append(row)
+            elif s == p:
+                out["consistent"].append(row)
+            elif s > p + q:
+                out["missing_refund_evidence"].append(row)
+            elif s > p:
+                out["pending_refunds"].append(row)
+            else:
+                out["snapshot_behind"].append(row)
+        return out
 
     # ── completion ──────────────────────────────────────────────────────────
     async def apply(self, donation_id: str, outcome: str, payment_id: str | None,

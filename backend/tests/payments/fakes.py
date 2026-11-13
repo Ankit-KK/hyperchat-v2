@@ -45,9 +45,11 @@ REFUND_STATUS = {"created": "pending", "processed": "processed", "failed": "fail
 
 def integrity_body(event: str, *, ref: str, payment_id: str, order_id: str | None, amount: int = 10000,
                    currency: str = "INR", status: str | None = None, phase: str = "chargeback",
-                   amount_deducted: int = 0, created_at: int = 1_800_000_000, omit: tuple = ()) -> bytes:
+                   amount_deducted: int = 0, created_at: int | None = 1_800_000_000, omit: tuple = (),
+                   payment: dict | None = None, omit_payment: tuple = ()) -> bytes:
     """A Razorpay dispute / refund webhook as documented (payload.<dispute|refund>.entity next to the payment entity,
-    which carries the payer's contact details: they must never be stored or logged)."""
+    which carries the payer's contact details: they must never be stored or logged). `payment` overrides payment-entity
+    fields (e.g. amount, amount_refunded, id, currency); `omit_payment` drops some (PAY-15 stage 5b snapshot tests)."""
     kind = "dispute" if event.startswith("payment.dispute.") else "refund"
     suffix = event.rsplit(".", 1)[1]
     if kind == "dispute":
@@ -61,7 +63,9 @@ def integrity_body(event: str, *, ref: str, payment_id: str, order_id: str | Non
         entity.pop(key, None)
     payment = {"id": payment_id, "entity": "payment", "amount": amount, "currency": currency, "status": "captured",
                "order_id": order_id, "method": "card", "email": PAYER_EMAIL, "contact": PAYER_CONTACT,
-               "amount_refunded": amount if kind == "refund" else 0}
+               "amount_refunded": amount if kind == "refund" else 0, **(payment or {})}
+    for key in omit_payment:
+        payment.pop(key, None)
     return json.dumps({"entity": "event", "account_id": "acc_TESTONLY", "event": event, "contains": [kind, "payment"],
                        "payload": {kind: {"entity": entity}, "payment": {"entity": payment}},
                        "created_at": created_at}).encode()

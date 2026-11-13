@@ -130,10 +130,10 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         working-directory: database
         run: python -m pytest -q --deselect tests/test_auth_hash_import.py
-      - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility)
+      - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
-        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/dashboard/test_moderation_api.py
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/dashboard/test_moderation_api.py
 
   integration:
     name: Database + integration tests (PostgreSQL 17)
