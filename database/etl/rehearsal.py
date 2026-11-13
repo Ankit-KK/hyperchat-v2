@@ -40,7 +40,8 @@ from etl.mapping import (
 )
 from etl.reconcile import reconcile
 
-EVIDENCE_TABLES = ("payment_webhook_events", "payment_integrity_events")
+# Append-only for every role: a load never wipes them (0029 payment evidence; 0031 donation credit audit).
+EVIDENCE_TABLES = ("payment_webhook_events", "payment_integrity_events", "donation_credit_events")
 
 DONATION_COLUMNS = (
     "id", "streamer_id", "order_id", "payment_provider", "provider_order_id", "donor_name", "amount", "currency",
@@ -67,6 +68,7 @@ class Loader:
         self.stats: dict[str, dict] = {}
         self.media_from, self.media_to = media_from, media_to
         self.media_rewritten: Counter = Counter()  # "table.column" -> URLs rewritten (reported, never the URLs)
+        self.credit_backfill = ""  # the 0031 credit backfill's counts, for the report
 
     def media(self, table: str, columns: tuple[str, ...] | list[str], rows: list[tuple]) -> list[tuple]:
         """Rewrite the legacy media base in this table's media URL columns (no-op without --media-base-to)."""
@@ -125,8 +127,8 @@ class Loader:
                 if table in tables:
                     cur.execute(sql.SQL("SELECT EXISTS (SELECT 1 FROM {})").format(sql.Identifier("public", table)))
                     if cur.fetchone()[0]:
-                        raise SystemExit(f"refusing to load: public.{table} holds payment evidence (migration 0029 "
-                                         "keeps it); nothing was changed")
+                        raise SystemExit(f"refusing to load: public.{table} holds append-only evidence (migrations "
+                                         "0029 / 0031 keep it); nothing was changed")
             cur.execute(sql.SQL("TRUNCATE {} CASCADE").format(
                 sql.SQL(", ").join(sql.Identifier("public", t) for t in tables)))
             for t in tables:
@@ -137,6 +139,16 @@ class Loader:
         with self.tgt.cursor() as cur:
             for t in self.target_tables:
                 cur.execute(sql.SQL("ALTER TABLE {} ENABLE TRIGGER USER").format(sql.Identifier("public", t)))
+
+    def backfill_credits(self) -> None:
+        """PAY-15 (0031): per-donation credits for the loaded donations, capped by the loaded donor totals, which
+        are not changed (public.donations_credit_backfill, once per database)."""
+        with self.tgt.cursor() as cur:
+            cur.execute("SELECT credited, short_v2, short_imported, short_buckets "
+                        "FROM public.donations_credit_backfill()")
+            credited, short_v2, short_imported, short_buckets = cur.fetchone()
+        self.credit_backfill = (f"donation credits (0031 backfill, donor totals unchanged): {credited} credited; "
+                                f"short rows {short_v2} V2 / {short_imported} imported; short buckets {short_buckets}")
 
     def load_users_and_streamers(self) -> None:
         admins = {r[0].lower() for r in self.fetch("SELECT email FROM public.admin_emails")}
@@ -319,11 +331,13 @@ def main() -> int:
         loader.load_donations()
         loader.load_donation_references()
         loader.finish_target()
+        loader.backfill_credits()
         tgt.commit()
         src.rollback()
 
         ok, text = reconcile(src, tgt, loader.stats, target_db, legacy_media_bases=media_from,
                              media_rewritten=dict(loader.media_rewritten))
+        text += "\n" + loader.credit_backfill + "\n"
     with open(args.report, "w", encoding="utf-8") as fh:
         fh.write(text)
     print(text)

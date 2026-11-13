@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.security.crypto import sha256_hex
-from tests.integration import db, make_streamer, requires_db, update_streamer
+from tests.integration import db, fixture_db, make_streamer, requires_db, update_streamer
 
 pytestmark = requires_db
 CONFIG, BOARD = "/api/v1/obs/overlay-config", "/api/v1/obs/leaderboard"
@@ -30,7 +30,7 @@ def token_for(sid: str, **cols) -> str:
 
 
 def totals(sid: str, *rows) -> None:
-    with db() as conn:
+    with fixture_db() as conn:  # since migration 0031 only the donations credit writer (or the migrator) writes totals
         for name, amount in rows:
             conn.execute("INSERT INTO public.streamer_donator_totals (streamer_id, donator_name, donator_name_lower, "
                          "total_amount, donation_count) VALUES (%s, %s, %s, %s, 1)", (sid, name, name.lower(), amount))

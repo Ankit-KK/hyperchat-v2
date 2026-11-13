@@ -33,6 +33,7 @@ EXPECTED_TABLES = {
     "kyc_enforcement_events", "webauthn_credentials", "stepup_challenges", "stepup_grants", "stepup_grant_effects",
     "session_assurance",
     "stepup_events", "stepup_rate_limits", "stepup_enforcement", "payment_integrity_events",
+    "donation_credit_events",
 }
 
 
@@ -851,7 +852,7 @@ def test_0029_payment_integrity_keeps_existing_evidence_and_refuses_to_lose_it(m
         from etl.rehearsal import Loader  # the cutover / rehearsal load refuses BEFORE changing anything
         tgt = psycopg.connect(_libpq(DSN))
         try:
-            with pytest.raises(SystemExit, match="holds payment evidence"):
+            with pytest.raises(SystemExit, match="holds append-only evidence"):
                 Loader(None, tgt).prepare_target()
             tgt.rollback()
         finally:
@@ -1258,3 +1259,126 @@ def test_0030_donation_history_guard_round_trip_keeps_every_row(monkeypatch):
             _clean_0030(conn)
         command.upgrade(cfg, "head")
     assert _history_guard() == (True, True, False)
+
+
+def _credit_shape() -> tuple:
+    """(credit columns present, writer + delete guard triggers present, app/worker privileges on totals)."""
+    with _owner() as conn:
+        cols = conn.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND "
+                            "table_name = 'donations' AND column_name IN ('creditable_inr', 'credited_inr')"
+                            ).fetchone()[0]
+        writer = conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname IN ('donations_credit_writer', "
+                              "'donations_credit_delete_guard', 'donations_credit_delete_guard_truncate')").fetchone()[0]
+        privileges = tuple(
+            tuple(p for p in ("SELECT", "INSERT", "UPDATE", "DELETE")
+                  if conn.execute("SELECT has_table_privilege(%s, 'public.streamer_donator_totals', %s)",
+                                  (role, p)).fetchone()[0])
+            for role in ("hyperchat_app", "hyperchat_worker"))
+    return cols, writer, *privileges
+
+
+def _clean_0031(conn) -> None:
+    """Scratch only: lift the audit guard (owner, one transaction), remove the synthetic audit, totals and rows."""
+    with conn.transaction():
+        if "donation_credit_events" in _tables():
+            conn.execute("ALTER TABLE public.donation_credit_events DISABLE TRIGGER donation_credit_events_guard")
+            conn.execute("DELETE FROM public.donation_credit_events WHERE streamer_id IN "
+                         "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'migtest31-%%')")
+            conn.execute("ALTER TABLE public.donation_credit_events ENABLE TRIGGER donation_credit_events_guard")
+        guarded = conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname = 'donations_credit_delete_guard'"
+                               ).fetchone()[0]
+        conn.execute("DELETE FROM public.streamer_donator_totals WHERE streamer_id IN "
+                     "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'migtest31-%%')")
+        if guarded:
+            conn.execute("ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard")
+        conn.execute("DELETE FROM public.donations WHERE order_id LIKE 'migtest31-%%'")
+        if guarded:
+            conn.execute("ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard")
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest31-%%'")
+
+
+FULL_DML = ("SELECT", "INSERT", "UPDATE", "DELETE")
+# (order_id suffix, donor, amount, imported, days ago, paid + approved, expected credit after the 0031 backfill).
+# Per bucket: V2 rows first, then imported rows (even older ones), oldest first, each min(amount, what is left).
+DONATIONS_0031 = (
+    ("full-v2-old", "Fan", 100, False, 9, True, 100), ("full-v2-new", "Fan", 50, False, 1, True, 50),
+    ("full-imported", "fan", 80, True, 30, True, 80),                     # same bucket (lower-cased name)
+    ("full-pending", "Fan", 70, False, 2, False, None),                   # not approved: untouched, ceiling = amount
+    ("short-v2-old", "Short", 100, False, 9, True, 100), ("short-v2-new", "Short", 60, False, 1, True, 20),
+    ("short-imported", "Short", 40, True, 30, True, 0),
+    ("imp-v2", "Imp", 30, False, 5, True, 30), ("imp-imported", "Imp", 50, True, 40, True, 30),
+    ("none-v2", "Nobody", 25, False, 3, True, 0),                         # no totals row at all
+)
+TOTALS_0031 = (("Fan", 230, 3), ("Short", 120, 2), ("Imp", 60, 2))
+
+
+def test_0031_capped_backfill_keeps_every_donor_total_and_refuses_to_lose_its_audit(monkeypatch):
+    """0031 credits existing donations up to what each donor total really holds (short buckets leave the newest rows
+    partly credited, imported rows after V2 rows); no total and no updated_at changes; the downgrade refuses while
+    the credit audit has rows."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0030")
+    try:
+        assert _credit_shape() == (0, 0, FULL_DML, FULL_DML)
+        with _owner() as conn:
+            _clean_0031(conn)
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
+                               "VALUES ('migtest31-c', 'C', 'active', 'legacy') RETURNING id").fetchone()[0]
+            for suffix, donor, amount, imported, days, approved, _ in DONATIONS_0031:
+                conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                             "amount_inr, payment_status, moderation_status, legacy_source_table, created_at) VALUES "
+                             "(%s, %s, %s, %s, 'INR', %s, 'success', %s, %s, now() - make_interval(days => %s))",
+                             (sid, "migtest31-" + suffix, donor, amount, amount, "approved" if approved else "pending",
+                              "migtest31_donations" if imported else None, days))
+            for donor, total, count in TOTALS_0031:
+                conn.execute("INSERT INTO public.streamer_donator_totals (streamer_id, donator_name, "
+                             "donator_name_lower, total_amount, donation_count) VALUES (%s, %s, lower(%s), %s, %s)",
+                             (sid, donor, donor, total, count))
+            totals_sql = ("SELECT donator_name, donator_name_lower, total_amount, donation_count, updated_at FROM "
+                          "public.streamer_donator_totals WHERE streamer_id = %s ORDER BY donator_name_lower")
+            rows_sql = ("SELECT order_id, updated_at FROM public.donations WHERE order_id LIKE 'migtest31-%%' "
+                        "ORDER BY order_id")
+            totals_before = conn.execute(totals_sql, (sid,)).fetchall()
+            rows_before = conn.execute(rows_sql).fetchall()
+
+        command.upgrade(cfg, "0031")
+        assert _credit_shape() == (2, 3, ("SELECT",), ("SELECT",))
+        with _owner() as conn:
+            assert conn.execute(totals_sql, (sid,)).fetchall() == totals_before  # byte-identical donor totals
+            assert conn.execute(rows_sql).fetchall() == rows_before              # no donation looks modified
+            got = dict(conn.execute("SELECT order_id, (credited_inr, creditable_inr) FROM public.donations "
+                                    "WHERE order_id LIKE 'migtest31-%%'").fetchall())
+            for suffix, _, _, _, _, approved, credit in DONATIONS_0031:
+                assert got["migtest31-" + suffix] == ((credit, credit) if approved else (0, None)), suffix
+            audit = conn.execute("SELECT d.order_id, e.cause, e.delta_inr, e.delta_count, e.total_after FROM "
+                                 "public.donation_credit_events e JOIN public.donations d ON d.id = e.donation_id "
+                                 "WHERE e.streamer_id = %s", (sid,)).fetchall()
+            assert {r[0].removeprefix("migtest31-"): r[2] for r in audit} == {  # one row per credit > 0
+                d[0]: d[6] for d in DONATIONS_0031 if d[5] and d[6]}
+            assert len(audit) == len({r[0] for r in audit})
+            assert {(r[1], r[3], r[4]) for r in audit} == {("backfill", 0, None)}
+            for donor, total, _ in TOTALS_0031:  # never credited beyond the total: a later debit cannot fail
+                assert conn.execute("SELECT sum(credited_inr) FROM public.donations WHERE streamer_id = %s AND "
+                                    "lower(donor_name) = lower(%s)", (sid, donor)).fetchone()[0] <= total
+            with pytest.raises(psycopg.Error) as again, conn.transaction(force_rollback=True):
+                conn.execute("SELECT * FROM public.donations_credit_backfill()")
+            assert again.value.sqlstate == "55000"                               # it runs once
+            conn.execute("UPDATE public.donations SET moderation_status = 'rejected' "
+                         "WHERE order_id = 'migtest31-short-v2-new'")
+            assert conn.execute("SELECT total_amount FROM public.streamer_donator_totals WHERE streamer_id = %s "
+                                "AND donator_name_lower = 'short'", (sid,)).fetchone()[0] == 100  # its 20 ceiling only
+
+        with pytest.raises(Exception, match="downgrade of 0031 stopped"):
+            command.downgrade(cfg, "0030")
+        assert _version() == "0031"
+        with _owner() as conn:
+            _clean_0031(conn)
+        command.downgrade(cfg, "0030")  # no audit left: the round trip works and the 0007 grants are back
+        assert _credit_shape() == (0, 0, FULL_DML, FULL_DML)
+    finally:
+        with _owner() as conn:
+            _clean_0031(conn)
+        command.upgrade(cfg, "head")
+    assert _credit_shape()[:2] == (2, 3)

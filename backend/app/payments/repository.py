@@ -18,7 +18,6 @@ from datetime import datetime
 
 from psycopg.rows import dict_row
 
-from app.db.donor_totals import change_donor_total
 from app.jobs.queue import enqueue
 from app.payments import rules
 from app.realtime import outbox
@@ -293,8 +292,7 @@ class PaymentRepository:
         # donations completed from now on are ever enqueued: there is no scan of older unnotified rows.
         await enqueue(cur, "moderator_notify", donation_id, {"donation_id": donation_id},
                       delay_seconds=rules.AUDIO_DELAY_SECONDS if auto else 0)
-        if auto:
-            await change_donor_total(cur, row["streamer_id"], row["donor_name"], row["amount_inr"], +1)
+        if auto:  # the donor total is credited by the donations credit writer (migration 0031), in this UPDATE
             # Phase 8: the audio job commits with the approval (or neither does).
             await enqueue(cur, "donation_audio", donation_id, {"donation_id": donation_id})
             await outbox.emit_totals_changed(cur, row["streamer_id"])
@@ -312,7 +310,6 @@ class PaymentRepository:
                 approved_by_moderator_id = NULL, audio_scheduled_at = NULL
             WHERE id = %s
         """, (payment_id, donation_id))
-        await change_donor_total(cur, row["streamer_id"], row["donor_name"], row["amount_inr"], +1)
         await outbox.emit(cur, row["streamer_id"], "new-donation", subject_id=donation_id)
         await outbox.emit_totals_changed(cur, row["streamer_id"])
         await outbox.emit(cur, row["streamer_id"], "vaani-celebration", subject_id=donation_id)

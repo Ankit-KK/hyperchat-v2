@@ -15,7 +15,7 @@ from datetime import datetime
 
 # Every Alembic revision a DEV database may legitimately be at; anything else FAILs.
 KNOWN_HEADS = ("0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
-               "0029", "0030")
+               "0029", "0030", "0031")
 # 0018 D6, 0019 D13, 0020-0023 KYC PR1-PR4, 0024 admin auth boundary, 0025-0028 admin step-up (S1-S3, A5),
 # 0029 payment integrity evidence (C1), 0030 donation history guard (D16)
 PRODUCTION_DATABASES = ("hyperchat", "hyperchat_restore_test")
@@ -382,8 +382,15 @@ def cleanup(app, owner, domain: str, started: datetime, keys: dict | None = None
               "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s)", (c,)),
         (app, "DELETE FROM public.jobs WHERE dedupe_key IN (SELECT d.id::text FROM public.donations d "
               "JOIN public.streamers s ON s.id = d.streamer_id WHERE s.streamer_slug LIKE %s)", (c,)),
-        (app, "DELETE FROM public.donations WHERE streamer_id IN "
-              "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (c,)),
+        # credited donations are guarded against DELETE (0031): the owner lifts the guard for this one statement
+        # (its creator, and so its donor totals, are deleted next); the tag is validated above
+        (owner, "DO $$ DECLARE guarded boolean := EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = "
+                "'donations_credit_delete_guard' AND tgrelid = 'public.donations'::regclass); BEGIN "
+                "IF guarded THEN ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard; END IF; "
+                "DELETE FROM public.donations WHERE streamer_id IN "
+                "(SELECT id FROM public.streamers WHERE streamer_slug LIKE '" + c + "'); "
+                "IF guarded THEN ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard; END IF; "
+                "END $$", None),
         # the status audit is append-only for the runtime roles (0020) and blocks deleting its creator (RESTRICT, 0023)
         (owner, "DELETE FROM public.creator_status_events WHERE streamer_id IN "
                 "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (c,)),

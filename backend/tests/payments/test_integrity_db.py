@@ -292,7 +292,7 @@ def test_evidence_is_append_only_for_every_role_and_never_truncated(client):
             assert _refused(app_conn, f"UPDATE public.{table} SET received_at = now()") == "42501", table
             assert _refused(app_conn, f"DELETE FROM public.{table}") == "42501", table
             assert _refused(app_conn, f"TRUNCATE public.{table}") == "42501", table
-        assert _refused(app_conn, "DELETE FROM public.donations WHERE id = %s", (did,)) == "23503"  # RESTRICT
+        assert _refused(app_conn, "DELETE FROM public.donations WHERE id = %s", (did,)) == "42501"  # credited (0031)
     with db("hyperchat_worker") as worker:
         for table in ("payment_integrity_events", "payment_webhook_events", "payment_integrity_current"):
             assert _refused(worker, f"SELECT 1 FROM public.{table}") == "42501", table
@@ -303,7 +303,10 @@ def test_evidence_is_append_only_for_every_role_and_never_truncated(client):
             assert _refused(owner, f"DELETE FROM public.{table} WHERE donation_id = %s", (did,)) == "42501", table
             assert _refused(owner, f"TRUNCATE public.{table} CASCADE") == "42501", table
         assert _refused(owner, "TRUNCATE public.donations CASCADE") == "42501"  # cascades into the evidence
-        assert _refused(owner, "DELETE FROM public.donations WHERE id = %s", (did,)) == "23503"
+        assert _refused(owner, "DELETE FROM public.donations WHERE id = %s", (did,)) == "42501"  # credited (0031)
+        with owner.transaction(force_rollback=True):  # without the credit guard, the evidence still holds it
+            owner.execute("ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard")
+            assert _refused(owner, "DELETE FROM public.donations WHERE id = %s", (did,)) == "23503"  # RESTRICT
     assert len(evidence("authtest-int-ro-")) == 1 and donation(out["order_id"])["id"] == did
 
 
