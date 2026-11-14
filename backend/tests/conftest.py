@@ -19,6 +19,17 @@ from tests.integration import (
 )
 
 
+@pytest.fixture
+def accounting_active():
+    """PAY-15 (migration 0034): accounting state 'active' with dispute mode 'apply' for tests of the evaluation path
+    (their assertions predate the switch); frozen afterwards, so the next test starts from a non-active state."""
+    from tests.integration import set_accounting
+
+    set_accounting("active", "apply")
+    yield
+    set_accounting("frozen")
+
+
 @pytest.fixture(scope="session")
 def scratch_db() -> str:
     """Name of the integration database, after refusing production and the restore source.

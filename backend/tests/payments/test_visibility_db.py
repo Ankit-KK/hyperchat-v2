@@ -30,7 +30,7 @@ from tests.payments.test_accounting_db import _apply, _evidence, _ref, _settle
 from tests.payments.test_figures_db import _csv, _v2
 from tests.stepup.test_stepup_enforcement_db import set_enforcement
 
-pytestmark = [requires_db, pytest.mark.usefixtures("env")]
+pytestmark = [requires_db, pytest.mark.usefixtures("env", "accounting_active")]  # 0034 state active
 S = "/api/v1/dashboard/streamers"
 DOMAIN = "@authtest.invalid"
 SENSITIVE = ("rfnd_", "disp_", "pay_", "order_", "H-CONFLICT", "H-CURRENCY", "H-NO-DEDUCTION", "H-OVER-REFUND",

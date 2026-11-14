@@ -253,6 +253,40 @@ With it off, evidence changes no money (as above). The code path it will enable:
 - Known PAY-13 semantics: a loss and a win in the **same phase** are `conflicting` in the current-state view, so the
   applied reversal stays frozen (held) until resolved; a win at a later phase restores it exactly.
 
+**Accounting state (PAY-15 stage 6a-1, migration 0034), OFF.** The startup refusal above is unchanged; 0034 adds the
+database switch the activation tools (6a-2 to 6a-4, not built) will drive.
+- `payment_accounting_state` (one row): `state` off / active / frozen (created **off**) and `dispute_mode` hold /
+  apply (created **hold**). Only the owner changes it (`payment_accounting_set_state`, operator + reason 10-500
+  characters); allowed: off→active, active→frozen, frozen→active, frozen→off (only once nothing is applied or held);
+  the mode changes only while off or frozen. Every change appends a `payment_accounting_events` row (append-only for
+  the owner too). Runtime roles read it only.
+- Evaluation happens **only while active**: `donation_accounting_apply` returns `inactive` otherwise and changes
+  nothing. Lock order L-1: every payment transaction that may evaluate (confirm, capture webhook, status poll,
+  `payment-reconcile`, integrity evidence) takes the state row FOR SHARE first (the API through
+  `payment_accounting_lock_state()`: FOR SHARE needs UPDATE privilege, which the API role has not), then the
+  donation, the donor total, jobs, the outbox. A freeze takes the state row FOR UPDATE: it commits only after
+  the evaluations holding the row (evaluations that start after its commit see `frozen`), waits at most **5 s**
+  (S6A-D6, the function's own `lock_timeout`; then `55P03`, rolled back, no event) and can be delayed by a steady
+  stream of evaluations. Moderation never takes it.
+- Refunds-only (dispute mode `hold`, S6A-D3): a current attributed lost dispute is held as `H-DISPUTE-MODE` (the
+  lowest-priority hold) and the database refuses any clear result while one exists. The hold freezes the applied
+  reversal (S6A-D3a: a refund arriving after the loss is **not** applied; the difference stays visible as a held item
+  in `payment-integrity-report`, never reconciled).
+- `donation_accounting_evaluations` (S6A-D8, operational metadata, not history): per donation the evidence
+  fingerprint (md5 over the payment id, the dispute mode and every current evidence row's reference, kind, match,
+  payment, status, phase, amounts, currency and conflict flag), when and in which state it was evaluated, the outcome,
+  and a keep acknowledgement. A no-op evaluation refreshes it but writes no history and moves no total.
+- Owner-only operations, each needing an operator run (`payment_accounting_runs`, append-only) of its command:
+  `payment_accounting_reconcile` (activation, state active), `payment_accounting_keep` (state active or frozen;
+  releases **only** `H-DISPUTE-MODE`, never an integrity hold, money unchanged, acknowledged for exactly the current
+  fingerprint: new or changed evidence or a mode change makes it hold again), `payment_accounting_apply_evaluation`
+  (state active; a held donation, only the clear result the evidence supports), `payment_accounting_revert` (state
+  frozen or off; reversal 0 and hold cleared through the one credit writer). History rows of causes `manual`,
+  `activation` and `revert` must name their run (`run_id`, CHECK). An operation that moves a reversal inserts the
+  realtime `goal-progress` and `leaderboard-updated` events in the same transaction, after the writer (as
+  `emit_totals_changed`, coalesced while one is pending); keep and no-op calls emit nothing.
+- Downgrade of 0034 refuses once the state, the mode, an event, a run, an evaluation or any 0034 history exists.
+
 **Live figures (PAY-15 stage 4).** Goal progress (public and realtime), dashboard revenue and the CSV export read the
 applied reversal through `app/payments/figures.py`: per donation `reversed_inr` = the pro-rata share of the stored
 `amount_inr`, rounded down to the paisa (exact integer division), and `net_inr = amount_inr − reversed_inr`; sums are

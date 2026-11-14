@@ -76,6 +76,33 @@ def fixture_db() -> psycopg.Connection:
     return conn
 
 
+def set_accounting(state: str, mode: str | None = None) -> None:
+    """Test fixture (owner, audited like any operator change): walk the PAY-15 accounting state machine (migration
+    0034) to `state` (and `mode`) along allowed transitions only. 'off' is reachable only when nothing is applied."""
+    def change(conn, new_state, new_mode):
+        conn.execute("SELECT public.payment_accounting_set_state(%s, %s, 'test-fixture', %s, NULL)",
+                     (new_state, new_mode, f"test fixture: {new_state} / {new_mode}"))
+
+    with fixture_db() as conn:
+        current, current_mode = conn.execute("SELECT state, dispute_mode FROM public.payment_accounting_state"
+                                             ).fetchone()
+        mode = mode or current_mode
+        if (current, current_mode) == (state, mode):
+            return
+        if current == "active":
+            change(conn, "frozen", None)
+            current = "frozen"
+        if mode != current_mode:
+            change(conn, None, mode)
+        if state == "active" or (state == "frozen" and current == "off"):
+            change(conn, "active", None)
+            current = "active"
+        if state == "frozen" and current == "active":
+            change(conn, "frozen", None)
+        elif state == "off" and current != "off":
+            change(conn, "off", None)
+
+
 def make_streamer(slug: str, user_id: str | None = None, name: str = "Auth Test") -> str:
     """An active creator as existing creators are after migration 0020 (eligible for donations while its owner is
     unchanged). Use the admin API to create a new (pending, standard-track) creator."""
@@ -205,6 +232,8 @@ def cleanup_synthetic_rows() -> None:
             # owner removes exactly the synthetic donations' rows; their history stays in donation_credit_events
             owner.execute(f"DELETE FROM public.donation_reversals WHERE donation_id IN {SYNTHETIC_DONATIONS}",
                           {"slug": SLUG_PREFIX + "%"})
+            owner.execute(f"DELETE FROM public.donation_accounting_evaluations WHERE donation_id IN "
+                          f"{SYNTHETIC_DONATIONS}", {"slug": SLUG_PREFIX + "%"})  # 0034 metadata (no FK)
             owner.execute("ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard")
             owner.execute("DELETE FROM public.donations WHERE streamer_id IN "
                           "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)", (SLUG_PREFIX + "%",))

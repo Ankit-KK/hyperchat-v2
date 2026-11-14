@@ -34,7 +34,7 @@ from tests.payments.test_payments_db import (  # noqa: F401 (fixtures)
     wire,
 )
 
-pytestmark = [requires_db, pytest.mark.usefixtures("env")]
+pytestmark = [requires_db, pytest.mark.usefixtures("env", "accounting_active")]  # 0034 state active
 REFUSED = psycopg.errors.InsufficientPrivilege
 INVALID = psycopg.errors.InvalidParameterValue
 APPLY = "SELECT public.donation_accounting_apply(%s, %s, %s, %s, %s)"
