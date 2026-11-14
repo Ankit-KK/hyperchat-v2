@@ -655,7 +655,8 @@ def test_refunds_only_a_refund_webhook_after_a_lost_dispute_stays_frozen_and_rep
                                          lambda c: [_post(c, client, refund, f"authtest-acct-rr-{tag}-2")]])
     assert first[0].json() == second[0].json() == {"status": "integrity_recorded"}
     held_history = _ledger(did)
-    assert _state(did) == (0, "H-DISPUTE-MODE", [], 100) and totals(sid) == [("Ravi", 100, 1)]
+    # F-BOTH: a processed refund and a lost deduction both exist (the evaluator's flag; still held, nothing applied)
+    assert _state(did) == (0, "H-DISPUTE-MODE", ["F-BOTH"], 100) and totals(sid) == [("Ravi", 100, 1)]
     assert _causes(did).count("hold") == 1 and "evaluation" not in _causes(did)  # the refund wrote no history
     assert _evaluation(did)["outcome"] == "unchanged" and _evaluation(did)["evidence_fp"] == _fp(did)
     with db() as conn:
