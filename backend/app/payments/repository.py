@@ -202,8 +202,10 @@ class PaymentRepository:
         """The webhook event and its evidence row in ONE transaction. False (nothing written) for a repeated event."""
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             if self.accounting and donation_id is not None:
-                # the donation row lock BEFORE the evidence insert: the insert's foreign key takes a share lock on
-                # it, and two deliveries upgrading that share lock would deadlock
+                # PAY-15 6a lock order L-1: the accounting state row FIRST (a freeze waits for this transaction or
+                # this transaction sees the freeze), then the donation BEFORE the evidence insert (the insert's
+                # foreign key takes a share lock on it, and two deliveries upgrading that share lock would deadlock)
+                await self._lock_accounting_state(cur)
                 await cur.execute("SELECT 1 FROM public.donations WHERE id = %s FOR UPDATE", (donation_id,))
             event_row = await self._insert_event(cur, event, outcome, donation_id)
             if event_row is None:
@@ -223,6 +225,14 @@ class PaymentRepository:
                 await self._settle_accounting(cur, donation_id)
             return True
 
+    @staticmethod
+    async def _lock_accounting_state(cur) -> dict:
+        """PAY-15 6a, lock order L-1: the accounting state row FOR SHARE, as the FIRST lock of every transaction that
+        may change accounting (before the donation, the donor total, jobs and the realtime outbox)."""
+        # an owner function: FOR SHARE needs UPDATE privilege on the table, which the API role must not have
+        await cur.execute("SELECT state, dispute_mode FROM public.payment_accounting_lock_state()")
+        return await cur.fetchone()
+
     async def _settle_accounting(self, cur, donation_id: str) -> str | None:
         """PAY-15 stage 3 (migration 0032), only when accounting is enabled: evaluate the donation's CURRENT evidence
         (payment_integrity_current) with the PR 1 evaluator under the donation row lock, then apply the result through
@@ -231,6 +241,9 @@ class PaymentRepository:
         evaluation committed later always sees every earlier delivery's evidence. Returns the function's outcome."""
         if not self.accounting:
             return None
+        switch = await self._lock_accounting_state(cur)  # already held (L-1): re-read, no wait
+        if switch["state"] != "active":
+            return "inactive"  # off / frozen: nothing is evaluated (the database refuses it too)
         await cur.execute(f"""
             SELECT d.id::text AS id, d.streamer_id::text AS streamer_id, d.amount, d.amount_inr,
                    d.currency::text AS currency, d.payment_status, d.provider_payment_id, d.legacy_source_table,
@@ -247,6 +260,12 @@ class PaymentRepository:
         """, (donation_id,))
         rows = await cur.fetchall()
         result = accounting.evaluate(donation, rows)
+        lost = any(r["donation_id"] == donation["id"] and donation["provider_payment_id"] is not None
+                   and r["provider_payment_id"] == donation["provider_payment_id"]
+                   and (r["kind"], r["status"]) == ("dispute", "lost") for r in rows)
+        if switch["dispute_mode"] == "hold" and result.hold is None and lost:
+            # refunds-only (PAY15 S6A-D3): a lost dispute is held, never applied (the database enforces it too)
+            result = accounting.Evaluation(None, "H-DISPUTE-MODE", result.flags)
         # a clear result counts exactly the attributed processed refunds and lost disputes; the database checks it
         refs = [] if result.hold else sorted(
             r["provider_ref"] for r in rows
@@ -380,6 +399,8 @@ class PaymentRepository:
         """
         try:
             async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                if self.accounting:  # PAY-15 6a lock order L-1: the accounting state row before the donation
+                    await self._lock_accounting_state(cur)
                 await cur.execute("""
                     SELECT d.streamer_id::text AS streamer_id, d.donor_name, d.amount_inr, d.payment_status,
                            d.provider_payment_id, d.voice_message_url IS NOT NULL AS has_voice,

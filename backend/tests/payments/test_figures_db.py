@@ -23,7 +23,7 @@ from tests.integration import db, fixture_db, make_donation, requires_db, update
 from tests.jobs.test_jobs_db import factory, run
 from tests.payments.test_accounting_db import _apply, _creator, _evidence, _ref, _settle, _total
 
-pytestmark = [requires_db, pytest.mark.usefixtures("env")]
+pytestmark = [requires_db, pytest.mark.usefixtures("env", "accounting_active")]  # 0034 state active
 WINDOW = (datetime(2000, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC))
 
 

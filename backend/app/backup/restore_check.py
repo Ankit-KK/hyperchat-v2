@@ -58,11 +58,21 @@ OWNER_ONLY_FUNCTIONS = ("public.stepup_enforcement_draft(text, text)",
                         "public.admin_link_google_identity(text, text, text, text, text, jsonb)",
                         "public.stepup_claim(uuid, uuid, text, text, text, text)",
                         "public.stepup_authorize(text, text, jsonb, text)",
-                        "public.donations_credit_backfill()")
+                        "public.donations_credit_backfill()",
+                        # PAY-15 6a (0034): the accounting operator functions (the API keeps only apply and the lock)
+                        "public.payment_evidence_fp(uuid)",
+                        "public.donation_accounting_core(uuid, bigint, text, text[], text[], text, bigint)",
+                        "public.payment_accounting_set_state(text, text, text, text, text)",
+                        "public.payment_accounting_open_run(text, text, text, text, jsonb)",
+                        "public.payment_accounting_reconcile(uuid, bigint, text, text[], text[], bigint)",
+                        "public.payment_accounting_keep(uuid, bigint)",
+                        "public.payment_accounting_apply_evaluation(uuid, bigint, text[], text[], bigint)",
+                        "public.payment_accounting_revert(uuid, bigint)")
 # Tables whose writes belong to one dedicated role or the owner only.
 NO_RUNTIME_WRITES = ("stepup_grants", "stepup_events", "stepup_enforcement", "webauthn_credentials",
                      "kyc_enforcement", "kyc_enforcement_events", "streamer_donator_totals", "donation_credit_events",
-                     "donation_reversals")
+                     "donation_reversals", "payment_accounting_state", "payment_accounting_events",
+                     "payment_accounting_runs", "donation_accounting_evaluations")
 
 
 class CheckError(Exception):

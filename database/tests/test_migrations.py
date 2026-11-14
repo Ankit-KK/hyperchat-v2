@@ -35,6 +35,7 @@ EXPECTED_TABLES = {
     "session_assurance",
     "stepup_events", "stepup_rate_limits", "stepup_enforcement", "payment_integrity_events",
     "donation_credit_events", "donation_reversals",
+    "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs", "donation_accounting_evaluations",
 }
 
 
@@ -712,7 +713,10 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
     # 0032's (reversal state, its function's EXECUTE for the API role) likewise
     evidence = ("payment_webhook_events", "payment_integrity_events", "streamer_donator_totals", "donation_reversals",
                 "donation_accounting_apply(uuid,bigint,text,text[],text[])",
-                "donation_credit_events")
+                "donation_credit_events",
+                # 0034 (accounting state, its audit, runs, evaluation metadata, the API's state lock)
+                "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs",
+                "donation_accounting_evaluations", "payment_accounting_lock_state()")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     command.downgrade(cfg, "0026")
     try:
@@ -1579,3 +1583,106 @@ def test_0033_refund_snapshot_column_keeps_evidence_append_only_and_refuses_to_l
             _clean_0033(conn)
         command.upgrade(cfg, "head")
     assert _snapshot_shape()[:2] == (True, True)
+
+
+ACTIVATION_TABLES = ("payment_accounting_state", "payment_accounting_events", "payment_accounting_runs",
+                     "donation_accounting_evaluations")
+APPLY_32 = "public.donation_accounting_apply(uuid, bigint, text, text[], text[])"
+
+
+def _activation_shape() -> tuple:
+    """(0034 tables present, run_id column present, H-DISPUTE-MODE allowed on reversals, the apply function's body,
+    runtime-role EXECUTE on the 0034 functions)."""
+    with _owner() as conn:
+        tables = tuple(t for t in ACTIVATION_TABLES
+                       if conn.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{t}",)).fetchone()[0])
+        run_col = conn.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND "
+                               "table_name = 'donation_credit_events' AND column_name = 'run_id'").fetchone()[0] == 1
+        holds = conn.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = "
+                             "'donation_reversals_hold_check'").fetchone()[0]
+        body = conn.execute("SELECT pg_get_functiondef(%s::regprocedure)", (APPLY_32,)).fetchone()[0]
+        # one string per (grantee, function): every runtime role, and PUBLIC, that may EXECUTE a 0034 function
+        executes = tuple(sorted(row[0] for row in conn.execute("""
+            SELECT r.rolname || ':' || f.proname FROM pg_proc f CROSS JOIN pg_roles r
+            WHERE f.pronamespace = 'public'::regnamespace AND (f.proname LIKE 'payment\\_accounting\\_%%'
+                  OR f.proname IN ('payment_evidence_fp', 'donation_accounting_core'))
+              AND r.rolname LIKE 'hyperchat\\_%%' AND r.rolname NOT IN ('hyperchat_owner', 'hyperchat_migrator')
+              AND has_function_privilege(r.oid, f.oid, 'EXECUTE')
+            UNION ALL
+            SELECT 'PUBLIC:' || f.proname FROM pg_proc f
+            WHERE f.pronamespace = 'public'::regnamespace AND (f.proname LIKE 'payment\\_accounting\\_%%'
+                  OR f.proname IN ('payment_evidence_fp', 'donation_accounting_core'))
+              AND has_function_privilege('public', f.oid, 'EXECUTE')""").fetchall()))
+    return tables, run_col, "H-DISPUTE-MODE" in holds, body, executes
+
+
+def _clean_0034(conn) -> None:
+    """Scratch only (owner, one transaction, guards lifted explicitly): back to the state 0034 creates."""
+    if "payment_accounting_state" not in _tables():
+        return
+    with conn.transaction():
+        for table in ("payment_accounting_events", "payment_accounting_runs"):
+            conn.execute(f"ALTER TABLE public.{table} DISABLE TRIGGER {table}_guard")
+            conn.execute(f"DELETE FROM public.{table}")
+            conn.execute(f"ALTER TABLE public.{table} ENABLE TRIGGER {table}_guard")
+        conn.execute("DELETE FROM public.donation_accounting_evaluations")
+        conn.execute("ALTER TABLE public.payment_accounting_state DISABLE TRIGGER payment_accounting_state_guard")
+        conn.execute("UPDATE public.payment_accounting_state SET state = 'off', dispute_mode = 'hold'")
+        conn.execute("ALTER TABLE public.payment_accounting_state ENABLE TRIGGER payment_accounting_state_guard")
+
+
+def test_0034_accounting_state_starts_off_is_guarded_and_the_downgrade_restores_0032_apply(monkeypatch):
+    """0034 adds the switch (off, dispute mode hold), its audit, runs and evaluation metadata; the runtime roles may
+    only read them (the API also takes the state lock and calls apply); the downgrade refuses once anything was
+    changed or recorded, otherwise restores 0033 exactly, 0032's apply function byte for byte."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    with _owner() as conn:
+        _clean_0034(conn)
+    command.downgrade(cfg, "0033")
+    try:
+        before = _activation_shape()
+        assert before[:3] == ((), False, False) and before[4] == ()
+
+        command.upgrade(cfg, "0034")
+        tables, run_col, dispute_hold, body, executes = _activation_shape()
+        assert (tables, run_col, dispute_hold) == (ACTIVATION_TABLES, True, True)
+        assert body != before[3] and "payment_accounting_state" in body
+        assert executes == ("hyperchat_app:payment_accounting_lock_state",)  # apply is 0032's grant
+        with _owner() as conn:
+            assert conn.execute("SELECT state, dispute_mode, changed_by FROM public.payment_accounting_state"
+                                ).fetchone() == ("off", "hold", "migration 0034")
+            assert sorted(conn.execute(  # S6A-D6: the 5 s lock timeout is the function's own setting
+                "SELECT proconfig FROM pg_proc WHERE oid = 'public.payment_accounting_set_state(text, text, text, "
+                "text, text)'::regprocedure").fetchone()[0]) == ["lock_timeout=5s", "search_path=pg_catalog, public"]
+            assert conn.execute("SELECT count(*) FROM public.payment_accounting_events").fetchone()[0] == 0
+            for role in ("hyperchat_app", "hyperchat_worker"):
+                for table in ACTIVATION_TABLES:
+                    assert [p for p in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE") if conn.execute(
+                        "SELECT has_table_privilege(%s, %s, %s)", (role, f"public.{table}", p)).fetchone()[0]
+                    ] == ["SELECT"], (role, table)
+            for sql, state in (("UPDATE public.payment_accounting_state SET state = 'active'", "42501"),  # no reason
+                               ("SELECT public.payment_accounting_set_state('frozen', NULL, 'op', "
+                                "'off cannot go to frozen', NULL)", "22023"),
+                               ("DELETE FROM public.payment_accounting_state", "42501")):
+                with pytest.raises(psycopg.Error) as exc, conn.transaction(force_rollback=True):
+                    conn.execute(sql)
+                assert exc.value.sqlstate == state, sql
+            assert conn.execute("SELECT public.donation_accounting_apply(gen_random_uuid(), 0, NULL, '{}', '{}')"
+                                ).fetchone()[0] == "inactive"  # off: nothing is evaluated, not even looked up
+            assert conn.execute("SELECT public.payment_accounting_set_state('active', NULL, 'op-migtest', "
+                                "'a scratch activation', NULL)").fetchone()[0] == "active"
+
+        with pytest.raises(Exception, match="downgrade of 0034 stopped"):
+            command.downgrade(cfg, "0033")
+        assert _version() == "0034"
+        with _owner() as conn:
+            _clean_0034(conn)  # controlled scratch recovery: state off / hold, no audit or metadata
+        command.downgrade(cfg, "0033")
+        assert _activation_shape() == before  # 0032's apply restored exactly, 0032's hold vocabulary, no run_id
+    finally:
+        with _owner() as conn:
+            _clean_0034(conn)
+        command.upgrade(cfg, "head")
+    assert _activation_shape()[:3] == (ACTIVATION_TABLES, True, True)

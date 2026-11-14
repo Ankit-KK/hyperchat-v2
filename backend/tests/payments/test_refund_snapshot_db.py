@@ -32,7 +32,7 @@ from tests.payments.test_payments_db import (  # noqa: F401 (fixtures)
     wire,
 )
 
-pytestmark = requires_db
+pytestmark = [requires_db, pytest.mark.usefixtures("accounting_active")]
 
 
 def _refund(client, out, payment_id, event_id, *, ref, amount, refunded, event="refund.processed", at=1_800_000_000,
