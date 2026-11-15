@@ -30,6 +30,35 @@ def accounting_active():
     set_accounting("frozen")
 
 
+VERIFY_TEMPLATE = "hyperchat_verify_tmpl"
+VERIFY_ROLES = ("hyperchat_migrator, hyperchat_app, hyperchat_worker, hyperchat_readonly, hyperchat_lifecycle, "
+                "hyperchat_auth, hyperchat_stepup")
+
+
+@pytest.fixture
+def verify_db():
+    """PAY-15 6a-2 (plan §9): a fresh database copied from the pristine template at head (setup-test-db.sh), dropped
+    afterwards. HYPERCHAT_TEST_VERIFY_ADMIN is the throwaway server's superuser connection (CI only)."""
+    import secrets
+
+    import psycopg
+
+    admin = os.environ.get("HYPERCHAT_TEST_VERIFY_ADMIN", "")
+    if not admin:
+        pytest.skip("HYPERCHAT_TEST_VERIFY_ADMIN not set")
+    name = f"hyperchat_verify_{secrets.token_hex(5)}"
+    with psycopg.connect(admin, autocommit=True) as conn:
+        assert conn.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]
+        conn.execute(f'CREATE DATABASE "{name}" TEMPLATE {VERIFY_TEMPLATE} OWNER hyperchat_owner')
+        conn.execute(f'REVOKE ALL ON DATABASE "{name}" FROM PUBLIC')
+        conn.execute(f'GRANT CONNECT ON DATABASE "{name}" TO {VERIFY_ROLES}')
+    try:
+        yield name
+    finally:
+        with psycopg.connect(admin, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
 @pytest.fixture(scope="session")
 def scratch_db() -> str:
     """Name of the integration database, after refusing production and the restore source.

@@ -287,6 +287,63 @@ database switch the activation tools (6a-2 to 6a-4, not built) will drive.
   `emit_totals_changed`, coalesced while one is pending); keep and no-op calls emit nothing.
 - Downgrade of 0034 refuses once the state, the mode, an event, a run, an evaluation or any 0034 history exists.
 
+**Accounting verification (PAY-15 stage 6a-2), read-only.** `HYPERCHAT_READONLY_DSN=… python -m app.payments.operator
+verify [--creator ID | --donation ID] [--output FILE]` (`app/payments/verify.py`) checks migration 0034's data and
+changes nothing. The writing commands (`state`, `reconcile`, `resolve`, `revert`) are stage 6a-3 and refused (exit 2).
+- **Session:** `hyperchat_readonly` only (session and current user), one `REPEATABLE READ READ ONLY` transaction (its
+  snapshot is the first statement's), statement timeout 120 s, lock timeout 5 s, head `0034`, PostgreSQL ≥ 15. SELECT
+  statements only: no DML, DDL, temporary table, SECURITY DEFINER call or advisory lock; it always ends with ROLLBACK.
+  Anything else, an SQL error or a timeout is **refused**.
+- **Invariants:** I1 credit bounds; I2 credited = the writer's target; I3 / I3-O per-donation and orphan chains and
+  I6 live-bucket continuity (Erratum 1: deleted-creator buckets excluded and counted); I4 reversal / hold chains; I5
+  totals rows; I7 Σ credited ≤ total (the pre-writer baseline reported); I8 no accounting on imported or ambiguous
+  donations; I9 identity; I10 triggers, definer functions (body pins), `set_state`'s 5 s, EXECUTE and table grants,
+  and the verifier's own copy of the current-evidence view; I11 bounds and vocabularies, refunds-only holds (R-DM);
+  I12 agreement with the audited revert exception (a keep is never an exception on 0034: its acknowledgement is only
+  checked for forgery, A1), I12-H every clear row checked against every recorded version of its evidence references
+  (S2, below); I13 evidence
+  processing; I14 one accounting row per (donation, transaction); I15 SQL figures = the Python reference.
+- **Operator runs (D-10, the plan rev. 3 §6 scope contract the 6a-3 CLI will write):** `{"kind": "donations",
+  "donations": [...]}`, `{"kind": "creator", "creator": …}`, `{"kind": "all_v2"}` (reconcile only) or `{"kind":
+  "recovery", "donations": [...], "verify_report_sha256": …}`, each with `expires_at` (RFC 3339, within 24 h of the
+  run). An unused run without a scope is attention; a used one, a malformed scope, a missing run, a use outside the
+  scope, after `expires_at` or under the wrong command is an audit violation and never an I12 exception.
+- **0034 timing limits (never hidden):** event timestamps are transaction starts and a transition's commit is
+  unbounded (L-2 / L-2b), so verify **never asserts a missed evaluation or an overdue 24 h reconciliation**: an
+  uncovered origin while active is `in_flight` (< 10 min) or `boundary_uncertain`, a backlog past the nominal window
+  `deadline_uncertain`, with the 500 ppm clock margin on the window (`pending` only when provably inside). A backlog
+  item is reconciled only when its evaluation observed `active` under the state lock (`ev.state`), on the current
+  fingerprint, and I12 agrees, never by `evaluated_at`. A missed evaluation later covered leaves no trace (L-1).
+  Legacy I12-H ambiguity (`historical_ambiguous`) is permanent; a later row never supersedes it.
+- **Historical dispute mode and evidence order (CR-2, owner decisions 2-4):** stamps are transaction starts and
+  commits are unbounded, so neither a row's mode nor its evidence state is chosen by timestamp proximity. A clear
+  row's possible modes are every active period's mode, minus `hold` when its refs name a dispute (the core refuses a
+  clear result in hold while a lost dispute is current). Evidence commit order is unknowable on 0034 (random uuid
+  ids, `recorded_at` a transaction start: Decision 5), so a row's refs may have had any of their recorded versions.
+  `unsupported_amount` (structural) only when no version, in any possible mode, gives the stored amount; supported
+  under some modes only: `historical_ambiguous` (`mode_order`); several amounts: `evidence_cut`; the refs determine
+  the amount but no `recorded_at` prefix within ±5 min reproduces it: `evidence_order`; otherwise exact. Exact proves
+  arithmetic consistency with the refs, **not** that the evidence state existed: some self-consistent forged
+  historical attribution can pass I12-H, and I4 / I12 may catch it but do not guarantee it. A keep acknowledgement is
+  **never proven** on 0034 (A1), and 0035 cannot prove it retroactively: one that any evidence state under any mode
+  the state ever had could give is `historical_ambiguous` (`ack_mode_order`, no exception); none: `forged_ack`. The
+  report's `limitations` (L-1, L-2, L-2b, D5-1 to D5-5) say the same. Enumeration is bounded (4 096 states, 12
+  events per ref): over the bound, or if the fingerprint replica fails, the case is uncertain, never exact or
+  forged. Ambiguities carry `basis` (`mode` /
+  `evidence`), are permanent and block `activation_verification_ready`. A mode change or capture whose stamp precedes
+  the evaluation is an uncertain origin (`boundary_uncertain`), never `indeterminate`.
+- **Report:** canonical JSON (ids, enums and amounts; donor buckets as creator id plus a name digest) with a SHA-256
+  `digest` over everything else. Status = the worst severity of the closed class table (`verify.SEVERITY`); exit
+  **0 clean, 1 violation, 2 refused, 3 attention** (D-7). A class outside the table refuses the report.
+- **Gates:** `reconcile_precondition` (full scope, active, no violation), `recovery_precondition`,
+  `activation_verification_ready` (full scope, active, status clean: the part verify can establish) and
+  `activation_complete`, which is **always false** in a verify report: it also needs the 6a-3 second report-only
+  reconcile to plan zero changes (plan §4.3), which verify never attests (`not_attested`). A scoped or refused run
+  sets every gate false. Clean is necessary, never sufficient, and nothing here activates accounting.
+- **Tests:** `tests/payments/test_verify_units.py` (no database) and `test_verify_db.py` (a fresh copy of the pristine
+  template `hyperchat_verify_tmpl` per test, created by `setup-test-db.sh`; `HYPERCHAT_TEST_VERIFY_ADMIN` names the
+  throwaway server's superuser connection).
+
 **Live figures (PAY-15 stage 4).** Goal progress (public and realtime), dashboard revenue and the CSV export read the
 applied reversal through `app/payments/figures.py`: per donation `reversed_inr` = the pro-rata share of the stored
 `amount_inr`, rounded down to the paisa (exact integer division), and `net_inr = amount_inr − reversed_inr`; sums are

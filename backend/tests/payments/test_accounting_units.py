@@ -4,6 +4,7 @@ import ast
 import copy
 import itertools
 import random
+import re
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -321,3 +322,98 @@ def test_the_accounting_switch_defaults_off_and_refuses_to_be_enabled(monkeypatc
             Settings(db_enabled=False)
     monkeypatch.setenv("HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED", "false")
     assert Settings(db_enabled=False).payment_accounting_enabled is False
+
+
+# ── PAY-15 6a-2 (plan §12): evaluate_in_mode is the old inline repository logic, moved unchanged ──
+
+def _old_inline(donation, rows, mode):
+    """FROZEN reference: repository._settle_accounting lines 262-268 at main 210897e, verbatim (never edit)."""
+    result = accounting.evaluate(donation, rows)
+    lost = any(r["donation_id"] == donation["id"] and donation["provider_payment_id"] is not None
+               and r["provider_payment_id"] == donation["provider_payment_id"]
+               and (r["kind"], r["status"]) == ("dispute", "lost") for r in rows)
+    if mode == "hold" and result.hold is None and lost:
+        result = accounting.Evaluation(None, "H-DISPUTE-MODE", result.flags)
+    return result
+
+
+GOLDEN_EVIDENCE = {
+    "none": [],
+    "refund": [refund()],
+    "lost": [dispute()],
+    "refund_and_lost": [refund(), dispute()],
+    "lost_elsewhere": [dispute(donation_id=OTHER_DID)],
+    "lost_other_payment": [dispute(match="order", provider_payment_id=OTHER_PAY)],
+    "payment_mismatch": [dispute(provider_payment_id=OTHER_PAY)],
+    "conflict": [dispute(conflicting=True)],
+    "currency": [refund(currency="USD")],
+    "no_deduction": [dispute(deducted=0)],
+    "over_refund": [refund(amount=20000)],
+    "open_and_refund": [refund(), dispute("disp_B", status="open", deducted=0)],
+}
+GOLDEN_DONATIONS = {"v2": {}, "unpaid": {"payment_status": "pending"}, "imported": {"legacy_source_table": "x"},
+                    "no_payment": {"provider_payment_id": None}, "usd": {"currency": "USD"}}
+
+
+@pytest.mark.parametrize("mode", ["hold", "apply"])
+@pytest.mark.parametrize("evidence", sorted(GOLDEN_EVIDENCE))
+@pytest.mark.parametrize("don", sorted(GOLDEN_DONATIONS))
+def test_evaluate_in_mode_golden_table_equals_the_frozen_inline_logic(mode, evidence, don):
+    d, rows = donation(**GOLDEN_DONATIONS[don]), GOLDEN_EVIDENCE[evidence]
+    assert accounting.evaluate_in_mode(d, rows, mode) == _old_inline(d, rows, mode)
+
+
+def test_evaluate_in_mode_golden_expectations():
+    assert accounting.evaluate_in_mode(donation(), [dispute()], "hold") == held("H-DISPUTE-MODE")
+    assert accounting.evaluate_in_mode(donation(), [dispute()], "apply") == clear(10000)
+    assert accounting.evaluate_in_mode(donation(), [refund(), dispute()], "hold") == held("H-DISPUTE-MODE", "F-BOTH")
+    assert accounting.evaluate_in_mode(donation(), [dispute(conflicting=True)], "hold") == held("H-CONFLICT")
+    assert accounting.evaluate_in_mode(donation(), [refund()], "hold") == clear(2500)
+
+
+def test_evaluate_in_mode_equals_the_inline_logic_on_2000_random_evidence_sets():
+    r = random.Random(20261115)
+    for _ in range(2000):
+        rows, mode = _random_rows(r), r.choice(["hold", "apply"])
+        don = donation(**r.choice(list(GOLDEN_DONATIONS.values())))
+        before = copy.deepcopy(rows)
+        assert accounting.evaluate_in_mode(don, rows, mode) == _old_inline(don, rows, mode)
+        assert rows == before
+
+
+def test_evaluate_in_mode_accepts_any_iterable_once():
+    assert accounting.evaluate_in_mode(donation(), iter([refund(), dispute()]), "hold") == \
+        held("H-DISPUTE-MODE", "F-BOTH")
+
+
+def test_the_repository_calls_evaluate_in_mode_and_keeps_no_inline_copy():
+    src = (Path(accounting.__file__).parent / "repository.py").read_text(encoding="utf-8")
+    assert src.count("accounting.evaluate_in_mode(donation, rows, switch[\"dispute_mode\"])") == 1
+    assert "lost = any(" not in src and "accounting.evaluate(" not in src
+    assert "accounting.Evaluation(None, \"H-DISPUTE-MODE\"" not in src
+
+
+def test_f12_helpers_report_processed_refunds_and_lost_deductions():
+    rows = [refund("rfnd_A", amount=2500), refund("rfnd_B", "pending", 900), dispute(deducted=4000),
+            refund("rfnd_C", amount=700, provider_payment_id=OTHER_PAY, match="order"), dispute("disp_X", "won", 0)]
+    assert accounting.processed_refunds_paise(donation(), rows) == 2500
+    assert accounting.lost_deductions_paise(donation(), rows) == 4000
+    assert accounting.counted_refs(donation(), rows) == ["disp_A", "rfnd_A"]
+    assert accounting.has_lost_dispute(donation(), rows) and not accounting.has_lost_dispute(donation(), rows[:2])
+
+
+def test_f8_every_0032_refusal_clause_is_in_the_0034_core():
+    """F-8 (6a-1 review, stage 6a-2): the core keeps 0032's apply rules verbatim (every RAISE message)."""
+    versions = Path(accounting.__file__).resolve().parents[3] / "database" / "migrations" / "versions"
+    old = (versions / "0032_donation_reversal_accounting.py").read_text(encoding="utf-8")
+    new = (versions / "0034_payment_accounting_activation.py").read_text(encoding="utf-8")
+    core = new.split("CREATE FUNCTION public.donation_accounting_core", 1)[1].split("CREATE OR REPLACE FUNCTION", 1)[0]
+    apply_0032 = old.split("CREATE FUNCTION public.donation_accounting_apply", 1)[1].split("END $$", 1)[0]
+    messages = re.findall(r"RAISE EXCEPTION '([^']+)'", apply_0032)
+    assert len(messages) >= 10
+    reworded = {"only V2 checkout donations are reversed automatically (imported or ambiguous ":
+                "only V2 checkout donations have accounting (imported or ambiguous provenance"}  # 6a-1, D8 wording
+    lock = new.split("LOCK_DONATION_V2 = ", 1)[1].split('"""', 2)[1]  # the core includes it ({LOCK_DONATION_V2})
+    assert "{LOCK_DONATION_V2}" in core
+    for message in messages:
+        assert reworded.get(message, message) in core + lock, message
