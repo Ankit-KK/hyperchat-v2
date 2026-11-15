@@ -27,4 +27,9 @@ PSQL=(psql -X -q -v ON_ERROR_STOP=1 -d postgres)
 cd "$ROOT/database"
 HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@${PGHOST}:${PGPORT:-5432}/${DB}" \
   "$PY" -m alembic upgrade head
-echo "test database $DB ready on ${PGHOST}:${PGPORT:-5432}"
+# PAY-15 6a-2 (plan §9): a pristine copy at head, never written by tests; each full-scope verify test copies it
+# (CREATE DATABASE ... TEMPLATE) so it starts uncontaminated by the shared suites' audit rows.
+"${PSQL[@]}" -c "DROP DATABASE IF EXISTS hyperchat_verify_tmpl"
+"${PSQL[@]}" -c "CREATE DATABASE hyperchat_verify_tmpl TEMPLATE \"$DB\" OWNER hyperchat_owner"
+"${PSQL[@]}" -c "REVOKE ALL ON DATABASE hyperchat_verify_tmpl FROM PUBLIC"
+echo "test database $DB ready on ${PGHOST}:${PGPORT:-5432} (verify template hyperchat_verify_tmpl)"
