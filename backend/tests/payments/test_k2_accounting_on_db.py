@@ -223,7 +223,14 @@ def test_k2_lost_dispute_racing_the_capture_applies_exactly_once_in_mode_apply(c
     """R-1 / R-2, mode apply: the lost dispute's deduction is applied exactly once whatever the commit order."""
     sid, did, state, row, _ = _check_race(client, schedule, mode="apply")
     assert state == (DEDUCTED, None, [], Decimal("30.00")), state
-    assert row[2:6] == (0, DEDUCTED, None, None) and row[1] == Decimal("-70.00") and row[6] == 1, row
+    # 0034 records the reversal in its own zero-delta row (credited before = after, _ledger l.87-96), then touches the
+    # donation so the one credit writer moves the money in a 'writer' row (0034 l.459-461; 0032: "the total moves only
+    # in the one writer's own ledger row"): the capture's +100, then exactly one -70 after the reversal record
+    assert row[0] == "evaluation" and row[1:7] == (Decimal("0.00"), 0, DEDUCTED, None, None, 1), row
+    ledger = _ledger(did)
+    money = [r for r in ledger if r[1] != 0]
+    assert [(r[0], r[1]) for r in money] == [("writer", Decimal("100.00")), ("writer", Decimal("-70.00"))], ledger
+    assert ledger.index(row) < ledger.index(money[1]) and sum(r[1] for r in ledger) == Decimal("30.00"), ledger
     assert totals(sid) == [("Ravi", Decimal("130.00"), 2)]                # the other ₹100 + this ₹100 − ₹70
 
 
