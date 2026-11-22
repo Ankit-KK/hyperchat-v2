@@ -212,7 +212,7 @@ Admin-only DEV flows can't be exercised until the owner decides how a DEV admini
 ## 5. Production migration and cutover prerequisites
 Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, no lifecycle, auth or stepup roles, no witness, no verifier, and no Razorpay keys. In order, each step **[APPROVAL]**:
 1. **Production backup install (A3):** the fixed backup script, its units and a production KYC witness. Then one production backup and a scratch `restore_check` with `--roles-sql` (docs/backup-recovery.md).
-2. **A production migration runbook, 0010 → 0028,** modelled on the DEV rehearsal. Production is on PostgreSQL 17 and starts at 0009, so it needs its own revisions list, baseline, gates and rollback (a Phase F equivalent against the A3 backup).
+2. **A production migration runbook, 0010 → 0034,** modelled on the DEV rehearsal (0030–0034 enter it only after their Stage 6 DEV validation; see the PAY-15 row of the checklist). Production is on PostgreSQL 17 and starts at 0009, so it needs its own revisions list, baseline, gates and rollback (a Phase F equivalent against the A3 backup).
 3. **Roles and authentication rules** on `17/hyperchat`: `roles.sql`, `setup_cluster.sh`, the production `pg_ident` lines; `check_isolation.sh prod` passes.
 4. **Release build and switch** of the target commit, as in Phase D.
 5. **Step-up verifier** (docs/admin-stepup.md "Deployment sequence" 4–6): install the `hyperchat-prod-stepup` unit and OS user, set `HYPERCHAT_STEPUP_SOCKET`, enroll two passkeys per administrator, operator approval, `readiness` = ready, then activation through the operator tool only.
@@ -228,7 +228,7 @@ Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, 
 | 4 | `hyperchat_restore_test` R0 → R2 (→ R4) | [APPROVAL] |
 | 5 | Opt-in smoke sections for Razorpay and email: merged (#103); move the email check onto the onboarding category settings | code |
 | 6 | Disposable F3–F4 rehearsal on the VPS | [APPROVAL] |
-| 7 | Production A3 backup install; production migration runbook 0010 → 0028 | [APPROVAL] / docs |
+| 7 | Production A3 backup install; production migration runbook 0010 → 0034 (0030–0034 after Stage 6 DEV validation) | [APPROVAL] / docs |
 | 8 | Step-up verifier on DEV, then production; enrollment; activation | [APPROVAL] |
 | 9 | Didit sandbox; R2 run (`HYPERCHAT_SMOKE_R2=1`); D1 hosted rehearsal | [APPROVAL] |
 | 10 | PAY-7 test payment (needs a client) | owner-run |
