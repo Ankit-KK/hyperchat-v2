@@ -131,10 +131,13 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         working-directory: database
         run: python -m pytest -q --deselect tests/test_auth_hash_import.py
-      - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot, accounting activation)
+      - name: CI identity capture (OD-14; the verifier DB tests compare the server against it)
+        if: steps.scope.outputs.run == 'true'
+        run: bash .github/scripts/ci-identity-capture.sh 15
+      - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot, accounting activation, accounting verify)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
-        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/payments/test_activation_db.py tests/payments/test_activation_concurrency_db.py tests/dashboard/test_moderation_api.py
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/payments/test_activation_db.py tests/payments/test_activation_concurrency_db.py tests/payments/test_verify_db.py tests/dashboard/test_moderation_api.py
 
   integration:
     name: Database + integration tests (PostgreSQL 17)
@@ -176,6 +179,8 @@ jobs:
       - name: Database tests (migration round trip, role privileges, ETL mapping)
         working-directory: database
         run: python -m pytest -q
+      - name: CI identity capture (OD-14; the verifier DB tests compare the server against it)
+        run: bash .github/scripts/ci-identity-capture.sh 17
       - name: Backend tests (unit + end-to-end against the database)
         working-directory: backend
         run: python -m pytest -q

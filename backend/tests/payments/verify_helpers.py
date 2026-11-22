@@ -16,10 +16,12 @@ NEVER_PRESENT_DATABASES = frozenset({"hyperchat", "hyperchat_dev", "hyperchat_re
 ROLES_SQL = frozenset({"hyperchat_owner", "hyperchat_migrator", "hyperchat_app", "hyperchat_worker",
                        "hyperchat_readonly", "hyperchat_lifecycle", "hyperchat_auth", "hyperchat_stepup"})
 
-# ── CI database execution: DISABLED (A1 Correction 2; owner direction 2026-11-17) ────────────────────────────────────
-# CI_DB_EXECUTION_AUTHORIZED is False: in CI mode the guard always refuses, whatever evidence is present. Nothing
-# here enables CI database execution, and ci.yml / setup-test-db.sh are unchanged (the current workflow sets none of
-# the CI variables, so the module also refuses for the plain reason that no Phase 2B expectations exist).
+# ── CI database execution: AUTHORIZED (OD-14, owner decision 2026-11-22) ─────────────────────────────────────────────
+# OD-14 (decision record D:\tmp\pay15-owner-decisions-record-20261122, PAY15-OD14-DECISION.md): CI database
+# execution is authorized on ci.yml's throwaway PostgreSQL 15 container and PostgreSQL 17 service, with the identity
+# capture below (written by .github/scripts/ci-identity-capture.sh) as the control. Accepted threat model: the
+# containers are disposable; the risk is misrouting to a non-CI database, which the capture detects and refuses.
+# Evidence class: CI database evidence, not Phase 2B validation, not financial verification.
 #
 # Trust boundary, stated plainly. The comparison logic below (I-1 to I-4) checks the live server against an identity
 # capture (system_identifier, data_directory, server_version_num, port, plus a nonce for freshness only). That
@@ -31,9 +33,9 @@ ROLES_SQL = frozenset({"hyperchat_owner", "hyperchat_migrator", "hyperchat_app",
 # needs a different, separately authorized design: a trusted launcher OUTSIDE pytest that verifies the service and
 # then runs pytest in a network-isolated namespace whose only reachable PostgreSQL is a disposable service with no
 # DEV / production credentials or routes (see the A1 Correction 2 report). Which threat model CI must meet is an
-# owner decision (OD-14); until it is taken, CI stays disabled and no CI security acceptance is claimed.
+# owner decision (OD-14): decided 2026-11-22 for misrouting detection only; no boundary against test code is claimed.
 #
-# Comparison logic kept (tested offline) for that future decision:
+# Comparison logic (tested offline; enforced in CI by OD-14):
 #   I-1  capture (HYPERCHAT_TEST_CI_IDENTITY_FILE): {"source": "hyperchat-ci-provisioning-v1", "sysid", "datadir",
 #        "version_num", "port": "5432", "nonce"}
 #   I-2  the server's system_identifier, data_directory, server_version_num and port equal the capture EXACTLY, and
@@ -43,7 +45,7 @@ ROLES_SQL = frozenset({"hyperchat_owner", "hyperchat_migrator", "hyperchat_app",
 #   I-4  no hyperchat / hyperchat_dev / hyperchat_restore_test; no login role outside postgres, roles.sql and
 #        authtest_; admin = superuser postgres; hyperchat_readonly the roles.sql test-only role
 # CI mode never enables DB-X and is refused on any port but 5432. The local four-cluster policy is unaffected.
-CI_DB_EXECUTION_AUTHORIZED = False
+CI_DB_EXECUTION_AUTHORIZED = True  # OD-14 (2026-11-22); set False to disable CI database execution again
 CI_DISABLED = ("CI database execution is disabled (A1 Correction 2): a same-user identity capture only detects "
                "accidental misrouting and is not a boundary against test-process code; owner decision OD-14 pending")
 CI_MARKER_PREFIX = "hyperchat-ci-disposable:"

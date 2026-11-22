@@ -59,10 +59,22 @@ def test_the_postgres15_job_excludes_only_the_postgres17_importer():
                   "tests/payments/test_visibility_db.py",  # PAY-15 stage 5 visibility
                   "tests/payments/test_refund_snapshot_db.py",  # PAY-15 stage 5b refund snapshot
                   "tests/payments/test_activation_db.py",  # PAY-15 6a-1 (0034) accounting state and operations
-                  "tests/payments/test_activation_concurrency_db.py"):  # PAY-15 6a-1 lock order (C1-C13)
+                  "tests/payments/test_activation_concurrency_db.py",  # PAY-15 6a-1 lock order (C1-C13)
+                  "tests/payments/test_verify_db.py"):  # PAY-15 6a-2 read-only verifier (OD-14: CI identity capture)
         assert suite in runs
     gated = [s for s in steps if s.get("id") != "scope" and "actions/checkout" not in str(s.get("uses"))]
     assert all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in gated)
+
+
+def test_both_database_jobs_capture_the_ci_identity_right_before_the_backend_suites():
+    """OD-14: the verifier DB tests refuse unless the server matches a capture taken by the workflow itself, after
+    the database is created and before the backend pytest step (the step that runs test_verify_db.py)."""
+    for job, major in (("postgres15", "15"), ("integration", "17")):
+        runs = [str(s.get("run", "")) for s in WORKFLOW["jobs"][job]["steps"]]
+        capture = runs.index(f"bash .github/scripts/ci-identity-capture.sh {major}")
+        setup = next(i for i, r in enumerate(runs) if "setup-test-db.sh" in r)
+        backend = max(i for i, r in enumerate(runs) if r.startswith("python -m pytest -q"))
+        assert setup < capture == backend - 1, job
 
 
 needs_git = pytest.mark.skipif(sys.platform == "win32" or not shutil.which("git"), reason="needs bash and git")
@@ -109,6 +121,7 @@ def _scope(repo_dir: Path, base: str) -> str:
     ("backend/tests/payments/test_activation_concurrency_db.py", "run=true"),
     ("backend/app/payments/repository.py", "run=true"),  # 6a-1: the L-1 lock order lives here
     ("backend/app/payments/verify.py", "run=true"),  # 6a-2: catalog / role-sensitive SQL as hyperchat_readonly
+    ("backend/tests/payments/test_verify_db.py", "run=true"),
     ("backend/tests/payments/test_verify_units.py", "run=false"),
     ("backend/tests/payments/test_accounting_units.py", "run=false"),
     ("backend/tests/dashboard/test_moderation_api.py", "run=true"),
