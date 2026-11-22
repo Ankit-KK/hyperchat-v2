@@ -1,11 +1,17 @@
 # Backend readiness plan (after the DEV rehearsal)
 
 **Status:** a plan for review. Nothing here has been run beyond the read-only checks it cites; every step marked
-**[APPROVAL]** needs the owner's explicit approval at the time it runs. Basis: `main` after #99, DEV on release
+**[APPROVAL]** needs the owner's explicit approval at the time it runs. Original basis (2026-10-25, superseded by "Current state" below): `main` after #99, DEV on release
 `c2fe883be71d` at 0028 (Phase E passed 2026-10-25), production on `940137070657` at 0009.
 
 **Update 2026-10-25, 16:32 UTC:** DEV runs release **`a9b9486efd86`**, deployed application-only with no migration
 (section 4, "DEV deployment of `a9b9486`"). Production is unchanged.
+
+**Current state (as of 2026-11-22, from records; re-verify before the next DEV window):** `main` is `210897e` (#129),
+head `0034`. DEV code release `8e1284871a05` (2026-10-28 record, not re-verified); DEV database at `0029`
+(2026-11-02T15:08Z, C1 Gate M record). Migrations 0030–0034 are on `main` and not on DEV; for their deployment plan see
+the PAY-15 row of [`docs/backend-completion-checklist.md`](../backend-completion-checklist.md) (the Stage 6 plan itself
+lives outside the repo). Production is unchanged at `940137070657`, 0009.
 
 ## 1. Code complete is not verified end to end
 | Area | Code and CI | Verified end to end on DEV | Needed before production |
