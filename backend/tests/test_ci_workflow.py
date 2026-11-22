@@ -40,6 +40,9 @@ def test_check_names_are_stable_and_every_suite_still_runs():
     integration = "\n".join(str(s.get("run", "")) for s in WORKFLOW["jobs"]["integration"]["steps"])
     assert "setup-test-db.sh" in integration and integration.count("python -m pytest -q") == 2  # full, unfiltered
     assert WORKFLOW["jobs"]["integration"]["services"]["postgres"]["image"].endswith("postgres:17")
+    for job in ("integration", "postgres15"):  # 6a-2: the per-test verify template copies need the superuser
+        assert WORKFLOW["jobs"][job]["env"]["HYPERCHAT_TEST_VERIFY_ADMIN"] == \
+            "host=localhost port=5432 user=postgres dbname=postgres"
     assert "nginx_ratelimit_check.sh" in str(WORKFLOW["jobs"]["deploy-config"]["steps"])
 
 
@@ -105,6 +108,8 @@ def _scope(repo_dir: Path, base: str) -> str:
     ("backend/tests/payments/test_activation_db.py", "run=true"),
     ("backend/tests/payments/test_activation_concurrency_db.py", "run=true"),
     ("backend/app/payments/repository.py", "run=true"),  # 6a-1: the L-1 lock order lives here
+    ("backend/app/payments/verify.py", "run=true"),  # 6a-2: catalog / role-sensitive SQL as hyperchat_readonly
+    ("backend/tests/payments/test_verify_units.py", "run=false"),
     ("backend/tests/payments/test_accounting_units.py", "run=false"),
     ("backend/tests/dashboard/test_moderation_api.py", "run=true"),
     ("backend/tests/dashboard/test_x.py", "run=false"),

@@ -259,13 +259,8 @@ class PaymentRepository:
             FROM public.payment_integrity_current WHERE donation_id = %s
         """, (donation_id,))
         rows = await cur.fetchall()
-        result = accounting.evaluate(donation, rows)
-        lost = any(r["donation_id"] == donation["id"] and donation["provider_payment_id"] is not None
-                   and r["provider_payment_id"] == donation["provider_payment_id"]
-                   and (r["kind"], r["status"]) == ("dispute", "lost") for r in rows)
-        if switch["dispute_mode"] == "hold" and result.hold is None and lost:
-            # refunds-only (PAY15 S6A-D3): a lost dispute is held, never applied (the database enforces it too)
-            result = accounting.Evaluation(None, "H-DISPUTE-MODE", result.flags)
+        # refunds-only (PAY15 S6A-D3): in mode hold a lost dispute is held, never applied (the database enforces it too)
+        result = accounting.evaluate_in_mode(donation, rows, switch["dispute_mode"])
         # a clear result counts exactly the attributed processed refunds and lost disputes; the database checks it
         refs = [] if result.hold else sorted(
             r["provider_ref"] for r in rows

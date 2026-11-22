@@ -287,6 +287,146 @@ database switch the activation tools (6a-2 to 6a-4, not built) will drive.
   `emit_totals_changed`, coalesced while one is pending); keep and no-op calls emit nothing.
 - Downgrade of 0034 refuses once the state, the mode, an event, a run, an evaluation or any 0034 history exists.
 
+**Accounting verification (PAY-15 stage 6a-2), read-only.** `HYPERCHAT_READONLY_DSN=… python -m app.payments.operator
+verify --max-seconds N [--creator ID | --donation ID] [--output FILE]` (`app/payments/verify.py`) checks migration
+0034's data and changes nothing. The writing commands (`state`, `reconcile`, `resolve`, `revert`) are stage 6a-3 and
+refused (exit 2). The scope id and `--max-seconds` are validated **before any connection**: an empty, blank or
+malformed id, or a missing, non-finite or non-positive budget, is refused (exit 2) without connecting.
+- **Session and statement protocol (audit correction rev. 7 §2.7):** `hyperchat_readonly` only (session and current
+  user), head `0034`, PostgreSQL ≥ 15, one `REPEATABLE READ READ ONLY` transaction (its snapshot is the first data
+  statement's). The connection issues **only**: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`; `SET LOCAL
+  lock_timeout = '5s'`, `SET LOCAL row_security = off`, `SET LOCAL statement_timeout = '<ms>ms'`; `DECLARE vfy_<n>
+  NO SCROLL CURSOR WITHOUT HOLD FOR <constant>` (with its parameters) / `FETCH FORWARD <n> FROM vfy_<n>` / `CLOSE`
+  for **every** data query, whose text must be an exact approved module constant (`SELECT` / `WITH`), so no result,
+  catalog queries included, is ever fetched whole; and `ROLLBACK`, always. Anything else is refused before it is
+  sent (`verify.statement_allowed`).
+- **Deadline and ceilings:** one monotonic deadline `max_seconds` from entry (no production default; the budget and
+  the snapshot-lifetime limit are owner decisions). Each data statement and `FETCH` gets `min(120 s, remaining)`;
+  below 50 ms remaining it is refused before it is sent. Ceilings (provisional values, owner item 7, printed in
+  `runtime.provisional_ceilings`): **rows** fetched (each FETCH asks for at most one row beyond the ceiling);
+  **bytes**, the retained size of every fetched value including nested arrays, JSON and strings (`sys.getsizeof` of
+  each distinct object, counted row by row before the row is kept; an estimate of Python memory, not process RSS,
+  and the driver still holds one FETCH batch before the check) **plus** the report's canonical size, streamed and
+  checked before serialization; and **CPU work**, charged one unit per item **as each scan actually iterates**
+  (rows retained, events, versions of one reference, observations and refunds of one snapshot, catalog rows and
+  role edges, enumeration steps, findings, serialization chunks), so the clock is read at least every
+  `CHECKPOINT_EVERY` units of real progress, even inside one hot collection; the single report sort is the one
+  bounded atomic operation (charged before, checked before and after). Measuring retained bytes checks the clock
+  without counting work. Exhausting any refuses the run. The report carries the actual `runtime.rows_loaded`,
+  `bytes_loaded` and `work_units`; `work_units` excludes the report's own size check and serialization
+  (`work_units_scope`), which are enforced but cannot be counted inside the report. The report is built,
+  `ROLLBACK` releases the
+  snapshot (the connection is closed if that fails), the release is confirmed (idle or closed), and only then is the
+  deadline checked: **no success is returned after the deadline**, including one crossed during `ROLLBACK`. Cleanup
+  (`CLOSE`, `ROLLBACK`, close) always runs whatever time remains. A measured bound, not a hard real-time guarantee.
+- **Row security:** before any financial read, any row security or policy on a relation the verifier reads refuses
+  the whole report (`row_security: <rel>`, no findings); a policy appearing later makes the filtered read error under
+  `row_security = off` (`row_security: read_filtered`). Any SQL error, cancellation or timeout is **refused**.
+- **Invariants:** I1 credit bounds; I2 credited = the writer's target; I3 / I3-O per-donation and orphan chains and
+  I6 live-bucket continuity (Erratum 1: deleted-creator buckets excluded and counted); I4 reversal / hold chains; I5
+  totals rows; I7 Σ credited ≤ total (the pre-writer baseline reported); I8 no accounting on imported or ambiguous
+  donations; I9 identity; I10 the PostgreSQL security baseline (below) and the verifier's own copy of the
+  current-evidence view; I11 bounds and vocabularies, refunds-only holds (R-DM);
+  I12 agreement with the audited revert exception (a keep is never an exception on 0034: its acknowledgement is only
+  checked for forgery, A1), I12-H every clear row checked against every recorded version of its evidence references
+  (S2, below); I13 evidence
+  processing; I14 one accounting row per (donation, transaction); I15 SQL figures = the Python reference; I16
+  evidence attribution (`evidence_attribution`: `unattributed`, `wrong_donation`, `account_mismatch`,
+  `ref_identity_conflict`; ownership is the completing payment plus its account, never the order id); I17 the
+  provider refund snapshot against processed and pending refunds (`refund_snapshot_mismatch`: same currency only,
+  never converted; the candidate set is the latest provider time plus every undated observation; any decrease across
+  the dated chronology is `snapshot_regression`; unusable refund rows are reported even without a snapshot); I18 the
+  accounting state event chain (structural; a defect suspends mode-dependent I12-H conclusions).
+- **I10, the PostgreSQL security baseline (rev. 7 §5), classified in Python over captured catalog rows
+  (`verify.i10_problems`):** application-role attributes; other superusers (`unexpected_superuser`) unless on the
+  administrator allow-list; **default-deny** role membership (only `hyperchat_migrator → hyperchat_owner`, stock
+  predefined edges and administrators' own memberships), with direct and transitive `admin_path`, `owner_path` and
+  `predefined_role_path` evaluated per version (PG16+ set / inherit options; PG15 `rolinherit`); the database owner
+  (`hyperchat_owner`); relation, function and schema ownership; effective table / column rights on the accounting
+  and evidence tables, and the **minimum `donations` write check** (only `hyperchat_app` / `hyperchat_worker` may
+  INSERT / UPDATE / DELETE; nobody else, PUBLIC included, has any table or column write right); signature-exact
+  function EXECUTE against the migration-derived ACL baseline, with grant options; schema CREATE; PUBLIC ACL entries;
+  exact trigger bindings (function, timing, events, WHEN, args, constraint, columns; any other trigger is
+  `unexpected_trigger`); and every pinned function's identity (`overloaded`, return type, language, volatility,
+  parallel, strictness, security, owner, `proconfig`, source pin); and, since A5b, the **explicit ACL entries of
+  schema `public`, the scoped tables and their columns against the owner-approved 0034 baseline** (OD-5, version-keyed:
+  PG17 adds the owner's MAINTAIN), with the OD-11 codes `schema_acl` / `schema_acl_missing`, `table_acl` /
+  `table_acl_missing`, `column_acl` / `column_acl_missing` (an altered entry is the missing + unexpected pair; PUBLIC
+  and grant-option entries keep their own codes). An unreadable ACL row refuses the report (`acl_unreadable`); an
+  unpinned PostgreSQL major is refused before any statement, and the effective-rights question includes MAINTAIN on
+  PG17. **The values are populated but NOT activated: `I10_BASELINE_CONFIRMED` is still False and every original
+  unverified entry is still reported, so I10 reports `baseline_unverified` (structural) and no report is clean before
+  A5c.**
+- **Administrator allow-list (provisional location, owner and format: owner item 5):**
+  `/etc/hyperchat/verify-administrators`, one role name per line, read by the CLI (outside the database and the
+  invocation). Missing: no approved administrator. **POSIX only:** opened without following a symlink and validated
+  and read through that one descriptor; it must be a regular file **owned by uid 0** (the provisional trusted
+  owner), not group- / other-writable, under ancestor directories owned by root that are not group- / other-writable
+  (unless sticky). Anything else (a symlink, another owner, a writable file or directory, a FIFO, malformed or
+  non-ASCII content) refuses the run before any connection. **Windows:** an existing allow-list refuses (ownership
+  and symlink guarantees are unavailable); a missing one approves nobody. Its SHA-256 is printed in `administrators`
+  as evidence of which file was read, not of its authorization. An application role on the list is never trusted.
+- **Operator runs (D-10, the plan rev. 3 §6 scope contract the 6a-3 CLI will write):** `{"kind": "donations",
+  "donations": [...]}`, `{"kind": "creator", "creator": …}`, `{"kind": "all_v2"}` (reconcile only) or `{"kind":
+  "recovery", "donations": [...], "verify_report_sha256": …}`, each with `expires_at` (RFC 3339, within 24 h of the
+  run). An unused run without a scope is attention; a used one, a malformed scope, a missing run, a use outside the
+  scope, after `expires_at` or under the wrong command is an audit violation and never an I12 exception.
+- **0034 timing limits (never hidden):** event timestamps are transaction starts and a transition's commit is
+  unbounded (L-2 / L-2b), so verify **never asserts a missed evaluation or an overdue 24 h reconciliation**: an
+  uncovered origin while active is `in_flight` (< 10 min) or `boundary_uncertain`, a backlog past the nominal window
+  `deadline_uncertain`, with the 500 ppm clock margin on the window (`pending` only when provably inside). A backlog
+  item is reconciled only when its evaluation observed `active` under the state lock (`ev.state`), on the current
+  fingerprint, and I12 agrees, never by `evaluated_at`. A missed evaluation later covered leaves no trace (L-1).
+  Legacy I12-H ambiguity (`historical_ambiguous`) is permanent; a later row never supersedes it.
+- **Historical dispute mode and evidence order (CR-2, owner decisions 2-4):** stamps are transaction starts and
+  commits are unbounded, so neither a row's mode nor its evidence state is chosen by timestamp proximity. A clear
+  row's possible modes are every active period's mode, minus `hold` when its refs name a dispute (the core refuses a
+  clear result in hold while a lost dispute is current). Evidence commit order is unknowable on 0034 (random uuid
+  ids, `recorded_at` a transaction start: Decision 5), so a row's refs may have had any of their recorded versions.
+  `unsupported_amount` (structural) only when no version, in any possible mode, gives the stored amount; supported
+  under some modes only: `historical_ambiguous` (`mode_order`); several amounts: `evidence_cut`; the refs determine
+  the amount but no `recorded_at` prefix within ±5 min reproduces it: `evidence_order`; otherwise exact. Exact proves
+  arithmetic consistency with the refs, **not** that the evidence state existed: some self-consistent forged
+  historical attribution can pass I12-H, and I4 / I12 may catch it but do not guarantee it. A keep acknowledgement is
+  **never proven** on 0034 (A1), and 0035 cannot prove it retroactively: one that any evidence state under any mode
+  the state ever had could give is `historical_ambiguous` (`ack_mode_order`, no exception); none: `forged_ack`. The
+  report's `limitations` (L-1, L-2, L-2b, D5-1 to D5-5) say the same. Enumeration is bounded (4 096 states, 12
+  events per ref): over the bound, or if the fingerprint replica fails, the case is uncertain, never exact or
+  forged. The A1 product is built ref by ref and stops expanding once it is provably over 4 096, so its reported
+  `combinations` is the product reached at that point (exact up to the bound; a lower bound beyond it). Ambiguities carry `basis` (`mode` /
+  `evidence`), are permanent and block `activation_verification_ready`. A mode change or capture whose stamp precedes
+  the evaluation is an uncertain origin (`boundary_uncertain`), never `indeterminate`.
+- **Report:** canonical JSON (ids, enums and amounts; donor buckets as creator id plus a name digest) with a SHA-256
+  `digest` over everything else. Status = the worst severity of the closed class table (`verify.SEVERITY`); exit
+  **0 clean, 1 violation, 2 refused, 3 attention** (D-7). A class outside the table refuses the report. Findings are
+  de-duplicated by (invariant, class, entity, canonical detail) and sorted. Every `historical_ambiguous`,
+  `evidence_attribution` and `refund_snapshot_mismatch` finding must match **exactly one** closed variant (rev. 7
+  §3.2, `reason` the discriminator), or the whole report is refused. `write_blockers` lists each blocking finding
+  (`s2_over_bound`, `chain_invalid`, `a1_over_bound`, `a1_replica_failed`, every I16 / I17 reason). Also reported:
+  `limitations` (rev. 7 §9), `administrators` and `runtime.provisional_ceilings`.
+- **Output (`--output FILE`, rev. 7 §2.7.4): never overwritten, never substituted.** POSIX with `/proc/self/fd`
+  only: the directory is opened once (`O_DIRECTORY | O_NOFOLLOW`) and must be owned by root or the operator's uid
+  and not group- / other-writable, with trusted ancestors; every later step is relative to that open directory. An
+  exclusive temporary file (`O_EXCL | O_NOFOLLOW`, 0600), write, fsync; the temporary name must still identify the
+  inode written; then the **open inode itself** is hard-linked to `FILE` (the commit point), so a pathname swap can
+  never publish foreign content (a swap is refused as `substituted`). An existing `FILE` (or symlink), an untrusted
+  directory or any failure before the link publishes nothing: stdout carries a refused report
+  `output_not_published: <step>` (exit 2), and only a temporary name still bound to this run's inode is removed.
+  A cleanup failure after the link leaves the report published (its own exit code) and names the leftover on
+  stderr. **Windows (and POSIX without `/proc/self/fd`): `--output` refuses** (`unsupported_platform`); stdout
+  still carries the report.
+- **Gates:** `reconcile_precondition` (full scope, active, no violation, **no write blocker**),
+  `recovery_precondition` (full scope, active, at most `overdue_reconciliation`, **no write blocker**),
+  `activation_verification_ready` (full scope, active, status clean: the part verify can establish) and
+  `activation_complete`, which is **always false** in a verify report: it also needs the 6a-3 second report-only
+  reconcile to plan zero changes (plan §4.3), which verify never attests (`not_attested`). A scoped or refused run
+  sets every gate false. Clean is necessary, never sufficient, and nothing here activates accounting.
+- **Tests:** `tests/payments/test_verify_units.py` and `test_verify_rev7_units.py` (no database: variants, gates,
+  I12-H, A1, I16-I18, captured-catalog I10, the statement protocol and deadline on a scripted connection, and
+  publication in temporary directories) and `test_verify_db.py` (a fresh copy of the pristine
+  template `hyperchat_verify_tmpl` per test, created by `setup-test-db.sh`; `HYPERCHAT_TEST_VERIFY_ADMIN` names the
+  throwaway server's superuser connection).
+
 **Live figures (PAY-15 stage 4).** Goal progress (public and realtime), dashboard revenue and the CSV export read the
 applied reversal through `app/payments/figures.py`: per donation `reversed_inr` = the pro-rata share of the stored
 `amount_inr`, rounded down to the paisa (exact integer division), and `net_inr = amount_inr − reversed_inr`; sums are

@@ -138,3 +138,49 @@ def evaluate(donation: Mapping, evidence: Iterable[Mapping]) -> Evaluation:
     if hold is not None:
         return Evaluation(None, hold, frozenset(flags))
     return Evaluation(max(refunds, disputes), None, frozenset(flags))
+
+
+# ── PAY-15 6a-1 / 6a-2: the dispute mode (migration 0034) and the reporting helpers ─────────────────────────────
+
+DISPUTE_MODE_HOLD = "H-DISPUTE-MODE"  # 0034's refunds-only hold: reported after the four evidence holds
+
+
+def _counts_for(donation: Mapping, row: Mapping) -> bool:
+    """The row is this donation's evidence for its completing payment (the repository's attribution, verbatim)."""
+    return (row["donation_id"] == donation["id"] and donation["provider_payment_id"] is not None
+            and row["provider_payment_id"] == donation["provider_payment_id"])
+
+
+def has_lost_dispute(donation: Mapping, rows: Iterable[Mapping]) -> bool:
+    """A current lost dispute attributed to this donation and its completing payment."""
+    return any(_counts_for(donation, r) and (r["kind"], r["status"]) == ("dispute", "lost") for r in rows)
+
+
+def evaluate_in_mode(donation: Mapping, evidence: Iterable[Mapping], mode: str) -> Evaluation:
+    """evaluate() under the accounting dispute mode (S6A-D3, refunds-only): in mode 'hold' a clear result is held as
+    H-DISPUTE-MODE while a current attributed lost dispute exists (a dispute deduction is never applied
+    automatically). Moved unchanged from repository._settle_accounting (stage 6a-2, plan §12); the database's core
+    enforces the same rule independently."""
+    rows = list(evidence)
+    result = evaluate(donation, rows)
+    if mode == "hold" and result.hold is None and has_lost_dispute(donation, rows):
+        return Evaluation(None, DISPUTE_MODE_HOLD, result.flags)
+    return result
+
+
+def counted_refs(donation: Mapping, rows: Iterable[Mapping]) -> list[str]:
+    """The references a clear result names: every attributed processed refund and lost dispute (0032 checks it)."""
+    return sorted(r["provider_ref"] for r in rows if _counts_for(donation, r)
+                  and (r["kind"], r["status"]) in (("refund", "processed"), ("dispute", "lost")))
+
+
+def processed_refunds_paise(donation: Mapping, rows: Iterable[Mapping]) -> int:
+    """F-12: Σ attributed processed refunds (current rows): what a held donation would reverse for refunds alone."""
+    return sum(_amount(r.get("amount_paise")) or 0 for r in rows
+               if _counts_for(donation, r) and (r["kind"], r["status"]) == ("refund", "processed"))
+
+
+def lost_deductions_paise(donation: Mapping, rows: Iterable[Mapping]) -> int:
+    """F-12: Σ attributed lost-dispute deductions (current rows)."""
+    return sum(_amount(r.get("amount_deducted_paise")) or 0 for r in rows
+               if _counts_for(donation, r) and (r["kind"], r["status"]) == ("dispute", "lost"))
