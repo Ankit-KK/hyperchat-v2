@@ -92,7 +92,7 @@ jobs:
     # (MAINTAIN privilege) are excluded; production stays covered by the PostgreSQL 17 job.
     name: PostgreSQL 15 compatibility (migrations + permissions)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       PGHOST: localhost
       PGPORT: "5432"
@@ -131,6 +131,13 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         working-directory: database
         run: python -m pytest -q --deselect tests/test_auth_hash_import.py
+      - name: CI identity capture (OD-14; the verifier DB tests compare the server against it)
+        if: steps.scope.outputs.run == 'true'
+        run: bash .github/scripts/ci-identity-capture.sh 15
+      - name: Verifier DB tests (OD-14; own step so its failure summary and slowest tests always print)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: backend
+        run: python -m pytest -q -ra --durations=25 --timeout=300 --timeout-method=signal -o faulthandler_timeout=240 tests/payments/test_verify_db.py
       - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot, accounting activation)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
@@ -139,7 +146,7 @@ jobs:
   integration:
     name: Database + integration tests (PostgreSQL 17)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:17  # Docker Hub's official image via its public mirror (see deploy-config)
@@ -176,6 +183,8 @@ jobs:
       - name: Database tests (migration round trip, role privileges, ETL mapping)
         working-directory: database
         run: python -m pytest -q
+      - name: CI identity capture (OD-14; the verifier DB tests compare the server against it)
+        run: bash .github/scripts/ci-identity-capture.sh 17
       - name: Backend tests (unit + end-to-end against the database)
         working-directory: backend
-        run: python -m pytest -q
+        run: python -m pytest -q -ra --durations=25 --timeout=300 --timeout-method=signal -o faulthandler_timeout=240

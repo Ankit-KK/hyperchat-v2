@@ -3162,17 +3162,23 @@ def _ci(server=None, env=None, capture=_CI_CAPTURE, admin=_CI_ADMIN):
                                                        admin, capture))
 
 
-def test_2b_ci_identity_disabled_even_with_complete_matching_evidence():
-    """A1 Correction 2: CI database execution is disabled. Even a complete, matching capture is refused, for that one
-    reason only (the comparison logic itself raises nothing more)."""
+def test_2b_ci_identity_authorized_by_od14_accepts_only_complete_matching_evidence():
+    """OD-14 (2026-11-22): CI database execution is authorized. A complete, matching capture passes with the real
+    switch; a missing capture is still refused, and the switch off still refuses for that reason alone."""
     from tests.payments import verify_helpers as m
-    assert m.CI_DB_EXECUTION_AUTHORIZED is False
-    assert cluster_identity_problems(_CI_SERVER, _CI_ENV, _CI_ADMIN, _CI_CAPTURE) == [m.CI_DISABLED]
+    assert m.CI_DB_EXECUTION_AUTHORIZED is True
+    assert cluster_identity_problems(_CI_SERVER, _CI_ENV, _CI_ADMIN, _CI_CAPTURE) == []
+    assert cluster_identity_problems(_CI_SERVER, _CI_ENV, _CI_ADMIN, None)
+    saved, m.CI_DB_EXECUTION_AUTHORIZED = m.CI_DB_EXECUTION_AUTHORIZED, False
+    try:
+        assert cluster_identity_problems(_CI_SERVER, _CI_ENV, _CI_ADMIN, _CI_CAPTURE) == [m.CI_DISABLED]
+    finally:
+        m.CI_DB_EXECUTION_AUTHORIZED = saved
 
 
 def test_2b_ci_identity_comparison_logic_accepts_only_the_matching_shape(monkeypatch):
     """The comparison logic kept for OD-14, exercised with the switch forced on IN THIS TEST ONLY: the one shape
-    whose server facts equal the capture passes; every other test below still refuses with the switch off."""
+    whose server facts equal the capture passes; the refusal tests below force the switch on too."""
     assert _ci() == []
     assert _ci(server={"sysid": "1"}) and _ci(capture=None)
 
