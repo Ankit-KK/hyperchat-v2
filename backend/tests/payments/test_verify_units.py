@@ -113,8 +113,10 @@ def test_ir6_t2_status_is_the_maximum_severity_and_only_processed_can_complete()
 
 
 def test_fc3_the_limitations_disclose_decision_5_and_never_claim_a_false_pass_is_impossible():
+    # revision 7 §9 (Phase 2A, MOD): the Decision 5 disclosures stay first and unchanged; §9's limitations follow
     assert [x.split(":")[0] for x in verify.LIMITATIONS] == ["L-1", "L-2", "L-2b", "D5-1", "D5-2", "D5-3", "D5-4",
-                                                              "D5-5"]
+                                                              "D5-5", "L-3", "L-4", "L-5", "L-6", "L-7", "L-8", "L-9",
+                                                              "L-10", "I16-I17", "INSTALL", "RUNTIME"]
     text = " ".join(verify.LIMITATIONS)
     for needle in ("commit order cannot be reconstructed", "not that the evidence state existed",
                    "a false historical pass is possible", "remain undetected by I12-H", "do not guarantee",
@@ -381,7 +383,9 @@ def make(state="active", mode="apply", *, current=(), reversal=None, ev=None, ev
                 seen.setdefault(tuple(sorted(r.items())), dict(r))
         return list(seen.values())
     v.versions = versions
-    v.conceivable_fps = lambda did, modes: {v.fp_at(did, c, m) for c in states for m in modes}
+    # revision 7 seam: I12-H reads every raw event of a stored ref (here: the synthetic versions of that ref)
+    v.raw_events = lambda did, ref: [r for r in v.versions(did) if r["provider_ref"] == ref]
+    v.conceivable_fps = lambda did, modes: ("ok", {v.fp_at(did, c, m) for c in states for m in modes})
     return v
 
 
@@ -883,7 +887,8 @@ def _i12h_states(stored, refs=("rfnd_A", "rfnd_B")):
              evidence=[("rfnd_A", T0 - timedelta(days=1)), ("rfnd_B", b_at)],
              cut_rows=lambda d, c: [refund(), refund("rfnd_B", 1000)] if c == "infinity" or
              (not isinstance(c, str) and c >= b_at) else ([] if isinstance(c, str) else [refund()]),
-             history=[hist(1, "activation", 0, stored, refs=list(refs), at=row_at, run=9)])
+             history=[hist(1, "activation", 0, stored, refs=list(refs), at=row_at, run=9)],
+             runs={9: run_row(9, "reconcile", row_at)})  # revision 7 §2.2: an activation row needs its run
     v.i12h(v.donations[DID], v.history)
     return [(f.cls, f.detail.get("problem") or f.detail.get("reason")) for f in v.findings]
 
@@ -894,7 +899,8 @@ def test_d4_an_amount_only_a_state_outside_the_margin_supports_is_evidence_order
 
 def test_d4_an_amount_no_evidence_state_supports_is_structural():
     assert _i12h_states(9999) == [("structural", "unsupported_amount")]
-    assert _i12h_states(3500, refs=("rfnd_A", "rfnd_X")) == [("structural", "unsupported_amount")]  # stored refs kept
+    # revision 7 §2.1 step 2: a ref never recorded anywhere is absent (still structural, ahead of enumeration)
+    assert _i12h_states(3500, refs=("rfnd_A", "rfnd_X")) == [("structural", "absent_reference")]
 
 
 def test_cr2_c_an_amount_no_mode_supports_is_still_structural():
@@ -916,19 +922,23 @@ TWO_MODES = [event(1, "off", "frozen", T0 - timedelta(days=2), "hold", "hold"),
 
 
 def _ack(events, fp_at, evidence=()):
-    return make(events=events, fp_at=fp_at, evidence=evidence).ack_reconstructs(DID, KEEP, "ACK")
+    """Revision 7 §2.4a: the outcome alone (forged / possible / over_bound / replica_failed)."""
+    return make(events=events, fp_at=fp_at, evidence=evidence).ack_reconstructs(DID, KEEP, "ACK")[0]
 
 
 def test_d5_a1_an_ack_is_never_proven_on_0034_even_with_a_single_mode():
     """r5 returned True here (single mode, matched within the margin); the keep's snapshot is never observable."""
     one_mode = [event(1, "off", "frozen", T0 - timedelta(days=2), "hold", "hold")]
-    assert _ack(one_mode, lambda d, c, m: "ACK" if m == "hold" else "OTHER") is None
+    assert _ack(one_mode, lambda d, c, m: "ACK" if m == "hold" else "OTHER") == "possible"
 
 
 def test_d5_an_incomplete_enumeration_is_uncertain_never_forged():
     v = make(events=TWO_MODES)
-    v.conceivable_fps = lambda did, modes: None  # over the bound, or the fingerprint replica failed
-    assert v.ack_reconstructs(DID, KEEP, "ACK") is None
+    bound = {"bound": "combinations", "combinations": 8192}
+    v.conceivable_fps = lambda did, modes: ("over_bound", bound)
+    assert v.ack_reconstructs(DID, KEEP, "ACK") == ("over_bound", bound)
+    v.conceivable_fps = lambda did, modes: ("replica_failed", None)  # the fingerprint replica failed
+    assert v.ack_reconstructs(DID, KEEP, "ACK") == ("replica_failed", None)
 
 
 def _event_row(i, status="processed", amount=2500, ref="rfnd_A", donation=DID, at=None, phase=None, kind="refund"):
@@ -977,19 +987,19 @@ def test_d5_an_over_bound_row_is_uncertain_never_exact_or_structural(monkeypatch
 def test_d3_4_an_ack_matching_one_of_several_possible_modes_is_uncertain():
     """r4 flaw: a match under a margin mode was taken as proof. The keep's commit is unbounded, so every mode the
     state ever had is possible; the fingerprint names its mode, but not that the state was in it."""
-    assert _ack(TWO_MODES, lambda d, c, m: "ACK" if m == "apply" else "OTHER") is None  # r4: True
-    assert _ack(TWO_MODES, lambda d, c, m: "ACK" if m == "hold" else "OTHER") is None
+    assert _ack(TWO_MODES, lambda d, c, m: "ACK" if m == "apply" else "OTHER") == "possible"  # r4: True
+    assert _ack(TWO_MODES, lambda d, c, m: "ACK" if m == "hold" else "OTHER") == "possible"
 
 
 def test_d3_an_ack_matching_only_a_distant_evidence_state_is_uncertain_never_proven_or_forged():
     far = T0 - timedelta(days=2)
     one_mode = [event(1, "off", "frozen", T0 - timedelta(days=3), "hold", "hold")]
     assert _ack(one_mode, lambda d, c, m: "ACK" if c == far else "OTHER",
-                evidence=[("disp_A", far), ("disp_A", T0 + timedelta(hours=1))]) is None  # r4: False (forged)
+                evidence=[("disp_A", far), ("disp_A", T0 + timedelta(hours=1))]) == "possible"  # r4: forged
 
 
 def test_d3_5_an_ack_impossible_under_every_mode_and_evidence_state_is_forged():
-    assert _ack(TWO_MODES, lambda d, c, m: "OTHER", evidence=[("disp_A", T0 - timedelta(days=2))]) is False
+    assert _ack(TWO_MODES, lambda d, c, m: "OTHER", evidence=[("disp_A", T0 - timedelta(days=2))]) == "forged"
 
 
 def test_cr2_e_an_uncertain_ack_grants_no_exception_and_raises_no_violation():
