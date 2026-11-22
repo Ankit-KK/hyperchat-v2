@@ -1,11 +1,17 @@
 # Backend readiness plan (after the DEV rehearsal)
 
 **Status:** a plan for review. Nothing here has been run beyond the read-only checks it cites; every step marked
-**[APPROVAL]** needs the owner's explicit approval at the time it runs. Basis: `main` after #99, DEV on release
+**[APPROVAL]** needs the owner's explicit approval at the time it runs. Original basis (2026-10-25, superseded by "Current state" below): `main` after #99, DEV on release
 `c2fe883be71d` at 0028 (Phase E passed 2026-10-25), production on `940137070657` at 0009.
 
 **Update 2026-10-25, 16:32 UTC:** DEV runs release **`a9b9486efd86`**, deployed application-only with no migration
 (section 4, "DEV deployment of `a9b9486`"). Production is unchanged.
+
+**Current state (as of 2026-11-22, from records; re-verify before the next DEV window):** `main` is `210897e` (#129),
+head `0034`. DEV code release `8e1284871a05` (2026-10-28 record, not re-verified); DEV database at `0029`
+(2026-11-02T15:08Z, C1 Gate M record). Migrations 0030–0034 are on `main` and not on DEV; for their deployment plan see
+the PAY-15 row of [`docs/backend-completion-checklist.md`](../backend-completion-checklist.md) (the Stage 6 plan itself
+lives outside the repo). Production is unchanged at `940137070657`, 0009.
 
 ## 1. Code complete is not verified end to end
 | Area | Code and CI | Verified end to end on DEV | Needed before production |
@@ -206,7 +212,7 @@ Admin-only DEV flows can't be exercised until the owner decides how a DEV admini
 ## 5. Production migration and cutover prerequisites
 Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, no lifecycle, auth or stepup roles, no witness, no verifier, and no Razorpay keys. In order, each step **[APPROVAL]**:
 1. **Production backup install (A3):** the fixed backup script, its units and a production KYC witness. Then one production backup and a scratch `restore_check` with `--roles-sql` (docs/backup-recovery.md).
-2. **A production migration runbook, 0010 → 0028,** modelled on the DEV rehearsal. Production is on PostgreSQL 17 and starts at 0009, so it needs its own revisions list, baseline, gates and rollback (a Phase F equivalent against the A3 backup).
+2. **A production migration runbook, 0010 → 0034,** modelled on the DEV rehearsal (0030–0034 enter it only after their Stage 6 DEV validation; see the PAY-15 row of the checklist). Production is on PostgreSQL 17 and starts at 0009, so it needs its own revisions list, baseline, gates and rollback (a Phase F equivalent against the A3 backup).
 3. **Roles and authentication rules** on `17/hyperchat`: `roles.sql`, `setup_cluster.sh`, the production `pg_ident` lines; `check_isolation.sh prod` passes.
 4. **Release build and switch** of the target commit, as in Phase D.
 5. **Step-up verifier** (docs/admin-stepup.md "Deployment sequence" 4–6): install the `hyperchat-prod-stepup` unit and OS user, set `HYPERCHAT_STEPUP_SOCKET`, enroll two passkeys per administrator, operator approval, `readiness` = ready, then activation through the operator tool only.
@@ -222,7 +228,7 @@ Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, 
 | 4 | `hyperchat_restore_test` R0 → R2 (→ R4) | [APPROVAL] |
 | 5 | Opt-in smoke sections for Razorpay and email: merged (#103); move the email check onto the onboarding category settings | code |
 | 6 | Disposable F3–F4 rehearsal on the VPS | [APPROVAL] |
-| 7 | Production A3 backup install; production migration runbook 0010 → 0028 | [APPROVAL] / docs |
+| 7 | Production A3 backup install; production migration runbook 0010 → 0034 (0030–0034 after Stage 6 DEV validation) | [APPROVAL] / docs |
 | 8 | Step-up verifier on DEV, then production; enrollment; activation | [APPROVAL] |
 | 9 | Didit sandbox; R2 run (`HYPERCHAT_SMOKE_R2=1`); D1 hosted rehearsal | [APPROVAL] |
 | 10 | PAY-7 test payment (needs a client) | owner-run |
