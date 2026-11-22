@@ -268,11 +268,14 @@ def test_a_dispute_racing_the_capture_completes_once_and_records_once(client):
         (integrity_body("payment.dispute.created", ref="disp_TESTk1", payment_id=payment.id,
                         order_id=out["razorpay_order_id"]), "authtest-int-race-d")], fake=client.fake)
     assert captured.json() == {"status": "completed"}
-    # before the completion commits it is an order match on an unpaid order (a mismatch), after it a payment match
+    # PAY-15 OD-13 (Alternative 1, 2026-11-22): match_type is provenance (how the evidence was linked when recorded),
+    # not ownership. The two lookups of integrity_target are separate reads, so a capture committing between them
+    # stores ('order', True): linked through the order, consistent with the now-paid donation. Money attribution is
+    # by donation_id + provider_payment_id at evaluation time, never by this label.
     assert disputed.json()["status"] in ("integrity_recorded", "integrity_mismatch")
     assert totals(sid) == [("Ravi", 100, 1)] and donation(out["order_id"])["payment_status"] == "success"
     (row,) = evidence("authtest-int-race-d")
-    assert (row["match_type"], row["consistent"]) in (("payment", True), ("order", False))
+    assert (row["match_type"], row["consistent"]) in (("payment", True), ("order", False), ("order", True))
 
 
 # ── append-only for every role ──────────────────────────────────────────────
