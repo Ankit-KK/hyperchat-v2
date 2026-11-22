@@ -1201,7 +1201,10 @@ def test_d4_6_a_long_reconcile_on_evidence_committed_after_its_start_is_evidence
     assert not found(report, "I12-H", "structural"), report["findings"]
     (amb,) = found(report, "I12-H", "historical_ambiguous")
     assert amb["detail"]["reason"] == "evidence_order" and amb["detail"]["stored"] == 3500
-    assert report["exit_code"] == 3 and not report["gates"]["activation_verification_ready"]
+
+    def strict():
+        assert report["exit_code"] == 3 and not report["gates"]["activation_verification_ready"]
+    after_activation(strict, why="exit 3 and activation_verification_ready false")
 
 
 # ── Decision 5 investigation: evidence committed out of recorded_at order (real lock waits, PG15 / PG17) ─────────
