@@ -125,6 +125,8 @@ def _post_all(client, requests, schedule: str | None = None, log: list | None = 
 
 
 def _order(client, slug):
+    with db() as conn:  # checkout allows 10 a minute per client IP and every test request shares one (as the C tests)
+        conn.execute("DELETE FROM public.rate_limits WHERE endpoint = 'payment:checkout'")
     out = checkout(client, slug)
     payment = client.fake.captured(out["razorpay_order_id"], 10000)
     with db() as conn:
@@ -182,9 +184,9 @@ def _check_race(client, schedule, *, mode):
         set_accounting("active", mode)
     refs = [_sequential(client, f"authtest-k2on-{mode}-{first[0]}{secrets.token_hex(2)}", first)
             for first in ("dispute", "capture")]
-    ref_states = {_state(did) for _, did in refs}
-    ref_ledgers = {tuple(_ledger(did)) for _, did in refs}
-    assert len(ref_states) == 1 and len(ref_ledgers) == 1, (ref_states, ref_ledgers)  # the two orders agree
+    (ref_state, other_ref_state), (ref_ledger, other_ref_ledger) = [[_state(d) for _, d in refs],
+                                                                    [_ledger(d) for _, d in refs]]
+    assert ref_state == other_ref_state and ref_ledger == other_ref_ledger, refs  # the two orders agree
 
     slug = f"authtest-k2on-{schedule.lower()}{secrets.token_hex(3)}"
     sid = make_streamer(slug)
@@ -209,7 +211,7 @@ def _check_race(client, schedule, *, mode):
     assert ev[0] == did and ev[1] == payment.id, ev                        # attributed to this donation and payment
     assert (ev[2], ev[3]) == LABEL_OF[schedule], (schedule, ev)            # OD-13 Alt 1: provenance, per schedule
     state, ledger = _state(did), _ledger(did)
-    assert state in ref_states and tuple(ledger) in ref_ledgers, (schedule, state, ledger, ref_states, ref_ledgers)
+    assert state == ref_state and ledger == ref_ledger, (schedule, state, ledger, ref_state, ref_ledger)
     reversal_rows = [r for r in ledger if r[3] != r[2] or r[5] != r[4]]
     assert len(reversal_rows) == 1, (schedule, ledger)                     # exactly one accounting change, once
     assert (_state(other), _ledger(other)) == other_before                 # never the other donation
