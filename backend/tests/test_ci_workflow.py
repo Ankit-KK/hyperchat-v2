@@ -79,7 +79,11 @@ def test_both_database_jobs_capture_the_ci_identity_right_before_the_backend_sui
         assert setup < capture == backend - 1, job
     pg15 = [str(s.get("run", "")) for s in WORKFLOW["jobs"]["postgres15"]["steps"]]
     verify = [r for r in pg15 if "tests/payments/test_verify_db.py" in r]
-    assert verify == ["python -m pytest -q -ra --durations=25 tests/payments/test_verify_db.py"]  # once, own step
+    diagnostic = "python -m pytest -q -ra --durations=25 --timeout=300" \
+                 " --timeout-method=signal -o faulthandler_timeout=240"  # a hang fails with a traceback
+    assert verify == [diagnostic + " tests/payments/test_verify_db.py"]  # once, its own step
+    integration = [str(s.get("run", "")) for s in WORKFLOW["jobs"]["integration"]["steps"]]
+    assert diagnostic in integration
 
 
 needs_git = pytest.mark.skipif(sys.platform == "win32" or not shutil.which("git"), reason="needs bash and git")
