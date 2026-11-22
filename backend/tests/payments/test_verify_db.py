@@ -206,13 +206,36 @@ def classes_of(report) -> set[str]:
     return {f["class"] for f in report["findings"]}
 
 
+def pre_a5c(report):
+    """§6A rule 6 / amendment B v1: until A5c, I10 fails closed with EXACTLY ONE I10 finding, problem
+    baseline_unverified, naming the remaining unverified components (the C0-b condition of test_rev7_c0_db). Assert
+    exactly that, and return the report without that one finding (counts adjusted) so a test's content assertions run
+    unchanged before A5c; its status / exit_code / gate assertions run under after_activation. After A5c (flag set,
+    nothing skipped) the report is returned unchanged."""
+    if _v("I10_BASELINE_CONFIRMED", False) and not _v("SKIPPED_COMPARISONS", ()):
+        return report
+    i10 = [f for f in report["findings"] if f["invariant"] == "I10"]
+    assert len(i10) == 1 and i10[0]["detail"].get("problem") == "baseline_unverified", ("pre-A5c", report["findings"])
+    expected = [*([] if _v("I10_BASELINE_CONFIRMED", False) else _v("I10_UNVERIFIED", ())),
+                *_v("SKIPPED_COMPARISONS", ())]
+    assert i10[0]["detail"]["components"] == expected, ("pre-A5c components", i10[0]["detail"])
+    counts = dict(report["counts"])
+    counts[i10[0]["class"]] -= 1
+    counts = {k: v for k, v in counts.items() if v}
+    return {**report, "findings": [f for f in report["findings"] if f is not i10[0]], "counts": counts}
+
+
 # ── statuses, gates and the read-only guarantee ───────────────────────────────────────────────────────────────────
 
 def test_a_fresh_0034_database_is_clean_and_not_activation_complete(vdb):
     report = vdb.verify()
-    assert report["status"] == "clean" and report["exit_code"] == 0 and report["findings"] == []
+    assert pre_a5c(report)["findings"] == []
     assert report["database"]["head"] == "0034" and report["accounting"] == {"state": "off", "dispute_mode": "hold"}
-    assert report["gates"] == dict.fromkeys(verify.GATE_KEYS, False)  # off: nothing is activation-ready
+
+    def strict():
+        assert report["status"] == "clean" and report["exit_code"] == 0 and report["findings"] == []
+        assert report["gates"] == dict.fromkeys(verify.GATE_KEYS, False)  # off: nothing is activation-ready
+    after_activation(strict, why="clean, exit 0 and every gate false")
 
 
 def test_m16_cr1_a_clean_active_full_report_is_verification_ready_and_never_activation_complete(vdb):
@@ -224,13 +247,17 @@ def test_m16_cr1_a_clean_active_full_report_is_verification_ready_and_never_acti
     other, _ = vdb.donation(sid, name="Other")  # no evidence: not accounting-relevant
     assert other
     report = vdb.verify()
-    assert report["status"] == "clean" and report["exit_code"] == 0, report["findings"]
-    assert report["counts"] == {"processed": 1}
-    # CR-1: no 6a-3 second reconcile result exists, so activation is never certified complete by verify
-    assert report["gates"] == {"reconcile_precondition": True, "recovery_precondition": True,
-                               "activation_verification_ready": True, "activation_complete": False}
+    assert pre_a5c(report)["counts"] == {"processed": 1}
     assert report["not_attested"] == list(verify.NOT_ATTESTED)
     assert vdb.state() == ("active", "apply")  # the report changed and authorized nothing
+
+    def strict():
+        assert report["status"] == "clean" and report["exit_code"] == 0, report["findings"]
+        assert report["counts"] == {"processed": 1}
+        # CR-1: no 6a-3 second reconcile result exists, so activation is never certified complete by verify
+        assert report["gates"] == {"reconcile_precondition": True, "recovery_precondition": True,
+                                   "activation_verification_ready": True, "activation_complete": False}
+    after_activation(strict, why="clean, exit 0 and the three readiness gates true")
 
 
 def test_the_verifier_modifies_nothing_and_issues_only_selects(vdb):
@@ -299,11 +326,18 @@ def test_a_scoped_report_judges_its_scope_and_sets_every_gate_false(vdb):
     db_, pb = vdb.donation(b)
     vdb.evidence(db_, pb, "refund", "rfnd_" + secrets.token_hex(4), "processed", 2500)  # never settled
     full = vdb.verify()
-    assert full["status"] == "attention"
+    pre_a5c(full)
     scoped = vdb.verify(creator=a)
-    assert scoped["status"] == "clean" and scoped["scope"] == {"kind": "creator", "id": a, "complete": False}
-    assert not any(scoped["gates"].values())
-    assert vdb.verify(donation=db_)["status"] == "attention"
+    pre_a5c(scoped)
+    assert scoped["scope"] == {"kind": "creator", "id": a, "complete": False}
+    single = vdb.verify(donation=db_)
+    pre_a5c(single)
+
+    def strict():
+        assert full["status"] == "attention"
+        assert scoped["status"] == "clean" and not any(scoped["gates"].values())
+        assert single["status"] == "attention"
+    after_activation(strict, why="the full / scoped / single statuses and the scoped gates")
 
 
 def test_the_operator_cli_prints_the_canonical_report_and_exits_with_its_code(vdb, monkeypatch, capsys, tmp_path):
@@ -316,7 +350,7 @@ def test_the_operator_cli_prints_the_canonical_report_and_exits_with_its_code(vd
     if not operator._POSIX_SECURE or not os.path.isdir("/proc/self/fd"):  # MOD: refused where it cannot be secured
         assert code == 2 and report["reason"] == "output_not_published: unsupported_platform" and not out.exists()
         return
-    assert code == 0  # Phase 2B: clean only once the pristine baseline is pinned (else baseline_unverified, 1)
+    pre_a5c(report)
     assert printed == out.read_text().strip() == verify.canonical(report)
     body = {k: v for k, v in report.items() if k != "digest"}
     assert report["digest"] == __import__("hashlib").sha256(verify.canonical(body).encode()).hexdigest()
@@ -328,6 +362,10 @@ def test_the_operator_cli_prints_the_canonical_report_and_exits_with_its_code(vd
     for command in ("state", "reconcile", "resolve", "revert"):
         assert operator.main([command]) == 2
 
+    def strict():
+        assert code == 0  # Phase 2B: clean only once the pristine baseline is pinned (else baseline_unverified, 1)
+    after_activation(strict, why="exit code 0 for a clean report")
+
 
 # ── classification on real flows ──────────────────────────────────────────────────────────────────────────────────
 
@@ -337,8 +375,12 @@ def test_evidence_while_off_is_awaiting_exit_3(vdb):
     vdb.evidence(did, pid, "refund", "rfnd_" + secrets.token_hex(4), "processed", 2500)
     assert vdb.settle(did) == "inactive"
     report = vdb.verify()
-    assert report["counts"] == {"awaiting_reconciliation": 1} and report["exit_code"] == 3
-    assert report["findings"][0]["entity_id"] == did and not any(report["gates"].values())
+    core = pre_a5c(report)
+    assert core["counts"] == {"awaiting_reconciliation": 1} and core["findings"][0]["entity_id"] == did
+
+    def strict():
+        assert report["exit_code"] == 3 and not any(report["gates"].values())
+    after_activation(strict, why="exit 3 and every gate false")
 
 
 def test_evidence_just_after_a_freeze_is_boundary_uncertain_never_clean(vdb):
@@ -347,7 +389,11 @@ def test_evidence_just_after_a_freeze_is_boundary_uncertain_never_clean(vdb):
     did, pid = vdb.donation(sid)
     vdb.evidence(did, pid, "refund", "rfnd_" + secrets.token_hex(4), "processed", 2500)
     report = vdb.verify()
-    assert report["counts"] == {"boundary_uncertain": 1} and report["exit_code"] == 3
+    assert pre_a5c(report)["counts"] == {"boundary_uncertain": 1}
+
+    def strict():
+        assert report["exit_code"] == 3
+    after_activation(strict, why="exit 3")
 
 
 def test_reconcile_after_reactivation_reconciles_and_mode_change_is_o_mode(vdb):
@@ -358,15 +404,19 @@ def test_reconcile_after_reactivation_reconciles_and_mode_change_is_o_mode(vdb):
     vdb.settle(did)
     vdb.go("frozen", "hold")  # F-9: the mode is in the fingerprint
     report = vdb.verify()
-    (f,) = report["findings"]
+    (f,) = pre_a5c(report)["findings"]
     # the mode change is the origin; the freeze seconds before it puts it inside the D-15 margin
     assert f["class"] in ("awaiting_reconciliation", "boundary_uncertain") and f["detail"]["origin_kind"] == "o_mode"
-    assert report["exit_code"] == 3
     vdb.go("active")
     run = vdb.run("reconcile", [did])
     vdb.reconcile(did, run)
     after = vdb.verify()
-    assert after["counts"] == {"processed": 1}, after["findings"]
+    assert pre_a5c(after)["counts"] == {"processed": 1}, after["findings"]
+
+    def strict():
+        assert report["exit_code"] == 3
+        assert after["counts"] == {"processed": 1}, after["findings"]
+    after_activation(strict, why="exit 3, then the processed-only counts")
 
 
 def test_m11_refunds_only_hold_is_processed_and_reports_its_unapplied_refunds(vdb):
@@ -379,7 +429,11 @@ def test_m11_refunds_only_hold_is_processed_and_reports_its_unapplied_refunds(vd
     vdb.evidence(did, pid, "refund", "rfnd_" + secrets.token_hex(4), "processed", 1000)
     assert vdb.settle(did) == "hold"
     report = vdb.verify()
-    assert report["counts"] == {"processed": 1}, report["findings"]
+    assert pre_a5c(report)["counts"] == {"processed": 1}, report["findings"]
+
+    def strict():
+        assert report["counts"] == {"processed": 1}, report["findings"]
+    after_activation(strict, why="the processed-only counts")
 
 
 def test_keep_exception_and_forged_ack(vdb):
@@ -427,11 +481,16 @@ def test_a_valid_revert_agrees_while_frozen_and_needs_reconciliation_once_active
     vdb.go("frozen")
     assert vdb.revert(did, vdb.run("revert", [did])) == "reverted"
     frozen = vdb.verify()
-    assert frozen["counts"] == {"processed": 1} and frozen["findings"][0]["detail"]["exception"] == "revert"
+    fcore = pre_a5c(frozen)
+    assert fcore["counts"] == {"processed": 1} and fcore["findings"][0]["detail"]["exception"] == "revert"
     vdb.go("active")
     active = vdb.verify()
-    (f,) = active["findings"]
-    assert f["class"] in ("pending_reconciliation", "boundary_uncertain") and active["exit_code"] == 3
+    (f,) = pre_a5c(active)["findings"]
+    assert f["class"] in ("pending_reconciliation", "boundary_uncertain")
+
+    def strict():
+        assert frozen["counts"] == {"processed": 1} and active["exit_code"] == 3
+    after_activation(strict, why="the processed-only counts and exit 3")
 
 
 def test_ir5_t1_an_evaluation_that_waited_for_the_activation_lock_is_reconciled(vdb):
@@ -468,7 +527,11 @@ def test_ir5_t1_an_evaluation_that_waited_for_the_activation_lock_is_reconciled(
                          ).fetchone()[0]
     assert ev_at < a_at  # the old rule (evaluated_at >= t_W) would have called this unreconciled
     report = vdb.verify()
-    assert report["counts"] == {"processed": 1}, report["findings"]
+    assert pre_a5c(report)["counts"] == {"processed": 1}, report["findings"]
+
+    def strict():
+        assert report["counts"] == {"processed": 1}, report["findings"]
+    after_activation(strict, why="the processed-only counts")
 
 
 def test_ir2_t4_evidence_during_an_uncommitted_activation_is_never_missed(vdb):
@@ -484,8 +547,13 @@ def test_ir2_t4_evidence_during_an_uncommitted_activation_is_never_missed(vdb):
     a.commit()
     a.close()
     report = vdb.verify()
-    assert not classes_of(report) & {"missed_evaluation", "overdue_reconciliation"}
-    assert report["exit_code"] == 3 and classes_of(report) <= {"in_flight", "boundary_uncertain"}
+    core = pre_a5c(report)
+    assert not classes_of(core) & {"missed_evaluation", "overdue_reconciliation"}
+    assert classes_of(core) <= {"in_flight", "boundary_uncertain"}
+
+    def strict():
+        assert report["exit_code"] == 3 and classes_of(report) <= {"in_flight", "boundary_uncertain"}
+    after_activation(strict, why="exit 3")
 
 
 # ── Erratum 1: cases A, B, C and A-1 to A-5 ───────────────────────────────────────────────────────────────────────
@@ -518,7 +586,11 @@ def test_erratum_case_a_deleting_an_uncredited_donation_passes(vdb):
     with vdb.conn() as c:
         c.execute("DELETE FROM public.donations WHERE id = %s", (d1,))  # credited 0: the guard allows it
     report = vdb.verify()
-    assert report["status"] == "clean", report["findings"]
+    pre_a5c(report)
+
+    def strict():
+        assert report["status"] == "clean", report["findings"]
+    after_activation(strict, why="clean")
 
 
 def test_erratum_case_b_whole_creator_cleanup_is_excluded_and_counted(vdb):
@@ -527,11 +599,17 @@ def test_erratum_case_b_whole_creator_cleanup_is_excluded_and_counted(vdb):
     with vdb.owner() as c:
         c.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))  # the totals cascade
     report = vdb.verify()
-    assert _no_violation(report), report["findings"]
+    core = pre_a5c(report)
+    assert _no_violation(core), report["findings"]
     assert report["orphans"] == {"orphan_buckets": 1, "orphan_rows": 3}  # Erratum 1: r1, r2, r3
     (bucket,) = report["excluded_buckets"]
     assert bucket["accounting_rows"] == 0 and Decimal(bucket["net_credit"]) == Decimal("50.00")
-    assert classes_of(report) == {"excluded_bucket_net_credit"} and report["exit_code"] == 3
+    assert classes_of(core) == {"excluded_bucket_net_credit"}
+
+    def strict():
+        assert _no_violation(report) and classes_of(report) == {"excluded_bucket_net_credit"}
+        assert report["exit_code"] == 3
+    after_activation(strict, why="no violation and exit 3")
 
 
 def test_erratum_case_c_deleting_a_credited_donation_is_an_i3o_violation(vdb):
@@ -613,8 +691,11 @@ def test_m15_a_deleted_creator_with_accounting_history_blocks_activation(vdb):
         c.execute("ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard")
         c.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
     report = vdb.verify()
-    assert "deleted_creator_with_accounting_history" in classes_of(report)
-    assert report["exit_code"] == 3 and not report["gates"]["activation_complete"]
+    assert "deleted_creator_with_accounting_history" in classes_of(pre_a5c(report))
+
+    def strict():
+        assert report["exit_code"] == 3 and not report["gates"]["activation_complete"]
+    after_activation(strict, why="exit 3 and activation_complete false")
 
 
 # ── I1-I15 corruption fixtures (no false pass) ────────────────────────────────────────────────────────────────────
@@ -703,12 +784,17 @@ def test_i9_a_history_row_of_another_creator(vdb):
 def test_i10_catalog_sabotage_is_structural(vdb, sabotage, problem):
     # MOD (rev. 7 §5.7 codes; signature texts matched by prefix until Phase 2B pins them). The clean precondition
     # passes only once Phase 2B has pinned the pristine baseline (until then I10 reports baseline_unverified).
-    assert vdb.verify()["status"] == "clean"
+    before = vdb.verify()
+    assert pre_a5c(before)["findings"] == []
     with vdb.owner() as c:
         c.execute(sabotage)
     report = vdb.verify()
     hits = [f for f in found(report, "I10", "structural") if f["detail"]["problem"].startswith(problem)]
     assert hits, report["findings"]
+
+    def strict():
+        assert before["status"] == "clean"
+    after_activation(strict, why="the clean precondition")
 
 
 def test_i10_a_redefined_function_body_is_drift(vdb):
@@ -744,7 +830,11 @@ def test_i14_two_accounting_rows_in_one_transaction(vdb):
 def test_i15_non_inr_figures_agree_with_the_python_reference(vdb):
     sid, did, _ = _paid_reversed(vdb, amount=50, refund=1234, currency="USD", amount_inr=4183)
     report = vdb.verify()
-    assert not found(report, "I15") and report["counts"] == {"processed": 1}, report["findings"]
+    assert not found(report, "I15") and pre_a5c(report)["counts"] == {"processed": 1}, report["findings"]
+
+    def strict():
+        assert report["counts"] == {"processed": 1}, report["findings"]
+    after_activation(strict, why="the processed-only counts")
 
 
 # ── D-1 fingerprint equality and the view replica ─────────────────────────────────────────────────────────────────
@@ -835,7 +925,11 @@ def test_a_keep_stays_valid_after_its_run_expires_and_later_acknowledged_evaluat
     time.sleep(2.5)
     assert vdb.settle(did) == "acknowledged"  # the same evidence: the core refreshes evaluated_at
     report = vdb.verify()
-    assert not found(report, "D-10") and report["counts"] == {"historical_ambiguous": 1}, report["findings"]  # A1
+    assert not found(report, "D-10") and pre_a5c(report)["counts"] == {"historical_ambiguous": 1}, report["findings"]
+
+    def strict():
+        assert report["counts"] == {"historical_ambiguous": 1}, report["findings"]  # A1
+    after_activation(strict, why="the historical_ambiguous-only counts")
 
 
 def test_s5_s8_s9_keeps_outside_their_run_scope_are_violations_and_never_exceptions(vdb):
@@ -923,9 +1017,13 @@ def test_n16_a_commit_during_verify_is_invisible_to_its_snapshot(vdb):
 
     with vdb.conn("hyperchat_readonly", cursor_factory=CommitMidway) as c:
         during = verify.verify(c, max_seconds=MAX_SECONDS)
-    assert len(seen) > 6 and during["counts"] == {"processed": 1}, during["findings"]  # the new evidence: not seen
+    assert len(seen) > 6 and pre_a5c(during)["counts"] == {"processed": 1}, during["findings"]  # new evidence: unseen
     after = vdb.verify()
-    assert "processed" not in after["counts"] and after["exit_code"] == 3  # the next snapshot sees it
+    assert "processed" not in pre_a5c(after)["counts"]  # the next snapshot sees it
+
+    def strict():
+        assert during["counts"] == {"processed": 1} and after["exit_code"] == 3
+    after_activation(strict, why="the processed-only counts and exit 3")
 
 
 # ── CR-2: historical dispute mode under transaction-start timestamps (real concurrency) ───────────────────────────
@@ -979,11 +1077,15 @@ def test_cr2_a_an_evaluation_under_the_previous_mode_stays_supported_despite_an_
     mode_event = [e for e in _event_times(vdb) if e[3] != e[4]][-1]
     assert mode_event[5] < r_at  # the reachability proof: the mode change's stamp precedes R's row
     report = vdb.verify()
-    violations = [f for f in report["findings"] if verify.SEVERITY[f["class"]] == "violation"]
+    violations = [f for f in pre_a5c(report)["findings"] if verify.SEVERITY[f["class"]] == "violation"]
     assert not violations, violations
-    assert not found(report, "I12-H") and report["exit_code"] == 3
+    assert not found(report, "I12-H")
     (timing,) = found(report, "I13")  # the proven mode change, stamped before the evaluation: an uncertain origin
     assert timing["class"] == "boundary_uncertain" and timing["detail"]["origin_kind"] == "o_mode_uncertain"
+
+    def strict():
+        assert report["exit_code"] == 3
+    after_activation(strict, why="exit 3")
 
 
 def test_cr2_b_d2_a_lost_dispute_ref_proves_apply_so_the_row_is_exact_despite_a_hold_period(vdb):
@@ -998,7 +1100,8 @@ def test_cr2_b_d2_a_lost_dispute_ref_proves_apply_so_the_row_is_exact_despite_a_
     vdb.set_state("active")
     report = vdb.verify()
     assert not found(report, "I12-H"), report["findings"]
-    assert not [f for f in report["findings"] if verify.SEVERITY[f["class"]] == "violation"], report["findings"]
+    assert not [f for f in pre_a5c(report)["findings"] if verify.SEVERITY[f["class"]] == "violation"], \
+        report["findings"]
     with vdb.owner() as c:  # M12-style: an owner-written row with the same refs and a forged amount is corruption
         refs = c.execute("SELECT evidence_refs FROM public.donation_credit_events WHERE donation_id = %s AND "
                          "cause = 'evaluation'", (did,)).fetchone()[0]
@@ -1009,6 +1112,10 @@ def test_cr2_b_d2_a_lost_dispute_ref_proves_apply_so_the_row_is_exact_despite_a_
                   "credited_inr, credited_inr, 0, 0, NULL, 'x', 4000, 3000, %s FROM public.donations WHERE id = %s",
                   (refs, did))
     assert found(vdb.verify(), "I12-H", "structural", "unsupported_amount")
+
+    def strict():
+        assert not [f for f in report["findings"] if verify.SEVERITY[f["class"]] == "violation"], report["findings"]
+    after_activation(strict, why="no violation before the forged row")
 
 
 def test_cr2_c_d3_a_keep_around_a_mode_transition_is_ack_mode_order_never_an_exception(vdb):
@@ -1024,16 +1131,21 @@ def test_cr2_c_d3_a_keep_around_a_mode_transition_is_ack_mode_order_never_an_exc
     vdb.set_state(None, "hold")   # back to hold: the ack is current again, so it is reconstructed
     report = vdb.verify()
     assert not found(report, "I12", "audit_integrity", "forged_ack"), report["findings"]
-    assert not [f for f in report["findings"] if verify.SEVERITY[f["class"]] == "violation"], report["findings"]
+    assert not [f for f in pre_a5c(report)["findings"] if verify.SEVERITY[f["class"]] == "violation"], \
+        report["findings"]
     # Decision 3: the ack names hold, but the state also had apply and the keep's commit is unbounded: possibly
     # valid, never proven, so no keep exception and a permanent readiness block (r4: the exception was granted)
     (amb,) = [f for f in found(report, "I12", "historical_ambiguous") if f["detail"].get("reason") == "ack_mode_order"]
-    assert not found(report, "I13", "processed") and report["exit_code"] == 3
-    assert not report["gates"]["activation_verification_ready"]
+    assert not found(report, "I13", "processed")
     with vdb.owner() as c:  # the same timeline with a tampered acknowledgement: still forged
         c.execute("UPDATE public.donation_accounting_evaluations SET ack_fp = md5('tampered') WHERE donation_id = %s",
                   (did,))
     assert found(vdb.verify(), "I12", "audit_integrity", "forged_ack")
+
+    def strict():
+        assert not [f for f in report["findings"] if verify.SEVERITY[f["class"]] == "violation"], report["findings"]
+        assert report["exit_code"] == 3 and not report["gates"]["activation_verification_ready"]
+    after_activation(strict, why="no violation, exit 3 and activation_verification_ready false")
 
 
 def test_cr2_d_refund_only_evidence_is_exact_despite_a_nearby_mode_change(vdb):
@@ -1052,6 +1164,7 @@ def test_cr2_d_refund_only_evidence_is_exact_despite_a_nearby_mode_change(vdb):
 
 # ── Decision 4: a long reconcile whose evidence committed after its transaction start (real concurrency) ──────────
 
+@pytest.mark.timeout(int(verify.MARGIN.total_seconds()) + 180)  # sleeps M + 20 s by design (D-15: M = 5 min)
 def test_d4_6_a_long_reconcile_on_evidence_committed_after_its_start_is_evidence_order(vdb):
     """Reachable under 0034: R starts (its now() stamps the row), waits longer than M, a second refund commits, R
     reconciles on the current evidence (READ COMMITTED) and commits. No evidence state within +-M of the stamp has
@@ -2728,9 +2841,12 @@ def test_2b_ro5_policy_after_catalog_check_db(vdb):
     class PolicyAfterCatalog(psycopg.Cursor):
         def execute(self, query, params=None, **kw):
             q = str(query)
-            if not done and "payment_integrity_events" in q and q.startswith("DECLARE") and "pg_catalog" not in q:
+            # the first financial read (donations): after the §5.6 catalog check (CAT_RELATIONS), before any
+            # user-table lock; later the CURRENT view locks payment_integrity_events, so DDL there would wait forever
+            if not done and q.startswith("DECLARE") and q.endswith(verify.DONATIONS):
                 done.append(q)
-                _owner_sql(vdb, "ALTER TABLE public.payment_integrity_events ENABLE ROW LEVEL SECURITY",
+                _owner_sql(vdb, "SET LOCAL lock_timeout = '10s'",  # a design error fails fast, never hangs
+                           "ALTER TABLE public.payment_integrity_events ENABLE ROW LEVEL SECURITY",
                            "CREATE POLICY authtest_late ON public.payment_integrity_events USING (true)")
             return super().execute(query, params, **kw)
     with vdb.conn("hyperchat_readonly", cursor_factory=PolicyAfterCatalog) as c:
@@ -2835,7 +2951,7 @@ def test_2b_identity_guard_refuses_mismatch_db(phase2b_cluster_guard):
     """T2-12 (IDN): the approved identity passes; any changed expectation, the §0 ports or a socket host refuse."""
     env = dict(os.environ)
     admin = conninfo_to_dict(os.environ["HYPERCHAT_TEST_VERIFY_ADMIN"])
-    assert cluster_identity_problems(phase2b_cluster_guard, env, admin) == []
+    assert cluster_identity_problems(phase2b_cluster_guard, env, admin, _ci_capture(env)) == []
     for key, bad in (("HYPERCHAT_TEST_EXPECT_SYSID", "1"), ("HYPERCHAT_TEST_EXPECT_DATADIR", "C:\\elsewhere"),
                      ("HYPERCHAT_TEST_EXPECT_VERSION_NUM", "999999")):
         if env.get(key):
@@ -2972,8 +3088,13 @@ def test_i10_act_pristine_db(vdb, row, label):
         assert unverified and _list_text(row) in unverified[0], (row, label)
 
 
+U6_XFAIL = pytest.mark.xfail(strict=True, reason="U-6: §6A I5(a) fixture revokes the verifier's own SELECT; "
+                                                "plan/fixture correction pending (Part C report §U-6)")
+
+
 @needs_a5b
-@pytest.mark.parametrize("row, label", sorted({(r, lab) for r, lab, *_ in ACT_DB}))
+@pytest.mark.parametrize("row, label", [pytest.param(r, lab, marks=U6_XFAIL) if (r, lab) == ("I5", "table_acl_removal")
+                                        else (r, lab) for r, lab in sorted({(r, lab) for r, lab, *_ in ACT_DB})])
 def test_i10_act_changed_db(vdb, row, label):
     """§6A negative (rule 2) when active; the comparison-off fail-first (rule 3) while inactive."""
     ((_, _, sql, code, active_now),) = [x for x in ACT_DB if (x[0], x[1]) == (row, label)]
