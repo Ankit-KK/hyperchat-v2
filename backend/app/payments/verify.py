@@ -33,8 +33,9 @@ from psycopg.rows import dict_row
 from app.payments import accounting, figures
 from app.public.pricing import EXCHANGE_RATES_TO_INR
 
-VERIFIER_VERSION = "6a-2.8"
+VERIFIER_VERSION = "6a-2.9"
 EXPECTED_HEAD = "0034"
+EXPECTED_HEADS = ("0034", "0035")  # OD-35-V: 0035 adds only the F-7 / F-11 objects of HEAD_DELTAS below
 MIN_SERVER = 150000
 READONLY_ROLE = "hyperchat_readonly"
 
@@ -1192,6 +1193,34 @@ FN_ACL_BASELINE = {
     "set_updated_at": frozenset(DONATION_WRITERS),                    # 0007 GRANT ... TO RUNTIME
     "donations_require_eligible_creator": frozenset({"PUBLIC"}),      # 0020: the global default PUBLIC EXECUTE
 }
+# OD-35-V (owner 2026-11-22): the objects migration 0035 adds or replaces, derived from its text (md5 of the rendered
+# prosrc, as the 0034 pins above). Every 0034 value above stays as reconciled at A5a; at head 0034 nothing changes.
+_SCOPE_ARGS = "p_scope jsonb, p_created timestamp with time zone, p_command text, p_donation uuid"
+HEAD_DELTAS = {
+    "0034": {"functions": {}, "pins": {}, "triggers": {}},
+    "0035": {
+        "functions": {"payment_accounting_ack_guard": _fn("", "trigger", "plpgsql", _SP),
+                      "payment_accounting_scope_covers": _fn(_SCOPE_ARGS, "boolean", "plpgsql", _SP, volatile="s")},
+        "pins": {"payment_accounting_ack_guard": "68d17111c7148d8235b990dc8cfad4fc",
+                 "payment_accounting_scope_covers": "5a76bcd9e3fa99a913a78e5c0c3683eb",
+                 "payment_accounting_reconcile": "e4bb1de5c6e0e4a85c81e7ac68cc81b4",
+                 "payment_accounting_keep": "5a046a34f622f154a382a7a2506fc9fc",
+                 "payment_accounting_apply_evaluation": "dcd997d14f6e302be6c4255335141e36",
+                 "payment_accounting_revert": "0b16c1eff5dda4450c1b979277241833"},
+        "triggers": {("donation_accounting_evaluations", "donation_accounting_evaluations_ack_guard"):
+                     ("payment_accounting_ack_guard", "BEFORE", "ROW", frozenset({"INSERT", "UPDATE"}))},
+    },
+}
+assert set(HEAD_DELTAS) == set(EXPECTED_HEADS)
+FN_NAMES_ALL = tuple(sorted(set(FN_EXPECT).union(*(d["functions"] for d in HEAD_DELTAS.values()))))
+
+
+def head_expectations(head: str) -> tuple[dict, dict, dict]:
+    """(FN_EXPECT, FUNCTION_PINS, TRIGGER_PINS) of a database head: 0034's, plus that head's deltas."""
+    d = HEAD_DELTAS[head]
+    return ({**FN_EXPECT, **d["functions"]}, {**FUNCTION_PINS, **d["pins"]}, {**TRIGGER_PINS, **d["triggers"]})
+
+
 # ── §6A baseline values (OD-5, owner 2026-11-17): the 0034 values reconciled A = B = C on PG 15.20 / 17.12 (A5a-R2) ──
 SCHEMA_OWNER_PIN = "pg_database_owner"  # I1
 SCHEMA_ACL_BASELINE = frozenset({("pg_database_owner", "CREATE"), ("pg_database_owner", "USAGE"),  # I2 (no PUBLIC)
@@ -1245,12 +1274,15 @@ def _config(entries, each=iter) -> dict:
     return dict(e.split("=", 1) for e in each(entries or ()))
 
 
-def i10_problems(cat: dict, version: int, admins=frozenset(), work=None, check=None) -> tuple[list, list]:
+def i10_problems(cat: dict, version: int, admins=frozenset(), work=None, check=None,
+                 head: str = "0034") -> tuple[list, list]:
     """§5 over captured catalog rows (pure: unit-testable without PostgreSQL). Returns the structural problems as
     (entity_kind, entity_id, problem, detail) and the baseline components still unverified. `work` is the §2.7.3
     checkpoint (one unit per catalog row and per membership edge visited); `check` the deadline check around each
     accepted atomic sort (Budget.check; derived from a bound Budget.work when omitted)."""
     out = []
+    fn_expect, fn_pins, trigger_pins = head_expectations(head)
+    fn_names = tuple(sorted(fn_expect))
     tick = work or (lambda n=1: None)
     chk = check or getattr(getattr(work, "__self__", None), "check", None) or (lambda: None)
 
@@ -1386,7 +1418,7 @@ def i10_problems(cat: dict, version: int, admins=frozenset(), work=None, check=N
         fns[f["name"]].append(f)
 
     def sig(name):
-        return f"{name}({fns[name][0]['args'] if fns.get(name) else FN_EXPECT[name]['args']})"
+        return f"{name}({fns[name][0]['args'] if fns.get(name) else fn_expect[name]['args']})"
 
     holders = defaultdict(set)
     for row in each(cat["function_rights"]):
@@ -1409,7 +1441,7 @@ def i10_problems(cat: dict, version: int, admins=frozenset(), work=None, check=N
         owner = fns[row["name"]][0]["owner"] if fns.get(row["name"]) else OWNER
         if row["grantee"] != owner:
             entries[row["name"]].add((row["grantee"], row["privilege"], bool(row["grantable"])))
-    for name in FN_NAMES:
+    for name in fn_names:
         base = {(g, "EXECUTE") for g in FN_ACL_BASELINE.get(name, ())}
         for grantee, priv, grantable in each(sort(entries.get(name, set()))):
             if grantable:
@@ -1500,7 +1532,7 @@ def i10_problems(cat: dict, version: int, admins=frozenset(), work=None, check=N
 
     # §5.5 triggers: exact binding; any other trigger on these relations is unexpected
     live = {(t["rel"], t["name"]): t for t in each(cat["triggers"])}
-    for key, (fn, timing, level, events) in sorted(TRIGGER_PINS.items()):
+    for key, (fn, timing, level, events) in sorted(trigger_pins.items()):
         t, entity = live.get(key), ".".join(key)
         if t is None:
             flag("trigger", entity, "trigger_binding:missing")
@@ -1517,12 +1549,12 @@ def i10_problems(cat: dict, version: int, admins=frozenset(), work=None, check=N
         for field_, good in checks.items():
             if not good:
                 flag("trigger", entity, f"trigger_binding:{field_}")
-    for key in each(sort([k for k in each(live) if k not in TRIGGER_PINS])):
+    for key in each(sort([k for k in each(live) if k not in trigger_pins])):
         flag("trigger", ".".join(key), "unexpected_trigger")
 
     # §5.5 functions: exactly one row per name, every column pinned
-    for name in FN_NAMES:
-        exp, rows = FN_EXPECT[name], fns.get(name, [])
+    for name in fn_names:
+        exp, rows = fn_expect[name], fns.get(name, [])
         if not rows:
             flag("function", name, "missing")
             continue
@@ -1540,7 +1572,7 @@ def i10_problems(cat: dict, version: int, admins=frozenset(), work=None, check=N
             flag("function", name, "security")
         if f["owner"] != OWNER:
             flag("function", name, f"ownership:{name}")
-        src = FUNCTION_PINS.get(name, UNVERIFIED)
+        src = fn_pins.get(name, UNVERIFIED)
         if name in PIN_ROWS and PIN_ROWS[name] not in active:
             src = UNVERIFIED  # I3 / I4: pinned by OD-5, compared only once their row is active
         if src is not UNVERIFIED and f["src"] != src:
@@ -1623,7 +1655,7 @@ class Verifier:
         relevant = [d for d in each(relevant) if d in self.donations]
         self.fp = {m: {r["id"]: r["fp"] for r in each(q(FP_NOW, {"mode": m, "ids": relevant}))}
                    for m in ("hold", "apply")}
-        names, rels = {"names": list(FN_NAMES)}, {"rels": list(RIGHTS_RELS)}
+        names, rels = {"names": list(FN_NAMES_ALL)}, {"rels": list(RIGHTS_RELS)}
         members = CAT_MEMBERS_16 if self.first["server_version_num"] >= 160000 else CAT_MEMBERS_15
         table_rights = CAT_TABLE_RIGHTS_17 if self.first["server_version_num"] // 10000 >= 17 else CAT_TABLE_RIGHTS
         self.catalog = {
@@ -1922,7 +1954,8 @@ class Verifier:
     # ── I10: triggers, function security and pins, ACLs, grants ──
     def i10(self):
         problems, unverified = i10_problems(self.catalog, self.first["server_version_num"], self.admins,
-                                            work=self.budget.work, check=self.budget.check)
+                                            work=self.budget.work, check=self.budget.check,
+                                            head=self.first.get("head", EXPECTED_HEAD))
         for kind, entity, problem, extra in self.budget.each(problems):  # the emission is checkpointed too
             self.add("I10", "structural", kind, entity, problem=problem, **extra)
         if unverified:  # fail closed: an unconfirmed baseline is never clean (Phase 2B pins it)
@@ -2676,8 +2709,9 @@ def _guard(first: dict):
         raise Refused("verify needs a READ ONLY transaction")
     if first["server_version_num"] < MIN_SERVER:
         raise Refused("PostgreSQL 15 or later required")
-    if first["head"] != EXPECTED_HEAD:
-        raise Refused(f"database head {first['head']!r}, expected {EXPECTED_HEAD} (6a-2 verifies 0034 data only)")
+    if first["head"] not in EXPECTED_HEADS:
+        raise Refused(f"database head {first['head']!r}, expected one of {', '.join(EXPECTED_HEADS)} (6a-2 verifies "
+                      "0034 data, on a 0034 or 0035 schema)")
 
 
 def scope_args(creator: str | None, donation: str | None) -> tuple[str, str | None]:

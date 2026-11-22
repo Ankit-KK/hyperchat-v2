@@ -254,7 +254,7 @@ With it off, evidence changes no money (as above). The code path it will enable:
   applied reversal stays frozen (held) until resolved; a win at a later phase restores it exactly.
 
 **Accounting state (PAY-15 stage 6a-1, migration 0034), OFF.** The startup refusal above is unchanged; 0034 adds the
-database switch the activation tools (6a-2 to 6a-4, not built) will drive.
+database switch the activation tools drive (6a-2 verify and 6a-3 operator CLI below; 6a-4 not built).
 - `payment_accounting_state` (one row): `state` off / active / frozen (created **off**) and `dispute_mode` hold /
   apply (created **hold**). Only the owner changes it (`payment_accounting_set_state`, operator + reason 10-500
   characters); allowed: off→active, active→frozen, frozen→active, frozen→off (only once nothing is applied or held);
@@ -289,11 +289,11 @@ database switch the activation tools (6a-2 to 6a-4, not built) will drive.
 
 **Accounting verification (PAY-15 stage 6a-2), read-only.** `HYPERCHAT_READONLY_DSN=… python -m app.payments.operator
 verify --max-seconds N [--creator ID | --donation ID] [--output FILE]` (`app/payments/verify.py`) checks migration
-0034's data and changes nothing. The writing commands (`state`, `reconcile`, `resolve`, `revert`) are stage 6a-3 and
-refused (exit 2). The scope id and `--max-seconds` are validated **before any connection**: an empty, blank or
+0034's data and changes nothing. The writing commands (`state`, `reconcile`, `resolve`, `revert`) are stage 6a-3
+(below). The scope id and `--max-seconds` are validated **before any connection**: an empty, blank or
 malformed id, or a missing, non-finite or non-positive budget, is refused (exit 2) without connecting.
 - **Session and statement protocol (audit correction rev. 7 §2.7):** `hyperchat_readonly` only (session and current
-  user), head `0034`, PostgreSQL ≥ 15, one `REPEATABLE READ READ ONLY` transaction (its snapshot is the first data
+  user), head `0034` or `0035` (0035's objects are I10 expectations at head 0035), PostgreSQL ≥ 15, one `REPEATABLE READ READ ONLY` transaction (its snapshot is the first data
   statement's). The connection issues **only**: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`; `SET LOCAL
   lock_timeout = '5s'`, `SET LOCAL row_security = off`, `SET LOCAL statement_timeout = '<ms>ms'`; `DECLARE vfy_<n>
   NO SCROLL CURSOR WITHOUT HOLD FOR <constant>` (with its parameters) / `FETCH FORWARD <n> FROM vfy_<n>` / `CLOSE`
@@ -426,6 +426,37 @@ malformed id, or a missing, non-finite or non-positive budget, is refused (exit 
   publication in temporary directories) and `test_verify_db.py` (a fresh copy of the pristine
   template `hyperchat_verify_tmpl` per test, created by `setup-test-db.sh`; `HYPERCHAT_TEST_VERIFY_ADMIN` names the
   throwaway server's superuser connection).
+
+**Accounting hardening (PAY-15, migration 0035).** Two fixes on 0034's operator surface (OD-35-S):
+- **F-7:** foreign keys bind `donation_accounting_evaluations.ack_run` and `donation_credit_events.run_id` to
+  `payment_accounting_runs` (the upgrade refuses dangling rows first), and a row trigger
+  (`donation_accounting_evaluations_ack_guard`) refuses setting or changing a keep acknowledgement outside
+  `payment_accounting_keep` (42501 "(F-7)"; clearing one is allowed).
+- **F-11:** `payment_accounting_reconcile`, `_keep`, `_apply_evaluation` and `_revert` check, at use, that the run's
+  scope covers the donation (`payment_accounting_scope_covers`, the rule-for-rule port of `verify.parse_scope` +
+  `scope_covers`: exact keys, a duplicate-free uuid list, `expires_at` within 24 h of the run and not passed,
+  `all_v2` = V2 donations for reconcile only). Anything else is refused (42501 "(F-11)"). `open_run` is unchanged, so
+  an unscoped run can still be opened but never used; `donation_accounting_core` stays owner-internal.
+- Downgrade restores 0034's function bodies exactly and drops the trigger, the two functions and the two keys (no
+  data is lost, so it is not refused).
+
+**Operator CLI (PAY-15 stage 6a-3, `app/payments/accounting_ops.py`), report-only by default.**
+`HYPERCHAT_ACCOUNTING_OWNER_DSN='… user=hyperchat_migrator' python -m app.payments.operator {state [--to off|active|
+frozen] [--mode hold|apply] | reconcile | resolve keep|apply | revert} [--donation UUID …] [--apply
+--confirm-database DB --operator ID --reason TEXT]`. The connection sets role `hyperchat_owner`; every write goes
+through 0034's owner functions.
+- Arguments are validated **before connecting** (exit 2): `--apply` needs `--confirm-database` equal to the connected
+  database, `--operator` matching `[a-z][a-z0-9._-]{1,62}` and a `--reason` of 10-500 characters; donation ids are
+  uuids without repeats. Each command also checks the accounting state first (reconcile and resolve apply: active;
+  resolve keep: active or frozen; revert: frozen or off) and opens no run otherwise.
+- The plan is the application's own evaluator (`accounting.evaluate_in_mode` over `payment_integrity_current`); the
+  database re-derives and refuses anything else. A writing run always carries a `donations` scope naming exactly the
+  planned donations, expiring in 1 h (OD-6a3-S: never unscoped, creator or all_v2). One transaction per donation; the
+  first refusal stops the run (earlier donations stay written). Reconcile re-plans after writing: the second report
+  must plan zero.
+- Output: one canonical JSON line. Exit codes (D-7): 0 nothing to do / all applied, 3 work planned (report), 1 a
+  donation refused or a reconcile's second report not zero, 2 refused before anything was written.
+- **Tests:** `tests/payments/test_operator_units.py` (no database) and `test_operator_db.py` (PostgreSQL 15 and 17).
 
 **Live figures (PAY-15 stage 4).** Goal progress (public and realtime), dashboard revenue and the CSV export read the
 applied reversal through `app/payments/figures.py`: per donation `reversed_inr` = the pro-rata share of the stored

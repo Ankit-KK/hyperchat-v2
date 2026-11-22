@@ -771,7 +771,7 @@ def test_n11_replaced_by_ce1_an_evaluation_row_after_the_freeze_event_is_no_viol
 
 @pytest.mark.parametrize("field, value", [("isolation", "read committed"), ("isolation", "serializable"),
                                           ("read_only", "off"), ("session_user", "hyperchat_app"),
-                                          ("current_user", "hyperchat_owner"), ("head", "0035"),
+                                          ("current_user", "hyperchat_owner"), ("head", "0036"),
                                           ("server_version_num", 140012)])
 def test_n15_the_session_guard_refuses_every_unsafe_session(field, value):
     first = {"session_user": "hyperchat_readonly", "current_user": "hyperchat_readonly",

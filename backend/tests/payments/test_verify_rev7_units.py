@@ -1087,6 +1087,65 @@ def test_c0_unit_the_migration_derived_pristine_catalog_has_no_problem_but_the_b
     assert verify.I10_BASELINE_CONFIRMED is False
 
 
+def pristine_0035(version=170000):
+    """The migration-derived pristine catalog at head 0035 (OD-35-V): 0034's, plus 0035's functions, pins and trigger."""
+    cat = pristine(version)
+    fn_expect, fn_pins, trigger_pins = verify.head_expectations("0035")
+    for row in cat["functions"]:
+        row["src"] = fn_pins.get(row["name"], row["src"])
+    for n, e in verify.HEAD_DELTAS["0035"]["functions"].items():
+        cat["functions"].append({"schema": "public", "name": n, "args": e["args"], "returns": e["returns"],
+                                 "lanname": e["lanname"], "prokind": "f", "provolatile": e["provolatile"],
+                                 "proparallel": "u", "proisstrict": False, "proleakproof": False, "prosecdef": False,
+                                 "proconfig": list(e["proconfig"]), "owner": OWNER, "src": fn_pins[n], "no_bin": True})
+        cat["function_rights"].append({"role": OWNER, "name": n, "args": e["args"]})
+        cat["function_acl"].append({"name": n, "args": e["args"], "grantee": OWNER, "privilege": "EXECUTE",
+                                    "grantable": False})
+    for (rel, name), (fn, timing, level, events) in verify.HEAD_DELTAS["0035"]["triggers"].items():
+        cat["triggers"].append({"rel": rel, "name": name, "fn_schema": "public", "fn_name": fn, "fn_args": "",
+                                "tgtype": tgtype(timing, level, events), "enabled": "O", "tgnargs": 0, "tgargs": "",
+                                "deferrable": False, "initdeferred": False, "is_constraint": False, "no_qual": True,
+                                "update_cols": []})
+    return cat
+
+
+@pytest.mark.parametrize("version", [150000, 170000])
+def test_od35v_the_pristine_0035_catalog_is_clean_at_head_0035_and_each_head_rejects_the_other(version):
+    """OD-35-V: at head 0035 the 0035 objects are expected (no problem, the baseline still unverified, A5c blocked);
+    the same catalog judged as 0034 shows the unexpected trigger and the changed bodies, and a 0034 catalog judged as
+    0035 shows the missing objects: the head decides, never a guess."""
+    found, unverified = i10_problems(pristine_0035(version), version, head="0035")
+    assert found == [] and unverified == [*verify.I10_UNVERIFIED, *verify.SKIPPED_COMPARISONS]
+    assert verify.I10_BASELINE_CONFIRMED is False
+    as_0034 = sorted(p for _, _, p, _ in i10_problems(pristine_0035(version), version)[0])
+    assert "unexpected_trigger" in as_0034 and as_0034.count("body_drift") == 4, as_0034
+    as_0035 = sorted(p for _, _, p, _ in i10_problems(pristine(version), version, head="0035")[0])
+    assert as_0035.count("missing") == 2 and "trigger_binding:missing" in as_0035 and as_0035.count("body_drift") == 4
+
+
+def test_od35v_heads_and_pins_follow_the_migration_text():
+    """The 0035 pins are md5 of the rendered prosrc of migration 0035 (as the 0034 ones are of 0034)."""
+    import hashlib
+    import importlib.util
+    import pathlib
+    import re
+    import types
+    versions = pathlib.Path(__file__).resolve().parents[3] / "database" / "migrations" / "versions"
+    spec = importlib.util.spec_from_file_location("_m0035", versions / "0035_payment_accounting_hardening.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    statements: list[str] = []
+    module.op = types.SimpleNamespace(execute=statements.append)
+    module.upgrade()
+    bodies = {}
+    for s in statements:
+        m, b = re.search(r"CREATE (?:OR REPLACE )?FUNCTION public\.(\w+)\(", s), re.search(r"\$\$(.*)\$\$", s, re.S)
+        if m and b:
+            bodies[m.group(1)] = hashlib.md5(b.group(1).encode()).hexdigest()
+    assert bodies == verify.HEAD_DELTAS["0035"]["pins"]
+    assert verify.EXPECTED_HEADS == ("0034", "0035")
+
+
 def test_i10_fails_closed_while_the_baseline_is_unverified(monkeypatch):
     v = make()
     v.catalog = pristine()
@@ -1954,7 +2013,7 @@ def test_c3_a_the_verifiers_own_i10_emission_is_checkpointed():
     clock, added, real = Clock(), [], verify.i10_problems
     v.budget = Budget(10, clock)
 
-    def classify(cat, version, admins, work=None, check=None):
+    def classify(cat, version, admins, work=None, check=None, head="0034"):
         problems = [("role", f"r{i}", f"role_edge:r{i}->x", {}) for i in range(n)]
         clock.t += 1_000  # the classifier finished in time; the deadline passes as its findings are added
         return problems, []
