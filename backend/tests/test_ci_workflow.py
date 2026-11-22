@@ -46,11 +46,21 @@ def test_check_names_are_stable_and_every_suite_still_runs():
     assert "nginx_ratelimit_check.sh" in str(WORKFLOW["jobs"]["deploy-config"]["steps"])
 
 
+def test_the_integration_job_fails_when_database_tests_are_skipped():  # audit T-8
+    steps = WORKFLOW["jobs"]["integration"]["steps"]
+    pytest_runs = [s for s in steps if "python -m pytest" in str(s.get("run", ""))]
+    assert len(pytest_runs) == 2 and all(s["run"].endswith(" --junitxml=junit.xml") for s in pytest_runs)
+    guard = steps[-1]  # last, after both reports exist; runs even when a pytest step failed
+    assert guard["run"] == "python tests/ci_guard.py ../database/junit.xml junit.xml"
+    assert guard["working-directory"] == "backend" and guard["if"] == "${{ !cancelled() }}"
+
+
 def test_the_postgres15_job_excludes_only_the_postgres17_importer():
     steps = WORKFLOW["jobs"]["postgres15"]["steps"]
     runs = "\n".join(str(s.get("run", "")) for s in steps)
     assert "postgres:15" in runs and "'^15\\.'" in runs
     assert "--deselect tests/test_auth_hash_import.py" in runs and runs.count("--deselect") == 1
+    args = [a for s in steps if s.get("working-directory") == "backend" for a in str(s.get("run", "")).split()]
     for suite in ("tests/auth", "tests/kyc", "tests/stepup", "tests/admin", "tests/backup",
                   "tests/payments/test_donation_history_guard_db.py",  # 0030: the per-role guard on DEV's PG 15
                   "tests/payments/test_donation_credit_db.py", "tests/dashboard/test_moderation_api.py",  # 0031
@@ -63,8 +73,14 @@ def test_the_postgres15_job_excludes_only_the_postgres17_importer():
                   "tests/payments/test_k2_accounting_on_db.py",  # PAY-15 A6k-CI: K2 with accounting on
                   "tests/payments/test_operator_db.py",  # PAY-15 6a-3 operator CLI (OD-6a3-S)
                   "tests/payments/test_switch_db.py",  # PAY-15 6a-4 switch gate (F12-F14) and L4
-                  "tests/payments/test_verify_db.py"):  # PAY-15 6a-2 read-only verifier (OD-14: CI identity capture)
-        assert suite in runs
+                  "tests/payments/test_verify_db.py",  # PAY-15 6a-2 read-only verifier (OD-14: CI identity capture)
+                  "tests/payments/test_integrity_db.py",  # T-9: every payments suite, the 0029 evidence too
+                  "tests/payments/test_payments_db.py",
+                  "tests/payments/test_dispute_leaves_figures_db.py",  # T-5
+                  "tests/obs/test_suspended_creator_access_db.py",  # T-4
+                  "tests/obs/test_player_failed_playback_db.py"):  # T-7
+        assert any(suite == a or suite.startswith(a + "/") for a in args), suite  # listed, or its directory
+    assert "tests/payments" in args  # T-9: the whole directory, not a hand-kept file list
     gated = [s for s in steps if s.get("id") != "scope" and "actions/checkout" not in str(s.get("uses"))]
     assert all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in gated)
 
@@ -81,12 +97,14 @@ def test_both_database_jobs_capture_the_ci_identity_right_before_the_backend_sui
                       and runs[i].startswith("python -m pytest -q"))
         assert setup < capture == backend - 1, job
     pg15 = [str(s.get("run", "")) for s in WORKFLOW["jobs"]["postgres15"]["steps"]]
-    verify = [r for r in pg15 if "tests/payments/test_verify_db.py" in r]
+    ignored = "--ignore=tests/payments/test_verify_db.py"  # the tests/payments directory run leaves it out
+    verify = [r for r in pg15 if "tests/payments/test_verify_db.py" in r.replace(ignored, "")]
+    assert all(ignored in r for r in pg15 if "tests/payments " in r + " ")
     diagnostic = "python -m pytest -q -ra --durations=25 --timeout=300" \
                  " --timeout-method=signal -o faulthandler_timeout=240"  # a hang fails with a traceback
     assert verify == [diagnostic + " tests/payments/test_verify_db.py"]  # once, its own step
     integration = [str(s.get("run", "")) for s in WORKFLOW["jobs"]["integration"]["steps"]]
-    assert diagnostic in integration
+    assert any(r.startswith(diagnostic) for r in integration)  # T-8 appends --junitxml for the skip guard
 
 
 needs_git = pytest.mark.skipif(sys.platform == "win32" or not shutil.which("git"), reason="needs bash and git")
@@ -143,6 +161,11 @@ def _scope(repo_dir: Path, base: str) -> str:
     ("backend/app/payments/switch.py", "run=true"),  # 6a-4: catalog precondition and L4 as runtime roles
     ("backend/tests/payments/test_switch_units.py", "run=false"),
     ("backend/tests/payments/test_verify_units.py", "run=false"),
+    ("backend/tests/payments/test_integrity_db.py", "run=true"),  # T-9: every payments DB suite runs on PG 15
+    ("backend/tests/payments/test_dispute_leaves_figures_db.py", "run=true"),  # T-5
+    ("backend/tests/obs/test_suspended_creator_access_db.py", "run=true"),  # T-4
+    ("backend/tests/obs/test_player_failed_playback_db.py", "run=true"),  # T-7
+    ("backend/tests/obs/test_obs_db.py", "run=false"),
     ("backend/tests/payments/test_accounting_units.py", "run=false"),
     ("backend/tests/dashboard/test_moderation_api.py", "run=true"),
     ("backend/tests/dashboard/test_x.py", "run=false"),

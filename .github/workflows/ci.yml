@@ -138,10 +138,10 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
         run: python -m pytest -q -ra --durations=25 --timeout=300 --timeout-method=signal -o faulthandler_timeout=240 tests/payments/test_verify_db.py
-      - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot, accounting activation)
+      - name: Backend permission suites (auth, KYC, step-up, admin, backup, every payments and integrity suite but the verifier above, suspended-creator and failed-playback OBS checks, moderation)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
-        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/payments/test_activation_db.py tests/payments/test_activation_concurrency_db.py tests/payments/test_k2_accounting_on_db.py tests/payments/test_operator_db.py tests/payments/test_switch_db.py tests/dashboard/test_moderation_api.py
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments --ignore=tests/payments/test_verify_db.py tests/obs/test_suspended_creator_access_db.py tests/obs/test_player_failed_playback_db.py tests/dashboard/test_moderation_api.py
 
   integration:
     name: Database + integration tests (PostgreSQL 17)
@@ -182,9 +182,13 @@ jobs:
         run: bash .github/scripts/setup-test-db.sh hyperchat_ci python
       - name: Database tests (migration round trip, role privileges, ETL mapping)
         working-directory: database
-        run: python -m pytest -q
+        run: python -m pytest -q -rs --junitxml=junit.xml
       - name: CI identity capture (OD-14; the verifier DB tests compare the server against it)
         run: bash .github/scripts/ci-identity-capture.sh 17
       - name: Backend tests (unit + end-to-end against the database)
         working-directory: backend
-        run: python -m pytest -q -ra --durations=25 --timeout=300 --timeout-method=signal -o faulthandler_timeout=240
+        run: python -m pytest -q -ra --durations=25 --timeout=300 --timeout-method=signal -o faulthandler_timeout=240 --junitxml=junit.xml
+      - name: Skip guard (a test skipped for a missing database fails the job, never passes green)
+        if: ${{ !cancelled() }}
+        working-directory: backend
+        run: python tests/ci_guard.py ../database/junit.xml junit.xml
