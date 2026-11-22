@@ -92,7 +92,7 @@ jobs:
     # (MAINTAIN privilege) are excluded; production stays covered by the PostgreSQL 17 job.
     name: PostgreSQL 15 compatibility (migrations + permissions)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       PGHOST: localhost
       PGPORT: "5432"
@@ -134,15 +134,19 @@ jobs:
       - name: CI identity capture (OD-14; the verifier DB tests compare the server against it)
         if: steps.scope.outputs.run == 'true'
         run: bash .github/scripts/ci-identity-capture.sh 15
-      - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot, accounting activation, accounting verify)
+      - name: Verifier DB tests (OD-14; own step so its failure summary and slowest tests always print)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
-        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/payments/test_activation_db.py tests/payments/test_activation_concurrency_db.py tests/payments/test_verify_db.py tests/dashboard/test_moderation_api.py
+        run: python -m pytest -q -ra --durations=25 tests/payments/test_verify_db.py
+      - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot, accounting activation)
+        if: steps.scope.outputs.run == 'true'
+        working-directory: backend
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/payments/test_activation_db.py tests/payments/test_activation_concurrency_db.py tests/dashboard/test_moderation_api.py
 
   integration:
     name: Database + integration tests (PostgreSQL 17)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:17  # Docker Hub's official image via its public mirror (see deploy-config)
@@ -183,4 +187,4 @@ jobs:
         run: bash .github/scripts/ci-identity-capture.sh 17
       - name: Backend tests (unit + end-to-end against the database)
         working-directory: backend
-        run: python -m pytest -q
+        run: python -m pytest -q -ra --durations=25

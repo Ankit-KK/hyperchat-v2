@@ -68,13 +68,18 @@ def test_the_postgres15_job_excludes_only_the_postgres17_importer():
 
 def test_both_database_jobs_capture_the_ci_identity_right_before_the_backend_suites():
     """OD-14: the verifier DB tests refuse unless the server matches a capture taken by the workflow itself, after
-    the database is created and before the backend pytest step (the step that runs test_verify_db.py)."""
+    the database is created and right before the FIRST backend pytest step (postgres15: the verifier DB step)."""
     for job, major in (("postgres15", "15"), ("integration", "17")):
-        runs = [str(s.get("run", "")) for s in WORKFLOW["jobs"][job]["steps"]]
+        steps = WORKFLOW["jobs"][job]["steps"]
+        runs = [str(s.get("run", "")) for s in steps]
         capture = runs.index(f"bash .github/scripts/ci-identity-capture.sh {major}")
         setup = next(i for i, r in enumerate(runs) if "setup-test-db.sh" in r)
-        backend = max(i for i, r in enumerate(runs) if r.startswith("python -m pytest -q"))
+        backend = min(i for i, s in enumerate(steps) if s.get("working-directory") == "backend"
+                      and runs[i].startswith("python -m pytest -q"))
         assert setup < capture == backend - 1, job
+    pg15 = [str(s.get("run", "")) for s in WORKFLOW["jobs"]["postgres15"]["steps"]]
+    verify = [r for r in pg15 if "tests/payments/test_verify_db.py" in r]
+    assert verify == ["python -m pytest -q -ra --durations=25 tests/payments/test_verify_db.py"]  # once, own step
 
 
 needs_git = pytest.mark.skipif(sys.platform == "win32" or not shutil.which("git"), reason="needs bash and git")
