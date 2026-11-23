@@ -41,6 +41,8 @@ check_isolation.sh              read-only server audit of one environment (dev|p
                                 symlink hop and ancestor directory of the code, mount points, units, service
                                 account, pg_hba coverage AND rule order, pg_ident; needs namei (util-linux)
 postgres/pg_ident.production.conf    ident map of the PRODUCTION cluster only (hyperchat-prod; no DEV user)
+tools/readonly_lint.py          local lint for scripts meant to be read-only (OPS-2 S3; "Running commands against a server")
+tools/nginx_drift_check.sh, nginx_fingerprints.txt  local nginx drift check vs recorded deployed hashes (OPS-2 S4)
 backup/                         nightly verified backup sets: production (02:30 UTC) and DEV (02:00 UTC), 14-day
                                 retention keeping the newest 3; optional encrypted off-site copies (disabled);
                                 restore verification and recovery runbooks: docs/backup-recovery.md
@@ -384,6 +386,24 @@ Install order, prerequisites and the operator tool are in [`docs/admin-stepup.md
 - PostgreSQL 15 verification, done in CI since #80.
 
 Every step needs approval; `check_isolation.sh` audits the verifier once installed.
+
+## Running commands against a server
+After the nginx incident of 2026-10-28 ([record](../docs/operations/incident-2026-10-28-nginx-config.md)), every
+remote command follows these rules (OPS-2, safeguards S1, S3 and S4):
+- **Only reviewed script files.** Write the commands into a file, review it, and send it from Windows with
+  `cmd /c 'ssh root@HOST "bash -s" < file'`. Never pass a command inline through PowerShell: Windows PowerShell 5.1
+  drops embedded double quotes, which turned `-> $(readlink -f $f)` inside an `echo` into an output redirect.
+- **No `>` text inside `echo` strings,** quoted or not. Print arrows and comparisons another way (`to`, `=`).
+- **Lint every read-only script before sending it:** `python deploy/tools/readonly_lint.py <script>` must exit 0.
+  It refuses redirects (except `2>&1`, `>&2`, `>/dev/null`), `tee`, `sed -i`, `mv`, `rm`, `cp`, `install`,
+  `chmod`/`chown`, `systemctl` state changes, `nginx -s`, package managers, `truncate` and `dd of=`. A line ending
+  in `# ro-lint: allow` is a reviewed exception, printed as `allowed`. It is static: writes hidden inside strings
+  run later (`bash -c "…"`, `eval`) are not seen, so a script that runs such strings is not read-only by this check.
+- **The nginx drift check runs locally:** `bash deploy/tools/nginx_drift_check.sh` prints `match`, `drift` or
+  `unrecorded` for each file under `deploy/nginx/` against the recorded deployed fingerprints in
+  `deploy/tools/nginx_fingerprints.txt`. `drift` is expected where the repository moved past the deployed version
+  (production's F1/F1-R today). Running it on the host, and its `--nginx-test` flag (`nginx -t` of the installed
+  configuration, as root), need separate approval.
 
 ## Rules
 - Firewall (UFW): SSH (rate-limited), 80 and 443 only. PostgreSQL listens on localhost / Unix socket only.
