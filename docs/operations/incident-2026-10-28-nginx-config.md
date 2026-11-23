@@ -80,6 +80,6 @@ The restored versions are the historically deployed ones, chosen from deploy rec
 |---|---|---|
 | S1 | Remote commands only as reviewed script files run with `cmd /c 'ssh … "bash -s" < file'` from Windows; never inline through PowerShell; no `>` text inside `echo` strings | in effect |
 | S2 | A sandboxed read-only runner (`systemd-run` with `ProtectSystem=strict`), so a mistaken redirect cannot write to `/etc`, `/opt`, `/var` or `/root` | proposed; host use needs separate approval after a dry test |
-| S3 | A local lint that refuses writing constructs in scripts meant to be read-only (`deploy/tools/readonly_lint.py`) | repo tooling, OPS-2 PR; implemented in repo, host execution still needs approval |
-| S4 | An nginx drift check (fingerprints vs the recorded deployed hashes) plus `nginx -t` (`deploy/tools/nginx_drift_check.sh`) | repo tooling, OPS-2 PR; implemented in repo, host execution and `--nginx-test` still need approval |
+| S3 | A local lint that refuses writing constructs in scripts meant to be read-only (`deploy/tools/readonly_lint.py`) | repo tooling, OPS-2 PR #139; implemented in repo, host execution still needs approval |
+| S4 | An nginx drift check (fingerprints vs the recorded deployed hashes) plus `nginx -t` (`deploy/tools/nginx_drift_check.sh`) | repo tooling, OPS-2 PR #139; implemented in repo, host execution and `--nginx-test` still need approval |
 | S5 | Host-side configuration history (etckeeper or a nightly `/etc/nginx` archive) | proposed; host change, later |
