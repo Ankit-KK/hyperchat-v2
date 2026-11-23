@@ -55,7 +55,7 @@ from app.core.logging import configure_logging
 from app.jobs.queue import enqueue
 from app.maintenance import run_cleanup
 from app.payments.accounts import AccountHealth, PaymentAccounts, health_report
-from app.payments import reconcile
+from app.payments import integrity, reconcile
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
 from app.security.audit import security_event
@@ -252,9 +252,6 @@ async def payment_reconcile(settings: Settings, args, client=None) -> int:
     return report.exit_code()
 
 
-ATTENTION_STATES = frozenset({"open", "under_review", "action_required", "lost", "pending", "processed", "failed"})
-
-
 async def payment_integrity_report(settings: Settings, args) -> int:
     """C1: read-only report of dispute / provider-refund evidence (payment_integrity_current). Never writes."""
     try:
@@ -263,30 +260,11 @@ async def payment_integrity_report(settings: Settings, args) -> int:
         print("Refused: --since must be a date (YYYY-MM-DD).", file=sys.stderr)
         return 2
     repo = PaymentRepository(connection_factory(settings))
-    rows = await repo.integrity_report(since)
-    items = [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()} for row in rows]
-    for item in items:
-        # PAY-15 stage 5 (D6): the evidence's donation's accounting state (None: never evaluated)
-        applied, hold, flags = (item.pop(k) for k in ("applied_reversed_paise", "accounting_hold", "accounting_flags"))
-        item["accounting"] = None if applied is None else {"applied_reversed_paise": applied, "hold": hold,
-                                                           "flags": flags}
-        item["attention"] = (item["status"] in ATTENTION_STATES or not item["all_consistent"] or item["conflicting"]
-                             or item["match_type"] != "payment" or hold is not None)
-    attention = sum(item["attention"] for item in items)
-    state = await repo.accounting_report()
-    accounting = {k: [{c: (v.isoformat() if hasattr(v, "isoformat") else v) for c, v in r.items()} for r in rows]
-                  for k, rows in state.items()}
-    accounting["counts"] = {k: len(v) for k, v in state.items()}
-    # PAY-15 stage 5b (D9): Razorpay's refunded-amount snapshot vs our refund evidence; consistent and no_snapshot are
-    # counted only, the other categories listed (ids, amounts, times; no names, no payloads)
-    snaps = await repo.refund_snapshot_report()
-    refund_snapshots = {k: [{c: (v.isoformat() if hasattr(v, "isoformat") else v) for c, v in r.items()}
-                            for r in snaps[k]] for k in ("missing_refund_evidence", "pending_refunds", "snapshot_behind")}
-    refund_snapshots["counts"] = {k: len(v) for k, v in snaps.items()}
-    print(json.dumps({"report": "payment-integrity", "read_only": True, "since": args.since, "items": items,
-                      "total": len(items), "attention": attention, "accounting": accounting,
-                      "refund_snapshots": refund_snapshots}, indent=2, sort_keys=True))
-    return 1 if attention or state["held"] or snaps["missing_refund_evidence"] else 0
+    summary = integrity.report(await repo.integrity_report(since), await repo.accounting_report(),
+                               await repo.refund_snapshot_report())
+    print(json.dumps({"report": "payment-integrity", "read_only": True, "since": args.since, **summary},
+                     indent=2, sort_keys=True))
+    return 1 if integrity.needs_attention(summary) else 0
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -230,3 +230,28 @@ def test_the_snapshot_never_changes_completeness_or_consistency(payment):
         k: v for k, v in dataclasses.asdict(shaped).items() if k not in ignore}
     donation = {"amount": Decimal("100.00"), "currency": "INR", "payment_status": "success"}
     assert integrity.consistent(plain, donation) is integrity.consistent(shaped, donation) is True
+
+
+def _item(**kw) -> dict:
+    return {"provider_ref": "disp_TEST1", "status": "won", "all_consistent": True, "conflicting": False,
+            "match_type": "payment", "received_at": datetime(2026, 11, 1, tzinfo=UTC), "applied_reversed_paise": None,
+            "accounting_hold": None, "accounting_flags": None, **kw}
+
+
+def _report(*items, held=(), missing=()):
+    snaps = {"missing_refund_evidence": list(missing), "pending_refunds": [], "snapshot_behind": [],
+             "consistent": [{}], "no_snapshot": []}
+    return integrity.report(list(items), {"held": list(held), "review_both": [], "imported_with_evidence": []}, snaps)
+
+
+def test_report_attention_rule_shared_by_the_cli_and_the_admin_api():
+    calm = _report(_item())
+    assert calm["items"][0]["attention"] is False and calm["items"][0]["accounting"] is None
+    assert calm["items"][0]["received_at"] == "2026-11-01T00:00:00+00:00" and not integrity.needs_attention(calm)
+    assert calm["refund_snapshots"]["counts"]["consistent"] == 1 and "consistent" not in calm["refund_snapshots"]
+    for kw in ({"status": "lost"}, {"status": "processed"}, {"all_consistent": False}, {"conflicting": True},
+               {"match_type": "order"}, {"applied_reversed_paise": 0, "accounting_hold": "H-1", "accounting_flags": []}):
+        r = _report(_item(**kw))
+        assert r["items"][0]["attention"] is True and r["attention"] == 1 and integrity.needs_attention(r), kw
+    assert integrity.needs_attention(_report(_item(), held=[{"donation_id": "x"}]))
+    assert integrity.needs_attention(_report(_item(), missing=[{"donation_id": "x"}]))

@@ -163,3 +163,39 @@ async def record(repo, event, evidence: Evidence | None, signed_by: list[str]) -
                    reason=f"{evidence.event_type}:{match_type}", status=evidence.status,
                    order_id=donation["order_id"] if donation else None, account=account)
     return outcome
+
+
+# ── the operator report (payment-integrity-report CLI and GET /api/v1/admin/payments/integrity) ──
+
+ATTENTION_STATES = frozenset({"open", "under_review", "action_required", "lost", "pending", "processed", "failed"})
+
+
+def _plain(row: dict) -> dict:
+    return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()}
+
+
+def report(rows: list[dict], state: dict, snaps: dict) -> dict:
+    """The integrity_report / accounting_report / refund_snapshot_report rows as one JSON-ready report, with the
+    per-item `attention` rule (open or lost disputes, refunds, mismatches, conflicts, unmatched payments, holds)."""
+    items = [_plain(row) for row in rows]
+    for item in items:
+        # PAY-15 stage 5 (D6): the evidence's donation's accounting state (None: never evaluated)
+        applied, hold, flags = (item.pop(k) for k in ("applied_reversed_paise", "accounting_hold", "accounting_flags"))
+        item["accounting"] = None if applied is None else {"applied_reversed_paise": applied, "hold": hold,
+                                                           "flags": flags}
+        item["attention"] = (item["status"] in ATTENTION_STATES or not item["all_consistent"] or item["conflicting"]
+                             or item["match_type"] != "payment" or hold is not None)
+    accounting = {k: [_plain(r) for r in v] for k, v in state.items()}
+    accounting["counts"] = {k: len(v) for k, v in state.items()}
+    # PAY-15 stage 5b (D9): consistent and no_snapshot are counted only, the other categories listed
+    refund_snapshots = {k: [_plain(r) for r in snaps[k]]
+                        for k in ("missing_refund_evidence", "pending_refunds", "snapshot_behind")}
+    refund_snapshots["counts"] = {k: len(v) for k, v in snaps.items()}
+    return {"items": items, "total": len(items), "attention": sum(item["attention"] for item in items),
+            "accounting": accounting, "refund_snapshots": refund_snapshots}
+
+
+def needs_attention(summary: dict) -> bool:
+    """The CLI's exit-1 rule: an item needs attention, a donation is held, or Razorpay reports unrecorded refunds."""
+    return bool(summary["attention"] or summary["accounting"]["held"]
+                or summary["refund_snapshots"]["missing_refund_evidence"])
