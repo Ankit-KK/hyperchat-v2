@@ -76,5 +76,43 @@ def test_every_writer_refuses_before_connecting_without_its_inputs(argv, monkeyp
     assert out["status"] == "refused" and out["exit_code"] == 2
 
 
+class _Conn:
+    """A scripted owner connection: the state read, then one recorded call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def cursor(self, row_factory=None):
+        conn = self
+
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, params=None):
+                return self
+
+            def fetchone(self):
+                return {"state": "active", "dispute_mode": "apply", "database": "hc_test"}
+        return Cur()
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        return self
+
+    def fetchone(self):
+        return ("frozen",)
+
+
+def test_state_apply_always_binds_the_operator_and_the_trimmed_reason():
+    conn = _Conn()
+    out = ops.run_state(conn, to="frozen", mode=None, apply=True, confirm="hc_test", operator="op-a",
+                        reason="  a reason long enough  ")
+    assert out["status"] == "clean" and conn.calls == [(ops.SET_STATE, ("frozen", None, "op-a", "a reason long enough"))]
+
+
 def test_the_exit_codes_are_d7():
     assert ops.EXIT == {"clean": 0, "failed": 1, "refused": 2, "planned": 3}

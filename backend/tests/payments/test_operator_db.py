@@ -152,9 +152,10 @@ def test_state_reports_and_changes_the_switch_with_its_reason(cli):
     assert code == 3 and report["planned"] == {"to": "frozen", "dispute_mode": None}
     code, applied = cli("state", "--to", "frozen", apply=True)
     assert code == 0 and applied["results"] == [{"outcome": "frozen"}]
-    with db() as conn:
-        assert conn.execute("SELECT state, change_operator FROM public.payment_accounting_state").fetchone() == (
-            "frozen", OPERATOR)
+    with db() as conn:  # 0034 records the change in an event and clears change_operator on the state row
+        assert conn.execute("SELECT state FROM public.payment_accounting_state").fetchone() == ("frozen",)
+        assert conn.execute("SELECT to_state, operator, reason FROM public.payment_accounting_events "
+                            "ORDER BY id DESC LIMIT 1").fetchone() == ("frozen", OPERATOR, REASON)
 
 
 def test_the_cli_never_opens_an_unscoped_run(cli):

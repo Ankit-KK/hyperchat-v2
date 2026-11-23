@@ -183,9 +183,24 @@ def test_events_and_runs_are_append_only_for_the_owner_too(table):
     set_accounting("frozen")
     _run("revert")
     _set(None, "apply" if _current_state()[1] == "hold" else "hold")
-    for sql in (f"UPDATE public.{table} SET operator = 'x'", f"DELETE FROM public.{table}", f"TRUNCATE public.{table}"):
-        with fixture_db() as conn, pytest.raises(REFUSED), conn.transaction(force_rollback=True):
+    count = f"SELECT count(*) FROM public.{table}"
+    with fixture_db() as conn:
+        before = conn.execute(count).fetchone()[0]
+    assert before > 0  # the TRUNCATE guard refuses only a non-empty table
+    plain_truncate = f"TRUNCATE public.{table}"
+    if table == "payment_accounting_runs":
+        # 0035 (F-7): runs are referenced by foreign keys, so a plain TRUNCATE is refused before any trigger runs;
+        # CASCADE passes that check and must still be stopped by the append-only trigger itself.
+        with fixture_db() as conn, pytest.raises(psycopg.errors.FeatureNotSupported), \
+                conn.transaction(force_rollback=True):
+            conn.execute(plain_truncate)
+        plain_truncate += " CASCADE"
+    for sql in (f"UPDATE public.{table} SET operator = 'x'", f"DELETE FROM public.{table}", plain_truncate):
+        with fixture_db() as conn, pytest.raises(REFUSED, match=f"{table} is append-only"), \
+                conn.transaction(force_rollback=True):
             conn.execute(sql)
+    with fixture_db() as conn:
+        assert conn.execute(count).fetchone()[0] == before  # no row lost
 
 
 @pytest.mark.parametrize("role", RUNTIME)
