@@ -141,7 +141,7 @@ jobs:
       - name: Backend permission suites (auth, KYC, step-up, admin, backup, donation history guard, donation credit writer, reversal accounting, live figures, visibility, refund snapshot, accounting activation)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
-        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/payments/test_activation_db.py tests/payments/test_activation_concurrency_db.py tests/payments/test_k2_accounting_on_db.py tests/payments/test_operator_db.py tests/dashboard/test_moderation_api.py
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments/test_donation_history_guard_db.py tests/payments/test_donation_credit_db.py tests/payments/test_accounting_db.py tests/payments/test_figures_db.py tests/payments/test_visibility_db.py tests/payments/test_refund_snapshot_db.py tests/payments/test_activation_db.py tests/payments/test_activation_concurrency_db.py tests/payments/test_k2_accounting_on_db.py tests/payments/test_operator_db.py tests/payments/test_switch_db.py tests/dashboard/test_moderation_api.py
 
   integration:
     name: Database + integration tests (PostgreSQL 17)

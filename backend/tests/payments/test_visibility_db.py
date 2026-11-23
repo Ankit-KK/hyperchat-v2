@@ -275,12 +275,10 @@ def test_the_report_keeps_its_existing_attention_rule_and_flags_holds(capsys):
     assert asyncio.run(payment_integrity_report(Settings(), Namespace(since="not-a-date"))) == 2  # unchanged
 
 
-def test_the_accounting_switch_stays_off():
-    from pydantic import ValidationError
-
+def test_the_accounting_switch_defaults_off():
+    """6a-4: a true setting is accepted by the settings (the 0035 precondition is a startup check, test_switch_db)."""
     assert Settings().payment_accounting_enabled is False
-    with pytest.raises(ValidationError):
-        Settings(payment_accounting_enabled=True)
+    assert Settings(payment_accounting_enabled=True).payment_accounting_enabled is True
 
 
 def test_the_report_connection_is_read_only_at_the_database_level():

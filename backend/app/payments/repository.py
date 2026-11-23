@@ -66,7 +66,8 @@ class _Duplicate(Exception):
 class PaymentRepository:
     def __init__(self, connection_factory, vaani_creators: frozenset[str] = rules.VAANI_CREATORS,
                  accounting: bool = False) -> None:
-        # accounting: PAY-15 evidence evaluation (HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED, refused on at this stage)
+        # accounting: PAY-15 evidence evaluation (HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED); it still evaluates only while
+        # the database state is 'active' (_settle_accounting, under the L-1 state lock)
         self._conn, self.vaani_creators, self.accounting = connection_factory, vaani_creators, accounting
 
     async def _one(self, sql: str, params: tuple | dict) -> dict | None:
