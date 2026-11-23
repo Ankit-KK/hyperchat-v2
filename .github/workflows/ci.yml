@@ -168,7 +168,6 @@ jobs:
       HYPERCHAT_TEST_PG_HOST: localhost
       HYPERCHAT_TEST_MIGRATION_DSN: postgresql+psycopg://hyperchat_migrator@localhost:5432/hyperchat_ci
       HYPERCHAT_TEST_ROLE_DB: hyperchat_ci:5432
-      HYPERCHAT_TEST_AUTH_DB: hyperchat_ci:5432
       HYPERCHAT_TEST_VERIFY_ADMIN: host=localhost port=5432 user=postgres dbname=postgres  # 6a-2 per-test template copies
     steps:
       - uses: actions/checkout@v4
