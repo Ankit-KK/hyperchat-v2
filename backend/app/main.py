@@ -44,6 +44,7 @@ from app.realtime.payloads import RealtimeRepository
 from app.realtime.pusher import PusherApps
 from app.routers import (
     admin,
+    admin_reads,
     auth,
     bots,
     dashboard,
@@ -252,6 +253,7 @@ def create_app() -> FastAPI:
     app.include_router(mfa.router)
     app.include_router(streamers.router)
     app.include_router(admin.router)
+    app.include_router(admin_reads.router)
     app.include_router(public.streamers_router)
     app.include_router(public.metrics_router)
     app.include_router(public.config_router)

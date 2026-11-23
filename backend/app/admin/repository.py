@@ -8,6 +8,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from app.auth.repository import burn_reset_tokens
+from app.dashboard.repository import _DONATION_COLS
+from app.payments import figures
 from app.stepup.grants import Grant, consume
 
 _ADMIN_USER_COLS = """id::text, email::text, username, role, streamer_id::text, is_active,
@@ -192,6 +194,43 @@ class AdminRepository:
         obs = (await cur.fetchone())["n"]
         return "ok", row, {"previous_owner_id": owner, "sessions_revoked": revoked, "old_owner_unlinked": unlinked,
                            "active_obs_tokens": obs}
+
+    async def list_creators(self, *, query: str | None, status: str | None,
+                            limit: int, offset: int) -> tuple[list[dict], int]:
+        where, params = ["true"], []
+        if query:
+            where.append("(streamer_slug ILIKE %s OR streamer_name ILIKE %s)")
+            params += [_like(query), _like(query)]
+        if status:
+            where.append("status = %s")
+            params.append(status)
+        cond = " AND ".join(where)
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(f"SELECT count(*) AS n FROM public.streamers WHERE {cond}", params)
+            total = (await cur.fetchone())["n"]
+            await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE {cond} "
+                              "ORDER BY streamer_slug LIMIT %s OFFSET %s", [*params, limit, offset])
+            return await cur.fetchall(), total
+
+    async def list_donations(self, *, streamer_slug: str | None, limit: int,
+                             after: tuple[datetime, str] | None) -> list[dict]:
+        """Paid donations of every creator (or one, by slug), newest first (created_at DESC, id DESC), after the
+        keyset position `after`: DashboardRepository.donations without the creator scope, plus the creator's slug.
+        shortcut: the unfiltered sort has no (created_at, id) index (a scan + sort); add one if this gets slow."""
+        where = ["d.payment_status = 'success'"]
+        params: dict = {"limit": limit}
+        if streamer_slug is not None:
+            where.append("s.streamer_slug = %(slug)s")
+            params["slug"] = streamer_slug
+        if after is not None:
+            where.append("(d.created_at, d.id) < (%(after_at)s, %(after_id)s::uuid)")
+            params.update(after_at=after[0], after_id=after[1])
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(f"SELECT {_DONATION_COLS}, s.streamer_slug FROM public.donations d "
+                              f"JOIN public.streamers s ON s.id = d.streamer_id {figures.REVERSAL_JOIN} "
+                              f"WHERE {' AND '.join(where)} "
+                              "ORDER BY d.created_at DESC, d.id DESC LIMIT %(limit)s", params)
+            return await cur.fetchall()
 
     async def donation_block(self, streamer_id: str) -> str | None:
         """public.creator_donation_block (migration 0020): None when the creator may accept new donations."""

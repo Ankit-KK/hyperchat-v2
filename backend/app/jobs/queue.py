@@ -133,6 +133,18 @@ class JobQueue:
             """, (job.id, job.locked_by))
             return cur.rowcount == 1
 
+    async def list(self, *, status: str, kind: str | None, limit: int, offset: int) -> list[dict]:
+        """Jobs in one status, most recently finished first (jobs_finished_idx for succeeded / failed). Never the
+        payload or result bodies."""
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("""
+                SELECT id::text AS id, kind, status, attempts, max_attempts, last_error, dedupe_key, created_at,
+                       started_at, completed_at
+                FROM public.jobs WHERE status = %(status)s AND (%(kind)s::text IS NULL OR kind = %(kind)s)
+                ORDER BY completed_at DESC, created_at DESC, id DESC LIMIT %(limit)s OFFSET %(offset)s
+            """, {"status": status, "kind": kind, "limit": limit, "offset": offset})
+            return await cur.fetchall()
+
     async def latest(self, kind: str, dedupe_key: str) -> dict | None:
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT id::text AS id, status, attempts, last_error, result FROM public.jobs "
