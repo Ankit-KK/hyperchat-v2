@@ -9,7 +9,14 @@ It connects as hyperchat_readonly, prints the canonical JSON report (ids, enums 
 D-7 code: 0 clean, 1 violation, 2 refused, 3 attention. A scoped run (--creator / --donation) has every gate false.
 `--max-seconds` is required (revision 7 §2.7.1: no production default). The scope is validated before any connection.
 `--output` publishes without ever overwriting (§2.7.4): an exclusive temporary file, fsync, then a hard link.
-The writing commands (state, reconcile, resolve, revert) belong to stage 6a-3 and are refused here (exit 2).
+Stage 6a-3 adds the owner-only writing commands (app/payments/accounting_ops.py), report-only by default:
+
+    HYPERCHAT_ACCOUNTING_OWNER_DSN='host=... dbname=... user=hyperchat_migrator' \
+        python -m app.payments.operator {state [--to S] [--mode M] | reconcile | resolve keep|apply | revert}
+        [--donation UUID ...] [--apply --confirm-database DB --operator ID --reason TEXT]
+
+Exit codes as verify's (D-7): 0 nothing to do / all applied, 3 work planned, 1 a donation refused (or a reconcile's
+second report not zero), 2 refused before anything was written.
 """
 
 import argparse
@@ -23,9 +30,10 @@ import sys
 
 import psycopg
 
+from app.payments import accounting_ops as ops
 from app.payments import verify as verifier
 
-LATER = ("state", "reconcile", "resolve", "revert")  # stage 6a-3
+WRITERS = ("state", "reconcile", "resolve", "revert")  # stage 6a-3 (accounting_ops)
 # PROVISIONAL (owner item 5: the allow-list format and location are pending): a root-owned file outside the
 # database and outside the invocation, one role name per line, '#' comments. A missing file means no approved
 # administrator (fail closed: every other superuser is unexpected_superuser).
@@ -260,16 +268,63 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--donation", help="limit to one donation id (every gate false)")
     v.add_argument("--output", help="also publish the report to this new file (never overwritten)")
     v.add_argument("--max-seconds", dest="max_seconds", help="the verification budget in seconds (required)")
-    for name in LATER:
-        sub.add_parser(name, add_help=False)
+    for name in WRITERS:
+        w = sub.add_parser(name, help=f"6a-3 {name} (owner; report-only unless --apply)")
+        if name == "state":
+            w.add_argument("--to", choices=("off", "active", "frozen"))
+            w.add_argument("--mode", choices=("hold", "apply"))
+        else:
+            if name == "resolve":
+                w.add_argument("action", nargs="?", choices=("keep", "apply"))
+            w.add_argument("--donation", action="append", help="limit to this donation id (repeatable)")
+        w.add_argument("--apply", action="store_true", help="write (default: report only)")
+        w.add_argument("--confirm-database", dest="confirm", help="must equal the connected database (with --apply)")
+        w.add_argument("--operator", help="the operator id recorded with the run / state change")
+        w.add_argument("--reason", help="the reason recorded (10-500 characters)")
     args, extra = parser.parse_known_args(argv)
-    if args.command != "verify":
-        sys.stdout.write(verifier.canonical({"status": "refused", "exit_code": verifier.EXIT_CODES["refused"],
-                                             "reason": f"'{args.command}' is not available in stage 6a-2"}) + "\n")
-        return verifier.EXIT_CODES["refused"]
     if extra:
+        if args.command != "verify":
+            return _refuse(f"unrecognized arguments: {' '.join(extra)}")
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    if args.command != "verify":
+        return run_writer(args)
     return run_verify(args)
+
+
+def _refuse(reason: str) -> int:
+    sys.stdout.write(verifier.canonical({"status": "refused", "exit_code": ops.EXIT["refused"], "reason": reason})
+                     + "\n")
+    return ops.EXIT["refused"]
+
+
+def run_writer(args) -> int:
+    """6a-3: validate everything before connecting; report-only unless --apply; canonical JSON out."""
+    action = {"resolve": getattr(args, "action", None)}.get(args.command, args.command)
+    if action is None:
+        return _refuse("resolve needs an action: keep or apply")
+    try:
+        ids = ops.validate(apply=args.apply, confirm=args.confirm, operator=args.operator, reason=args.reason,
+                           donations=getattr(args, "donation", None))
+        conn = ops.connect(os.environ.get(ops.OWNER_DSN_ENV))
+    except ops.Refusal as exc:
+        return _refuse(str(exc))
+    except psycopg.Error as exc:
+        return _refuse(f"cannot connect as the owner: {type(exc).__name__}")
+    try:
+        with conn:
+            if args.command == "state":
+                out = ops.run_state(conn, to=args.to, mode=args.mode, apply=args.apply, confirm=args.confirm,
+                                    operator=args.operator, reason=args.reason)
+            else:
+                out = ops.run_action(conn, action, apply=args.apply, confirm=args.confirm, operator=args.operator,
+                                     reason=args.reason, ids=ids)
+    except ops.Refusal as exc:
+        return _refuse(str(exc))
+    except psycopg.Error as exc:
+        return _refuse(f"database error before writing: {type(exc).__name__}")
+    code = ops.EXIT[out["status"]]
+    sys.stdout.write(verifier.canonical({**out, "exit_code": code}) + "\n")
+    return code
 
 
 if __name__ == "__main__":

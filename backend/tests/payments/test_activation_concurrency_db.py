@@ -448,7 +448,7 @@ def test_c6_keep_racing_a_webhook_evaluation_serialises_on_the_donation(attempt)
     _settle(did)
     _evidence(did, pid, "dispute", _ref("dispute"), "lost", 10000, deducted=5000)
     assert _settle(did) == "hold"
-    run = _run("resolve-keep")
+    run = _run("resolve-keep", did)
     results = _together(lambda: _keep(did, run), lambda: _settle(did))
     assert [r[0] for r in results] == ["ok", "ok"], results
     # keep first -> the evaluation sees its acknowledgement; evaluation first -> unchanged, then kept
@@ -463,7 +463,7 @@ def test_c9_two_reconcile_runs_at_once_write_history_once(record_property):
         did, pid = _paid(_creator())
         ref = _ref("refund")
         _evidence(did, pid, "refund", ref, "processed", 2500)
-        runs = [_run("reconcile"), _run("reconcile")]
+        runs = [_run("reconcile", did), _run("reconcile", did)]
         results = _together(*(lambda r=r: _reconcile(did, 2500, (ref,), r) for r in runs))
         assert sorted(r[1] for r in results) == ["activation", "unchanged"], results
         assert _causes(did).count("activation") == 1 and _state(did)[:2] == (2500, None)
@@ -501,7 +501,7 @@ def test_c11_a_state_change_waits_for_a_revert_and_a_revert_after_activation_is_
         reverter, activator = _tx(None), fixture_db()
         try:
             assert reverter.execute("SELECT public.payment_accounting_revert(%s, %s)",
-                                    (did, _run("revert"))).fetchone()[0] == "reverted"
+                                    (did, _run("revert", did))).fetchone()[0] == "reverted"
             thread, out = _background(lambda: activator.execute(SET_STATE, ("active",)).fetchone()[0])
             _wait_blocked(activator.info.backend_pid)
             assert _state_now()[0] == "frozen"
@@ -516,7 +516,7 @@ def test_c11_a_state_change_waits_for_a_revert_and_a_revert_after_activation_is_
         _evidence(other, other_pid, "refund", _ref("refund"), "processed", 1000)
         _settle(other)
         with pytest.raises(psycopg.errors.InsufficientPrivilege):  # active committed first: revert refused
-            _revert(other, _run("revert"))
+            _revert(other, _run("revert", other))
         assert _state(other)[0] == 1000
     record_property("iterations", N)
 
@@ -535,7 +535,7 @@ def test_c7_the_revision_1_deadlock_pattern_never_deadlocks_under_l1(record_prop
         ref = _ref("refund")
         _evidence(b, b_pid, "refund", ref, "processed", 1000)
         _apply(b, None, hold="H-CURRENCY")
-        run = _run("resolve-apply")
+        run = _run("resolve-apply", b)
         before_b = (_state(b), _ledger(b))
         repo = PaymentRepository(factory(), accounting=True)
         results = _together(

@@ -1621,11 +1621,11 @@ def _clean_0034(conn) -> None:
     if "payment_accounting_state" not in _tables():
         return
     with conn.transaction():
+        conn.execute("DELETE FROM public.donation_accounting_evaluations")  # first: 0035's ack_run key names runs
         for table in ("payment_accounting_events", "payment_accounting_runs"):
             conn.execute(f"ALTER TABLE public.{table} DISABLE TRIGGER {table}_guard")
             conn.execute(f"DELETE FROM public.{table}")
             conn.execute(f"ALTER TABLE public.{table} ENABLE TRIGGER {table}_guard")
-        conn.execute("DELETE FROM public.donation_accounting_evaluations")
         conn.execute("ALTER TABLE public.payment_accounting_state DISABLE TRIGGER payment_accounting_state_guard")
         conn.execute("UPDATE public.payment_accounting_state SET state = 'off', dispute_mode = 'hold'")
         conn.execute("ALTER TABLE public.payment_accounting_state ENABLE TRIGGER payment_accounting_state_guard")
@@ -1686,3 +1686,85 @@ def test_0034_accounting_state_starts_off_is_guarded_and_the_downgrade_restores_
             _clean_0034(conn)
         command.upgrade(cfg, "head")
     assert _activation_shape()[:3] == (ACTIVATION_TABLES, True, True)
+
+
+# ── 0035: F-7 (run keys, the owner-function-only acknowledgement) and F-11 (runs bound to their scope) ──
+OPERATIONS_0035 = ("payment_accounting_reconcile", "payment_accounting_keep", "payment_accounting_apply_evaluation",
+                   "payment_accounting_revert")
+
+
+def _hardening_shape() -> tuple:
+    """(the two run keys, the ack guard trigger, the scope function, md5(prosrc) of the four operations)."""
+    with _owner() as conn:
+        keys = tuple(r[0] for r in conn.execute(
+            "SELECT conname FROM pg_constraint WHERE conname IN ('donation_accounting_evaluations_ack_run', "
+            "'donation_credit_events_run_id') ORDER BY conname"))
+        guard = conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname = "
+                             "'donation_accounting_evaluations_ack_guard'").fetchone()[0] == 1
+        scope = conn.execute("SELECT to_regproc('public.payment_accounting_scope_covers') IS NOT NULL").fetchone()[0]
+        bodies = tuple(conn.execute("SELECT md5(prosrc) FROM pg_proc WHERE proname = %s", (n,)).fetchone()[0]
+                       for n in OPERATIONS_0035)
+    return keys, guard, scope, bodies
+
+
+def test_0035_binds_runs_to_their_scope_guards_the_acknowledgement_and_downgrades_to_0034_exactly(monkeypatch):
+    """0035 adds the two run keys and the acknowledgement guard (F-7) and the use-time scope check (F-11); an unscoped
+    run can still be opened but not used; the downgrade loses no data and restores 0034's four bodies byte for byte."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    with _owner() as conn:
+        _clean_0034(conn)
+    command.downgrade(cfg, "0034")
+    try:
+        before = _hardening_shape()
+        assert before[:3] == ((), False, False)
+        command.upgrade(cfg, "0035")
+        keys, guard, scope, bodies = _hardening_shape()
+        assert keys == ("donation_accounting_evaluations_ack_run", "donation_credit_events_run_id") and guard and scope
+        assert all(a != b for a, b in zip(bodies, before[3])), "every operation gains the scoped run check"
+        with _owner() as conn:
+            for role in ("hyperchat_app", "hyperchat_worker", "hyperchat_readonly"):
+                assert not conn.execute("SELECT has_function_privilege(%s, 'public.payment_accounting_scope_covers("
+                                        "jsonb, timestamp with time zone, text, uuid)', 'EXECUTE')",
+                                        (role,)).fetchone()[0], role
+            assert conn.execute("SELECT public.payment_accounting_set_state('active', NULL, 'op-migtest', "
+                                "'a scratch activation', NULL)").fetchone()[0] == "active"
+            unscoped = conn.execute("SELECT public.payment_accounting_open_run('reconcile', 'op-migtest', "
+                                    "'a scratch unscoped run', NULL, '{}')").fetchone()[0]  # still allowed: D-10
+            listed = conn.execute(
+                "SELECT public.payment_accounting_open_run('reconcile', 'op-migtest', 'a scratch scoped run', NULL, "
+                "jsonb_build_object('kind', 'donations', 'donations', jsonb_build_array(%s::text), 'expires_at', "
+                "to_char(now() AT TIME ZONE 'UTC' + interval '1 hour', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"')))",
+                ("00000000-0000-4000-8000-000000000035",)).fetchone()[0]
+            reconcile = "SELECT public.payment_accounting_reconcile(%s::uuid, 0, NULL, '{}', '{}', %s)"
+            for did, run in (("00000000-0000-4000-8000-000000000035", unscoped),   # unscoped: never usable
+                             ("00000000-0000-4000-8000-000000000036", listed)):    # not listed
+                with pytest.raises(psycopg.Error) as exc, conn.transaction(force_rollback=True):
+                    conn.execute(reconcile, (did, run))
+                assert exc.value.sqlstate == "42501" and "(F-11)" in str(exc.value), (did, run)
+            with pytest.raises(psycopg.Error) as exc, conn.transaction(force_rollback=True):
+                conn.execute(reconcile, ("00000000-0000-4000-8000-000000000035", listed))
+            assert exc.value.sqlstate == "22023" and "no donation" in str(exc.value)  # the scope passed; the core ran
+            ack = ("INSERT INTO public.donation_accounting_evaluations (donation_id, evidence_fp, evaluated_at, state, "
+                   "dispute_mode, outcome, ack_fp, ack_run) VALUES (gen_random_uuid(), 'x', now(), 'active', 'hold', "
+                   "'kept', 'x', %s)")
+            with pytest.raises(psycopg.Error) as exc, conn.transaction(force_rollback=True):
+                conn.execute(ack, (listed,))  # no keep marked the transaction
+            assert exc.value.sqlstate == "42501" and "(F-7)" in str(exc.value)
+            with pytest.raises(psycopg.Error) as exc, conn.transaction(force_rollback=True):
+                conn.execute("SELECT set_config('hyperchat.accounting_ack', '1', true)")
+                conn.execute(ack, (987654321,))  # a run that does not exist
+            assert exc.value.sqlstate == "23503"
+            with conn.transaction(force_rollback=True):  # an evaluation without an acknowledgement is unaffected
+                conn.execute("INSERT INTO public.donation_accounting_evaluations (donation_id, evidence_fp, "
+                             "evaluated_at, state, dispute_mode, outcome) VALUES (gen_random_uuid(), 'x', now(), "
+                             "'active', 'hold', 'evaluation')")
+        command.downgrade(cfg, "0034")  # nothing is lost: not refused, even with runs present
+        assert _hardening_shape() == before  # 0034's bodies byte for byte
+    finally:
+        with _owner() as conn:
+            _clean_0034(conn)
+        command.upgrade(cfg, "head")
+    assert _hardening_shape()[:3] == (("donation_accounting_evaluations_ack_run", "donation_credit_events_run_id"),
+                                      True, True)

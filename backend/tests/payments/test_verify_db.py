@@ -14,6 +14,7 @@ import random
 import secrets
 import threading
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -159,20 +160,54 @@ class DB:
         return self.one("SELECT public.payment_accounting_open_run(%s, 'op-verify', 'a verify test run', NULL, %s)",
                         (command, json.dumps(scope)))
 
-    def reconcile(self, did, run):
+    def reconcile(self, did, run, via_core=False):
+        """The 6a-3 reconcile path. via_core: the owner calling donation_accounting_core directly (cause activation)
+        with a run 0035's use-time scope check would refuse (F-11): how such a 0034-era row can still be written."""
         with self.owner() as c, c.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT dispute_mode FROM public.payment_accounting_state")
             mode = cur.fetchone()["dispute_mode"]
             d, rows = self._donation(cur, did), self._current(cur, did)
             result = accounting.evaluate_in_mode(d, rows, mode)
             refs = [] if result.hold else accounting.counted_refs(d, rows)
-            cur.execute("SELECT public.payment_accounting_reconcile(%s, %s, %s, %s, %s, %s) AS o",
-                        (did, result.reversed_paise, result.hold, sorted(result.flags & {"F-BOTH", "F-OPEN"}), refs,
-                         run))
+            call = ("SELECT public.donation_accounting_core(%s, %s, %s, %s, %s, 'activation', %s) AS o" if via_core
+                    else "SELECT public.payment_accounting_reconcile(%s, %s, %s, %s, %s, %s) AS o")
+            cur.execute(call, (did, result.reversed_paise, result.hold, sorted(result.flags & {"F-BOTH", "F-OPEN"}),
+                               refs, run))
             return cur.fetchone()["o"]
 
     def keep(self, did, run):
         return self.one("SELECT public.payment_accounting_keep(%s, %s)", (did, run))
+
+    def owner_keep(self, did, run):
+        """0034's keep, written statement for statement by the owner (marking the transaction as keep does), for a
+        run 0035's use-time scope check refuses (F-11): the 0034-era D-10 fixtures, as owner tampering on 0035."""
+        with self.owner() as c, c.transaction():
+            c.execute("SELECT set_config('hyperchat.accounting_ack', '1', true)")
+            c.execute("INSERT INTO public.donation_credit_events (donation_id, streamer_id, donator_name_lower, cause, "
+                      "payment_status, moderation_status, credited_before, credited_after, delta_inr, delta_count, "
+                      "total_after, actor, reversed_before_paise, reversed_after_paise, hold_before, hold_after, "
+                      "evidence_refs, run_id) SELECT d.id, d.streamer_id, lower(d.donor_name), 'manual', "
+                      "d.payment_status, d.moderation_status, d.credited_inr, d.credited_inr, 0, 0, NULL, "
+                      "session_user, r.applied_reversed_paise, r.applied_reversed_paise, r.hold, NULL, NULL, %s "
+                      "FROM public.donations d JOIN public.donation_reversals r ON r.donation_id = d.id "
+                      "WHERE d.id = %s AND r.hold = 'H-DISPUTE-MODE'", (run, did))
+            c.execute("UPDATE public.donation_reversals SET hold = NULL, evaluated_at = now() WHERE donation_id = %s",
+                      (did,))
+            c.execute("INSERT INTO public.donation_accounting_evaluations AS e (donation_id, evidence_fp, evaluated_at, "
+                      "state, dispute_mode, outcome, ack_fp, ack_run) SELECT %(d)s, public.payment_evidence_fp(%(d)s), "
+                      "now(), s.state, s.dispute_mode, 'kept', public.payment_evidence_fp(%(d)s), %(r)s "
+                      "FROM public.payment_accounting_state s ON CONFLICT (donation_id) DO UPDATE SET "
+                      "evidence_fp = EXCLUDED.evidence_fp, evaluated_at = now(), state = EXCLUDED.state, "
+                      "dispute_mode = EXCLUDED.dispute_mode, outcome = 'kept', ack_fp = EXCLUDED.ack_fp, "
+                      "ack_run = EXCLUDED.ack_run", {"d": did, "r": run})
+        return "kept"
+
+    def owner_ack_sql(self, sql, params):
+        """An owner rewriting an acknowledgement: 0035's guard (F-7) refuses it unless the transaction is marked, which
+        an owner can always do; the verifier must still detect the forgery (I12)."""
+        with self.owner() as c, c.transaction():
+            c.execute("SELECT set_config('hyperchat.accounting_ack', '1', true)")
+            c.execute(sql, params)
 
     def revert(self, did, run):
         return self.one("SELECT public.payment_accounting_revert(%s, %s)", (did, run))
@@ -195,6 +230,7 @@ def vdb(verify_db) -> DB:
 
 
 MAX_SECONDS = 600  # test budget only (owner item 8: the production budget is pending)
+HEAD = "0035"  # the migration head CI tests at (OD-35-V: the verifier accepts 0034 and 0035)
 
 
 def found(report, invariant=None, cls=None, problem=None) -> list[dict]:
@@ -230,7 +266,7 @@ def pre_a5c(report):
 def test_a_fresh_0034_database_is_clean_and_not_activation_complete(vdb):
     report = vdb.verify()
     assert pre_a5c(report)["findings"] == []
-    assert report["database"]["head"] == "0034" and report["accounting"] == {"state": "off", "dispute_mode": "hold"}
+    assert report["database"]["head"] == HEAD and report["accounting"] == {"state": "off", "dispute_mode": "hold"}
 
     def strict():
         assert report["status"] == "clean" and report["exit_code"] == 0 and report["findings"] == []
@@ -307,7 +343,7 @@ def test_verify_refuses_a_connection_with_an_open_transaction_or_a_bad_scope(vdb
 
 def test_6a2_refuses_a_head_other_than_0034(vdb):
     with vdb.owner() as c:
-        c.execute("UPDATE public.alembic_version SET version_num = '0035'")
+        c.execute("UPDATE public.alembic_version SET version_num = '0036'")
     report = vdb.verify()
     assert report["status"] == "refused" and "0034" in report["reason"]
 
@@ -448,9 +484,8 @@ def test_keep_exception_and_forged_ack(vdb):
     (amb,) = found(genuine, "I12", "historical_ambiguous")
     assert amb["detail"]["reason"] == "ack_mode_order" and amb["detail"]["basis"] == "evidence", genuine["findings"]
     assert "processed" not in genuine["counts"] and not genuine["gates"]["activation_verification_ready"]
-    with vdb.owner() as c:  # M14: an owner rewrites the acknowledged fingerprint
-        c.execute("UPDATE public.donation_accounting_evaluations SET ack_fp = md5('forged'), evidence_fp = "
-                  "md5('forged') WHERE donation_id = %s", (did,))
+    vdb.owner_ack_sql("UPDATE public.donation_accounting_evaluations SET ack_fp = md5('forged'), evidence_fp = "
+                      "md5('forged') WHERE donation_id = %s", (did,))  # M14: an owner rewrites the acknowledged fp
     report = vdb.verify()
     assert found(report, "I12", "audit_integrity", "forged_ack") and report["exit_code"] == 1
     # rev. 3 N2: a forged ack is audit_integrity, never also a pending / timing class for that donation
@@ -464,7 +499,9 @@ def test_a_keep_under_an_unscoped_run_is_an_audit_violation(vdb):
     vdb.evidence(did, pid, "dispute", "disp_" + secrets.token_hex(4), "lost", deducted=4000)
     vdb.settle(did)
     run = vdb.run("resolve-keep", [], scope={})  # the 6a-1 tests' runs: used with an empty scope
-    vdb.keep(did, run)
+    with pytest.raises(psycopg.errors.InsufficientPrivilege, match="F-11"):
+        vdb.keep(did, run)  # 0035 never lets an unscoped run be used
+    vdb.owner_keep(did, run)  # the 0034-era row, as only owner tampering can write it now
     unused = vdb.run("revert", [], scope={})
     report = vdb.verify()
     assert found(report, "D-10", "audit_integrity", "unscoped_used_run")[0]["entity_id"] == str(run)
@@ -891,7 +928,9 @@ def test_the_dirty_shared_6a1_style_runs_are_reported_as_contamination(vdb):
     vdb.evidence(did, pid, "refund", "rfnd_" + secrets.token_hex(4), "processed", 2500)  # arrives while frozen
     vdb.go("active")
     run = vdb.run("reconcile", [], scope={})
-    assert vdb.reconcile(did, run) == "activation"  # a history row now names the unscoped run
+    with pytest.raises(psycopg.errors.InsufficientPrivilege, match="F-11"):
+        vdb.reconcile(did, run)  # 0035: an unscoped run is never usable
+    assert vdb.reconcile(did, run, via_core=True) == "activation"  # a history row now names the unscoped run
     report = vdb.verify()
     assert found(report, "D-10", "audit_integrity", "unscoped_used_run") and report["exit_code"] == 1
 
@@ -938,7 +977,10 @@ def test_s5_s8_s9_keeps_outside_their_run_scope_are_violations_and_never_excepti
                   {"kind": "creator", "creator": vdb.creator(), "expires_at": expires},           # S8
                   {"kind": "all_v2", "expires_at": expires}):                                     # S9: keep
         sid, did = _dm_hold(vdb)
-        vdb.keep(did, vdb.run("resolve-keep", [], scope=scope))
+        run = vdb.run("resolve-keep", [], scope=scope)
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="F-11"):
+            vdb.keep(did, run)  # 0035 refuses a use its scope does not cover
+        vdb.owner_keep(did, run)
         report = vdb.verify(donation=did)
         assert found(report, "D-10", "audit_integrity", "scope_mismatch"), scope["kind"]
         assert not [f for f in report["findings"] if f["class"] == "processed"]  # not an I12 exception
@@ -949,7 +991,9 @@ def test_s6_a_use_after_expires_at_is_a_violation(vdb):
     opened = datetime.now(UTC) - timedelta(hours=2)
     run = _owner_run(vdb, "resolve-keep", {"kind": "donations", "donations": [did],
                                            "expires_at": (opened + timedelta(hours=1)).isoformat()}, opened)
-    vdb.keep(did, run)
+    with pytest.raises(psycopg.errors.InsufficientPrivilege, match="F-11"):
+        vdb.keep(did, run)  # 0035 refuses a use after expires_at
+    vdb.owner_keep(did, run)
     assert found(vdb.verify(), "D-10", "audit_integrity", "scope_mismatch")
 
 
@@ -963,7 +1007,9 @@ def test_s10_a_recovery_scope_used_beyond_its_listed_donations_flags_the_extras(
     vdb.go("active")
     run = vdb.run("reconcile", [], scope={"kind": "recovery", "donations": [listed], "verify_report_sha256": "a" * 64,
                                           "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
-    assert vdb.reconcile(listed, run) == vdb.reconcile(extra, run) == "activation"
+    with pytest.raises(psycopg.errors.InsufficientPrivilege, match="F-11"):
+        vdb.reconcile(extra, run)  # 0035 refuses the unlisted donation
+    assert vdb.reconcile(listed, run) == vdb.reconcile(extra, run, via_core=True) == "activation"
     mismatched = {f["detail"]["donation"] for f in found(vdb.verify(), "D-10", "audit_integrity", "scope_mismatch")}
     assert mismatched == {extra}
 
@@ -990,13 +1036,17 @@ def test_n1_a_pending_backlog_with_a_corrupted_credit_is_structural_with_every_g
 
 def test_n3_a_revert_row_naming_a_missing_run_is_audit_integrity(vdb):
     sid, did, _ = _paid_reversed(vdb)
-    with vdb.owner() as c:
-        c.execute("INSERT INTO public.donation_credit_events (donation_id, streamer_id, donator_name_lower, cause, "
-                  "payment_status, moderation_status, credited_before, credited_after, delta_inr, delta_count, "
-                  "total_after, actor, reversed_before_paise, reversed_after_paise, run_id) "
-                  "SELECT id, streamer_id, lower(donor_name), 'revert', payment_status, moderation_status, "
-                  "credited_inr, credited_inr, 0, 0, NULL, 'x', 2500, 0, 987654 FROM public.donations WHERE id = %s",
-                  (did,))
+    insert = ("INSERT INTO public.donation_credit_events (donation_id, streamer_id, donator_name_lower, cause, "
+              "payment_status, moderation_status, credited_before, credited_after, delta_inr, delta_count, "
+              "total_after, actor, reversed_before_paise, reversed_after_paise, run_id) "
+              "SELECT id, streamer_id, lower(donor_name), 'revert', payment_status, moderation_status, "
+              "credited_inr, credited_inr, 0, 0, NULL, 'x', 2500, 0, 987654 FROM public.donations "
+              f"WHERE id = '{uuid.UUID(did)}'")
+    with pytest.raises(psycopg.errors.ForeignKeyViolation), vdb.owner() as c:
+        c.execute(insert)  # 0035 (F-7): a history row can no longer name a missing run
+    # tests only: the superuser disables the key's triggers (session_replication_role = replica) to write the
+    # 0034-era row the verifier must still report; nothing in the application can do this
+    _super_sql(vdb, "SET session_replication_role = replica", insert)
     assert found(vdb.verify(), "D-10", "audit_integrity", "missing_run")
 
 
@@ -1137,9 +1187,8 @@ def test_cr2_c_d3_a_keep_around_a_mode_transition_is_ack_mode_order_never_an_exc
     # valid, never proven, so no keep exception and a permanent readiness block (r4: the exception was granted)
     (amb,) = [f for f in found(report, "I12", "historical_ambiguous") if f["detail"].get("reason") == "ack_mode_order"]
     assert not found(report, "I13", "processed")
-    with vdb.owner() as c:  # the same timeline with a tampered acknowledgement: still forged
-        c.execute("UPDATE public.donation_accounting_evaluations SET ack_fp = md5('tampered') WHERE donation_id = %s",
-                  (did,))
+    vdb.owner_ack_sql("UPDATE public.donation_accounting_evaluations SET ack_fp = md5('tampered') WHERE "
+                      "donation_id = %s", (did,))  # the same timeline with a tampered acknowledgement: still forged
     assert found(vdb.verify(), "I12", "audit_integrity", "forged_ack")
 
     def strict():
@@ -1379,9 +1428,9 @@ def test_d5_a_ack_a_genuine_keep_on_a_non_prefix_state_is_never_forged(vdb):
 
 def test_d5_b_ack_an_ack_rewritten_to_a_state_the_keep_never_saw_is_never_a_proven_exception(vdb):
     did = _frozen_keep_race(vdb, extra_before_keep=False)
-    with vdb.owner() as c:  # the owner rewrites the ack to the current fingerprint, which includes r2
-        c.execute("UPDATE public.donation_accounting_evaluations SET ack_fp = public.payment_evidence_fp(donation_id), "
-                  "evidence_fp = public.payment_evidence_fp(donation_id) WHERE donation_id = %s", (did,))
+    vdb.owner_ack_sql("UPDATE public.donation_accounting_evaluations SET ack_fp = "
+                      "public.payment_evidence_fp(donation_id), evidence_fp = public.payment_evidence_fp(donation_id) "
+                      "WHERE donation_id = %s", (did,))  # the owner rewrites the ack to the current fp, incl. r2
     report = vdb.verify()
     mine = [f for f in report["findings"] if f["entity_id"] == did or f["detail"].get("donation") == did]
     assert any(f["detail"].get("reason") == "ack_mode_order" or f["detail"].get("problem") == "forged_ack"
@@ -2281,7 +2330,7 @@ def test_rev7_c0_db(vdb, phase2b_cluster_guard):
         assert f["detail"]["components"] == expected, tag("CC", "C0-b", report)
     else:
         assert report["status"] == "clean" and report["findings"] == [], tag("CC", "C0-c", report)
-    assert report["database"]["head"] == "0034", tag("CC", "C0", report)
+    assert report["database"]["head"] == HEAD, tag("CC", "C0", report)
 
 
 GUARD = "payment_accounting_runs_guard"

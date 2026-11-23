@@ -6,8 +6,10 @@ The state is created 'off'. Every financial change still goes through the one cr
 activation or revert change names an operator run. Reversals come from real evidence through the repository path
 (_settle) or the bounded database functions, never from writes to donation_reversals."""
 
+import json
 import secrets
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import psycopg
@@ -52,8 +54,13 @@ def _events() -> int:
         return conn.execute("SELECT count(*) FROM public.payment_accounting_events").fetchone()[0]
 
 
-def _run(command: str, reason: str = "a test operator run") -> int:
-    return _owner("SELECT public.payment_accounting_open_run(%s, 'op-test', %s, NULL, '{}'::jsonb)", (command, reason))
+def _run(command: str, *dids: str, reason: str = "a test operator run") -> int:
+    """An operator run scoped to `dids` for one hour (0035, F-11: a run is usable only within its scope); without
+    donations, an unscoped run (openable, never usable)."""
+    scope = {"kind": "donations", "donations": list(dids),
+             "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()} if dids else {}
+    return _owner("SELECT public.payment_accounting_open_run(%s, 'op-test', %s, NULL, %s::jsonb)",
+                  (command, reason, json.dumps(scope)))
 
 
 def _keep(did, run):
@@ -176,9 +183,24 @@ def test_events_and_runs_are_append_only_for_the_owner_too(table):
     set_accounting("frozen")
     _run("revert")
     _set(None, "apply" if _current_state()[1] == "hold" else "hold")
-    for sql in (f"UPDATE public.{table} SET operator = 'x'", f"DELETE FROM public.{table}", f"TRUNCATE public.{table}"):
-        with fixture_db() as conn, pytest.raises(REFUSED), conn.transaction(force_rollback=True):
+    count = f"SELECT count(*) FROM public.{table}"
+    with fixture_db() as conn:
+        before = conn.execute(count).fetchone()[0]
+    assert before > 0  # the TRUNCATE guard refuses only a non-empty table
+    plain_truncate = f"TRUNCATE public.{table}"
+    if table == "payment_accounting_runs":
+        # 0035 (F-7): runs are referenced by foreign keys, so a plain TRUNCATE is refused before any trigger runs;
+        # CASCADE passes that check and must still be stopped by the append-only trigger itself.
+        with fixture_db() as conn, pytest.raises(psycopg.errors.FeatureNotSupported), \
+                conn.transaction(force_rollback=True):
+            conn.execute(plain_truncate)
+        plain_truncate += " CASCADE"
+    for sql in (f"UPDATE public.{table} SET operator = 'x'", f"DELETE FROM public.{table}", plain_truncate):
+        with fixture_db() as conn, pytest.raises(REFUSED, match=f"{table} is append-only"), \
+                conn.transaction(force_rollback=True):
             conn.execute(sql)
+    with fixture_db() as conn:
+        assert conn.execute(count).fetchone()[0] == before  # no row lost
 
 
 @pytest.mark.parametrize("role", RUNTIME)
@@ -464,13 +486,13 @@ def test_keep_releases_only_a_dispute_mode_hold_and_needs_its_run():
     _hold_mode()
     conflicted, pid = _paid(_creator())
     _apply(conflicted, None, hold="H-CONFLICT")
-    run = _run("resolve-keep")
+    plain, _ = _paid(_creator())
+    run = _run("resolve-keep", conflicted, plain)
     with pytest.raises(REFUSED):
         _keep(conflicted, run)                                         # an evidence-integrity hold is never kept
-    plain, _ = _paid(_creator())
     assert _keep(plain, run) == "unchanged"                             # not held
     with pytest.raises(REFUSED):
-        _keep(plain, _run("revert"))                                    # a run of another command
+        _keep(plain, _run("revert", plain))                             # a run of another command
 
 
 def test_keep_is_acknowledged_for_exactly_this_evidence_and_new_evidence_invalidates_it():
@@ -482,7 +504,7 @@ def test_keep_is_acknowledged_for_exactly_this_evidence_and_new_evidence_invalid
     _evidence(did, pid, "dispute", _ref("dispute"), "lost", 10000, deducted=4000)
     _settle(did)
     history = len(_ledger(did))
-    run = _run("resolve-keep")
+    run = _run("resolve-keep", did)
     assert _keep(did, run) == "kept"
     assert _state(did)[:2] == (2000, None) and _total(sid) == Decimal("80.00")          # no money moved
     assert _runs_of(did) == [("manual", run)] and len(_ledger(did)) == history + 1
@@ -500,7 +522,7 @@ def test_a_dispute_mode_change_invalidates_a_keep():
     did, pid = _paid(_creator())
     _evidence(did, pid, "dispute", _ref("dispute"), "lost", 10000, deducted=4000)
     _settle(did)
-    _keep(did, _run("resolve-keep"))
+    _keep(did, _run("resolve-keep", did))
     set_accounting("active", "apply")                                                     # mode is in the fingerprint
     assert _settle(did) == "evaluation" and _state(did)[:2] == (4000, None)
 
@@ -514,7 +536,7 @@ def test_apply_evaluation_applies_only_what_the_evidence_supports():
     ref = _ref("refund")
     _evidence(did, pid, "refund", ref, "processed", 2500)
     _apply(did, None, hold="H-CURRENCY")                    # held earlier although the evidence is now clear
-    run = _run("resolve-apply")
+    run = _run("resolve-apply", did)
     with pytest.raises(REFUSED):
         _apply_evaluation(did, 3000, (ref,), run)            # not what the evidence supports
     assert _apply_evaluation(did, 2500, (ref,), run) == "manual"
@@ -530,7 +552,7 @@ def test_apply_evaluation_is_refused_for_a_lost_dispute_in_hold_mode():
     _evidence(did, pid, "dispute", lost, "lost", 10000, deducted=4000)
     _settle(did)
     with pytest.raises(REFUSED):
-        _apply_evaluation(did, 4000, (lost,), _run("resolve-apply"))
+        _apply_evaluation(did, 4000, (lost,), _run("resolve-apply", did))
     assert _state(did)[:2] == (0, "H-DISPUTE-MODE")
 
 
@@ -542,7 +564,7 @@ def test_revert_restores_the_no_reversal_world_through_the_writer():
     did, pid = _paid(sid)
     _evidence(did, pid, "refund", _ref("refund"), "processed", 4000)
     _settle(did)
-    run = _run("revert")
+    run = _run("revert", did)
     with pytest.raises(REFUSED):
         _revert(did, run)                                             # never while active
     set_accounting("frozen")
@@ -564,11 +586,11 @@ def test_revert_also_clears_a_hold_and_drops_a_keep_acknowledgement():
     _settle(did)
     _evidence(did, pid, "dispute", _ref("dispute"), "lost", 10000, deducted=6000)
     _settle(did)
-    _keep(did, _run("resolve-keep"))
+    _keep(did, _run("resolve-keep", did))
     _evidence(did, pid, "refund", _ref("refund"), "processed", 500)
     assert _settle(did) == "hold"                                        # held again: (4000, H-DISPUTE-MODE)
     set_accounting("frozen")
-    assert _revert(did, _run("revert")) == "reverted"
+    assert _revert(did, _run("revert", did)) == "reverted"
     assert _state(did)[:2] == (0, None) and _total(sid) == Decimal("100.00")
     history = _ledger(did)
     revert = [r for r in history if r[0] == "revert"]
@@ -593,7 +615,7 @@ def test_a_manual_operation_that_cannot_move_the_total_rolls_back_entirely():
         conn.execute("UPDATE public.streamer_donator_totals SET total_amount = 10 WHERE streamer_id = %s", (sid,))
     before = (_state(did), _ledger(did), _evaluation(did), _total(sid), _outbox(sid))
     with pytest.raises(psycopg.Error) as failed:
-        _apply_evaluation(did, 9000, (ref,), _run("resolve-apply"))
+        _apply_evaluation(did, 9000, (ref,), _run("resolve-apply", did))
     assert failed.value.sqlstate == "HC002"
     assert (_state(did), _ledger(did), _evaluation(did), _total(sid), _outbox(sid)) == before  # no event either
 
@@ -605,12 +627,12 @@ def test_reconcile_needs_active_and_its_run_and_is_idempotent():
     did, pid = _paid(_creator())
     ref = _ref("refund")
     _evidence(did, pid, "refund", ref, "processed", 2500)
-    run = _run("reconcile")
+    run = _run("reconcile", did)
     with pytest.raises(REFUSED):
         _reconcile(did, 2500, (ref,), run)
     set_accounting("active")
     with pytest.raises(REFUSED):
-        _reconcile(did, 2500, (ref,), _run("revert"))
+        _reconcile(did, 2500, (ref,), _run("revert", did))
     assert _reconcile(did, 2500, (ref,), run) == "activation"
     assert _runs_of(did) == [("activation", run)]
     assert _reconcile(did, 2500, (ref,), run) == "unchanged"
@@ -640,7 +662,7 @@ def test_owner_operations_that_move_money_emit_goal_and_leaderboard_like_the_app
     _evidence(did, pid, "refund", ref, "processed", 2500)
     _apply(did, None, hold="H-CURRENCY")
     assert _outbox(sid) == []                                           # a hold moves no money: no event
-    run = _run("resolve-apply")
+    run = _run("resolve-apply", did)
     assert _apply_evaluation(did, 2500, (ref,), run) == "manual" and _total(sid) == Decimal("75.00")
     assert _outbox(sid) == _totals_changed(sid)
     assert _apply_evaluation(did, 2500, (ref,), run) == "unchanged" and _outbox(sid) == _totals_changed(sid)
@@ -648,12 +670,12 @@ def test_owner_operations_that_move_money_emit_goal_and_leaderboard_like_the_app
     other, other_pid = _paid(sid, name="Fan2")                          # same creator, events still pending
     other_ref = _ref("refund")
     _evidence(other, other_pid, "refund", other_ref, "processed", 1000)
-    assert _reconcile(other, 1000, (other_ref,), _run("reconcile")) == "activation"
+    assert _reconcile(other, 1000, (other_ref,), _run("reconcile", other)) == "activation"
     assert _outbox(sid) == _totals_changed(sid)                         # coalesced into the pending pair
 
     _published(sid)
     set_accounting("frozen")
-    revert = _run("revert")
+    revert = _run("revert", did)
     assert _revert(did, revert) == "reverted" and _total(sid) == Decimal("100.00")
     published = [(e, c, k, "published", m) for e, c, k, _, m in _totals_changed(sid)]
     assert _outbox(sid) == published + _totals_changed(sid)             # a new pair once the first was sent
@@ -668,14 +690,14 @@ def test_operations_that_move_no_money_emit_nothing():
     did, pid = _paid(sid)
     _evidence(did, pid, "dispute", _ref("dispute"), "lost", 10000, deducted=4000)
     assert _apply(did, None, hold="H-DISPUTE-MODE") == "hold"
-    assert _keep(did, _run("resolve-keep")) == "kept"
+    assert _keep(did, _run("resolve-keep", did)) == "kept"
     clear, clear_pid = _paid(sid, name="Fan2")
     clear_ref = _ref("refund")
     _evidence(clear, clear_pid, "refund", clear_ref, "processed", 3000)
     assert _apply(clear, 3000, refs=(clear_ref,)) == "evaluation" and _total(sid, "Fan2") == Decimal("70.00")
-    assert _reconcile(clear, 3000, (clear_ref,), _run("reconcile")) == "unchanged"
+    assert _reconcile(clear, 3000, (clear_ref,), _run("reconcile", clear)) == "unchanged"
     held, _ = _paid(sid, name="Fan3")
     _apply(held, None, hold="H-CONFLICT")
     set_accounting("frozen")
-    assert _revert(held, _run("revert")) == "reverted"                  # hold cleared, reversal was 0
+    assert _revert(held, _run("revert", held)) == "reverted"                  # hold cleared, reversal was 0
     assert _outbox(sid) == []
