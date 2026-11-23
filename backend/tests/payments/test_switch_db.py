@@ -99,7 +99,11 @@ def test_f14_revert_restores_exactly_the_counterfactual_and_leaves_everything_el
     assert _state(b) == (2500, None, [], Decimal("75.00"))
     assert (_total(sid, "FanA"), _total(sid, "FanB")) == (Decimal("150.00"), Decimal("75.00"))
     after = {d: _ledger(d) for d in (a, a2, b)}
-    assert after[a][:len(before[a])] == before[a] and [r[0] for r in after[a][len(before[a]):]] == ["revert"]
+    assert after[a][:len(before[a])] == before[a]  # earlier rows kept; then 0034's pair, as for an evaluation:
+    revert, writer = after[a][len(before[a]):]  # the zero-delta revert row, then the one writer's credit row
+    assert revert[:4] == ("revert", Decimal("0.00"), 4000, 0) and writer[:4] == ("writer", Decimal("40.00"), 0, 0)
+    assert revert[7] == writer[7]  # one transaction
+    assert sum(r[1] for r in after[a]) == _state(a)[3] == Decimal("100.00")  # the ledger sums to the counterfactual
     assert after[a2] == before[a2] and after[b] == before[b]  # ledger rows only grow; --donation scope respected
 
 
