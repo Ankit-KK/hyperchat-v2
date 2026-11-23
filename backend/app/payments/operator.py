@@ -17,6 +17,14 @@ Stage 6a-3 adds the owner-only writing commands (app/payments/accounting_ops.py)
 
 Exit codes as verify's (D-7): 0 nothing to do / all applied, 3 work planned, 1 a donation refused (or a reconcile's
 second report not zero), 2 refused before anything was written.
+
+Stage 6a-4 adds the read-only L4 deploy check, run by the deploy runbook before any code rollback:
+
+    HYPERCHAT_READONLY_DSN='... user=hyperchat_readonly' \
+        python -m app.payments.operator deploy-check --target-release COMMIT [--releases-root DIR]
+
+Exit 0 when the rollback is allowed; 2 (refused) when the target release lacks the reversal-aware writer (migration
+0032) while any applied reversal exists (revert first, L3), and on anything it cannot establish (fail closed).
 """
 
 import argparse
@@ -31,6 +39,7 @@ import sys
 import psycopg
 
 from app.payments import accounting_ops as ops
+from app.payments import switch
 from app.payments import verify as verifier
 
 WRITERS = ("state", "reconcile", "resolve", "revert")  # stage 6a-3 (accounting_ops)
@@ -268,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--donation", help="limit to one donation id (every gate false)")
     v.add_argument("--output", help="also publish the report to this new file (never overwritten)")
     v.add_argument("--max-seconds", dest="max_seconds", help="the verification budget in seconds (required)")
+    d = sub.add_parser("deploy-check", help="6a-4 L4: may the code be rolled back to this release? (read-only)")
+    d.add_argument("--target-release", dest="target", help="the 40-hex commit of the release to roll back to")
+    d.add_argument("--releases-root", dest="root", default=switch.RELEASES_ROOT,
+                   help=f"the directory holding the release trees (default {switch.RELEASES_ROOT})")
     for name in WRITERS:
         w = sub.add_parser(name, help=f"6a-3 {name} (owner; report-only unless --apply)")
         if name == "state":
@@ -286,14 +299,40 @@ def main(argv: list[str] | None = None) -> int:
         if args.command != "verify":
             return _refuse(f"unrecognized arguments: {' '.join(extra)}")
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    if args.command == "deploy-check":
+        return run_deploy_check(args)
     if args.command != "verify":
         return run_writer(args)
     return run_verify(args)
 
 
-def _refuse(reason: str) -> int:
-    sys.stdout.write(verifier.canonical({"status": "refused", "exit_code": ops.EXIT["refused"], "reason": reason})
-                     + "\n")
+def run_deploy_check(args) -> int:
+    """L4 (accounting plan): refuse a code rollback below the writer release while any applied reversal exists."""
+    try:
+        carries = switch.carries_writer_rule(args.root, args.target)
+    except ValueError as exc:
+        return _refuse(f"--target-release: {exc}")
+    dsn = os.environ.get("HYPERCHAT_READONLY_DSN", "")
+    if not dsn:
+        return _refuse("HYPERCHAT_READONLY_DSN is not set")
+    try:
+        with psycopg.connect(dsn, autocommit=True, connect_timeout=10,
+                             application_name="hyperchat-accounting-deploy-check") as conn:
+            applied = conn.execute(switch.APPLIED).fetchone()[0]
+    except psycopg.Error as exc:
+        return _refuse(f"cannot read the applied reversals: {type(exc).__name__}")
+    out = {"command": "deploy-check", "target_release": args.target, "carries_writer_rule": carries,
+           "writer_revision": switch.ACCOUNTING_WRITER_REVISION, "applied_reversals": applied}
+    if not carries and applied:
+        return _refuse(f"release {args.target} predates the reversal-aware writer ({switch.WRITER_MIGRATION}) and "
+                       f"{applied} donation(s) have an applied reversal: revert them first (L3)", **out)
+    sys.stdout.write(verifier.canonical({**out, "status": "clean", "exit_code": 0}) + "\n")
+    return 0
+
+
+def _refuse(reason: str, **extra) -> int:
+    sys.stdout.write(verifier.canonical({**extra, "status": "refused", "exit_code": ops.EXIT["refused"],
+                                         "reason": reason}) + "\n")
     return ops.EXIT["refused"]
 
 

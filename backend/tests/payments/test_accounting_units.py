@@ -310,16 +310,15 @@ def test_the_evaluator_is_pure_code_without_io():
 
 # ── the switch (PAY15-D7, stage 3): it exists, defaults off, and refuses to be enabled ──
 
-def test_the_accounting_switch_defaults_off_and_refuses_to_be_enabled(monkeypatch):
-    from pydantic import ValidationError
-
+def test_the_accounting_switch_defaults_off_and_6a4_accepts_it_on(monkeypatch):
+    """6a-4: the startup refusal of a true setting is removed; the 0035 precondition (app/payments/switch.py, needs a
+    database) and the database state 'active' gate evaluation instead."""
     from app.core.config import Settings
 
     assert Settings(db_enabled=False).payment_accounting_enabled is False
     for value in ("true", "1", "yes", "on"):
         monkeypatch.setenv("HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED", value)
-        with pytest.raises(ValidationError, match="cannot be enabled before PAY-15 stages 4-6"):
-            Settings(db_enabled=False)
+        assert Settings(db_enabled=False).payment_accounting_enabled is True
     monkeypatch.setenv("HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED", "false")
     assert Settings(db_enabled=False).payment_accounting_enabled is False
 

@@ -58,6 +58,7 @@ from app.payments.accounts import AccountHealth, PaymentAccounts, health_report
 from app.payments import integrity, reconcile
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
+from app.payments.switch import PreconditionError, require_hardening
 from app.security.audit import security_event
 from app.soundboard import seed
 from app.storage.r2 import StorageError, build_object_store
@@ -227,6 +228,12 @@ async def payment_reconcile(settings: Settings, args, client=None) -> int:
               file=sys.stderr)
         return 2
     factory = connection_factory(settings)
+    if settings.payment_accounting_enabled:  # PAY-15 6a-4: it evaluates too, so the API's precondition applies
+        try:
+            await require_hardening(factory)
+        except PreconditionError as exc:
+            print(f"Refused: {exc}", file=sys.stderr)
+            return 2
     if args.apply:
         async with factory() as conn:
             database = (await (await conn.execute("SELECT current_database()")).fetchone())[0]

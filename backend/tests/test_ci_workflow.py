@@ -62,6 +62,7 @@ def test_the_postgres15_job_excludes_only_the_postgres17_importer():
                   "tests/payments/test_activation_concurrency_db.py",  # PAY-15 6a-1 lock order (C1-C13)
                   "tests/payments/test_k2_accounting_on_db.py",  # PAY-15 A6k-CI: K2 with accounting on
                   "tests/payments/test_operator_db.py",  # PAY-15 6a-3 operator CLI (OD-6a3-S)
+                  "tests/payments/test_switch_db.py",  # PAY-15 6a-4 switch gate (F12-F14) and L4
                   "tests/payments/test_verify_db.py"):  # PAY-15 6a-2 read-only verifier (OD-14: CI identity capture)
         assert suite in runs
     gated = [s for s in steps if s.get("id") != "scope" and "actions/checkout" not in str(s.get("uses"))]
@@ -136,6 +137,9 @@ def _scope(repo_dir: Path, base: str) -> str:
     ("backend/tests/payments/test_operator_db.py", "run=true"),
     ("backend/app/payments/accounting_ops.py", "run=true"),  # 6a-3: owner writes through 0034/0035
     ("backend/tests/payments/test_operator_units.py", "run=false"),
+    ("backend/tests/payments/test_switch_db.py", "run=true"),
+    ("backend/app/payments/switch.py", "run=true"),  # 6a-4: catalog precondition and L4 as runtime roles
+    ("backend/tests/payments/test_switch_units.py", "run=false"),
     ("backend/tests/payments/test_verify_units.py", "run=false"),
     ("backend/tests/payments/test_accounting_units.py", "run=false"),
     ("backend/tests/dashboard/test_moderation_api.py", "run=true"),

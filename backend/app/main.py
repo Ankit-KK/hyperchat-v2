@@ -32,6 +32,7 @@ from app.payments.accounts import AccountHealth, PaymentAccounts
 from app.payments.razorpay import RazorpayClient
 from app.payments.repository import PaymentRepository
 from app.payments.service import PaymentService
+from app.payments.switch import PreconditionError, require_hardening
 from app.bots.clients import TelegramClient
 from app.bots.discord import DiscordBot
 from app.bots.repository import BotRepository
@@ -89,6 +90,10 @@ async def lifespan(app: FastAPI):
         log.warning("non-production database", extra={"db_label": settings.db_label})
     app.state.db = Database(settings)
     await app.state.db.open()
+    if settings.payment_accounting_enabled:  # PAY-15 6a-4: accounting on needs 0035's hardening in this database
+        if not app.state.db.enabled:
+            raise PreconditionError("Refusing to start: HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED is true without a database")
+        await require_hardening(app.state.db.connection)
     store = build_object_store(settings)  # None until every R2 variable is set and valid
     app.state.hypersounds = HypersoundLibrary(store)
     payment_accounts = PaymentAccounts.from_settings(settings)

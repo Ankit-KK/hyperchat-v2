@@ -234,9 +234,9 @@ So a won chargeback that reopens in pre-arbitration is open again, and a late `c
 **Cutover / rehearsal ETL:** `database/etl/rehearsal.py` refuses to load, before changing anything, when either
 evidence table holds a row.
 
-**Reversal accounting (PAY-15 stage 3, migration 0032), OFF.** `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED` defaults to
-`false` and the API **refuses to start** with it on until the live figures and activation tools (stages 4-6) exist.
-With it off, evidence changes no money (as above). The code path it will enable:
+**Reversal accounting (PAY-15 stage 3, migration 0032), OFF by default.** `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED`
+defaults to `false`; since stage 6a-4 a true setting is accepted under the switch gate below. With it off, evidence
+changes no money (as above). The code path it enables:
 - After recording evidence for a donation, and after a capture (evidence can arrive first), the repository locks the
   donation (before the evidence insert, so concurrent deliveries cannot deadlock), reads its current evidence and
   evaluates it with `app/payments/accounting.py` (PAY15-D2 to D4, D8).
@@ -458,6 +458,24 @@ through 0034's owner functions.
   donation refused or a reconcile's second report not zero, 2 refused before anything was written.
 - **Tests:** `tests/payments/test_operator_units.py` (no database) and `test_operator_db.py` (PostgreSQL 15 and 17).
 
+**Switch gate (PAY-15 stage 6a-4, `app/payments/switch.py`).**
+- Evaluation runs only when `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED` is true **and** the database state is `active`,
+  read inside each evaluation transaction (`repository._settle_accounting` under `payment_accounting_lock_state`,
+  L-1). `frozen` or `off` stops evaluation at once with no restart; applied reversals stay, and moderation keeps using
+  the applied value (F12). Activation is the 6a-3 reconcile, whose second report plans zero (F13); revert restores
+  exactly the history without evidence-based reversals, leaving other donations and earlier ledger rows (F14).
+- **Startup precondition:** with the setting true, the API and `payment-reconcile` refuse to start (exit 2 for the
+  CLI) unless the database carries migration 0035: `payment_accounting_scope_covers`, the enabled
+  `donation_accounting_evaluations_ack_guard` trigger and both validated foreign keys. This is a catalog check:
+  runtime roles cannot read `alembic_version` (0007). An unreachable database refuses too.
+- **L4 deploy check** (read-only, before any code rollback): `HYPERCHAT_READONLY_DSN=… python -m
+  app.payments.operator deploy-check --target-release <commit> [--releases-root /opt/hyperchat/releases]`. A release
+  carries the reversal-aware writer iff its tree has migration 0032 (`ACCOUNTING_WRITER_REVISION`). Exit 2 (refused)
+  when the target lacks it while any `applied_reversed_paise > 0` (revert first, L3), and on a malformed commit, a
+  missing release tree or a database it cannot read; exit 0 otherwise. Canonical JSON out.
+- Deployment of 6a-4 to DEV or production is a separate owner decision (stage 6b, D-19 attestation, G4).
+- **Tests:** `tests/payments/test_switch_units.py` (no database) and `test_switch_db.py` (PostgreSQL 15 and 17).
+
 **Live figures (PAY-15 stage 4).** Goal progress (public and realtime), dashboard revenue and the CSV export read the
 applied reversal through `app/payments/figures.py`: per donation `reversed_inr` = the pro-rata share of the stored
 `amount_inr`, rounded down to the paisa (exact integer division), and `net_inr = amount_inr − reversed_inr`; sums are
@@ -466,7 +484,7 @@ reversal (the switch off), every figure equals the gross figure exactly.
 
 ## Configuration (`/etc/hyperchat/api.env`, names only; see `deploy/api.env.example`)
 `HYPERCHAT_RAZORPAY_PRIMARY_{KEY_ID,KEY_SECRET,WEBHOOK_SECRET}`. `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED` stays unset
-or `false` (section 7: the API refuses `true` at this stage).
+or `false` until an owner-approved activation (stage 6a-4 switch gate: a true setting needs migration 0035).
 - **One account, `primary` (D6)**: test vs live is the environment's job. **DEV: Razorpay test-mode keys. Production: live keys.** The `secondary` account was retired (migration 0018); a leftover `HYPERCHAT_RAZORPAY_SECONDARY_*` variable configures nothing.
 - **Account mapping**: `streamers.razorpay_account` is `primary` or NULL (no payment account: on hold). Migration 0010 filled it from the legacy secret-name columns; since 0018 both legacy pairs (`razorpay-keyid`/`razorpay-keysecret` and the `(test)` pair, which held test-mode keys) are `primary`, anything else is NULL. Legacy orders keep `donations.payment_account` NULL (legacy never recorded one; the creator's account applies); V2 orders record the account they were created on.
 - **Mode guards (startup, both ways)**: the API refuses to start with an `rzp_live_` key id unless `HYPERCHAT_APP_ENV=production`, and with an `rzp_test_` key id when it is `production`. The error names the variable, never the value.
