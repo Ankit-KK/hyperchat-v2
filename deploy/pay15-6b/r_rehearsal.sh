@@ -15,6 +15,7 @@ r_rehearsal() { local set rcc t0 t1 W="" PORT SOCK DATA started=0 dsn old_rel no
   ok() { echo "OK    $1"; nok=$((nok+1)); }; bad() { echo "FAIL  $1"; nbad=$((nbad+1)); }
   [ -f "$ST/B-passed" ] && [ ! -e "$ST/R-passed" ] || { echo "STOP: B has not passed, or R already passed"; return 1; }
   window_ok 90 || return 1
+  cd / || return 1   # runuser as postgres: no "could not change directory to /root"; every path here is absolute
   host_ok && target_ok && head_is "$PRE_HEAD" && [ "$(readlink -f "$APP_CURRENT")" = "$(facts OLD_REL)" ] \
     && [ "$(tree_fp "$REL_NEW")" = "$NEW_FP" ] && pins_ok "$REL_NEW" || { echo "STOP: not the B state"; return 1; }
   set="$(latest_set)"; set_ok "$set" || return 1
@@ -76,7 +77,8 @@ asyncio.run(switch.require_hardening(connect)); print("precondition passes")' \
   ( cd "$REL_NEW/backend" && env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 HYPERCHAT_READONLY_DSN="host=$SOCK port=$PORT dbname=$DEV_DB user=hyperchat_readonly" \
       "$REL_NEW/venv/bin/python" -B -E -s -m app.payments.operator verify --max-seconds 300 > "$ST/R2-verifier.json" 2> "$ST/R2-verifier.err" ); rcc=$?
   echo "INFO  read-only verifier exit $rcc (pre-A5c: findings expected; recorded for the owner, decision OD-6b-3): $(python3 -I -B -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("status"), "findings", len(d.get("findings", [])), "gates", d.get("gates"))' "$ST/R2-verifier.json" 2>&1 | head -1)"
-  [ "$rcc" -le 3 ] && ok "verifier produced a report (exit $rcc)" || bad "verifier crashed (exit $rcc)"
+  [ "$rcc" -le 1 ] && findings_ok "$ST/R2-verifier.json" && ok "verifier findings exactly the packet's expected set (exit $rcc)" \
+    || bad "verifier exit $rcc, or its findings differ from the packet's expected set (see above, R2-verifier.json)"
   migrate_to "$REL_NEW" "$PRE_HEAD" "$dsn" downgrade > "$ST/R2-downgrade.out" 2>&1; rcc=$?
   echo "INFO  downgrade to $PRE_HEAD: exit $rcc, head now $(S -d "$DEV_DB" -Atc 'SELECT string_agg(version_num, $$,$$) FROM alembic_version')"
   [ "$rcc" != 0 ] && grep -Eq 'downgrade of 003[0-4] stopped' "$ST/R2-downgrade.out" && ok "downgrade to $PRE_HEAD refused (0031 audit rows exist): rollback is the backup restore (X)" \

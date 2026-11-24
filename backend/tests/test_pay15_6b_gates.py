@@ -103,11 +103,13 @@ def host(tmp_path):
         d.mkdir(parents=True)
     for f in SRC.glob("*.sh"):
         shutil.copy(f, st / "pkg" / f.name)
+    shutil.copy(SRC / "findings_check.py", st / "pkg" / "findings_check.py")
     for f in (SRC / "sql").glob("*.sql"):
         shutil.copy(f, st / "pkg" / "sql" / f.name)
     (st / "pkg" / "release.env").write_text(
         f"NEW_ID={NEW}\nCOMMIT={NEW}6a3c11e8b9ada7ed3ac3fd825ce0\nTAR_SHA={'1' * 64}\nNEW_FP={'2' * 64}\nNEW_FILES=380\n"
-        f"SMOKE_SHA={'3' * 64}\nLOCK_NAME=lock.txt\nLOCK_SHA={'4' * 64}\nPINS='x backend/app/main.py'\n")
+        f"SMOKE_SHA={'3' * 64}\nLOCK_NAME=lock.txt\nLOCK_SHA={'4' * 64}\nPINS='x backend/app/main.py'\n"
+        "EXPECTED_FINDINGS='I10|structural|baseline|i10'\nKNOWN_ORPHANS=''\n")
     names = sorted(str(p.relative_to(st / "pkg")) for p in (st / "pkg").rglob("*") if p.is_file())
     (st / "pkg" / "MANIFEST.sha256").write_text("".join(f"{_sha((st / 'pkg' / n).read_bytes())} *{n}\n" for n in names))
     _release(rels / OLD)  # the running release; the new one appears only once B has built it (_w_ready)
@@ -197,6 +199,16 @@ def test_g0_passes_on_the_expected_host_and_records_the_facts(host):
     assert f"OLD_ID={OLD}\n" in facts and "DB_ACL=-\n" in facts and (host.st / "G0-passed").exists()
     assert (host.st / "prestate-G0.txt").read_text().splitlines() == PRESTATE
     assert not [c for c in calls if " start " in f" {c} " or " stop " in f" {c} "]  # G0 changed nothing
+
+
+def test_a_malformed_known_orphans_pin_is_refused(host):
+    pkg = host.st / "pkg"
+    env = pkg / "release.env"
+    env.write_text(env.read_text().replace("KNOWN_ORPHANS=''", "KNOWN_ORPHANS='not-an-id'"))
+    names = sorted(str(p.relative_to(pkg)) for p in pkg.rglob("*") if p.is_file() and p.name != "MANIFEST.sha256")
+    (pkg / "MANIFEST.sha256").write_text("".join(f"{_sha((pkg / n).read_bytes())} *{n}\n" for n in names))
+    code, out, _, calls = host("G0")
+    assert code == 1 and "release.env is incomplete or malformed" in out and calls == [], out
 
 
 def test_g0_stops_on_another_database_cluster(host):

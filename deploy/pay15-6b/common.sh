@@ -11,12 +11,15 @@
 [ "$(id -u)" = 0 ] || { echo "STOP: run as root"; exit 1; }
 export PYTHONDONTWRITEBYTECODE=1
 B6_PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# release.env (packet only): NEW_ID COMMIT TAR_SHA NEW_FP NEW_FILES SMOKE_SHA LOCK_NAME LOCK_SHA PINS
+# release.env (packet only): NEW_ID COMMIT TAR_SHA NEW_FP NEW_FILES SMOKE_SHA LOCK_NAME LOCK_SHA PINS, and the DEV data
+# facts EXPECTED_FINDINGS (verifier keys invariant|class|entity_kind|entity_id, one per line) and KNOWN_ORPHANS (ids of
+# deleted creators whose append-only credit history remains, e.g. from earlier smoke runs; may be empty) (FU-1, FU-2)
 [ -f "$B6_PKG/release.env" ] && . "$B6_PKG/release.env" || { echo "STOP: $B6_PKG/release.env is missing"; exit 1; }
 [[ "${NEW_ID:-}" =~ ^[0-9a-f]{12}$ && "${COMMIT:-}" =~ ^[0-9a-f]{40}$ && "${COMMIT:0:12}" = "$NEW_ID" \
    && "${TAR_SHA:-}" =~ ^[0-9a-f]{64}$ && "${NEW_FP:-}" =~ ^[0-9a-f]{64}$ && "${NEW_FILES:-}" =~ ^[0-9]+$ \
    && "${SMOKE_SHA:-}" =~ ^[0-9a-f]{64}$ && "${LOCK_SHA:-}" =~ ^[0-9a-f]{64}$ && "${LOCK_NAME:-}" =~ ^[A-Za-z0-9._-]+$ \
-   && -n "${PINS:-}" ]] || { echo "STOP: release.env is incomplete or malformed"; exit 1; }
+   && -n "${PINS:-}" && -n "${EXPECTED_FINDINGS:-}" && "${KNOWN_ORPHANS:-}" =~ ^([0-9a-f-]{36}( |$))*$ ]] \
+  || { echo "STOP: release.env is incomplete or malformed"; exit 1; }
 if [ "${B6_TEST:-}" != 1 ]; then   # the server: always the real facts and paths (overrides are for mock tests only)
   # DEV identity (C1, read-only facts of 2026-10-30; G0 re-checks them and stops if they changed)
   DEV_IDENTITY="hyperchat_dev 5433 15/restoretest 7692889322508027580 /var/lib/postgresql/15/restoretest"
@@ -88,6 +91,13 @@ prestate_core() { prestate | grep -v "^jobs "; }   # once services run, jobs may
 verify_sql() { QF "$PKG/sql/verify_0035.sql" "$@"; }
 verify_fixed() { grep -Ev '^V11 ' ; }   # the exactly-expected lines (V11 is recorded)
 same() { diff -q "$ST/$1" <($2) >/dev/null || { echo "STOP: $2 differs from $1:"; diff "$ST/$1" <($2) | sed 's/^/      /'; return 1; }; }
+orphan_list() {  # deleted creators with credit history left: streamer_id|first_epoch|last_epoch (FU-1 A)
+  Q "SELECT e.streamer_id, extract(epoch FROM min(e.created_at))::bigint, extract(epoch FROM max(e.created_at))::bigint
+     FROM public.donation_credit_events e WHERE NOT EXISTS (SELECT 1 FROM public.streamers s WHERE s.id = e.streamer_id)
+     GROUP BY 1 ORDER BY 1"; }
+findings_ok() {  # $1 = verifier JSON, then findings_check.py options: the findings must be EXACTLY the expected set (FU-2)
+  printf '%s\n' "$EXPECTED_FINDINGS" > "$ST/expected-findings.txt"
+  python3 -I -B "$PKG/findings_check.py" "$1" "$ST/expected-findings.txt" --known-orphans "${KNOWN_ORPHANS:-}" "${@:2}"; }
 facts() { grep -m1 "^$1=" "$ST/G0-facts.env" | cut -d= -f2-; }   # a fact recorded by G0 (OLD_ID, ENV_SHA, ...)
 window_ok() {  # $1 = minutes the step needs. Never inside the DEV backup window or near the S0-6 / off-site runs.
   python3 -I -B -c '
