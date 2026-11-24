@@ -5,7 +5,13 @@
 #   R2 a second scratch cluster built the same way (restore_check.scratch_cluster): restore, pre-state, the full
 #      0029 -> 0035 upgrade with the new release's Alembic (timed), the verification SQL, the 0035 precondition, the
 #      read-only verifier, then the downgrade-to-0029 check (expected to REFUSE at 0031: rollback = restore, A2)
-r_rehearsal() { local set rcc t0 t1 W="" PORT SOCK DATA started=0 dsn nok=0 nbad=0
+R_SCRATCH_W=""; R_SCRATCH_DATA=""   # globals: the RETURN trap runs after r_rehearsal's locals are gone (set -u)
+r_scratch_cleanup() {  # stop and delete R2's scratch cluster, once; the trap clears itself first
+  trap - RETURN
+  [ -z "$R_SCRATCH_DATA" ] || runuser -u postgres -- "$PGBIN/pg_ctl" -D "$R_SCRATCH_DATA" -m immediate stop >/dev/null 2>&1
+  [ -z "$R_SCRATCH_W" ] || rm -rf -- "$R_SCRATCH_W"
+  R_SCRATCH_W=""; R_SCRATCH_DATA=""; }
+r_rehearsal() { local set rcc t0 t1 W="" PORT SOCK DATA started=0 dsn old_rel nok=0 nbad=0
   ok() { echo "OK    $1"; nok=$((nok+1)); }; bad() { echo "FAIL  $1"; nbad=$((nbad+1)); }
   [ -f "$ST/B-passed" ] && [ ! -e "$ST/R-passed" ] || { echo "STOP: B has not passed, or R already passed"; return 1; }
   window_ok 90 || return 1
@@ -13,9 +19,13 @@ r_rehearsal() { local set rcc t0 t1 W="" PORT SOCK DATA started=0 dsn nok=0 nbad
     && [ "$(tree_fp "$REL_NEW")" = "$NEW_FP" ] && pins_ok "$REL_NEW" || { echo "STOP: not the B state"; return 1; }
   set="$(latest_set)"; set_ok "$set" || return 1
   prestate > "$ST/prestate-live-R-before.txt" || return 1
-  echo "== R1 restore_check --scratch on $set (expect-head $PRE_HEAD; TMPDIR=$SCRATCH_ROOT)"
+  # R1 uses the RUNNING release's restore_check: the set is at 0029, and the new release's checker (since 0031) treats
+  # runtime writes on streamer_donator_totals as a leak although they are legitimate before 0031 (the C1 A-gate way)
+  old_rel="$(facts OLD_REL)"
+  echo "== R1 restore_check --scratch on $set with the running release's checker (expect-head $PRE_HEAD; TMPDIR=$SCRATCH_ROOT)"
+  echo "INFO  checker: $old_rel/backend/app/backup/restore_check.py sha256 $(sha256sum "$old_rel/backend/app/backup/restore_check.py" | cut -c1-16) (release $(facts OLD_ID))"
   t0=$(date +%s)
-  ( cd "$REL_NEW/backend" && env TMPDIR="$SCRATCH_ROOT" "$REL_NEW/venv/bin/python" -B -E -s -m app.backup.restore_check --dir "$BACKUP_DIR" \
+  ( cd "$old_rel/backend" && env TMPDIR="$SCRATCH_ROOT" "$old_rel/venv/bin/python" -B -E -s -m app.backup.restore_check --dir "$BACKUP_DIR" \
       --set "$set" --env dev --pg-bin "$PGBIN" --scratch --scratch-user postgres --expect-head "$PRE_HEAD" --roles-sql "$ROLES" \
       --output "$ST/R1-restorecheck-$set.json" > "$ST/R1-restore_check.out" 2>&1 ); rcc=$?
   t1=$(date +%s); echo "INFO  restore drill: $((t1 - t0)) s (rollback path X restores the same way)"
@@ -27,7 +37,8 @@ r_rehearsal() { local set rcc t0 t1 W="" PORT SOCK DATA started=0 dsn nok=0 nbad
   W="$(mktemp -d "$SCRATCH_ROOT/hc-6b1-XXXXXX")" && DATA="$W/data" && SOCK="$W/sock" && mkdir "$SOCK" && chown postgres "$W" "$SOCK" \
     || { echo "STOP: scratch directory"; return 1; }
   PORT="$(python3 -I -B -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-  trap 'runuser -u postgres -- "$PGBIN/pg_ctl" -D "$DATA" -m immediate stop >/dev/null 2>&1; rm -rf "$W"' RETURN
+  R_SCRATCH_W="$W"; R_SCRATCH_DATA="$DATA"
+  trap r_scratch_cleanup RETURN
   runuser -u postgres -- "$PGBIN/initdb" -D "$DATA" -A trust -U postgres --no-sync >/dev/null \
     && runuser -u postgres -- "$PGBIN/pg_ctl" -D "$DATA" -w -l "$DATA/server.log" \
          -o "-p $PORT -k $SOCK -c listen_addresses='' -c fsync=off" start >/dev/null && started=1 \

@@ -1800,8 +1800,15 @@ def _verify_expected() -> list[str]:
 
 
 def _clean_6b(conn) -> None:
-    """Scratch only (owner, one transaction, guards lifted explicitly): this test's audit, totals and rows."""
+    """Scratch only (owner, one transaction, guards lifted explicitly): this test's evidence, audit, totals and rows."""
     with conn.transaction():
+        for name in GUARDS_0029:  # the 0029 append-only guards: evidence and webhook rows of this test only
+            conn.execute(f"ALTER TABLE public.{name.removesuffix('_guard')} DISABLE TRIGGER {name}")
+        conn.execute("DELETE FROM public.payment_integrity_events WHERE webhook_event_id IN (SELECT id FROM "
+                     "public.payment_webhook_events WHERE event_id LIKE 'migtest6b-%%')")
+        conn.execute("DELETE FROM public.payment_webhook_events WHERE event_id LIKE 'migtest6b-%%'")
+        for name in GUARDS_0029:
+            conn.execute(f"ALTER TABLE public.{name.removesuffix('_guard')} ENABLE TRIGGER {name}")
         if "donation_credit_events" in _tables():
             conn.execute("ALTER TABLE public.donation_credit_events DISABLE TRIGGER donation_credit_events_guard")
             conn.execute("DELETE FROM public.donation_credit_events WHERE streamer_id IN "
@@ -1847,8 +1854,14 @@ def test_pay15_6b_packet_sql_on_a_fresh_0029_to_0035_upgrade(monkeypatch):
                 conn.execute("INSERT INTO public.streamer_donator_totals (streamer_id, donator_name, "
                              "donator_name_lower, total_amount, donation_count) VALUES (%s, %s, lower(%s), %s, %s)",
                              (sid, donor, donor, total, count))
+            # webhook + evidence rows as DEV has them (2 processed refunds): 0033 adds a column to the evidence table,
+            # so the pre-state row hashes must name their columns (gate R on DEV, 2026-11-24, hashed e::text)
+            for n in (1, 2):
+                _evidence33(conn, f"migtest6b-{n}", f"rfnd_MIG6B{n}", with_column=False)
         before = _packet_sql("prestate.sql")
         assert len(before) == 9 and before[0].startswith("totals ") and before[-1].startswith("jobs "), before
+        evidence = [line for line in before if line.startswith(("evidence", "webhook"))]
+        assert "evidence refund/processed=2" in evidence and all(not line.endswith(" -") for line in evidence), evidence
 
         upgrade = subprocess.run([sys.executable, "-B", "-m", "alembic", "upgrade", "0035"], cwd=DATABASE,
                                  env={**os.environ, "HYPERCHAT_MIGRATION_DSN": DSN}, capture_output=True, text=True)

@@ -49,8 +49,9 @@ V10 0035 hardening true true 2"
 fp() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }   # (C1)
 tree_fp() { (cd "$1" && find . -type f ! -path './venv/*' ! -path './backend/RELEASE' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64); }
 # read-only psql on live DEV (C1)
-Q() { sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_SOCK" -p "$DEV_PORT" -d "$DEV_DB" -Atc "$1"; }
-QF() { sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -h "${2:-$DEV_SOCK}" -p "${3:-$DEV_PORT}" -d "${4:-$DEV_DB}" -At < "$1"; }   # stdin: postgres cannot read the root-only $PKG
+# both run from / : postgres cannot enter root's working directory ("could not change directory", gate R 2026-11-24)
+Q() { ( cd / && sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -h "$DEV_SOCK" -p "$DEV_PORT" -d "$DEV_DB" -Atc "$1" ); }
+QF() { ( cd / && sudo -u postgres env PGOPTIONS='-c default_transaction_read_only=on' psql -X -q -v ON_ERROR_STOP=1 -h "${2:-$DEV_SOCK}" -p "${3:-$DEV_PORT}" -d "${4:-$DEV_DB}" -At < "$1" ); }   # stdin: postgres cannot read the root-only $PKG
 head_now() { Q 'SELECT string_agg(version_num, $$,$$) FROM alembic_version'; }
 head_is() { local now; now="$(head_now)" || { echo "STOP: cannot read alembic_version"; return 1; }
             [ "$now" = "$1" ] || { echo "STOP: database at '$now', expected $1"; return 1; }; }
