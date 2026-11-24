@@ -8,7 +8,7 @@ and it runs on the DEV host only, started from a reviewed wrapper file, never an
 |---|---|---|
 | G0 | `g0_precheck.sh` | read-only pre-checks; records the facts every later gate compares against |
 | B | `b_build.sh` | builds the inert release directory from the hash-pinned lock (nothing switched) |
-| R | `r_rehearsal.sh` | `restore_check --scratch` plus the 0029 → 0035 upgrade on a private scratch cluster |
+| R | `r_rehearsal.sh` | `restore_check --scratch` (with the running release's checker: the set is at 0029) plus the 0029 → 0035 upgrade on a private scratch cluster |
 | W | `w_window.sh` | stops the DEV API and worker, takes one backup, migrates exactly to 0035, switches the release, starts it |
 | S | `s_post.sh` | the DEV smoke, the integrity report, the verifier, and the L4 deploy-check against the previous release id |
 | X | `x_rollback.sh` | restores the window's backup by a database rename swap; nothing is dropped |
