@@ -6,6 +6,9 @@ Enabled when HYPERCHAT_TEST_MIGRATION_DSN points at a scratch database, e.g.
 
 import io
 import os
+import re
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -1768,3 +1771,105 @@ def test_0035_binds_runs_to_their_scope_guards_the_acknowledgement_and_downgrade
         command.upgrade(cfg, "head")
     assert _hardening_shape()[:3] == (("donation_accounting_evaluations_ack_run", "donation_credit_events_run_id"),
                                       True, True)
+
+
+# ── PAY-15 stage 6b: the DEV packet's SQL on a fresh 0001 -> 0029 -> 0035 database ─────────────────────────────────
+
+PACKET_6B = DATABASE.parent / "deploy" / "pay15-6b"
+DONATIONS_6B = (  # (suffix, donor, amount, moderation, minutes ago): a full bucket, a short bucket, no credit
+    ("full-a", "Fan", 100, "approved", 60), ("full-b", "Fan", 50, "auto_approved", 50),
+    ("short-a", "Short", 100, "approved", 40), ("short-b", "Short", 60, "approved", 30),  # oldest credited first
+    ("pending", "Fan", 70, "pending", 20), ("rejected", "Fan", 40, "rejected", 10),
+)
+TOTALS_6B = (("Fan", 150, 2), ("Short", 120, 2))  # Short holds 120 of 160: the newest row is credited 20 of 60
+
+
+def _packet_sql(name: str) -> list[str]:
+    """The packet's SQL file, run as psql -At would (one single-column line per statement, read only)."""
+    statements = [s.strip() for s in (PACKET_6B / "sql" / name).read_text().split(";\n") if s.strip()]
+    statements = ["\n".join(line for line in s.splitlines() if not line.lstrip().startswith("--")) for s in statements]
+    with psycopg.connect(_libpq(DSN), autocommit=True) as conn:
+        conn.execute("SET ROLE hyperchat_owner")  # reads every table, as the packet's postgres session does on DEV
+        conn.execute("SET default_transaction_read_only = on")
+        return [conn.execute(s).fetchone()[0] for s in statements if s.strip()]
+
+
+def _verify_expected() -> list[str]:
+    common = (PACKET_6B / "common.sh").read_text()
+    return re.search(r'^VERIFY_EXPECTED="(.*?)"$', common, re.S | re.M).group(1).splitlines()
+
+
+def _clean_6b(conn) -> None:
+    """Scratch only (owner, one transaction, guards lifted explicitly): this test's audit, totals and rows."""
+    with conn.transaction():
+        if "donation_credit_events" in _tables():
+            conn.execute("ALTER TABLE public.donation_credit_events DISABLE TRIGGER donation_credit_events_guard")
+            conn.execute("DELETE FROM public.donation_credit_events WHERE streamer_id IN "
+                         "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'migtest6b-%%')")
+            conn.execute("ALTER TABLE public.donation_credit_events ENABLE TRIGGER donation_credit_events_guard")
+        conn.execute("DELETE FROM public.streamer_donator_totals WHERE streamer_id IN "
+                     "(SELECT id FROM public.streamers WHERE streamer_slug LIKE 'migtest6b-%%')")
+        guarded = conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname = 'donations_credit_delete_guard'"
+                               ).fetchone()[0]
+        if guarded:
+            conn.execute("ALTER TABLE public.donations DISABLE TRIGGER donations_credit_delete_guard")
+        conn.execute("DELETE FROM public.donations WHERE order_id LIKE 'migtest6b-%%'")
+        if guarded:
+            conn.execute("ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard")
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest6b-%%'")
+
+
+def test_pay15_6b_packet_sql_on_a_fresh_0029_to_0035_upgrade(monkeypatch):
+    """The 6b packet's rehearsal, permanent and repeatable (PostgreSQL 15 and 17 jobs): a database built from 0001 to
+    0029 with DEV-shaped data, then Alembic exactly to 0035 as the window runs it (a subprocess, its own output).
+    Asserted: prestate.sql has its 9 lines and is unchanged by the upgrade and by a no-op; every exact line of
+    verify_0035.sql equals the packet's VERIFY_EXPECTED; V11 records the capped backfill; the 0031 backfill NOTICE never
+    reaches Alembic's output (psycopg drops notices without a handler, so the packet relies on V11); the downgrade to
+    0029 stops at the first migration whose history exists (rollback = the window's backup restore)."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    with _owner() as conn:
+        _clean_6b(conn)
+    command.downgrade(cfg, "0029")
+    try:
+        assert _version() == "0029"
+        with _owner() as conn:
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, status, kyc_track) "
+                               "VALUES ('migtest6b-c', 'C', 'active', 'legacy') RETURNING id").fetchone()[0]
+            for suffix, donor, amount, moderation, minutes in DONATIONS_6B:
+                conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                             "amount_inr, payment_status, moderation_status, created_at) VALUES (%s, %s, %s, %s, 'INR', "
+                             "%s, %s, %s, now() - make_interval(mins => %s))",
+                             (sid, "migtest6b-" + suffix, donor, amount, amount,
+                              "pending" if moderation == "pending" else "success", moderation, minutes))
+            for donor, total, count in TOTALS_6B:
+                conn.execute("INSERT INTO public.streamer_donator_totals (streamer_id, donator_name, "
+                             "donator_name_lower, total_amount, donation_count) VALUES (%s, %s, lower(%s), %s, %s)",
+                             (sid, donor, donor, total, count))
+        before = _packet_sql("prestate.sql")
+        assert len(before) == 9 and before[0].startswith("totals ") and before[-1].startswith("jobs "), before
+
+        upgrade = subprocess.run([sys.executable, "-B", "-m", "alembic", "upgrade", "0035"], cwd=DATABASE,
+                                 env={**os.environ, "HYPERCHAT_MIGRATION_DSN": DSN}, capture_output=True, text=True)
+        assert upgrade.returncode == 0, upgrade.stderr[-2000:]
+        assert _version() == "0035"
+        assert "credit backfill" not in upgrade.stdout + upgrade.stderr  # the NOTICE is not printed: V11 records it
+        assert _packet_sql("prestate.sql") == before                       # V2: the totals checksum and every record
+        with _owner() as conn:
+            conn.execute("ANALYZE public.donations")                         # a no-op for the record
+        assert _packet_sql("prestate.sql") == before
+
+        got = _packet_sql("verify_0035.sql")
+        assert [line for line in got if not line.startswith("V11 ")] == _verify_expected(), got
+        assert [line for line in got if line.startswith("V11 ")] == ["V11 backfill rows 4 credited 270.00"], got
+
+        with pytest.raises(Exception, match=r"downgrade of 003[0-4] stopped"):
+            command.downgrade(cfg, "0029")
+        assert _version() in ("0031", "0032")  # 0035 / 0034 / 0033 undo cleanly; the credit history stops it
+        assert _packet_sql("prestate.sql")[0] == before[0]  # the totals survive the refused downgrade
+    finally:
+        with _owner() as conn:
+            _clean_6b(conn)
+        command.upgrade(cfg, "head")
+    assert _version() == "0035"
