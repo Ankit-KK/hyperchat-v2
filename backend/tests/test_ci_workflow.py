@@ -120,6 +120,8 @@ def _scope(repo_dir: Path, base: str) -> str:
     ("deploy/nginx/site.conf", "run=false"),
     ("database/migrations/versions/0029_x.py", "run=true"),
     ("deploy/postgres/roles.sql", "run=true"),
+    ("deploy/pay15-6b/sql/verify_0035.sql", "run=true"),  # the 6b packet SQL: proved in database/tests
+    ("deploy/pay15-6b/w_window.sh", "run=true"),
     ("backend/app/kyc/service.py", "run=true"),
     ("backend/tests/stepup/test_x.py", "run=true"),
     ("backend/tests/payments/test_donation_history_guard_db.py", "run=true"),
