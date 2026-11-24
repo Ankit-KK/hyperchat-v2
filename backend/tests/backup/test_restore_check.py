@@ -130,6 +130,12 @@ def test_the_expected_head_is_this_checkouts_newest_migration():
     assert restore_check.expected_head() == newest
 
 
+def test_the_runtime_write_rule_for_donor_totals_applies_from_0031():
+    assert "streamer_donator_totals" not in restore_check.no_runtime_writes("0029")
+    assert "streamer_donator_totals" in restore_check.no_runtime_writes("0031")
+    assert restore_check.no_runtime_writes("0035") == restore_check.NO_RUNTIME_WRITES
+
+
 @requires_db
 def test_the_invariants_notice_a_disabled_guard_or_a_leaked_privilege(env):
     """Run against the migrated test database inside a transaction that is rolled back: nothing persists."""
@@ -155,6 +161,13 @@ def test_the_invariants_notice_a_disabled_guard_or_a_leaked_privilege(env):
             assert "hyperchat_worker UPDATE kyc_enforcement" in \
                 restore_check.invariants(conn, bset, version)["runtime_role_privilege_leaks"]
             assert restore_check.invariants(conn, bset, "9999")["ok"] is False  # another head
+            conn.execute("REVOKE UPDATE ON public.kyc_enforcement FROM hyperchat_worker")
+            conn.execute("GRANT UPDATE ON public.streamer_donator_totals TO hyperchat_app")
+            assert "hyperchat_app UPDATE streamer_donator_totals" in \
+                restore_check.invariants(conn, bset, version)["runtime_role_privilege_leaks"]
+            conn.execute("UPDATE public.alembic_version SET version_num = '0029'")  # a pre-0031 set: legitimate
+            assert "hyperchat_app UPDATE streamer_donator_totals" not in \
+                restore_check.invariants(conn, bset, None)["runtime_role_privilege_leaks"]
         finally:
             conn.execute("ROLLBACK")
 

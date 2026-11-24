@@ -73,6 +73,14 @@ NO_RUNTIME_WRITES = ("stepup_grants", "stepup_events", "stepup_enforcement", "we
                      "kyc_enforcement", "kyc_enforcement_events", "streamer_donator_totals", "donation_credit_events",
                      "donation_reversals", "payment_accounting_state", "payment_accounting_events",
                      "payment_accounting_runs", "donation_accounting_evaluations")
+# A table that existed BEFORE the migration that took the runtime roles' writes away: below that revision those writes
+# are legitimate, so an older set is not a leak (FU-3: 0029 sets on DEV were reported as leaking streamer_donator_totals)
+NO_RUNTIME_WRITES_FROM = {"streamer_donator_totals": "0031"}
+
+
+def no_runtime_writes(version: str) -> tuple[str, ...]:
+    """The NO_RUNTIME_WRITES tables that apply to a database at Alembic `version` (4-digit revisions compare as text)."""
+    return tuple(t for t in NO_RUNTIME_WRITES if version >= NO_RUNTIME_WRITES_FROM.get(t, ""))
 
 
 class CheckError(Exception):
@@ -186,7 +194,7 @@ def invariants(conn: psycopg.Connection, bset: BackupSet, head: str | None) -> d
         if q("SELECT to_regprocedure(%s) IS NOT NULL", fn):
             leaks += [f"{role} EXECUTE {fn}" for role in sorted(roles)
                       if q("SELECT has_function_privilege(%s, %s, 'EXECUTE')", role, fn)]
-    for table in NO_RUNTIME_WRITES:
+    for table in no_runtime_writes(version):
         if q("SELECT to_regclass(%s) IS NOT NULL", f"public.{table}"):
             leaks += [f"{role} {priv} {table}" for role in sorted(roles) for priv in ("UPDATE", "DELETE", "TRUNCATE")
                       if q("SELECT has_table_privilege(%s, %s, %s)", role, f"public.{table}", priv)]
