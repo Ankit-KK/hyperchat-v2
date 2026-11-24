@@ -8,8 +8,11 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
-# requires_db (tests/integration.py), the database suites' DSN / role gates, and their CI-PostgreSQL gate
-DB_SKIP = re.compile(r"HYPERCHAT_TEST_\w+|requires_db|throwaway CI PostgreSQL")
+# Only the skip texts of a MISSING database: requires_db (tests/integration.py), database/tests' role and migration
+# gates, the verifier's admin DSN (tests/payments/test_verify_db.py) and the db_only CI-PostgreSQL gates. By-design
+# skips (e.g. the verifier's DB-X rows, HYPERCHAT_TEST_EXCLUSIVE_CLUSTER) are not a missing database.
+DB_SKIP = re.compile(r"HYPERCHAT_TEST_(AUTH_DB|ROLE_DB|MIGRATION_DSN|VERIFY_ADMIN) not set"
+                     r"|requires_db|throwaway CI PostgreSQL")
 
 
 def db_skips(path: str) -> list[str]:

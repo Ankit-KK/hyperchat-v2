@@ -18,12 +18,16 @@ def skip(message: str) -> str:
 
 def test_database_skips_fail(tmp_path):
     for reason in ("HYPERCHAT_TEST_AUTH_DB not set", "HYPERCHAT_TEST_MIGRATION_DSN not set",
+                   "HYPERCHAT_TEST_VERIFY_ADMIN not set", "HYPERCHAT_TEST_ROLE_DB not set",
                    "needs the throwaway CI PostgreSQL (HYPERCHAT_CI_DB_SETUP=1)"):
         assert main([report(tmp_path, "", skip(reason))]) == 1, reason
 
 
 def test_other_skips_and_passes_are_fine(tmp_path):
     assert main([report(tmp_path, "", skip("needs gpg"), skip("Unix sockets"))]) == 0
+    by_design = ("DB-X: runs only with HYPERCHAT_TEST_EXCLUSIVE_CLUSTER=1 on X15 / X17 (A7a / A7b)",
+                 "finding assertions passed; exit 3 needs the activated I10 baseline (A5c)")
+    assert main([report(tmp_path, "", *map(skip, by_design))]) == 0
     xfail = '<skipped type="pytest.xfail" message="requires_db finding">x</skipped>'  # an xfail, not a skip
     assert main([report(tmp_path, "", xfail)]) == 0
 
