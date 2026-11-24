@@ -469,10 +469,13 @@ through 0034's owner functions.
   `donation_accounting_evaluations_ack_guard` trigger and both validated foreign keys. This is a catalog check:
   runtime roles cannot read `alembic_version` (0007). An unreachable database refuses too.
 - **L4 deploy check** (read-only, before any code rollback): `HYPERCHAT_READONLY_DSN=… python -m
-  app.payments.operator deploy-check --target-release <commit> [--releases-root /opt/hyperchat/releases]`. A release
-  carries the reversal-aware writer iff its tree has migration 0032 (`ACCOUNTING_WRITER_REVISION`). Exit 2 (refused)
-  when the target lacks it while any `applied_reversed_paise > 0` (revert first, L3), and on a malformed commit, a
-  missing release tree or a database it cannot read; exit 0 otherwise. Canonical JSON out.
+  app.payments.operator deploy-check --target-release <release> [--releases-root /opt/hyperchat/releases]`.
+  `<release>` is the 12-hex release id exactly as the host names its directory (`0963113493c7`), or a 40-hex commit
+  matching a directory named by the full commit or by its 12-hex prefix. A release carries the reversal-aware writer
+  iff its tree has migration 0032 (`ACCOUNTING_WRITER_REVISION`). Exit 2 (refused) when the target lacks it while any
+  `applied_reversed_paise > 0` (revert first, L3), and on a malformed target, no matching or an ambiguous (several
+  matching) release tree, an unreadable releases root or a database it cannot read; exit 0 otherwise. Canonical JSON
+  out. An operator guard against an accidental rollback, not a tamper control.
 - Deployment of 6a-4 to DEV or production is a separate owner decision (stage 6b, D-19 attestation, G4).
 - **Tests:** `tests/payments/test_switch_units.py` (no database) and `test_switch_db.py` (PostgreSQL 15 and 17).
 

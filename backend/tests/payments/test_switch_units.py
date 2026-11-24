@@ -69,6 +69,40 @@ def test_a_release_carries_the_writer_rule_iff_its_tree_has_migration_0032(tmp_p
             switch.carries_writer_rule(str(tmp_path), bad)
 
 
+def _tree(root, name, writer=False):
+    (root / name / "database" / "migrations" / "versions").mkdir(parents=True)
+    if writer:
+        (root / name / switch.WRITER_MIGRATION).write_text("# 0032\n")
+
+
+def test_a_release_is_named_as_the_host_names_it_or_by_its_full_commit(tmp_path):
+    """D-6b-1: release directories are the 12-hex release ids (/opt/hyperchat/releases/0963113493c7)."""
+    old, new = "0963113493c7", "26a458af0c8b"
+    _tree(tmp_path, old)
+    _tree(tmp_path, new, writer=True)
+    assert switch.carries_writer_rule(str(tmp_path), old) is False  # the 12-hex id exactly
+    assert switch.carries_writer_rule(str(tmp_path), new) is True
+    assert switch.release_dir(str(tmp_path), old + "d953b8323aa34e9bb77cb966795a") == tmp_path / old  # 40-hex by prefix
+    assert switch.carries_writer_rule(str(tmp_path), new + "6a3c11e8b9ada7ed3ac3fd825ce0") is True
+
+
+def test_a_target_naming_no_or_several_releases_is_refused(tmp_path):
+    commit = "0963113493c7d953b8323aa34e9bb77cb966795a"
+    _tree(tmp_path, commit[:12])
+    _tree(tmp_path, commit)  # both the id and the full commit: ambiguous
+    with pytest.raises(ValueError, match="ambiguous"):
+        switch.release_dir(str(tmp_path), commit)
+    assert switch.release_dir(str(tmp_path), commit[:12]) == tmp_path / commit[:12]  # the exact id stays unique
+    (tmp_path / ("f" * 12)).write_text("not a directory")
+    for bad, why in (("f" * 12, "no release"), ("0963113493c", "not a 12-hex"), ("0963113493c7d", "not a 12-hex"),
+                     ("0963113493C7", "not a 12-hex"), ("e" * 40, "no release"), ("../0963113493c7", "not a 12-hex"),
+                     ("1963113493c7d953b8323aa34e9bb77cb966795a", "no release")):  # a prefix only at the start
+        with pytest.raises(ValueError, match=why):
+            switch.release_dir(str(tmp_path), bad)
+    with pytest.raises(ValueError, match="cannot read the releases root"):
+        switch.release_dir(str(tmp_path / "missing"), commit[:12])
+
+
 @pytest.mark.parametrize("argv", [["deploy-check"], ["deploy-check", "--target-release", "nope"],
                                   ["deploy-check", "--target-release", "a" * 40, "--releases-root", "/nonexistent"],
                                   ["deploy-check", "--bogus"]])

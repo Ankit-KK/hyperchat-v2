@@ -221,7 +221,8 @@ are never edited: record their fingerprints first (`sha256sum /etc/hyperchat/api
 Production rollback (no step is automatic):
 - application: `ln -sfn /opt/hyperchat-prod/releases/<previous> /opt/hyperchat-prod/current && systemctl restart hyperchat-prod-api`;
   first run the PAY-15 L4 check from the current release, `HYPERCHAT_READONLY_DSN=… ../venv/bin/python -m
-  app.payments.operator deploy-check --target-release <previous> --releases-root /opt/hyperchat-prod/releases`,
+  app.payments.operator deploy-check --target-release <previous> --releases-root /opt/hyperchat-prod/releases`
+  (`<previous>` = the release id, the directory name under `releases/`, e.g. `0963113493c7`),
   and roll back only on exit 0 (exit 2: revert the applied reversals first, docs/payments-api.md);
   first release: `systemctl disable --now hyperchat-prod-api hyperchat-prod-cleanup.timer`;
 - Nginx: `rm /etc/nginx/sites-enabled/api.hyperchat.space` (and the two production snippets), `nginx -t`, reload;
