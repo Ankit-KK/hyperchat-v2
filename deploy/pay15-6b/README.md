@@ -13,6 +13,14 @@ and it runs on the DEV host only, started from a reviewed wrapper file, never an
 | S | `s_post.sh` | the DEV smoke, the integrity report, the verifier, and the L4 deploy-check against the previous release id |
 | X | `x_rollback.sh` | restores the window's backup by a database rename swap; nothing is dropped |
 
+**The verifier's findings are checked exactly** (R2 and S2, `findings_check.py`). The packet's `release.env` names them:
+- `EXPECTED_FINDINGS`: one `invariant|class|entity_kind|entity_id` per line (for DEV pre-A5c: the I10 baseline and the
+  I13 Gate T refund donation).
+- `KNOWN_ORPHANS`: the ids of deleted creators whose append-only credit history remains (earlier DEV smoke runs).
+  Their Erratum-1 `excluded_bucket_net_credit` findings are allowed.
+- S also allows them for creators whose whole credit history was written during its own smoke run: the smoke deletes
+  its synthetic creators, but not their history. Any other finding, or a missing expected one, is a FAIL.
+
 **Proved in CI:**
 - `database/tests/test_migrations.py::test_pay15_6b_packet_sql_on_a_fresh_0029_to_0035_upgrade` runs
   `sql/prestate.sql` and `sql/verify_0035.sql` on a fresh 0001 → 0029 → 0035 database, on PostgreSQL 15 and 17.
