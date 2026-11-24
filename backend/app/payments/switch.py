@@ -18,7 +18,7 @@ from pathlib import Path
 ACCOUNTING_WRITER_REVISION = "0032"
 WRITER_MIGRATION = "database/migrations/versions/0032_donation_reversal_accounting.py"
 RELEASES_ROOT = "/opt/hyperchat/releases"
-COMMIT = re.compile(r"[0-9a-f]{40}")
+RELEASE_ID = re.compile(r"[0-9a-f]{12}|[0-9a-f]{40}")  # the host's 12-hex release id, or a full commit
 
 HARDENING = """SELECT
     to_regprocedure('public.payment_accounting_scope_covers(jsonb, timestamp with time zone, text, uuid)')
@@ -58,13 +58,28 @@ async def require_hardening(connect) -> None:
                                 f"lacks migration 0035's hardening (missing: {', '.join(missing)})")
 
 
-def carries_writer_rule(releases_root: str, commit: str) -> bool:
-    """L4: whether the release tree <root>/<commit> has the writer migration. Refuses (ValueError) anything that is
-    not a 40-hex commit with an existing release directory. An operator guard against an accidental rollback, not a
-    tamper control: whoever can edit the release trees can defeat it, so file presence is sufficient."""
-    if not COMMIT.fullmatch(commit or ""):
-        raise ValueError(f"not a 40-hex commit: {commit!r}")
-    release = Path(releases_root) / commit
+def release_dir(releases_root: str, target: str) -> Path:
+    """The ONE release directory `target` names: a release id exactly as the host names its directory (12 hex, e.g.
+    0963113493c7), or a 40-hex commit matching a directory named by the full commit or by its 12-hex prefix. Refuses
+    (ValueError) a malformed target, no match, an ambiguous match or an unreadable root."""
+    if not RELEASE_ID.fullmatch(target or ""):
+        raise ValueError(f"not a 12-hex release id or a 40-hex commit: {target!r}")
+    try:
+        names = [p.name for p in Path(releases_root).iterdir() if p.is_dir() and RELEASE_ID.fullmatch(p.name)]
+    except OSError as exc:
+        raise ValueError(f"cannot read the releases root {releases_root} ({type(exc).__name__})") from None
+    matches = [n for n in names if n == target or (len(target) == 40 and len(n) == 12 and target.startswith(n))]
+    if len(matches) != 1:
+        raise ValueError(f"{'no' if not matches else 'an ambiguous'} release directory for {target} in {releases_root}"
+                         + (f" ({', '.join(sorted(matches))})" if matches else ""))
+    return Path(releases_root) / matches[0]
+
+
+def carries_writer_rule(releases_root: str, target: str) -> bool:
+    """L4: whether the release tree `target` names (release_dir) has the writer migration. Refuses (ValueError) a
+    target that does not name exactly one existing release tree. An operator guard against an accidental rollback, not
+    a tamper control: whoever can edit the release trees can defeat it, so file presence is sufficient."""
+    release = release_dir(releases_root, target)
     if not (release / "database" / "migrations" / "versions").is_dir():
         raise ValueError(f"no release tree with migrations at {release}")
     return (release / WRITER_MIGRATION).is_file()

@@ -21,7 +21,7 @@ second report not zero), 2 refused before anything was written.
 Stage 6a-4 adds the read-only L4 deploy check, run by the deploy runbook before any code rollback:
 
     HYPERCHAT_READONLY_DSN='... user=hyperchat_readonly' \
-        python -m app.payments.operator deploy-check --target-release COMMIT [--releases-root DIR]
+        python -m app.payments.operator deploy-check --target-release RELEASE [--releases-root DIR]
 
 Exit 0 when the rollback is allowed; 2 (refused) when the target release lacks the reversal-aware writer (migration
 0032) while any applied reversal exists (revert first, L3), and on anything it cannot establish (fail closed).
@@ -278,7 +278,8 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--output", help="also publish the report to this new file (never overwritten)")
     v.add_argument("--max-seconds", dest="max_seconds", help="the verification budget in seconds (required)")
     d = sub.add_parser("deploy-check", help="6a-4 L4: may the code be rolled back to this release? (read-only)")
-    d.add_argument("--target-release", dest="target", help="the 40-hex commit of the release to roll back to")
+    d.add_argument("--target-release", dest="target",
+                   help="the release to roll back to: its 12-hex id as the host names it, or its 40-hex commit")
     d.add_argument("--releases-root", dest="root", default=switch.RELEASES_ROOT,
                    help=f"the directory holding the release trees (default {switch.RELEASES_ROOT})")
     for name in WRITERS:
