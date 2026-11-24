@@ -62,13 +62,14 @@ if name == "curl":
 if name == "psql":
     sql = args[args.index("-Atc") + 1] if "-Atc" in args else sys.stdin.read()
     migrated = Path(state["marker"]).exists()
-    if "pg_control_system" in sql: print(state["identity"])
+    # the whole-file markers first: verify_0035.sql also names alembic_version and payment_accounting_state
+    if "'totals '" in sql: print("\n".join(state["prestate"]))
+    elif "'V1 head '" in sql: print("\n".join(state["verify"]))
+    elif "pg_control_system" in sql: print(state["identity"])
     elif "alembic_version" in sql: print("0035" if migrated else "0029")
     elif "FROM jobs WHERE status" in sql or "realtime_outbox" in sql or "pg_stat_activity" in sql: print("0")
     elif "datacl" in sql or "pg_db_role_setting" in sql: print("-")
     elif "FROM payment_accounting_state" in sql: print("off")
-    elif "'totals '" in sql: print("\n".join(state["prestate"]))
-    elif "'V1 head '" in sql: print("\n".join(state["verify"]))
     else: print("fake psql: unexpected query: " + sql[:120], file=sys.stderr); sys.exit(3)
     sys.exit(0)
 sys.exit(f"fake {name}: not emulated")
