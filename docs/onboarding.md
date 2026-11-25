@@ -69,7 +69,8 @@ S4's alert table once PR #148 is on `main` (TODO in the code).
 
 - **Q1:** the approve form's `razorpay_account` defaults to `primary`. An explicit value must still be a configured
   account. This reverses D12 for application approval only; `POST /api/v1/admin/creators` still requires the account
-  by name.
+  by name. The approve form accepts only `primary`, the one logical account since D6 retired `secondary` (migration
+  0018). A second account would need that field widened.
 - **Q3:** the manual resend `POST /api/v1/admin/applications/{id}/invite` no longer asks for a passkey grant. A
   presented grant is still consumed. Its refusal rules are unchanged (`creator_claimed`, `account_exists`).
 
