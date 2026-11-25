@@ -7,7 +7,7 @@
 # permission-sensitive SQL. Fails OPEN: without a usable base (manual run, first push, a base it cannot fetch) it runs.
 set -euo pipefail
 
-RELEVANT='^(database/|deploy/postgres/|deploy/pay15-6b/|\.github/|backend/app/(db|auth|kyc|stepup|admin|backup)/|backend/tests/(auth|kyc|stepup|admin|backup)/|backend/tests/payments/test_[a-z0-9_]+_db\.py|backend/tests/obs/test_(suspended_creator_access|player_failed_playback)_db\.py|backend/app/payments/(figures|repository|verify|accounting_ops|operator|switch)\.py|backend/tests/dashboard/test_moderation_api\.py|backend/requirements)'
+RELEVANT='^(database/|deploy/postgres/|deploy/pay15-6b/|\.github/|backend/app/(db|auth|kyc|stepup|admin|backup)/|backend/tests/(auth|kyc|stepup|admin|onboarding|backup)/|backend/app/onboarding/|backend/tests/payments/test_[a-z0-9_]+_db\.py|backend/tests/obs/test_(suspended_creator_access|player_failed_playback)_db\.py|backend/app/payments/(figures|repository|verify|accounting_ops|operator|switch)\.py|backend/tests/dashboard/test_moderation_api\.py|backend/requirements)'
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 base="${1:-}"
 
@@ -22,6 +22,6 @@ if grep -qE "$RELEVANT" <<<"$changed"; then
   echo "relevant changes:"; grep -E "$RELEVANT" <<<"$changed" | head -20 | sed 's/^/  /'
   echo "run=true" >> "$out"
 else
-  echo "no database, role, auth, KYC, step-up, admin, backup or CI change: nothing to run on PostgreSQL 15"
+  echo "no database, role, auth, KYC, step-up, admin, onboarding, backup or CI change: nothing to run on PostgreSQL 15"
   echo "run=false" >> "$out"
 fi

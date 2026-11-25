@@ -61,7 +61,7 @@ def test_the_postgres15_job_excludes_only_the_postgres17_importer():
     assert "postgres:15" in runs and "'^15\\.'" in runs
     assert "--deselect tests/test_auth_hash_import.py" in runs and runs.count("--deselect") == 1
     args = [a for s in steps if s.get("working-directory") == "backend" for a in str(s.get("run", "")).split()]
-    for suite in ("tests/auth", "tests/kyc", "tests/stepup", "tests/admin", "tests/backup",
+    for suite in ("tests/auth", "tests/kyc", "tests/stepup", "tests/admin", "tests/onboarding", "tests/backup",
                   "tests/payments/test_donation_history_guard_db.py",  # 0030: the per-role guard on DEV's PG 15
                   "tests/payments/test_donation_credit_db.py", "tests/dashboard/test_moderation_api.py",  # 0031
                   "tests/payments/test_accounting_db.py",  # 0032 reversal accounting

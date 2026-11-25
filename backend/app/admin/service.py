@@ -57,8 +57,8 @@ class AdminService:
     # ── creators ───────────────────────────────────────────────────────────
     async def create_creator(self, admin: User, body: dict, grant: Grant | None = None) -> dict:
         """Onboard a creator (legacy: a manual SQL insert, docs/ADD_NEW_STREAMER.md step 3). The new creator is
-        unclaimed: only admins can manage it until an invite with its streamer_id is accepted (step 16). The
-        Razorpay account is never defaulted (owner decision D12): the admin names it, and it must be configured."""
+        unclaimed: only admins can manage it until an invite with its streamer_id is accepted (step 16). This route
+        still requires the Razorpay account by name (D12); only application approval defaults it (Q1, creator_fields)."""
         fields = self.creator_fields(body)
         try:
             row = await self.repo.create_creator(fields, self.pusher_groups, grant)
@@ -79,7 +79,7 @@ class AdminService:
         name = " ".join(body["name"].split())
         if not 1 <= len(name) <= CREATOR_NAME_MAX:
             raise AuthError(400, f"Name must be 1-{CREATOR_NAME_MAX} characters", "bad_name")
-        account = body["razorpay_account"]
+        account = body.get("razorpay_account") or "primary"  # Q1 (owner 2026-11-25): the approve form's default
         if account not in self.payment_accounts:
             raise AuthError(400, "That Razorpay account is not configured on this server", "account_not_configured")
         fields = {"streamer_slug": slug, "streamer_name": name, "razorpay_account": account,

@@ -3,7 +3,8 @@
 Reads the same environment as the API (EnvironmentFile), connects as the same DML-only role (hyperchat_app,
 D6) and processes donation_audio and voice_transcription jobs with HYPERCHAT_WORKER_CONCURRENCY slots.
 Next to them, one loop publishes the realtime outbox to Pusher (Phase 9, app.realtime.publisher); while
-HYPERCHAT_REALTIME_ENABLED is false it only marks events 'skipped'.
+HYPERCHAT_REALTIME_ENABLED is false it only marks events 'skipped'. With HYPERCHAT_AUTO_INVITE_ENABLED=true and
+the `onboarding` email category active, a third loop invites approved creator applicants (app.onboarding.auto_invite).
 Paid providers are only constructed when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true and their key is set (D7);
 otherwise donation audio resolves to the silent fallback and transcription jobs fail as unavailable.
 SIGTERM/SIGINT stop it gracefully (see app.jobs.runner). Logs carry names and reason codes only.
@@ -13,18 +14,21 @@ import asyncio
 import logging
 import signal
 
+from app.admin.applications import ApplicationRepository
 from app.audio.handlers import DonationAudioHandler, VoiceTranscriptionHandler
 from app.audio.providers import ElevenLabsProvider, MiniMaxProvider, SarvamProvider
 from app.audio.repository import AudioRepository
 from app.audio.silence import ensure_silence
 from app.bots.clients import DiscordClient, TelegramClient
 from app.bots.notify import ModeratorNotifyHandler
+from app.auth.email import sender_from_settings
 from app.bots.repository import BotRepository
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.pool import Database
 from app.jobs.queue import JobQueue
 from app.jobs.runner import Worker
+from app.onboarding.auto_invite import AutoInviter
 from app.realtime.outbox import OutboxQueue
 from app.realtime.payloads import Renderer, RealtimeRepository
 from app.realtime.publisher import OutboxPublisher
@@ -68,6 +72,18 @@ def build_handlers(settings: Settings, connection_factory, store) -> dict:
     return handlers
 
 
+def build_auto_inviter(settings: Settings, connection_factory) -> AutoInviter | None:
+    """The automatic invitation loop, or None while it is off or could not send (docs/onboarding.md)."""
+    if not settings.auto_invite_enabled:
+        return None
+    if settings.email_backend != "resend" or "onboarding" not in settings.email_categories:
+        log.warning("automatic invitations not started", extra={"reason": "onboarding_email_inactive"})
+        return None
+    return AutoInviter(ApplicationRepository(connection_factory), sender_from_settings(settings),
+                       frontend_url=settings.frontend_url, ttl_days=settings.invite_ttl_days,
+                       poll_seconds=settings.auto_invite_poll_seconds)
+
+
 def build_publisher(settings: Settings, connection_factory) -> OutboxPublisher:
     silence_url = f"{settings.r2_public_base}/{SILENCE_KEY}" if settings.r2_public_base else None  # Phase 10
     return OutboxPublisher(OutboxQueue(connection_factory),
@@ -107,9 +123,15 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> int:
         log.info("realtime configuration", extra={
             "realtime_enabled": settings.realtime_enabled, "pusher_groups": settings.pusher_groups_configured,
             "pusher_invalid": settings.pusher_config_problems()})
-        await asyncio.gather(
-            Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency).run(stop),
-            publisher.run(stop))
+        inviter = build_auto_inviter(settings, db.connection)
+        log.info("onboarding configuration", extra={"auto_invite_enabled": inviter is not None})
+        try:
+            await asyncio.gather(
+                Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency).run(stop),
+                publisher.run(stop), *([inviter.run(stop)] if inviter else []))
+        finally:
+            if inviter is not None:
+                await inviter.sender.aclose()
     finally:
         await db.close()
     return 0

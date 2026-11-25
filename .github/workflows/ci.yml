@@ -141,7 +141,7 @@ jobs:
       - name: Backend permission suites (auth, KYC, step-up, admin, backup, every payments and integrity suite but the verifier above, suspended-creator and failed-playback OBS checks, moderation)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
-        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/backup tests/payments --ignore=tests/payments/test_verify_db.py tests/obs/test_suspended_creator_access_db.py tests/obs/test_player_failed_playback_db.py tests/dashboard/test_moderation_api.py
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/onboarding tests/backup tests/payments --ignore=tests/payments/test_verify_db.py tests/obs/test_suspended_creator_access_db.py tests/obs/test_player_failed_playback_db.py tests/dashboard/test_moderation_api.py
 
   integration:
     name: Database + integration tests (PostgreSQL 17)
