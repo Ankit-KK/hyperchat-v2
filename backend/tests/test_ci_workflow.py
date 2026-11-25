@@ -17,6 +17,7 @@ CHECK_NAMES = {
     "deploy-config": "Deployment configuration (nginx syntax + rate limits)",
     "integration": "Database + integration tests (PostgreSQL 17)",
     "postgres15": "PostgreSQL 15 compatibility (migrations + permissions)",
+    "frontend": "Frontend (lint, typecheck, tests, build, guards)",
 }
 
 
@@ -107,6 +108,19 @@ def test_both_database_jobs_capture_the_ci_identity_right_before_the_backend_sui
     integration = [str(s.get("run", "")) for s in WORKFLOW["jobs"]["integration"]["steps"]]
     assert any(r.startswith(diagnostic) for r in integration)  # T-8 appends --junitxml for the skip guard
 
+
+
+def test_the_frontend_job_runs_every_check_against_the_dev_api_and_is_scoped():
+    job = WORKFLOW["jobs"]["frontend"]
+    assert job["env"]["NEXT_PUBLIC_API_BASE_URL"] == "https://api.quicktestspace.site"
+    steps = job["steps"]
+    runs = [str(s.get("run", "")) for s in steps]
+    for command in ("pnpm install --frozen-lockfile", "pnpm guard", "pnpm check:api", "pnpm format:check",
+                    "pnpm lint", "pnpm typecheck", "pnpm test", "pnpm build"):
+        assert command in runs, command
+    assert steps[1]["id"] == "scope" and "frontend-scope.sh" in runs[1]
+    gated = [s for s in steps if s.get("id") != "scope" and "actions/checkout" not in str(s.get("uses"))]
+    assert all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in gated)
 
 needs_git = pytest.mark.skipif(sys.platform == "win32" or not shutil.which("git"), reason="needs bash and git")
 

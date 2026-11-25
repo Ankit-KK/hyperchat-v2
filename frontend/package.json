@@ -1,0 +1,26 @@
+{
+  "name": "hyperchat-frontend",
+  "private": true,
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=24.21.0 <25",
+    "pnpm": "10.34.9"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test": "pnpm -r test && node --test scripts/guard-prod-api.test.mjs",
+    "build": "pnpm --filter @hyperchat/web --filter @hyperchat/admin build",
+    "guard": "node scripts/guard-prod-api.mjs",
+    "generate:api": "pnpm --filter @hyperchat/api-client generate",
+    "check:api": "pnpm --filter @hyperchat/api-client generate && git diff --exit-code -- packages/api-client/src/schema.d.ts"
+  },
+  "devDependencies": {
+    "@hyperchat/config": "workspace:*",
+    "eslint": "9.39.5",
+    "prettier": "3.9.10",
+    "typescript": "5.9.3"
+  }
+}

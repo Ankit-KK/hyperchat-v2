@@ -1,0 +1,5 @@
+{
+  "extends": "@hyperchat/config/tsconfig/base.json",
+  "compilerOptions": { "types": ["@testing-library/jest-dom/vitest"] },
+  "include": ["src", "vitest.config.ts"]
+}
