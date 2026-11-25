@@ -8,9 +8,11 @@ calls to any URL; tests in `backend/tests/ops/test_legacy_asset_inventory.py`).
 
 **Out of scope here:** the image upload API for new creators (profile picture and 16:9 background, validated and
 optimised by the backend, replaceable later). That is part of the creator onboarding plan (PDP v1.1, document to
-follow) and decides the upload design; nothing in this plan builds or constrains an upload endpoint. The D-M2c limits
-(logo ≤ 1 MB, background ≤ 3 MB, JPEG/PNG/WebP only) are applied **to new uploads** there; legacy files are copied
-byte for byte (section 4) and only *reported* against those limits.
+follow) and decides the upload design; nothing in this plan builds or constrains an upload endpoint. The owner's PDP v1.1
+(2026-11-25) proposes 5 MB (profile) / 10 MB (background) limits for new uploads, so the size limits for new uploads
+are decided by the onboarding plan. Here the D-M2c figures (logo ≤ 1 MB, background ≤ 3 MB, JPEG/PNG/WebP only) serve
+only as the **reporting threshold for legacy files** until that plan decides; legacy files are copied byte for byte
+(section 4) and only *reported* against them.
 
 ## 0. Open owner inputs (needed before step 3 of section 4 can start)
 
@@ -64,7 +66,7 @@ creator-assets/<streamer uuid>/<logo|background>/<sha256 hex of the bytes>.<jpg|
 - **Consistent with `WRITABLE_KEY`**: the store refuses writes outside its patterns today, so the copy step cannot
   use `R2Store` until a later PR adds `CREATOR_ASSET_KEY =
   ^creator-assets/<uuid>/(logo|background)/[0-9a-f]{64}\.(jpg|png|webp|gif)$` to `WRITABLE_KEY` (and a matching
-  `head_` check). That PR comes with O-4, not before. The daily cleanup lists only `voice-messages/` and
+  `head_` check). That PR comes with O-4, not before, and not before 2026-12-01 (migration freeze, section 3). The daily cleanup lists only `voice-messages/` and
   `donation-media/`, so it never sees these objects.
 - Extension from the legacy file name, lower-cased (`.jpeg` becomes `.jpg`); the content type written to R2 is the
   **sniffed** type (`backend/app/uploads/media.py`, `sniff_image`), and a mismatch between extension and bytes stops
@@ -98,7 +100,10 @@ public.streamer_asset_migrations (
 
 Grants: SELECT to `hyperchat_readonly`; INSERT/UPDATE only to the role of O-7; the API roles get nothing (the API
 never reads it). `ON DELETE RESTRICT`: a creator with a migration record is not deleted by accident. The migration
-file (`database/migrations/versions/00xx_streamer_asset_migrations.py`) is written in the O-4 PR; the previous release
+file (`database/migrations/versions/00xx_streamer_asset_migrations.py`) is written in the O-4 PR.
+**Migration freeze:** no migration, this audit table included, can merge or apply before 2026-12-01.
+`backend/app/payments/verify.py` pins `EXPECTED_HEADS` to `0034` / `0035` and is frozen during the PAY-15 soak. The O-4 PR
+therefore lands after the soak and after a separate PR that widens the verifier pins. Once applied, the previous release
 ignores the table.
 
 ## 4. Copy procedure (per creator, DEV first, then production; every window approved)
