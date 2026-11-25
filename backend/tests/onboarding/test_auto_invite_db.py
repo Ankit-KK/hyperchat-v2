@@ -75,7 +75,7 @@ def test_the_fifth_failure_alerts_and_stops(approved, inviter):
         age_events(sid)
     assert asyncio.run(loop.run_once()) == []  # no sixth attempt, however long it waits
     [(source, code, context)] = alerts(sid)
-    assert (source, code) == ("onboarding", "transient")
+    assert (source, code) == ("auto_invite", "transient")
     assert context == {"kind": "invite_failed", "signup_id": sid, "invite_id": invites(sid)[-1][0]}  # ids only
     assert sender.attempts == MAX_ATTEMPTS and all(i[3] for i in invites(sid))
     assert [e[2] for e in events(sid)].count("auto") == MAX_ATTEMPTS
@@ -137,7 +137,7 @@ def test_a_step_up_refusal_is_recorded_and_pauses_the_application(approved, invi
     set_enforcement("active")  # Q14: the loop must survive the step-up state it was not built for
     try:
         assert asyncio.run(inviter(sender).run_once()) == [(sid, "paused")]
-        assert [(a[0], a[1]) for a in alerts(sid)] == [("onboarding", "stepup_refused")]
+        assert [(a[0], a[1]) for a in alerts(sid)] == [("auto_invite", "stepup_refused")]
     finally:
         set_enforcement("draft")
     assert events(sid)[-1] == ("note", None, "auto:paused:stepup_refused") and invites(sid) == []

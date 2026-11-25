@@ -10,7 +10,7 @@ publisher.
 | Kind | Source | Written when | Code (`message`) | Ids (`context`) |
 |---|---|---|---|---|
 | `job_failed` | `worker` | a background job finishes `failed`: its attempts ran out, or it hit a permanent error | the job's reason code (`provider_auth`, `max_attempts`, ...) | `job_id`, `job_kind`, `dedupe_key` (the job's subject id) |
-| `invite_failed` | `onboarding` | an automatic creator invitation stopped: its fifth email failed, or the database refused it (step-up `active`; `docs/onboarding.md`) | the email failure code (`transient`, ...) or `stepup_refused` / `guard_refused` | `signup_id`, and `invite_id` after a failed email |
+| `invite_failed` | `auto_invite` | an automatic creator invitation stopped: its fifth email failed, or the database refused it (step-up `active`; `docs/onboarding.md`) | the email failure code (`transient`, ...) or `stepup_refused` / `guard_refused` | `signup_id`, and `invite_id` after a failed email |
 | `payment_on_hold` | `payments` | a creator's `streamer_payment_health` row goes on hold, or its hold reason changes; a hold that clears and comes back is alerted again | `invalid_key` or `missing_key` | `streamer_id` |
 
 - **Severity:** every alert is `error`.

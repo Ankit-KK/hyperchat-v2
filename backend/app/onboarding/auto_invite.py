@@ -18,7 +18,7 @@ outcome is kept as actor-less application_events rows (codes only, never an addr
   note 'auto:skipped:<code>'              account_exists (owner decision Q2: the manual owner-assign path) or similar
   note 'auto:paused:<code>'               the database refused the insert (step-up 'active' before migration 0037)
 After the MAX_ATTEMPTS-th failure, or on a pause, an `invite_failed` alert is recorded (app.alerts, source
-'onboarding', ids only) and the application is left to the manual resend route.
+'auto_invite', ids only) and the application is left to the manual resend route.
 
 shortcut: an invitation committed but never sent (the worker died between commit and send) stays open until it
 expires and is never retried automatically; the admin view shows it as pending with no failure. Upgrade with the
@@ -94,7 +94,7 @@ class AutoInviter:
     async def _alert(self, code: str, **ids: str) -> None:
         log.warning("automatic invitation alert", extra={"reason": code, **ids})
         try:
-            await self.alerts.record(kind="invite_failed", source="onboarding", code=code, **ids)
+            await self.alerts.record(kind="invite_failed", source="auto_invite", code=code, **ids)
         except Exception as exc:  # noqa: BLE001 - alerting never fails what it reports on (app.alerts)
             log.warning("alert not recorded", extra={"kind": "invite_failed", "error": type(exc).__name__})
 
