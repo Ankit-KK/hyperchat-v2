@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { API_ORIGIN } from "./lib/api";
 import { securityHeaders } from "./lib/headers";
-import { DEFAULT_HOST_MAP, parseHostMap, routeFor, zoneFor } from "./lib/hosts";
+import { DEFAULT_HOST_MAP, normalizeHost, parseHostMap, routeFor, zoneFor } from "./lib/hosts";
 
 // Next.js 16 renamed middleware.ts to proxy.ts (same behaviour; it runs on the Node.js runtime).
 const HOSTS = parseHostMap(process.env.WEB_HOST_MAP || DEFAULT_HOST_MAP);
@@ -15,6 +15,9 @@ export function proxy(request: NextRequest) {
     dev: process.env.NODE_ENV === "development",
     https: request.nextUrl.protocol === "https:",
   });
+  // An unmapped host (a *.vercel.app URL, a stray DNS name) serves the public site but must never be indexed.
+  const host = request.headers.get("host");
+  if (!host || !HOSTS.has(normalizeHost(host))) headers["X-Robots-Tag"] = "noindex";
 
   const route = routeFor(zone, request.nextUrl.pathname);
   let response: NextResponse;

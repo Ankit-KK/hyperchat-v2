@@ -100,6 +100,11 @@ describe("proxy", () => {
     expect(res.headers.get("x-middleware-rewrite")).toBeNull();
   });
 
+  it("marks an unmapped host noindex even though it serves the public site", () => {
+    expect(call("https://my-app-git-main.vercel.app/").headers.get("x-robots-tag")).toBe("noindex");
+    expect(call("https://quicktestspace.site/").headers.get("x-robots-tag")).toBeNull();
+  });
+
   it("passes the public host through with a fresh nonce per request", () => {
     const a = call("https://quicktestspace.site/tsukii").headers.get("content-security-policy");
     const b = call("https://quicktestspace.site/tsukii").headers.get("content-security-policy");

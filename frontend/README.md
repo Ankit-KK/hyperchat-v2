@@ -78,7 +78,8 @@ Only `*.env.example` files are committed. Copy one to `.env.local` in the same a
 
 How `apps/web/proxy.ts` routes (Next.js 16 renamed `middleware.ts` to `proxy.ts`):
 
-- The `Host` header picks the zone. Unknown hosts, Vercel preview URLs included, get the public site.
+- The `Host` header picks the zone. Unknown hosts, Vercel preview URLs included, get the public site, sent with
+  `X-Robots-Tag: noindex`.
 - The auth, dashboard and overlay zones are rewritten to the internal segments `/auth`, `/dashboard` and `/obs`.
   Their pages live in the route groups `(auth)`, `(dashboard)` and `(overlay)`; the public pages live in `(public)`.
   The segments are reserved creator slugs, so no creator page can collide with them, and requesting one directly
@@ -166,20 +167,28 @@ change the values.
 
 ## Vercel setup (owner)
 
-Nothing here deploys. When you set up hosting:
+Nothing here deploys. These steps follow Vercel's monorepo, build and package-manager docs
+(vercel.com/docs/monorepos, /docs/builds/configure-a-build, /docs/package-managers). Check the first build log of
+each project for the points marked "check".
 
-1. Create two Vercel projects from this repository, both with the root directory `frontend`.
-2. **`hyperchat-web`** uses `pnpm --filter @hyperchat/web build` with output `apps/web/.next`. Add the domains
-   `quicktestspace.site`, `auth.quicktestspace.site`, `dashboard.quicktestspace.site` and
-   `overlay.quicktestspace.site`. Add the `hyperchat.space` domains only at the production cutover.
-3. **`hyperchat-admin`** uses `pnpm --filter @hyperchat/admin build` with output `apps/admin/.next`. Add the domain
-   `admin.quicktestspace.site`.
-4. Set environment variables per environment. Preview and Development get
+1. Create two Vercel projects from this repository. Set **Root Directory** to the app folder: `frontend/apps/web`
+   for `hyperchat-web` and `frontend/apps/admin` for `hyperchat-admin`. Keep **Include files outside the root
+   directory in the Build Step** on, since the apps import `frontend/packages/*`.
+2. Check: the first build log should show `pnpm install` resolving the whole workspace from
+   `frontend/pnpm-lock.yaml`. The docs do not say this outright. If the install misses the workspace, set the
+   Install Command to `cd ../.. && pnpm install --frozen-lockfile`.
+3. Set `ENABLE_EXPERIMENTAL_COREPACK=1` in both projects, so Vercel uses the pnpm pinned in `packageManager`
+   rather than guessing one from the lockfile. Use Node.js 24.x.
+4. Domains. On `hyperchat-web`, add `quicktestspace.site`, `auth.quicktestspace.site`,
+   `dashboard.quicktestspace.site` and `overlay.quicktestspace.site`. On `hyperchat-admin`, add
+   `admin.quicktestspace.site`. Add the `hyperchat.space` domains only at the production cutover.
+5. Environment variables per environment. Preview and Development get
    `NEXT_PUBLIC_API_BASE_URL=https://api.quicktestspace.site`. Production also gets the DEV API until the cutover,
    and then the production API in Production only. Set `WEB_HOST_MAP` or `ADMIN_HOSTS` only to change the built-in
    host lists.
-5. Turn on Deployment Protection (Vercel Authentication) for every preview of `hyperchat-admin`. Previews of
-   `hyperchat-web` serve the public zone. Vercel marks preview deployments `noindex`.
-6. Node.js version: 24.x. Vercel reads pnpm from `packageManager`.
+6. Under Deployment Protection, turn on Vercel Authentication with Standard Protection for both projects. It
+   protects every preview and generated URL, leaving only the custom domains public. Check that it is on, because
+   the default is a team setting. The apps also send `X-Robots-Tag: noindex` on every host outside their host
+   lists, so `*.vercel.app` URLs are never indexed even without protection.
 7. Before the dev hosts work end to end, the API must allow their origins. That is the post-soak backend change in
    review §6 G1-G2.

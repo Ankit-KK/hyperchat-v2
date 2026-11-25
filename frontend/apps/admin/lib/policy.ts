@@ -33,7 +33,8 @@ export function adminHeaders(
   const csp = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${dev ? " 'unsafe-eval'" : ""}`,
-    `style-src 'self' 'nonce-${nonce}'`,
+    // Dev only: Next's dev overlay injects <style> without the nonce (and a nonce would void 'unsafe-inline').
+    dev ? "style-src 'self' 'unsafe-inline'" : `style-src 'self' 'nonce-${nonce}'`,
     "img-src 'self' data:",
     "font-src 'self'",
     `connect-src 'self' ${apiOrigin}`,

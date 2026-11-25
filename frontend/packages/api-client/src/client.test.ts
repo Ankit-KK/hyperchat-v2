@@ -109,6 +109,21 @@ describe("results", () => {
     });
   });
 
+  it("refuses a 200 whose body is not JSON instead of returning no data", async () => {
+    server.use(
+      http.get(`${BASE}/api/v1/public/config`, () => new HttpResponse("<html>ok</html>", { status: 200 })),
+    );
+    expect(await client().get("/api/v1/public/config")).toEqual({
+      ok: false,
+      error: { kind: "http", status: 200, error: "The API answered with an unreadable body", code: null },
+    });
+  });
+
+  it("accepts a 204 without a body", async () => {
+    server.use(http.post(`${BASE}/api/v1/auth/logout`, () => new HttpResponse(null, { status: 204 })));
+    expect(await client().post("/api/v1/auth/logout")).toEqual({ ok: true, status: 204, data: undefined });
+  });
+
   it("returns typed data on success", async () => {
     server.use(
       http.get(`${BASE}/api/v1/metrics/showcase`, () =>

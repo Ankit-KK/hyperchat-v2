@@ -92,7 +92,19 @@ export function createApiClient({
     }
 
     const parsed: unknown = await response.json().catch(() => undefined);
-    if (response.ok) return { ok: true, status: response.status, data: parsed as T } as const;
+    if (timeout.aborted) return fail({ kind: "timeout", error: `No answer within ${timeoutMs} ms` });
+    if (response.ok) {
+      if (parsed === undefined && response.status !== 204) {
+        // A success page that is not JSON (a proxy page, a cut-off body, a CSV route): never hand back no data.
+        return fail({
+          kind: "http",
+          status: response.status,
+          error: "The API answered with an unreadable body",
+          code: null,
+        });
+      }
+      return { ok: true, status: response.status, data: parsed as T } as const;
+    }
     const fields = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
     const error =
       typeof fields.error === "string" ? fields.error : `Request failed (HTTP ${response.status})`;
