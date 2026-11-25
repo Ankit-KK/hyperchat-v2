@@ -135,7 +135,7 @@ class AlertNotifier:
                  interval: float = 30.0, batch: int = 20) -> None:
         self.alerts, self.discord, self.channel_id, self.app_env = alerts, discord, channel_id, app_env
         self.interval, self.batch = interval, batch
-        self.held: set[str] | None = None  # creators on hold at the last scan (None: not scanned yet)
+        self.held: dict[str, str] | None = None  # creator -> hold status at the last scan (None: not scanned yet)
         self.stopping: asyncio.Event | None = None
 
     @property
@@ -143,17 +143,19 @@ class AlertNotifier:
         return self.discord is not None and bool(self.channel_id)
 
     async def scan_holds(self) -> int:
-        """Alert each creator that went on hold since the last scan. On the first scan after a start, a hold whose
+        """Alert each creator that went on hold, or whose hold reason changed, since the last scan. On the first scan
+        after a start, a hold whose
         latest alert already carries the same code is not alerted again."""
         rows = await self.alerts.holds()
         new = 0
         for row in rows:
-            seen = row["streamer_id"] in self.held if self.held is not None else row["alerted"] == row["status"]
+            last = self.held.get(row["streamer_id"]) if self.held is not None else row["alerted"]
+            seen = last == row["status"]  # the same hold with the same reason: already alerted
             if not seen:
                 await self.alerts.record(kind="payment_on_hold", source="payments", code=row["status"],
                                          streamer_id=row["streamer_id"])
                 new += 1
-        self.held = {r["streamer_id"] for r in rows}
+        self.held = {r["streamer_id"]: r["status"] for r in rows}
         return new
 
     async def _send(self, alert: dict) -> None:
