@@ -7,11 +7,20 @@
 **Update 2026-10-25, 16:32 UTC:** DEV runs release **`a9b9486efd86`**, deployed application-only with no migration
 (section 4, "DEV deployment of `a9b9486`"). Production is unchanged.
 
-**Current state (as of 2026-11-22, from records; re-verify before the next DEV window):** `main` is `210897e` (#129),
-head `0034`. DEV code release `8e1284871a05` (2026-10-28 record, not re-verified); DEV database at `0029`
-(2026-11-02T15:08Z, C1 Gate M record). Migrations 0030–0034 are on `main` and not on DEV; for their deployment plan see
-the PAY-15 row of [`docs/backend-completion-checklist.md`](../backend-completion-checklist.md) (the Stage 6 plan itself
-lives outside the repo). Production is unchanged at `940137070657`, 0009.
+**Current state (as of 2026-11-25, from records outside the repo; re-verify before the next DEV window):** `main` is
+`a98eb13` (#144), head `0035`. DEV code release `b8c1596466f6` at `0035`, deployed in the PAY-15 stage 6b window on
+2026-11-24 (closure record `D:\tmp\pay15-6b-window-20261124\PAY15-6B-WINDOW-CLOSURE.md`, sha256 `cda6bf3f…`). Production
+is unchanged at `940137070657`, 0009.
+
+**Note 2026-11-25:** migrations 0030–0035 are on DEV since 2026-11-24, so every migration on `main` has run on DEV.
+DEV payment accounting is active since 2026-11-24 18:20Z (stage 6d record `D:\tmp\pay15-6d-run-20261124\PAY15-6D-RESULT.md`,
+`5adc652a…`) with a 7-day soak to 2026-12-01. The open item is now the **production deployment of 0010–0035** (§5), after
+the soak and the PAY-15 go decision. Backups: DEV off-site to a separate-account R2 bucket since 2026-11-23 with Discord
+failure alerting (2026-11-24, evidence `D:\tmp\hyperchat-offsite-dev-c2-evidence-20261124`); restore drills on a separate
+host PASSED for a 0029 set (gate R rev 3, 2026-11-24 19:11Z, `D:\tmp\hyperchat-gateR-oracle-r3-20261125`) and a 0035
+set (FU-4, 2026-11-25 06:14Z, `D:\tmp\hyperchat-restore0035-oracle-r2-20261125-run\FU4-PASS-20261125T0614Z.md`);
+production still has no off-site copy (interim C3). Details per row in
+[`docs/backend-completion-checklist.md`](../backend-completion-checklist.md).
 
 ## 1. Code complete is not verified end to end
 | Area | Code and CI | Verified end to end on DEV | Needed before production |
@@ -25,7 +34,7 @@ lives outside the repo). Production is unchanged at `940137070657`, 0009.
 | Email (Resend), five categories (#105, #106) | yes (merged at `a9b9486`) | DEV: five keys installed; **onboarding active**, and onboarding **email delivery verified** (one message, 2026-10-26). Not verified: the full invitation workflow and password reset (authentication inactive) | §4 |
 | Uploads and storage (R2), upload cleanup (D9) | yes | BLOCKED (R2 writes not approved) | `HYPERCHAT_SMOKE_R2=1` run [APPROVAL] |
 | TTS, transcription, bots, Google sign-in | yes | not configured | per product scope |
-| Backups and restore checks | yes | yes (DEV: two sets, scratch restores) | A3 install on production (§5) |
+| Backups and restore checks | yes | yes (DEV: off-site to R2 since 2026-11-23, Discord alerting, restore drills of a 0029 and a 0035 set passed on a separate host 2026-11-24/25) | A3 install and off-site (C1) on production (§5) |
 | Rollback (Phase F) | yes (fail-closed, #98) | control flow only (harness); not run on a real cluster | §3 rehearsal [APPROVAL] |
 
 ## 2. Restrict access to `hyperchat_restore_test` (DEV cluster only)
@@ -212,7 +221,7 @@ Admin-only DEV flows can't be exercised until the owner decides how a DEV admini
 ## 5. Production migration and cutover prerequisites
 Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, no lifecycle, auth or stepup roles, no witness, no verifier, and no Razorpay keys. In order, each step **[APPROVAL]**:
 1. **Production backup install (A3):** the fixed backup script, its units and a production KYC witness. Then one production backup and a scratch `restore_check` with `--roles-sql` (docs/backup-recovery.md).
-2. **A production migration runbook, 0010 → 0034,** modelled on the DEV rehearsal (0030–0034 enter it only after their Stage 6 DEV validation; see the PAY-15 row of the checklist). Production is on PostgreSQL 17 and starts at 0009, so it needs its own revisions list, baseline, gates and rollback (a Phase F equivalent against the A3 backup).
+2. **A production migration runbook, 0010 → 0035,** modelled on the DEV rehearsal (0030–0035 are on DEV since 2026-11-24; they enter it after the PAY-15 soak and go decision; see the PAY-15 row of the checklist). Production is on PostgreSQL 17 and starts at 0009, so it needs its own revisions list, baseline, gates and rollback (a Phase F equivalent against the A3 backup).
 3. **Roles and authentication rules** on `17/hyperchat`: `roles.sql`, `setup_cluster.sh`, the production `pg_ident` lines; `check_isolation.sh prod` passes.
 4. **Release build and switch** of the target commit, as in Phase D.
 5. **Step-up verifier** (docs/admin-stepup.md "Deployment sequence" 4–6): install the `hyperchat-prod-stepup` unit and OS user, set `HYPERCHAT_STEPUP_SOCKET`, enroll two passkeys per administrator, operator approval, `readiness` = ready, then activation through the operator tool only.
@@ -228,7 +237,7 @@ Production runs `940137070657` at **0009**, with the old `pg_hba` / `pg_ident`, 
 | 4 | `hyperchat_restore_test` R0 → R2 (→ R4) | [APPROVAL] |
 | 5 | Opt-in smoke sections for Razorpay and email: merged (#103); move the email check onto the onboarding category settings | code |
 | 6 | Disposable F3–F4 rehearsal on the VPS | [APPROVAL] |
-| 7 | Production A3 backup install; production migration runbook 0010 → 0034 (0030–0034 after Stage 6 DEV validation) | [APPROVAL] / docs |
+| 7 | Production A3 backup install and off-site (C1); production migration runbook 0010 → 0035 (after the PAY-15 soak, 2026-12-01) | [APPROVAL] / docs |
 | 8 | Step-up verifier on DEV, then production; enrollment; activation | [APPROVAL] |
 | 9 | Didit sandbox; R2 run (`HYPERCHAT_SMOKE_R2=1`); D1 hosted rehearsal | [APPROVAL] |
 | 10 | PAY-7 test payment (needs a client) | owner-run |
