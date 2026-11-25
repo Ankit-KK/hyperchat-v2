@@ -37,7 +37,6 @@ from app.bots.clients import TelegramClient
 from app.bots.discord import DiscordBot
 from app.bots.repository import BotRepository
 from app.bots.telegram import TelegramBot
-from app.alerts import Alerts
 from app.obs.queue import AudioQueue
 from app.obs.service import ObsService
 from app.obs.tokens import TokenRepository
@@ -142,7 +141,6 @@ async def lifespan(app: FastAPI):
                                                          accounting=settings.payment_accounting_enabled),
             accounts=payment_accounts, client=razorpay,
             health=AccountHealth(razorpay), library=app.state.hypersounds, store=store, limiter=app.state.auth.repo)
-        app.state.payments.alerts = Alerts(conn)  # operator alert when a creator's account goes on hold
         # Phase 9: channel authorization and client config; events are published by the worker.
         app.state.realtime = RealtimeService(
             enabled=settings.realtime_enabled, apps=PusherApps.from_settings(settings), repo=RealtimeRepository(conn),

@@ -79,7 +79,6 @@ class PaymentService:
         self.public, self.repo, self.accounts, self.client, self.health = public, repo, accounts, client, health
         self.library, self.store, self.limiter = library, store, limiter
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
-        self.alerts = None  # app.alerts.Alerts (set by main.py): operator alert when an account goes on hold
 
     async def check_rate(self, action: str, client_ip: str | None) -> None:
         bucket, limit, window = RATE_RULES[action]
@@ -186,9 +185,6 @@ class PaymentService:
         stale = checked is None or datetime.now(UTC) - checked > timedelta(seconds=HEALTH_TTL_SECONDS)
         if stale or settings["health_status"] != status or settings["health_on_hold"] != (status != "ok"):
             await self.repo.record_health(creator["id"], status)
-            # a NEW hold (or a changed reason), never a stale refresh of the same hold; network_error is transient
-            if status not in ("ok", "network_error") and settings["health_status"] != status and self.alerts:
-                await self.alerts.payment_on_hold(creator["id"], status)
         if status == "network_error":  # transient: the same answer as an unreachable order creation, not a hold
             security_event("payment_unavailable", reason=status, streamer_slug=creator["streamer_slug"])
             raise ApiError(502, UNAVAILABLE, "razorpay_unavailable")

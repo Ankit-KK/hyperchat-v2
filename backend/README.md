@@ -44,7 +44,8 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 `HYPERCHAT_DB_LABEL` is reported in logs and `/health`; the app refuses to start with
 `HYPERCHAT_APP_ENV=production` if the label contains `TEST` or `DEV`.
 `HYPERCHAT_ALERT_DISCORD_CHANNEL_ID` (unset by default) is the Discord channel that receives operator failure alerts,
-posted with `HYPERCHAT_DISCORD_BOT_TOKEN`; unset, alerts are only recorded ([`../docs/alerting.md`](../docs/alerting.md)).
+posted with `HYPERCHAT_DISCORD_BOT_TOKEN` by the worker every `HYPERCHAT_ALERT_POLL_SECONDS` (default 30); unset, alerts
+are only recorded ([`../docs/alerting.md`](../docs/alerting.md)).
 
 ## Authentication (`/api/v1/auth`)
 - Passwords: Argon2id. bcrypt hashes imported from the legacy system at cutover verify and are

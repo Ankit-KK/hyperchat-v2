@@ -292,6 +292,7 @@ class Settings(BaseSettings):
     # Operator failure alerts (docs/alerting.md): the Discord channel that receives them, posted with the bot token
     # above. Unset (default) = alerts are only recorded in system_alerts; nothing is sent.
     alert_discord_channel_id: str | None = None
+    alert_poll_seconds: float = Field(30.0, ge=5, le=3600)  # the worker's alert loop interval (and retry backoff base)
 
     @field_validator("alert_discord_channel_id")
     @classmethod

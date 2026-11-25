@@ -89,6 +89,8 @@ python -m app.cli --env-file /etc/hyperchat/api.env bots-set-discord-endpoint \
     --url https://<api host>/api/v1/webhooks/discord --expect-application-id <test application id>
 ```
 
+Operator failure alerts reuse `HYPERCHAT_DISCORD_BOT_TOKEN` to post to an operator channel; see [`alerting.md`](alerting.md).
+
 Both refuse if the configured token belongs to another bot or application, so the legacy production bot can never be re-pointed by mistake.
 
 ## Deferred
