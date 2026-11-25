@@ -43,6 +43,8 @@ check_isolation.sh              read-only server audit of one environment (dev|p
 postgres/pg_ident.production.conf    ident map of the PRODUCTION cluster only (hyperchat-prod; no DEV user)
 tools/readonly_lint.py          local lint for scripts meant to be read-only (OPS-2 S3; "Running commands against a server")
 tools/nginx_drift_check.sh, nginx_fingerprints.txt  local nginx drift check vs recorded deployed hashes (OPS-2 S4)
+tools/legacy_asset_inventory.py  read-only inventory of creator logo / background URLs (D-M2b, CRE-8): CSV + summary,
+                                no URL is fetched; the copy plan is docs/operations/legacy-asset-migration-plan.md
 backup/                         nightly verified backup sets: production (02:30 UTC) and DEV (02:00 UTC), 14-day
                                 retention keeping the newest 3; optional encrypted off-site copies (disabled);
                                 restore verification and recovery runbooks: docs/backup-recovery.md
