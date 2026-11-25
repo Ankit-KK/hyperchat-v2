@@ -97,6 +97,25 @@ outside these rules is `400 {"error": "<field> <rule>"}` (e.g. `message_min_amou
 `voice_tiers allows at most 5 tiers`), nothing written. Checkout and the public pricing endpoint read these exact
 columns and rows, so a change applies to the next donation. The TTS (`min_tts_amount_inr`) and HyperSound minimums are not writable.
 
+**Post-soak migration 0036 (proposed, not built).** Today these limits are enforced in application validation
+only: no migration may land while the PAY-15 verifier pins the database head to 0034 / 0035 (until 2026-12-01).
+After the soak, a migration 0036 would repeat the bounds and counts in the database. It would apply to the runtime
+roles (`hyperchat_app`, `hyperchat_worker`) only, as 0020's `streamers_protect_kyc_columns` does, so migrations
+and the legacy import stay unrestricted:
+
+| Table | Rule in the database |
+|---|---|
+| `streamers` | `min_text_amount_inr`, `min_voice_amount_inr`, `media_min_amount`: NULL or 0–10,000, checked only when the statement changes the column |
+| `streamers` | `message_char_tiers`: NULL or a JSON array of at most 5 objects with numeric `min_amount` 0–10,000 and `max_chars` 50–500, checked only when it changes |
+| `streamer_voice_tiers` | `min_amount_inr` 0–10,000 and `max_duration_seconds` 5–30 on insert / update |
+| `streamer_voice_tiers` | at most 5 active rows per creator (counted under the creator row lock) |
+
+They would be BEFORE triggers raising `check_violation`, not CHECK constraints: a CHECK, even `NOT VALID`, is
+re-checked on every update of a row, so a legacy out-of-range value would block unrelated settings edits. They
+would not rewrite or validate existing rows, add no grant, and the downgrade would only drop the two triggers and
+their functions. Floors and tier ordering stay application rules. Landing it also needs the verifier's accepted
+heads, `test_verify_db.py`'s `HEAD`, the smoke `KNOWN_HEADS` and the migration tests' final head pin moved to 0036.
+
 An empty body is `400 {"error": "No settings to update"}`; one invalid or unknown field rejects the
 whole patch. PostgreSQL compares the new values with the stored ones under a row lock
 (`IS DISTINCT FROM`): only differing columns are written, `changed` lists them, and an unchanged
