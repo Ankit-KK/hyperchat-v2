@@ -11,8 +11,8 @@ from tests.integration import (
     DOMAIN,
     ORIGIN,
     PASSWORD,
-    creator_state,
     db,
+    fixture_db,
     login,
     make_user,
     new_browser,
@@ -41,6 +41,14 @@ def boss(app):
     from tests.admin.test_applications import _admin
     _admin(app, "chk-boss")  # the shared client as an admin; 'primary' is this server's configured account
     return app
+
+
+def hold(cid: str, admin: str) -> None:
+    """An open restriction, written as fixture setup. kyc_restrict_creator would also append a KYC enforcement event,
+    which moves the enforcement chain past the restore witness and fails later donation suites closed."""
+    with fixture_db() as conn:
+        conn.execute("INSERT INTO public.kyc_restrictions (streamer_id, reason, created_by) VALUES (%s, 'admin_hold', %s)",
+                     (cid, make_user(admin + DOMAIN, role="admin")))
 
 
 def rows(entry: dict) -> dict:
@@ -105,15 +113,14 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
     assert rows(entry_of(owner.get(ME), cid))["razorpay_account"] == ("missing", "account_not_configured")
     app.app_state.admin.payment_accounts = frozenset({"primary"})
 
-    with db() as conn:
-        conn.execute("SELECT public.kyc_restrict_creator(%s, 'admin_hold', NULL, %s)",
-                     (cid, make_user("chk-holder" + DOMAIN, role="admin")))
+    hold(cid, "chk-holder")
     held = entry_of(owner.get(ME), cid)
     assert rows(held)["no_restriction"] == ("blocked", "open_restriction")
     assert rows(held)["lifecycle_eligible"] == ("blocked", "restricted")
     assert rows(held)["pan_policy"] == ("policy_pending", "pan_evidence_not_recorded")
     assert held["ready_for_activation"] is False
-    assert creator_state(cid) == "pending"  # nothing here activates
+    with db() as conn:  # nothing here activates
+        assert conn.execute("SELECT status FROM public.streamers WHERE id = %s", (cid,)).fetchone()[0] == "pending"
 
 
 def test_who_may_read_a_checklist(app, approved, kyc):
@@ -143,9 +150,7 @@ def test_who_may_read_a_checklist(app, approved, kyc):
 def test_the_admin_view_filters_pages_and_shows_no_applicant_data(app, approved, boss, kyc):
     sid, held, email = approved("chk-adm-held")
     _, other, _ = approved("chk-adm-other")
-    with db() as conn:
-        conn.execute("SELECT public.kyc_restrict_creator(%s, 'admin_hold', NULL, %s)",
-                     (held, make_user("chk-adm-holder" + DOMAIN, role="admin")))
+    hold(held, "chk-adm-holder")
 
     r = boss.get(ADMIN)
     assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
