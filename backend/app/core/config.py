@@ -289,6 +289,19 @@ class Settings(BaseSettings):
             return None
         return frozenset(s.strip().lower() for s in self.bot_creator_allowlist.split(",") if s.strip())
 
+    # Operator failure alerts (docs/alerting.md): the Discord channel that receives them, posted with the bot token
+    # above. Unset (default) = alerts are only recorded in system_alerts; nothing is sent.
+    alert_discord_channel_id: str | None = None
+    alert_poll_seconds: float = Field(30.0, ge=5, le=3600)  # the worker's alert loop interval (and retry backoff base)
+
+    @field_validator("alert_discord_channel_id")
+    @classmethod
+    def _alert_channel(cls, value: str | None) -> str | None:
+        value = (value or "").strip()
+        if value and not re.fullmatch(r"[0-9]{15,21}", value):
+            raise ValueError("HYPERCHAT_ALERT_DISCORD_CHANNEL_ID must be a Discord channel id (15-21 digits)")
+        return value or None
+
     @property
     def telegram_configured(self) -> bool:
         return bool(_secret_value(self.telegram_bot_token) and _secret_value(self.telegram_webhook_secret))
