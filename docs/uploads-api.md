@@ -15,6 +15,7 @@ Base: `https://api.quicktestspace.site` (development). All three routes are publ
 | POST | `/api/v1/public/streamers/{slug}/upload-grant` | 10 / min (`upload:grant`) |
 | POST | `/api/v1/public/streamers/{slug}/uploads/voice` | 5 / min (`upload:voice`) |
 | POST | `/api/v1/public/streamers/{slug}/uploads/media` | 3 / min (`upload:media`) |
+| PUT | `/api/v1/streamers/{streamer}/images/{profile,background}` | creator images, not donor uploads: signed-in owner or linked account, 20 / creator / day (`upload:creator-image`). See [`creator-images.md`](creator-images.md) (limits 5 MB / 10 MB, owner decision Q8, replacing D-M2c's) |
 
 ## 1. Upload grant
 Request body: `{"kind": "voice" | "media"}` (no other fields).
