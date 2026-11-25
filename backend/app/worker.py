@@ -13,6 +13,7 @@ import asyncio
 import logging
 import signal
 
+from app.alerts import Alerts
 from app.audio.handlers import DonationAudioHandler, VoiceTranscriptionHandler
 from app.audio.providers import ElevenLabsProvider, MiniMaxProvider, SarvamProvider
 from app.audio.repository import AudioRepository
@@ -108,7 +109,8 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> int:
             "realtime_enabled": settings.realtime_enabled, "pusher_groups": settings.pusher_groups_configured,
             "pusher_invalid": settings.pusher_config_problems()})
         await asyncio.gather(
-            Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency).run(stop),
+            Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency,
+                   on_failure=Alerts(db.connection).job_failed).run(stop),
             publisher.run(stop))
     finally:
         await db.close()

@@ -43,6 +43,8 @@ All settings are `HYPERCHAT_*` environment variables; template: `../deploy/api.e
 On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never in Git.
 `HYPERCHAT_DB_LABEL` is reported in logs and `/health`; the app refuses to start with
 `HYPERCHAT_APP_ENV=production` if the label contains `TEST` or `DEV`.
+`HYPERCHAT_ALERT_DISCORD_CHANNEL_ID` (unset by default) is the Discord channel that receives operator failure alerts,
+posted with `HYPERCHAT_DISCORD_BOT_TOKEN`; unset, alerts are only recorded ([`../docs/alerting.md`](../docs/alerting.md)).
 
 ## Authentication (`/api/v1/auth`)
 - Passwords: Argon2id. bcrypt hashes imported from the legacy system at cutover verify and are
@@ -100,6 +102,7 @@ On the VPS they live in `/etc/hyperchat/api.env` (root:hyperchat, 0640), never i
 | `GET /api/v1/admin/donations?streamer&limit&cursor` | operator read: paid donations of every creator (or one, `streamer` = slug), newest first, keyset paged (`next_cursor`, `has_more`, as the dashboard list); the dashboard's donation fields plus `streamer_slug`, with reversal figures; `no-store` |
 | `GET /api/v1/admin/payments/integrity?since=YYYY-MM-DD` | operator read: the `payment-integrity-report` CLI report (disputes and provider refunds with the per-item `attention` rule, accounting holds and review items, refund snapshots) plus `needs_attention` (the CLI's exit 1); read-only on a connection of its own, no Razorpay call; `no-store` |
 | `GET /api/v1/admin/jobs?status=failed\|queued\|running\|succeeded&kind&limit&offset` | operator read: background jobs in one status (default `failed`), most recently finished first: id, kind, status, attempts, max_attempts, last_error, dedupe_key, timestamps; never the payload or result bodies; `no-store` |
+| `GET /api/v1/admin/alerts?kind=job_failed\|payment_on_hold&delivered=true\|false&limit&offset` | operator read: failure alerts (`system_alerts`), newest first: id, source, severity, kind, reason `code`, entity ids (`context`), created_at, `notified_at` (null = not delivered); never donor text or secrets; `no-store`. See [`../docs/alerting.md`](../docs/alerting.md) |
 
 An admin cannot change their own role or status, and at least one active admin who can sign in
 (password or Google identity) always remains.
