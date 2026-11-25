@@ -90,7 +90,8 @@ How `apps/web/proxy.ts` routes (Next.js 16 renamed `middleware.ts` to `proxy.ts`
 
 The admin app answers 404 on any host except its own. A `*.vercel.app` preview URL is accepted only when
 `VERCEL_ENV=preview`. Its CSP allows same-origin resources, nonce scripts and no inline style attributes. It is
-always `noindex, nofollow` and `no-store`.
+always `noindex, nofollow` and `no-store`. Because preview URLs are accepted, Vercel deployment protection on the
+admin project is required, not optional (Vercel setup, step 6).
 
 ## Authentication model
 
@@ -102,6 +103,10 @@ always `noindex, nofollow` and `no-store`.
   the app's decision.
 - Next.js server components make anonymous public reads only.
 - Frontend route guards are user experience, never authorization.
+- **The dashboard shell's session bootstrap does not work yet.** `GET /api/v1/auth/session` from
+  `dashboard.quicktestspace.site` only succeeds once the backend's `browser_origins` includes that origin. That is
+  the post-soak backend PR for review §6 G1. Until then the browser refuses the call (CORS) and the shell shows
+  "The API could not be reached".
 
 Other principles: realtime goes through Pusher with private channels authorized by the API. Uploads go straight
 to Cloudflare R2 with short-lived grants from the API. Payments use Razorpay Checkout, with orders created and
@@ -188,7 +193,8 @@ each project for the points marked "check".
    host lists.
 6. Under Deployment Protection, turn on Vercel Authentication with Standard Protection for both projects. It
    protects every preview and generated URL, leaving only the custom domains public. Check that it is on, because
-   the default is a team setting. The apps also send `X-Robots-Tag: noindex` on every host outside their host
+   the default is a team setting. **On `hyperchat-admin` this is mandatory:** the admin app accepts `*.vercel.app`
+   hosts when `VERCEL_ENV=preview`, so an unprotected preview would serve the admin app to anyone with the URL. The apps also send `X-Robots-Tag: noindex` on every host outside their host
    lists, so `*.vercel.app` URLs are never indexed even without protection.
 7. Before the dev hosts work end to end, the API must allow their origins. That is the post-soak backend change in
    review §6 G1-G2.
