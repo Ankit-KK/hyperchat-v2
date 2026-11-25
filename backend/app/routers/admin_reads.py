@@ -17,6 +17,7 @@ from app.dashboard import validation as v
 from app.dashboard.models import DonationItem, DonationPage
 from app.db.pool import single_connection_factory
 from app.jobs.queue import KINDS, JobQueue
+from app.onboarding import checklist
 from app.payments import integrity
 from app.payments.repository import PaymentRepository
 from app.routers.admin import admin_service
@@ -99,3 +100,20 @@ async def list_alerts(request: Request, kind: str | None = None, delivered: bool
     rows = await alerts.Alerts(request.app.state.db.connection).list(kind=kind, delivered=delivered, limit=limit,
                                                                      offset=offset)
     return {"limit": limit, "offset": offset, "alerts": rows}
+
+
+@router.get("/onboarding")
+async def onboarding_progress(request: Request, status: Literal["pending", "active"] | None = None,
+                              blocked_by: str | None = None, limit: int = Query(50, ge=1, le=200),
+                              offset: int = Query(0, ge=0, le=100_000),
+                              current: CurrentUser = Depends(require_admin)) -> dict:
+    """Onboarding progress (Stage 5 Phase A, read-only): every creator's checklist (app.onboarding.checklist), its
+    application id and invitation delivery; optionally one status and/or only creators a condition blocks. Ids and
+    slugs only: never the applicant's name, email or phone."""
+    if blocked_by is not None and blocked_by not in checklist.CONDITIONS:
+        raise AuthError(400, "blocked_by must be one of: " + ", ".join(checklist.CONDITIONS), "bad_condition")
+    admin = admin_service(request)  # 503 without a database
+    kyc = getattr(request.app.state, "kyc", None)
+    return await checklist.admin_progress(
+        request.app.state.db.connection, status=status, condition=blocked_by, limit=limit, offset=offset,
+        environment=kyc.environment if kyc else None, accounts=admin.payment_accounts)

@@ -34,6 +34,20 @@ _COLS = """a.id::text, a.name, a.email, a.mobile_number, a.youtube_channel, a.in
     a.review_status, a.reviewed_by::text, a.reviewed_at, a.rejection_reason, a.streamer_id::text, a.invite_id::text"""
 
 
+# An invitation's delivery state (also read by app.onboarding.checklist).
+DELIVERY = ("CASE WHEN accepted_at IS NOT NULL THEN 'accepted' WHEN revoked_at IS NOT NULL THEN 'revoked' "
+            "WHEN expires_at <= now() THEN 'expired' ELSE 'pending' END")
+
+
+def invite_delivery(status: str | None, events: list[dict]) -> dict:
+    """The automatic invitation summary (app.onboarding.auto_invite) from an application's events: codes only."""
+    outcomes = [e["note"].split(":", 2)[2] for e in events
+                if e["action"] == "note" and e["actor_user_id"] is None and (e["note"] or "").startswith("auto:")]
+    return {"status": status,  # pending | accepted | revoked | expired, or None (no invitation kept)
+            "auto_attempts": sum(e["action"] == "invite" and e["note"] == "auto" for e in events),
+            "last_failure": outcomes[-1] if outcomes else None}
+
+
 class _Stop(Exception):
     """Rolls the transaction back with a result code."""
 
@@ -72,9 +86,8 @@ class ApplicationRepository:
             invite = None
             if row["invite_id"]:
                 await cur.execute("SELECT id::text, expires_at, accepted_at, revoked_at, accepted_user_id::text, "
-                                  "CASE WHEN accepted_at IS NOT NULL THEN 'accepted' WHEN revoked_at IS NOT NULL "
-                                  "THEN 'revoked' WHEN expires_at <= now() THEN 'expired' ELSE 'pending' END "
-                                  "AS delivery FROM public.user_invites WHERE id = %s", (row["invite_id"],))
+                                  f"{DELIVERY} AS delivery FROM public.user_invites WHERE id = %s",
+                                  (row["invite_id"],))
                 invite = await cur.fetchone()
             return row, events, invite
 
@@ -253,17 +266,11 @@ class ApplicationService:
         if row is None:
             raise AuthError(404, "Application not found", "not_found")
         delivery = invite.pop("delivery") if invite else None
-        # Automatic invitations (app.onboarding.auto_invite): codes only, from the actor-less events.
-        outcomes = [e["note"].split(":", 2)[2] for e in events
-                    if e["action"] == "note" and e["actor_user_id"] is None and (e["note"] or "").startswith("auto:")]
         return {"application": public_application(row),
                 "events": [{**e, "created_at": _iso(e["created_at"])} for e in events],
                 "invite": {**invite, **{k: _iso(invite[k]) for k in ("expires_at", "accepted_at", "revoked_at")}}
                 if invite else None,
-                "invite_delivery": {
-                    "status": delivery,  # pending | accepted | revoked | expired, or None (no invitation kept)
-                    "auto_attempts": sum(e["action"] == "invite" and e["note"] == "auto" for e in events),
-                    "last_failure": outcomes[-1] if outcomes else None}}
+                "invite_delivery": invite_delivery(delivery, events)}
 
     def _audit(self, admin: User, action: str, ip: str | None, **extra) -> None:
         # Ids and codes only: never the applicant's name, email, phone or a note.
