@@ -57,7 +57,9 @@ class CreatorStatusChange(BaseModel):
 
 
 class ApplicationApprove(CreatorCreate):
-    """The pending creator to create for an approved application (the same rules as POST /admin/creators)."""
+    """The pending creator to create for an approved application (the same rules as POST /admin/creators), except
+    that the Razorpay account defaults to "primary" (Q1, owner 2026-11-25; reverses D12 for approvals only)."""
+    razorpay_account: Literal["primary"] = "primary"
 
 
 class ApplicationReject(BaseModel):
@@ -213,7 +215,8 @@ async def get_application(signup_id: str, request: Request, current: CurrentUser
 async def approve_application(signup_id: str, body: ApplicationApprove, request: Request,
                               current: CurrentUser = Depends(require_admin),
                               stepup: StepUp = Depends(step_up("application.approve"))) -> dict:
-    """Approve and create the creator, PENDING (never active), in one transaction; a repeat approval is 409."""
+    """Approve and create the creator, PENDING (never active), in one transaction; a repeat approval is 409.
+    razorpay_account may be omitted: it defaults to "primary" (Q1, reverses D12 here; it must still be configured)."""
     svc = application_service(request)
     grant = stepup.bind(f"application:{uid(signup_id) or signup_id}", _creator_params(svc.admin, body))
     return await svc.approve(current.user, signup_id, body.model_dump(), client_ip(request), grant)
@@ -243,8 +246,11 @@ async def note_application(signup_id: str, body: ApplicationNote, request: Reque
 async def invite_application(signup_id: str, request: Request, current: CurrentUser = Depends(require_admin),
                              stepup: StepUp = Depends(step_up("application.invite"))) -> dict:
     """Send (or resend: the previous open link is revoked) the applicant's account invitation; accepting it makes
-    them the owner of the application's still-unclaimed creator."""
-    grant = stepup.bind(f"application:{uid(signup_id) or signup_id}", {})
+    them the owner of the application's still-unclaimed creator. Q3 (owner 2026-11-25): no passkey grant is
+    required here; a presented one is still consumed. While step-up enforcement is 'active' the database (0027)
+    still asks for one until migration 0037, and its refusal answers 403 step_up_required (docs/onboarding.md)."""
+    target = f"application:{uid(signup_id) or signup_id}"
+    grant = stepup.bind(target, {}) if stepup.presented is not None else None
     return await application_service(request).invite(current.user, signup_id, client_ip(request), grant)
 
 

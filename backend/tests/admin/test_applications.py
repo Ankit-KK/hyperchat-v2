@@ -123,6 +123,48 @@ def test_approve_creates_a_pending_creator_and_never_activates(app):
     assert _events(sid) == ["approve"]
 
 
+def test_the_approve_form_defaults_the_razorpay_account_to_primary(app):
+    """Q1 (owner 2026-11-25, reverses D12 for approvals): omitted means "primary", still checked as configured."""
+    headers = _admin(app)
+    sid = _apply(app, "apps-default")
+    app.app_state.admin.payment_accounts = frozenset()
+    r = app.post(f"{AP}/{sid}/approve", json={"slug": "authtest-apps-default", "name": "A"}, headers=headers)
+    assert (r.status_code, r.json()["error"]) == (400, "That Razorpay account is not configured on this server")
+    app.app_state.admin.payment_accounts = frozenset({"primary"})
+    r = app.post(f"{AP}/{sid}/approve", json={"slug": "authtest-apps-default", "name": "A"}, headers=headers)
+    assert r.status_code == 200 and r.json()["creator"]["razorpay_account"] == "primary", r.text
+    bare = app.post("/api/v1/admin/creators", json={"slug": "authtest-apps-bare", "name": "B"}, headers=headers)
+    assert bare.status_code == 422  # creating a creator directly still names the account (D12)
+
+
+def test_a_manual_resend_needs_no_step_up_grant(app, monkeypatch):
+    """Q3: the invite route no longer asks for a grant even when the API reads enforcement as active (the database
+    guard of 0027 is unchanged; tests/onboarding covers its refusal). The refusal rules stay."""
+    headers = _admin(app)
+    sid = _apply(app, "apps-q3")
+    _approve(app, headers, sid, "authtest-apps-q3")
+
+    async def active():
+        return "active"
+
+    monkeypatch.setattr(app.app_state.auth.repo, "stepup_enforcement", active)
+    assert app.post(f"{AP}/{sid}/approve", json={"slug": "authtest-apps-q3b", "name": "A"},
+                    headers=headers).json()["reason"] == "step_up_required"  # approval still needs its grant
+    monkeypatch.undo()
+    r = app.post(f"{AP}/{sid}/invite", headers=headers)
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(app.app_state.auth.repo, "stepup_enforcement", active)
+    with db() as conn:  # the route reads 'active', the database stays 'draft': only the route's rule is tested
+        assert conn.execute("SELECT state FROM public.stepup_enforcement").fetchone()[0] == "draft"
+    r = app.post(f"{AP}/{sid}/invite", headers=headers)
+    assert r.status_code == 200 and r.json()["replaced_invites"] == 1, r.text
+    with db() as conn:
+        conn.execute("UPDATE public.streamers SET user_id = %s WHERE id = (SELECT streamer_id FROM "
+                     "public.user_signups WHERE id = %s)", (make_user("apps-q3-owner" + DOMAIN), sid))
+    claimed = app.post(f"{AP}/{sid}/invite", headers=headers)
+    assert (claimed.status_code, claimed.json()["error"]) == (409, "The application's creator already has an owner")
+
+
 def test_slug_conflict_and_validation_change_nothing(app):
     headers = _admin(app)
     make_streamer("authtest-apps-taken")

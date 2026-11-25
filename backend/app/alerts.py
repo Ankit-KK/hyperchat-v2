@@ -34,7 +34,7 @@ from psycopg.types.json import Jsonb
 from app.jobs.retry import Permanent, Retryable, reason_code
 
 log = logging.getLogger("hyperchat.alerts")
-KINDS = ("job_failed", "payment_on_hold")
+KINDS = ("job_failed", "payment_on_hold", "invite_failed")  # invite_failed: app.onboarding.auto_invite
 MAX_ATTEMPTS = 5
 HOLD_STATUSES = ("invalid_key", "missing_key")
 _COLUMNS = ("id::text AS id, source, severity, message AS code, context->>'kind' AS kind, "

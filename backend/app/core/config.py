@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     reset_token_ttl_minutes: int = 60
     invite_ttl_days: int = 7
     auth_return_invite_links: bool = False  # dev convenience: include the accept URL in the admin response
+    # Onboarding Stage 2 Phase A (docs/onboarding.md): the worker invites approved applicants itself. Off by default.
+    auto_invite_enabled: bool = False
+    auto_invite_poll_seconds: int = Field(default=60, ge=10, le=3600)
 
     email_backend: Literal["disabled", "resend"] = "disabled"
     # Used only by the opt-in delivery check (tests/e2e/smoke_integrations.py); the API sends per category (below).

@@ -16,6 +16,7 @@ and note is kept in application_events (append-only); no token is ever stored or
 import uuid
 from datetime import datetime
 
+import psycopg
 from psycopg.rows import dict_row
 
 from app.admin.repository import CreatorConflict, insert_creator
@@ -25,7 +26,7 @@ from app.auth.repository import User
 from app.auth.service import AuthError, AuthService
 from app.auth.tokens import new_hex_token, sha256_hex
 from app.security.audit import security_event
-from app.stepup.grants import Grant, consume
+from app.stepup.grants import Grant, StepUpRequired, consume
 
 STATUSES = ("legacy_unreviewed", "submitted", "approved", "rejected")
 REVIEWABLE = ("legacy_unreviewed", "submitted")
@@ -70,8 +71,10 @@ class ApplicationRepository:
             events = await cur.fetchall()
             invite = None
             if row["invite_id"]:
-                await cur.execute("SELECT id::text, expires_at, accepted_at, revoked_at, accepted_user_id::text "
-                                  "FROM public.user_invites WHERE id = %s", (row["invite_id"],))
+                await cur.execute("SELECT id::text, expires_at, accepted_at, revoked_at, accepted_user_id::text, "
+                                  "CASE WHEN accepted_at IS NOT NULL THEN 'accepted' WHEN revoked_at IS NOT NULL "
+                                  "THEN 'revoked' WHEN expires_at <= now() THEN 'expired' ELSE 'pending' END "
+                                  "AS delivery FROM public.user_invites WHERE id = %s", (row["invite_id"],))
                 invite = await cur.fetchone()
             return row, events, invite
 
@@ -83,7 +86,7 @@ class ApplicationRepository:
         return row
 
     @staticmethod
-    async def _event(cur, signup_id: str, action: str, actor_id: str, note: str | None = None,
+    async def _event(cur, signup_id: str, action: str, actor_id: str | None, note: str | None = None,
                      streamer_id: str | None = None, invite_id: str | None = None) -> None:
         await cur.execute("INSERT INTO public.application_events (signup_id, action, actor_user_id, note, "
                           "streamer_id, invite_id) VALUES (%s, %s, %s, %s, %s, %s)",
@@ -149,31 +152,56 @@ class ApplicationRepository:
         """Revoke this application's open invitations and issue a new one (a retry never leaves two usable links).
         Lock order: application -> its invites -> its creator, matching accept_invite (invite -> creator -> users),
         so a retry racing an acceptance waits instead of deadlocking (and then sees the creator claimed)."""
+        return await self._run(lambda cur: self._issue(cur, signup_id, actor_id, token_hash, ttl_days), grant)
+
+    async def issue_auto_invite(self, pick, token_hash: str, ttl_days: int):
+        """The automatic invitation (app.onboarding.auto_invite): `pick(cur)` locks one due application in this same
+        transaction, so the claim and the invitation commit together. No actor; the event note is 'auto'.
+        Returns (result, invite, signup_id); result 'none_due' when nothing was picked."""
+        picked = {}
+
         async def work(cur):
-            app = await self._locked(cur, signup_id)
-            if app["review_status"] != "approved":
-                raise _Stop("not_approved")
-            await cur.execute("UPDATE public.user_invites SET revoked_at = now() WHERE signup_id = %s "
-                              "AND accepted_at IS NULL AND revoked_at IS NULL", (signup_id,))
-            replaced = cur.rowcount
-            await cur.execute("SELECT user_id FROM public.streamers WHERE id = %s FOR NO KEY UPDATE",
-                              (app["streamer_id"],))
-            if (await cur.fetchone())["user_id"] is not None:
-                raise _Stop("creator_claimed")
-            await cur.execute("SELECT 1 FROM public.users WHERE email = %s", (app["email"],))
-            if await cur.fetchone() is not None:
-                raise _Stop("account_exists")
-            await cur.execute("""
-                INSERT INTO public.user_invites (email, role, streamer_id, token_hash, invited_by, expires_at, signup_id)
-                VALUES (%s, 'streamer', %s, %s, %s, now() + make_interval(days => %s), %s)
-                RETURNING id::text, expires_at
-            """, (app["email"], app["streamer_id"], token_hash, actor_id, ttl_days, signup_id))
-            invite = await cur.fetchone()
-            await cur.execute("UPDATE public.user_signups SET invite_id = %s WHERE id = %s", (invite["id"], signup_id))
-            await self._event(cur, signup_id, "invite", actor_id, streamer_id=app["streamer_id"],
-                              invite_id=invite["id"])
-            return {**invite, "email": app["email"], "replaced": replaced}
-        return await self._run(work, grant)
+            picked["id"] = await pick(cur)
+            if picked["id"] is None:
+                raise _Stop("none_due")
+            return await self._issue(cur, picked["id"], None, token_hash, ttl_days, note="auto")
+        result, invite = await self._run(work)
+        return result, invite, picked.get("id")
+
+    async def auto_outcome(self, signup_id: str, note: str, revoke_invite_id: str | None = None) -> None:
+        """Record an automatic attempt's outcome as an actor-less note event (codes only), in the same transaction
+        revoking the undelivered invitation when given (as the manual path's withdrawal does)."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+            if revoke_invite_id is not None:
+                await cur.execute("UPDATE public.user_invites SET revoked_at = now() WHERE id = %s "
+                                  "AND accepted_at IS NULL AND revoked_at IS NULL", (revoke_invite_id,))
+            await self._event(cur, signup_id, "note", None, note=note, invite_id=revoke_invite_id)
+
+    async def _issue(self, cur, signup_id: str, actor_id: str | None, token_hash: str, ttl_days: int,
+                     note: str | None = None) -> dict:
+        app = await self._locked(cur, signup_id)
+        if app["review_status"] != "approved":
+            raise _Stop("not_approved")
+        await cur.execute("UPDATE public.user_invites SET revoked_at = now() WHERE signup_id = %s "
+                          "AND accepted_at IS NULL AND revoked_at IS NULL", (signup_id,))
+        replaced = cur.rowcount
+        await cur.execute("SELECT user_id FROM public.streamers WHERE id = %s FOR NO KEY UPDATE",
+                          (app["streamer_id"],))
+        if (await cur.fetchone())["user_id"] is not None:
+            raise _Stop("creator_claimed")
+        await cur.execute("SELECT 1 FROM public.users WHERE email = %s", (app["email"],))
+        if await cur.fetchone() is not None:
+            raise _Stop("account_exists")
+        await cur.execute("""
+            INSERT INTO public.user_invites (email, role, streamer_id, token_hash, invited_by, expires_at, signup_id)
+            VALUES (%s, 'streamer', %s, %s, %s, now() + make_interval(days => %s), %s)
+            RETURNING id::text, expires_at
+        """, (app["email"], app["streamer_id"], token_hash, actor_id, ttl_days, signup_id))
+        invite = await cur.fetchone()
+        await cur.execute("UPDATE public.user_signups SET invite_id = %s WHERE id = %s", (invite["id"], signup_id))
+        await self._event(cur, signup_id, "invite", actor_id, note=note, streamer_id=app["streamer_id"],
+                          invite_id=invite["id"])
+        return {**invite, "email": app["email"], "replaced": replaced}
 
 
 _REFUSALS = {
@@ -224,10 +252,18 @@ class ApplicationService:
         row, events, invite = await self.repo.get(self._id(signup_id))
         if row is None:
             raise AuthError(404, "Application not found", "not_found")
+        delivery = invite.pop("delivery") if invite else None
+        # Automatic invitations (app.onboarding.auto_invite): codes only, from the actor-less events.
+        outcomes = [e["note"].split(":", 2)[2] for e in events
+                    if e["action"] == "note" and e["actor_user_id"] is None and (e["note"] or "").startswith("auto:")]
         return {"application": public_application(row),
                 "events": [{**e, "created_at": _iso(e["created_at"])} for e in events],
                 "invite": {**invite, **{k: _iso(invite[k]) for k in ("expires_at", "accepted_at", "revoked_at")}}
-                if invite else None}
+                if invite else None,
+                "invite_delivery": {
+                    "status": delivery,  # pending | accepted | revoked | expired, or None (no invitation kept)
+                    "auto_attempts": sum(e["action"] == "invite" and e["note"] == "auto" for e in events),
+                    "last_failure": outcomes[-1] if outcomes else None}}
 
     def _audit(self, admin: User, action: str, ip: str | None, **extra) -> None:
         # Ids and codes only: never the applicant's name, email, phone or a note.
@@ -269,8 +305,13 @@ class ApplicationService:
         link and revokes this one; the creator is never created twice."""
         signup_id = self._id(signup_id)
         token = new_hex_token(32)
-        result, invite = await self.repo.issue_invite(signup_id, admin.id, sha256_hex(token),
-                                                      self.auth.settings.invite_ttl_days, grant)
+        try:
+            result, invite = await self.repo.issue_invite(signup_id, admin.id, sha256_hex(token),
+                                                          self.auth.settings.invite_ttl_days, grant)
+        except psycopg.errors.InsufficientPrivilege as exc:  # Q3: the route asks for no grant; 0027 still may
+            if "step-up" not in str(exc):
+                raise
+            raise StepUpRequired("application.invite", f"application:{signup_id}", {}) from None
         self._check(result)
         url = f"{self.auth.settings.frontend_url.rstrip('/')}/invite?token={token}"
         try:
