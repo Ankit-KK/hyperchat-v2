@@ -50,7 +50,8 @@ Errors use `{"error": "..."}` (FastAPI's `{"detail": [...]}` for 422): 401 `Not 
 ## G1 settings
 **D-R1 fields:** `slug, name, status, moderation_mode, telegram_moderation_enabled,
 discord_moderation_enabled, media_moderation_enabled, tts_enabled, tts_language_boost, el_voice_id,
-media_upload_enabled, media_min_amount, brand_color,
+media_upload_enabled, message_min_amount, voice_min_amount, media_min_amount, message_char_tiers, voice_tiers,
+brand_color,
 alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id, overlay_adjust_mode,
 leaderboard_bg_enabled, leaderboard_widget_enabled, goal_name, goal_target_amount, goal_is_active,
 goal_activated_at`. Nullable booleans and `moderation_mode` are served with their column default.
@@ -67,8 +68,8 @@ goal_activated_at`. Nullable booleans and `moderation_mode` are served with thei
 - **Sending `goal_activated_at`** (any value, including null) is an unknown field: 422, nothing changed.
 - **`changed`** lists `goal_activated_at` when it was stamped, and the realtime `goal-progress` event follows as for any goal setting.
 
-**D-M1** accepts any subset of the 20 writable fields (the legacy `update-streamer-settings`
-allowlist minus the two read-only amounts and the server-owned `goal_activated_at`):
+**D-M1** accepts any subset of the 24 writable fields (the legacy `update-streamer-settings`
+allowlist minus HyperEmotes and the server-owned `goal_activated_at`, plus the PAY-14 pricing fields):
 
 | Field | Rule |
 |---|---|
@@ -83,8 +84,19 @@ allowlist minus the two read-only amounts and the server-owned `goal_activated_a
 | `goal_overlay_id` | integer 0–6 |
 | `brand_color` | `#RRGGBB` |
 | `el_voice_id` | 10–64 letters/digits; `""` or null clears it (stored as NULL) |
-| `media_min_amount` | **read-only** in Phase 5 (A1): sending it is a 422 |
+| `message_min_amount` | PAY-14: JSON number in INR, 40 (the text platform floor) – 10,000; stored as `min_text_amount_inr`. Served `null` until set (the floor applies) |
+| `voice_min_amount` | PAY-14: JSON number in INR, 0 (the voice platform floor) – 10,000; stored as `min_voice_amount_inr` |
+| `media_min_amount` | PAY-14: JSON number in INR, 0 (the media platform floor) – 10,000 |
+| `message_char_tiers` | PAY-14: list of `{min_amount, max_chars}` (integers): at most 5; `max_chars` 50–500; `min_amount` 0–10,000; both strictly increasing. `[]` clears it (no character limit) |
+| `voice_tiers` | PAY-14: list of `{min_amount, max_duration_seconds}` (integers): at most 5; seconds 5–30; `min_amount` 0–10,000; both strictly increasing. Replaces the creator's `streamer_voice_tiers` rows in the same transaction (inactive rows included); `[]` deletes them, so the platform tiers apply. Served as the active rows (`[]` = platform tiers) |
 | `hyperemotes_enabled`, `hyperemotes_min_amount` | not fields: HyperEmotes are discontinued (owner decision D16, 2026-11-13); sending either is a 422 |
+
+The floors are the platform floors checkout already enforces (D-M3a, raising or lowering them, is not approved).
+Types and shapes (a string amount, a missing or extra tier key, a fractional tier amount, null) are 422; a value
+outside these rules is `400 {"error": "<field> <rule>"}` (e.g. `message_min_amount must be 40-10000`,
+`voice_tiers allows at most 5 tiers`), nothing written. Checkout and the public pricing endpoint read these exact
+columns and rows, so a change applies to the next donation. Migration 0036 repeats the bounds and tier counts in
+the database for the runtime roles. The TTS (`min_tts_amount_inr`) and HyperSound minimums are not writable.
 
 An empty body is `400 {"error": "No settings to update"}`; one invalid or unknown field rejects the
 whole patch. PostgreSQL compares the new values with the stored ones under a row lock

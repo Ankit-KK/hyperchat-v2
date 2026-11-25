@@ -356,6 +356,27 @@ def test_voice_minimum(client, world):
     assert r.json() == {"error": "Voice messages require minimum INR 150"}
 
 
+def test_creator_set_minimum_and_tiers_are_what_checkout_enforces(client, world):
+    """PAY-14: the columns and tier rows the dashboard PATCH writes (min_text_amount_inr, min_voice_amount_inr,
+    message_char_tiers, streamer_voice_tiers) are the ones checkout reads."""
+    world.public_repo.rows["creator-a"].update(min_text_amount_inr=Decimal("200"), min_voice_amount_inr=Decimal("300"),
+                                               message_char_tiers=[{"min_amount": 200, "max_chars": 60},
+                                                                   {"min_amount": 1000, "max_chars": 400}])
+    world.public_repo.tiers["id-a"] = [(300, 5), (1000, 30)]
+    assert checkout(client, amount=190).json() == {"error": "Text messages require minimum INR 200"}
+    assert checkout(client, amount=200, message="x" * 60).status_code == 201
+    assert checkout(client, amount=200, message="x" * 61).json() == {
+        "error": "Message exceeds 60 character limit for this donation amount"}
+    assert checkout(client, amount=1000, message="x" * 400).status_code == 201  # the new top tier
+    seed_voice(world, duration_ms="25000")
+    url = f"{BASE}/{VOICE}"
+    assert checkout(client, amount=290, voice_message_url=url).json() == {
+        "error": "Voice messages require minimum INR 300"}
+    assert checkout(client, amount=300, voice_message_url=url).json() == {
+        "error": "Voice message is too long for this amount. Maximum is 5 seconds."}
+    assert checkout(client, amount=1000, voice_message_url=url).status_code == 201  # 25 s fits the new 30 s tier
+
+
 def test_media_type_comes_from_the_server(client, world):
     seed_media(world, MEDIA)
     r = checkout(client, amount=100, media_url=f"{BASE}/{MEDIA}")

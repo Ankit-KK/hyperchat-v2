@@ -32,7 +32,8 @@ DEFAULTS = {  # a new creator row, as served (nullable booleans get their column
     "slug": "authtest-set", "name": "Auth Test", "status": "active", "moderation_mode": "auto_approve",
     "telegram_moderation_enabled": True, "discord_moderation_enabled": False, "media_moderation_enabled": True,
     "tts_enabled": True, "tts_language_boost": "Hindi", "el_voice_id": None,
-    "media_upload_enabled": False, "media_min_amount": 100.0,
+    "media_upload_enabled": False, "message_min_amount": None, "voice_min_amount": None, "media_min_amount": 100.0,
+    "message_char_tiers": None, "voice_tiers": [],
     "brand_color": "#3b82f6", "alert_box_scale": 1.0, "alert_overlay_id": 0, "leaderboard_overlay_id": 0,
     "goal_overlay_id": 0, "overlay_adjust_mode": False, "leaderboard_bg_enabled": True,
     "leaderboard_widget_enabled": True, "goal_name": None, "goal_target_amount": None, "goal_is_active": False,
@@ -45,6 +46,9 @@ EVERYTHING = {
     "media_upload_enabled": True, "media_moderation_enabled": False, "tts_language_boost": "english",
     "alert_overlay_id": 16, "leaderboard_overlay_id": 15, "overlay_adjust_mode": True, "leaderboard_bg_enabled": False,
     "goal_overlay_id": 6, "brand_color": "#ABCDEF", "leaderboard_widget_enabled": False, "el_voice_id": "Voice123456",
+    "message_min_amount": 75.5, "voice_min_amount": 200, "media_min_amount": 250,
+    "message_char_tiers": [{"min_amount": 40, "max_chars": 100}, {"min_amount": 200, "max_chars": 300}],
+    "voice_tiers": [{"min_amount": 0, "max_duration_seconds": 10}, {"min_amount": 300, "max_duration_seconds": 30}],
 }
 
 
@@ -125,7 +129,8 @@ def test_lowercase_language_is_canonicalised_only_when_saved(app):
     ({"brand_color": "javascript:alert(1)"}, 422),
     ({"goal_target_amount": 0}, 422),
     ({"tts_language_boost": "Klingon"}, 422),
-    ({"media_min_amount": 10}, 422),              # read-only (A1)
+    ({"media_min_amount": "10"}, 422),            # PAY-14: a JSON number (bounds are 400s: test_pricing_settings)
+    ({"voice_tiers": [{"min_amount": 0}]}, 422),
     ({"hyperemotes_min_amount": 10}, 422),       # HyperEmotes discontinued (owner decision 2026-11-13)
     ({"hyperemotes_enabled": True}, 422),
     ({"hyperemotes_enabled": False}, 422),

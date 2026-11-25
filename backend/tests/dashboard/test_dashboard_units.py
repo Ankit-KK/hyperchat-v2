@@ -68,7 +68,7 @@ def test_parse_uuid():
 
 # ── G1 settings: field sets ─────────────────────────────────────────────────────
 
-def test_writable_settings_are_the_legacy_allowlist_minus_the_read_only_amounts():
+def test_writable_settings_are_the_legacy_allowlist_plus_the_pay14_pricing_fields():
     legacy = {"moderation_mode", "telegram_moderation_enabled", "discord_moderation_enabled", "tts_enabled",
               "hyperemotes_enabled", "hyperemotes_min_amount", "alert_box_scale", "goal_is_active", "goal_name",
               "goal_target_amount", "goal_activated_at", "media_upload_enabled", "media_moderation_enabled",
@@ -76,14 +76,14 @@ def test_writable_settings_are_the_legacy_allowlist_minus_the_read_only_amounts(
               "overlay_adjust_mode", "leaderboard_bg_enabled", "goal_overlay_id", "brand_color",
               "leaderboard_widget_enabled", "el_voice_id"}  # update-streamer-settings/index.ts:132
     retired = {"hyperemotes_enabled", "hyperemotes_min_amount"}  # HyperEmotes discontinued (owner, 2026-11-13)
-    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 19
-    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.READ_ONLY_SETTINGS) - set(v.SERVER_OWNED_SETTINGS) - retired
-    assert not retired & (set(v.WRITABLE_SETTINGS) | set(v.READ_ONLY_SETTINGS) | set(models.DashboardSettings.model_fields))
+    pay14 = {"message_min_amount", "voice_min_amount", "message_char_tiers", "voice_tiers"}  # D-M3b, 2026-11-25
+    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 24
+    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.SERVER_OWNED_SETTINGS) - retired | pay14
+    assert not retired & (set(v.WRITABLE_SETTINGS) | set(models.DashboardSettings.model_fields))
     assert set(models.SettingsPatch.model_fields) == set(v.WRITABLE_SETTINGS)
-    assert tuple(SETTINGS_SQL_TYPES) == v.WRITABLE_SETTINGS
+    assert tuple(SETTINGS_SQL_TYPES) == tuple(c for c in v.WRITABLE_SETTINGS if c != "voice_tiers")
     shown = set(models.DashboardSettings.model_fields)
-    assert (set(v.WRITABLE_SETTINGS) | set(v.READ_ONLY_SETTINGS) | set(v.SERVER_OWNED_SETTINGS)
-            | {"slug", "name", "status"}) == shown
+    assert set(v.WRITABLE_SETTINGS) | set(v.SERVER_OWNED_SETTINGS) | {"slug", "name", "status"} == shown
     for private in ("id", "user_id", "rejection_reason", "order_prefix", "pusher_group", "razorpay_key_ref",
                     "razorpay_secret_ref", "discord_moderation_channel_id", "api_enabled", "custom_page_path"):
         assert private not in shown
@@ -151,7 +151,14 @@ INVALID = [
     {"brand_color": "#3b82f6ff"}, {"brand_color": None},
     {"el_voice_id": "short"}, {"el_voice_id": "has space 123"}, {"el_voice_id": "a" * 65},
     {"el_voice_id": "abc-def-ghi-jk"}, {"el_voice_id": 1234567890},
-    {"media_min_amount": 5},  # read-only in Phase 5 (A1)
+    # PAY-14 types and shapes (422; the D-M3b bounds are 400s: test_pricing_rules)
+    {"media_min_amount": "100"}, {"media_min_amount": True}, {"media_min_amount": None},
+    {"media_min_amount": float("nan")}, {"message_min_amount": None}, {"voice_min_amount": "5"},
+    {"message_char_tiers": None}, {"message_char_tiers": {"min_amount": 50, "max_chars": 100}},
+    {"message_char_tiers": [{"min_amount": 50}]}, {"message_char_tiers": [{"min_amount": 50.5, "max_chars": 100}]},
+    {"message_char_tiers": [{"min_amount": 50, "max_chars": 100, "x": 1}]},
+    {"voice_tiers": None}, {"voice_tiers": [{"min_amount": 0, "max_chars": 10}]},
+    {"voice_tiers": [{"min_amount": "0", "max_duration_seconds": 10}]},
     {"hyperemotes_enabled": True}, {"hyperemotes_enabled": False}, {"hyperemotes_min_amount": 5},  # discontinued
     {"status": "active"}, {"slug": "x"}, {"user_id": "x"}, {"rejection_reason": "x"}, {"pusher_group": 2},
 ]
