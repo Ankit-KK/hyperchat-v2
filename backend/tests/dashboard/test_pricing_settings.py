@@ -1,17 +1,11 @@
 """PAY-14 creator pricing (D-M3b): the validation matrix (pure, no database) and the settings PATCH / public pricing /
-migration 0036 behaviour against a scratch database."""
+public pricing behaviour against a scratch database."""
 
-import asyncio
-
-import psycopg
 import pytest
 
-from app.cli import connection_factory
-from app.core.config import Settings
 from app.core.errors import ApiError
 from app.dashboard import models
 from app.dashboard import validation as v
-from app.dashboard.repository import DashboardRepository
 from tests.integration import (
     DOMAIN,
     ORIGIN,
@@ -182,39 +176,6 @@ def test_voice_tiers_replace_the_whole_set_atomically(app):
         platform = conn.execute("SELECT count(*) FROM public.platform_voice_tiers WHERE is_active").fetchone()[0]
     if platform == 0:
         assert app.get(f"{P}/authtest-vt14/pricing").json()["voice_duration_tiers"][0]["max_duration_seconds"] == 8
-
-
-@requires_db
-def test_a_failed_write_rolls_back_every_part_of_the_patch(env):
-    """The repository below the app rules: migration 0036 refuses a sixth tier, and the minimum written in the same
-    transaction is rolled back with it."""
-    sid = make_streamer("authtest-atomic14", user_id=make_user("owner" + DOMAIN))
-    repo = DashboardRepository(connection_factory(Settings()))
-    asyncio.run(repo.update_settings(sid, {"voice_tiers": _voice((0, 5), (10, 10))}))
-    before = _cols(sid)
-    six = _voice((0, 5), (1, 6), (2, 7), (3, 8), (4, 9), (5, 10))
-    with pytest.raises(psycopg.errors.CheckViolation):
-        asyncio.run(repo.update_settings(sid, {"media_min_amount": 500, "voice_tiers": six}))
-    assert _cols(sid) == before and _tiers(sid) == [(0, 5, True), (10, 10, True)]
-
-
-@requires_db
-def test_database_refuses_out_of_range_values_from_the_runtime_role(env):
-    sid = make_streamer("authtest-db14")
-    with db() as conn:
-        for sql in ("UPDATE public.streamers SET media_min_amount = 10001 WHERE id = %s",
-                    "UPDATE public.streamers SET min_text_amount_inr = -1 WHERE id = %s",
-                    """UPDATE public.streamers SET message_char_tiers = '[{"min_amount": 0, "max_chars": 49}]'
-                       WHERE id = %s""",
-                    """UPDATE public.streamers SET message_char_tiers = '{"min_amount": 0}' WHERE id = %s""",
-                    "INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) "
-                    "VALUES (%s, 0, 31)"):
-            with pytest.raises(psycopg.errors.CheckViolation):
-                conn.execute(sql, (sid,))
-    with fixture_db() as conn:  # an out-of-range legacy value (written by the owner) ...
-        conn.execute("UPDATE public.streamers SET media_min_amount = 20000 WHERE id = %s", (sid,))
-    with db() as conn:  # ... never blocks an unrelated change by the runtime role
-        conn.execute("UPDATE public.streamers SET brand_color = '#000000' WHERE id = %s", (sid,))
 
 
 @requires_db

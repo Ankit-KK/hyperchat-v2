@@ -95,8 +95,7 @@ The floors are the platform floors checkout already enforces (D-M3a, raising or 
 Types and shapes (a string amount, a missing or extra tier key, a fractional tier amount, null) are 422; a value
 outside these rules is `400 {"error": "<field> <rule>"}` (e.g. `message_min_amount must be 40-10000`,
 `voice_tiers allows at most 5 tiers`), nothing written. Checkout and the public pricing endpoint read these exact
-columns and rows, so a change applies to the next donation. Migration 0036 repeats the bounds and tier counts in
-the database for the runtime roles. The TTS (`min_tts_amount_inr`) and HyperSound minimums are not writable.
+columns and rows, so a change applies to the next donation. The TTS (`min_tts_amount_inr`) and HyperSound minimums are not writable.
 
 An empty body is `400 {"error": "No settings to update"}`; one invalid or unknown field rejects the
 whole patch. PostgreSQL compares the new values with the stored ones under a row lock
