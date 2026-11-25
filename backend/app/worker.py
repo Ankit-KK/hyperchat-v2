@@ -3,8 +3,10 @@
 Reads the same environment as the API (EnvironmentFile), connects as the same DML-only role (hyperchat_app,
 D6) and processes donation_audio and voice_transcription jobs with HYPERCHAT_WORKER_CONCURRENCY slots.
 Next to them, one loop publishes the realtime outbox to Pusher (Phase 9, app.realtime.publisher); while
-HYPERCHAT_REALTIME_ENABLED is false it only marks events 'skipped'. With HYPERCHAT_AUTO_INVITE_ENABLED=true and
-the `onboarding` email category active, a third loop invites approved creator applicants (app.onboarding.auto_invite).
+HYPERCHAT_REALTIME_ENABLED is false it only marks events 'skipped'. A third loop records payment-hold alerts and
+delivers operator alerts to Discord (app.alerts, docs/alerting.md); failed jobs are recorded as alerts too.
+With HYPERCHAT_AUTO_INVITE_ENABLED=true and the `onboarding` email category active, a fourth loop invites
+approved creator applicants (app.onboarding.auto_invite, docs/onboarding.md).
 Paid providers are only constructed when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true and their key is set (D7);
 otherwise donation audio resolves to the silent fallback and transcription jobs fail as unavailable.
 SIGTERM/SIGINT stop it gracefully (see app.jobs.runner). Logs carry names and reason codes only.
@@ -15,12 +17,13 @@ import logging
 import signal
 
 from app.admin.applications import ApplicationRepository
+from app.alerts import AlertNotifier, Alerts
 from app.audio.handlers import DonationAudioHandler, VoiceTranscriptionHandler
 from app.audio.providers import ElevenLabsProvider, MiniMaxProvider, SarvamProvider
 from app.audio.repository import AudioRepository
 from app.audio.silence import ensure_silence
 from app.bots.clients import DiscordClient, TelegramClient
-from app.bots.notify import ModeratorNotifyHandler
+from app.bots.notify import ModeratorNotifyHandler, allowed
 from app.auth.email import sender_from_settings
 from app.bots.repository import BotRepository
 from app.core.config import Settings, get_settings
@@ -80,8 +83,22 @@ def build_auto_inviter(settings: Settings, connection_factory) -> AutoInviter | 
         log.warning("automatic invitations not started", extra={"reason": "onboarding_email_inactive"})
         return None
     return AutoInviter(ApplicationRepository(connection_factory), sender_from_settings(settings),
+                       Alerts(connection_factory),
                        frontend_url=settings.frontend_url, ttl_days=settings.invite_ttl_days,
                        poll_seconds=settings.auto_invite_poll_seconds)
+
+
+def build_notifier(settings: Settings, connection_factory) -> AlertNotifier:
+    """Operator alerts (docs/alerting.md): delivered only with a channel and the Discord bot token; outside production
+    only to a channel on HYPERCHAT_BOT_RECIPIENT_ALLOWLIST (D13). Otherwise they are recorded only."""
+    channel, token = settings.alert_discord_channel_id, settings.discord_bot_token
+    token = token.get_secret_value().strip() if token is not None else ""
+    if channel and not allowed(settings.bot_recipients, channel):
+        log.warning("alert channel not allow-listed: alerts are recorded only", extra={"reason": "not_allowlisted"})
+        channel = None
+    discord = DiscordClient(token) if channel and token else None
+    return AlertNotifier(Alerts(connection_factory), discord=discord, channel_id=channel, app_env=settings.app_env,
+                         interval=settings.alert_poll_seconds)
 
 
 def build_publisher(settings: Settings, connection_factory) -> OutboxPublisher:
@@ -127,8 +144,10 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> int:
         log.info("onboarding configuration", extra={"auto_invite_enabled": inviter is not None})
         try:
             await asyncio.gather(
-                Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency).run(stop),
-                publisher.run(stop), *([inviter.run(stop)] if inviter else []))
+                Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency,
+                       on_failure=Alerts(db.connection).job_failed).run(stop),
+                publisher.run(stop), build_notifier(settings, db.connection).run(stop),
+                *([inviter.run(stop)] if inviter else []))
         finally:
             if inviter is not None:
                 await inviter.sender.aclose()

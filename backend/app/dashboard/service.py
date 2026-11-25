@@ -49,6 +49,7 @@ class DashboardService:
     async def update_settings(self, access: StreamerAccess, changes: dict) -> SettingsUpdate:
         if not changes:
             raise ApiError(400, "No settings to update", "empty_patch")
+        v.pricing_rules(changes)  # PAY-14: 400 naming the field
         row, changed = await self.repo.update_settings(access.streamer.id, changes)
         if row is None:
             raise streamer_gone()

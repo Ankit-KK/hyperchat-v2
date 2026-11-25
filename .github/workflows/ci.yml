@@ -138,10 +138,10 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
         run: python -m pytest -q -ra --durations=25 --timeout=300 --timeout-method=signal -o faulthandler_timeout=240 tests/payments/test_verify_db.py
-      - name: Backend permission suites (auth, KYC, step-up, admin, backup, every payments and integrity suite but the verifier above, suspended-creator and failed-playback OBS checks, moderation)
+      - name: Backend permission suites (auth, KYC, step-up, admin, alerts, backup, every payments and integrity suite but the verifier above, suspended-creator and failed-playback OBS checks, moderation)
         if: steps.scope.outputs.run == 'true'
         working-directory: backend
-        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/onboarding tests/backup tests/payments --ignore=tests/payments/test_verify_db.py tests/obs/test_suspended_creator_access_db.py tests/obs/test_player_failed_playback_db.py tests/dashboard/test_moderation_api.py
+        run: python -m pytest -q tests/auth tests/kyc tests/stepup tests/admin tests/onboarding tests/alerts tests/backup tests/payments --ignore=tests/payments/test_verify_db.py tests/obs/test_suspended_creator_access_db.py tests/obs/test_player_failed_playback_db.py tests/dashboard/test_moderation_api.py
 
   integration:
     name: Database + integration tests (PostgreSQL 17)

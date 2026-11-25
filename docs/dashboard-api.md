@@ -50,7 +50,8 @@ Errors use `{"error": "..."}` (FastAPI's `{"detail": [...]}` for 422): 401 `Not 
 ## G1 settings
 **D-R1 fields:** `slug, name, status, moderation_mode, telegram_moderation_enabled,
 discord_moderation_enabled, media_moderation_enabled, tts_enabled, tts_language_boost, el_voice_id,
-media_upload_enabled, media_min_amount, brand_color,
+media_upload_enabled, message_min_amount, voice_min_amount, media_min_amount, message_char_tiers, voice_tiers,
+brand_color,
 alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id, overlay_adjust_mode,
 leaderboard_bg_enabled, leaderboard_widget_enabled, goal_name, goal_target_amount, goal_is_active,
 goal_activated_at`. Nullable booleans and `moderation_mode` are served with their column default.
@@ -67,8 +68,8 @@ goal_activated_at`. Nullable booleans and `moderation_mode` are served with thei
 - **Sending `goal_activated_at`** (any value, including null) is an unknown field: 422, nothing changed.
 - **`changed`** lists `goal_activated_at` when it was stamped, and the realtime `goal-progress` event follows as for any goal setting.
 
-**D-M1** accepts any subset of the 20 writable fields (the legacy `update-streamer-settings`
-allowlist minus the two read-only amounts and the server-owned `goal_activated_at`):
+**D-M1** accepts any subset of the 24 writable fields (the legacy `update-streamer-settings`
+allowlist minus HyperEmotes and the server-owned `goal_activated_at`, plus the PAY-14 pricing fields):
 
 | Field | Rule |
 |---|---|
@@ -83,8 +84,37 @@ allowlist minus the two read-only amounts and the server-owned `goal_activated_a
 | `goal_overlay_id` | integer 0–6 |
 | `brand_color` | `#RRGGBB` |
 | `el_voice_id` | 10–64 letters/digits; `""` or null clears it (stored as NULL) |
-| `media_min_amount` | **read-only** in Phase 5 (A1): sending it is a 422 |
+| `message_min_amount` | PAY-14: JSON number in INR, 40 (the text platform floor) – 10,000; stored as `min_text_amount_inr`. Served `null` until set (the floor applies) |
+| `voice_min_amount` | PAY-14: JSON number in INR, 150 – 10,000 (owner decision 2026-11-25: voice notes incur paid transcription); stored as `min_voice_amount_inr` |
+| `media_min_amount` | PAY-14: JSON number in INR, 100 – 10,000 (owner decision 2026-11-25) |
+| `message_char_tiers` | PAY-14: list of `{min_amount, max_chars}` (integers): at most 5; `max_chars` 50–500; `min_amount` 0–10,000; both strictly increasing. `[]` clears it (no character limit) |
+| `voice_tiers` | PAY-14: list of `{min_amount, max_duration_seconds}` (integers): at most 5; seconds 5–30; `min_amount` 0–10,000; both strictly increasing. Replaces the creator's `streamer_voice_tiers` rows in the same transaction (inactive rows included); `[]` deletes them, so the platform tiers apply. Served as the active rows (`[]` = platform tiers) |
 | `hyperemotes_enabled`, `hyperemotes_min_amount` | not fields: HyperEmotes are discontinued (owner decision D16, 2026-11-13); sending either is a 422 |
+
+The voice and media floors are the new-creator defaults and bind PATCH values only: a creator may raise its minimum but never set it below ₹150 / ₹100. Checkout keeps the platform floors (text ₹40, voice and media ₹0), so a legacy creator already below ₹150 / ₹100 is untouched until it sets a new value.
+Types and shapes (a string amount, a missing or extra tier key, a fractional tier amount, null) are 422; a value
+outside these rules is `400 {"error": "<field> <rule>"}` (e.g. `message_min_amount must be 40-10000`,
+`voice_tiers allows at most 5 tiers`), nothing written. Checkout and the public pricing endpoint read these exact
+columns and rows, so a change applies to the next donation. The TTS (`min_tts_amount_inr`) and HyperSound minimums are not writable.
+
+**Post-soak migration 0036 (proposed, not built).** Today these limits are enforced in application validation
+only: no migration may land while the PAY-15 verifier pins the database head to 0034 / 0035 (until 2026-12-01).
+After the soak, a migration 0036 would repeat the bounds and counts in the database. It would apply to the runtime
+roles (`hyperchat_app`, `hyperchat_worker`) only, as 0020's `streamers_protect_kyc_columns` does, so migrations
+and the legacy import stay unrestricted:
+
+| Table | Rule in the database |
+|---|---|
+| `streamers` | `min_text_amount_inr`, `min_voice_amount_inr`, `media_min_amount`: NULL or 0–10,000, checked only when the statement changes the column |
+| `streamers` | `message_char_tiers`: NULL or a JSON array of at most 5 objects with numeric `min_amount` 0–10,000 and `max_chars` 50–500, checked only when it changes |
+| `streamer_voice_tiers` | `min_amount_inr` 0–10,000 and `max_duration_seconds` 5–30 on insert / update |
+| `streamer_voice_tiers` | at most 5 active rows per creator (counted under the creator row lock) |
+
+They would be BEFORE triggers raising `check_violation`, not CHECK constraints: a CHECK, even `NOT VALID`, is
+re-checked on every update of a row, so a legacy out-of-range value would block unrelated settings edits. They
+would not rewrite or validate existing rows, add no grant, and the downgrade would only drop the two triggers and
+their functions. Floors and tier ordering stay application rules. Landing it also needs the verifier's accepted
+heads, `test_verify_db.py`'s `HEAD`, the smoke `KNOWN_HEADS` and the migration tests' final head pin moved to 0036.
 
 An empty body is `400 {"error": "No settings to update"}`; one invalid or unknown field rejects the
 whole patch. PostgreSQL compares the new values with the stored ones under a row lock

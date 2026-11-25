@@ -16,6 +16,7 @@ from decimal import Decimal
 
 from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from app.dashboard.moderation import Step, transition
 from app.dashboard.validation import WRITABLE_SETTINGS
@@ -30,7 +31,13 @@ _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
     COALESCE(discord_moderation_enabled, false) AS discord_moderation_enabled,
     COALESCE(media_moderation_enabled, true) AS media_moderation_enabled,
     COALESCE(tts_enabled, true) AS tts_enabled, tts_language_boost, el_voice_id,
-    COALESCE(media_upload_enabled, false) AS media_upload_enabled, media_min_amount,
+    COALESCE(media_upload_enabled, false) AS media_upload_enabled,
+    min_text_amount_inr AS message_min_amount, min_voice_amount_inr AS voice_min_amount, media_min_amount,
+    message_char_tiers,
+    (SELECT COALESCE(jsonb_agg(jsonb_build_object('min_amount', t.min_amount_inr,
+                                                  'max_duration_seconds', t.max_duration_seconds)
+                               ORDER BY t.min_amount_inr), '[]'::jsonb)
+     FROM public.streamer_voice_tiers t WHERE t.streamer_id = streamers.id AND t.is_active) AS voice_tiers,
     brand_color, alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id,
     overlay_adjust_mode, leaderboard_bg_enabled,
     COALESCE(leaderboard_widget_enabled, true) AS leaderboard_widget_enabled,
@@ -46,7 +53,12 @@ SETTINGS_SQL_TYPES = {
     "tts_language_boost": "text", "alert_overlay_id": "smallint", "leaderboard_overlay_id": "smallint",
     "overlay_adjust_mode": "boolean", "leaderboard_bg_enabled": "boolean", "goal_overlay_id": "smallint",
     "brand_color": "text", "leaderboard_widget_enabled": "boolean", "el_voice_id": "text",
+    "message_min_amount": "numeric", "voice_min_amount": "numeric", "media_min_amount": "numeric",
+    "message_char_tiers": "jsonb",
 }
+# PAY-14 fields stored under their existing legacy column names (the ones checkout and public pricing read).
+SETTINGS_COLUMNS = {"message_min_amount": "min_text_amount_inr", "voice_min_amount": "min_voice_amount_inr"}
+VOICE_TIERS = "voice_tiers"  # not a streamers column: the creator's rows in streamer_voice_tiers
 
 
 # PAY-15 stage 5 (S5-D1): reversed_inr / net_inr (stage 4 figures) and the coarse reversal_flag, from the donation's
@@ -91,7 +103,9 @@ class DuplicateModerator(Exception):
 
 
 def _db_value(value):
-    # JSON numbers arrive as float; numeric columns get the exact decimal the client wrote.
+    # JSON numbers arrive as float; numeric columns get the exact decimal the client wrote. Lists are jsonb tiers.
+    if isinstance(value, list):
+        return Jsonb(value)
     return Decimal(repr(value)) if isinstance(value, float) else value
 
 
@@ -121,26 +135,48 @@ class DashboardRepository:
         D-G: goal_activated_at is stamped here with the database clock (now(), timestamptz) on a real
         activation only: goal_is_active set to true while it was false/NULL, or while no activation time
         exists (imported rows). It is never taken from the client and never moved by other edits.
+
+        PAY-14: voice_tiers replaces the creator's streamer_voice_tiers rows (inactive ones included) in the same
+        transaction, under the same row lock, only when the active set differs.
         """
-        cols = [c for c in WRITABLE_SETTINGS if c in changes]
+        cols = [c for c in WRITABLE_SETTINGS if c in changes and c != VOICE_TIERS]
         params = {**{c: _db_value(changes[c]) for c in cols}, "id": streamer_id}
-        differs = ", ".join(f"({c} IS DISTINCT FROM %({c})s::{SETTINGS_SQL_TYPES[c]}) AS {c}" for c in cols)
+        col = {c: SETTINGS_COLUMNS.get(c, c) for c in cols}
+        differs = [f"({col[c]} IS DISTINCT FROM %({c})s::{SETTINGS_SQL_TYPES[c]}) AS {c}" for c in cols]
         async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(f"SELECT {differs}, goal_activated_at IS NULL AS unstamped "
+            await cur.execute(f"SELECT {', '.join([*differs, 'goal_activated_at IS NULL AS unstamped'])} "
                               "FROM public.streamers WHERE id = %(id)s FOR UPDATE", params)
             diff = await cur.fetchone()
             if diff is None:
                 return None, []
             changed = [c for c in cols if diff[c]]
-            sets = [f"{c} = %({c})s::{SETTINGS_SQL_TYPES[c]}" for c in changed]
+            sets = [f"{col[c]} = %({c})s::{SETTINGS_SQL_TYPES[c]}" for c in changed]
+            if VOICE_TIERS in changes and await self._replace_voice_tiers(cur, streamer_id, changes[VOICE_TIERS]):
+                changed.append(VOICE_TIERS)
             if changes.get("goal_is_active") is True and ("goal_is_active" in changed or diff["unstamped"]):
                 sets.append("goal_activated_at = now()")
                 changed.append("goal_activated_at")
-            if changed:
+            if sets:
                 await cur.execute(f"UPDATE public.streamers SET {', '.join(sets)} WHERE id = %(id)s", params)
+            if changed:
                 await outbox.emit_settings_changed(cur, streamer_id, changed)  # Phase 9: live overlay settings
             await cur.execute(f"SELECT {_SETTINGS_COLS} FROM public.streamers WHERE id = %(id)s", params)
             return await cur.fetchone(), changed
+
+    @staticmethod
+    async def _replace_voice_tiers(cur, streamer_id: str, tiers: list[dict]) -> bool:
+        """Make the creator's tiers exactly `tiers` (all active); False when the active set already is that."""
+        await cur.execute("SELECT min_amount_inr, max_duration_seconds, is_active FROM public.streamer_voice_tiers "
+                          "WHERE streamer_id = %s ORDER BY min_amount_inr", (streamer_id,))
+        current = [(r["min_amount_inr"], r["max_duration_seconds"]) for r in await cur.fetchall() if r["is_active"]]
+        if current == [(t["min_amount"], t["max_duration_seconds"]) for t in tiers]:
+            return False
+        await cur.execute("DELETE FROM public.streamer_voice_tiers WHERE streamer_id = %s", (streamer_id,))
+        if tiers:
+            await cur.executemany("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, "
+                                  "max_duration_seconds, is_active) VALUES (%s, %s, %s, true)",
+                                  [(streamer_id, t["min_amount"], t["max_duration_seconds"]) for t in tiers])
+        return True
 
     # ── G2 donations (paid only) ───────────────────────────────────────────
     async def donations(self, streamer_id: str, *, statuses: tuple[str, ...] | None, limit: int,

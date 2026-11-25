@@ -5,7 +5,7 @@ models use strict types: booleans must be JSON booleans and integers JSON intege
 """
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AfterValidator,
@@ -39,7 +39,13 @@ class DashboardSettings(_Model):  # D-R1
     tts_language_boost: str | None
     el_voice_id: str | None
     media_upload_enabled: bool
-    media_min_amount: float | None  # read-only (A1)
+    # PAY-14: the creator's own minimums (null = the platform floor applies) and tiers, served as stored;
+    # voice_tiers [] = the platform tiers apply (as the public pricing endpoint shows them)
+    message_min_amount: float | None
+    voice_min_amount: float | None
+    media_min_amount: float | None
+    message_char_tiers: Any  # jsonb as stored (legacy rows may hold any shape; checkout skips malformed entries)
+    voice_tiers: list[dict]
     brand_color: str | None
     alert_box_scale: float | None
     alert_overlay_id: int
@@ -56,6 +62,21 @@ class DashboardSettings(_Model):  # D-R1
 
 def _overlay(maximum: int):
     return Annotated[StrictInt, Field(ge=0, le=maximum)]
+
+
+# PAY-14 tiers: amounts in whole INR (streamer_voice_tiers.min_amount_inr is an integer). Types here (422); the
+# D-M3b bounds, counts and ordering are validation.pricing_rules (400 naming the field).
+class CharTier(_Model):
+    min_amount: StrictInt
+    max_chars: StrictInt
+
+
+class VoiceTier(_Model):
+    min_amount: StrictInt
+    max_duration_seconds: StrictInt
+
+
+_Amount = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 
 
 class SettingsPatch(_Model):  # D-M1 body
@@ -83,6 +104,11 @@ class SettingsPatch(_Model):  # D-M1 body
     brand_color: Annotated[StrictStr, AfterValidator(v.brand_color)] | None = None
     leaderboard_widget_enabled: StrictBool | None = None
     el_voice_id: Annotated[StrictStr | None, AfterValidator(v.el_voice_id)] = None
+    message_min_amount: _Amount | None = None
+    voice_min_amount: _Amount | None = None
+    media_min_amount: _Amount | None = None
+    message_char_tiers: list[CharTier] | None = None  # [] clears the tiers (no character limit)
+    voice_tiers: list[VoiceTier] | None = None        # [] clears the tiers (the platform tiers apply)
 
     @model_validator(mode="before")
     @classmethod
@@ -96,7 +122,8 @@ class SettingsPatch(_Model):  # D-M1 body
 
     def changes(self) -> dict:
         """Only the fields the client sent, with their validated (canonical) values."""
-        return {k: getattr(self, k) for k in v.WRITABLE_SETTINGS if k in self.model_fields_set}
+        dumped = self.model_dump(include=self.model_fields_set)  # tiers as plain dicts
+        return {k: dumped[k] for k in v.WRITABLE_SETTINGS if k in self.model_fields_set}
 
 
 class SettingsUpdate(_Model):  # D-M1 response

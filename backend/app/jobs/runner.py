@@ -46,8 +46,9 @@ def worker_id() -> str:
 class Worker:
     def __init__(self, queue: JobQueue, handlers: dict[str, Handler], *, concurrency: int = 2,
                  poll_seconds: float = 1.0, shutdown_grace: float = 50.0, ident: str | None = None,
-                 rng: random.Random | None = None) -> None:
-        self.queue, self.handlers = queue, handlers
+                 rng: random.Random | None = None, on_failure=None) -> None:
+        # on_failure(job, reason): called after a job's 'failed' write committed (app.alerts); its own errors are logged
+        self.queue, self.handlers, self.on_failure = queue, handlers, on_failure
         self.concurrency, self.poll_seconds, self.shutdown_grace = concurrency, poll_seconds, shutdown_grace
         self.ident = ident or worker_id()
         self.rng = rng or random.Random()
@@ -113,6 +114,11 @@ class Worker:
         self.processed += 1
         self._log("job failed" if ok else "job lease lost", job, started, reason=reason, fallback=effects is not None,
                   level=logging.WARNING)
+        if ok and self.on_failure is not None:
+            try:
+                await self.on_failure(job, reason)
+            except Exception as exc:  # noqa: BLE001 - the job is already failed; alerting never changes that
+                log.warning("job failure hook error", extra={"job_id": job.id, "error": type(exc).__name__})
 
     async def _safe(self, call, job: Job) -> bool:
         try:

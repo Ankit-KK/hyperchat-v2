@@ -53,8 +53,10 @@ The fifth failed attempt raises an `invite_failed` alert, and no sixth attempt f
 schedule also lists a 12 h step, which only a sixth attempt would wait for. An invitation that expires after its 7
 days is never re-sent automatically (Q4). In every stopped case the admin's manual resend remains available.
 
-Alerts are logged as `onboarding alert` warnings, with `alert=invite_failed`, a reason code and the ids. They move to
-S4's alert table once PR #148 is on `main` (TODO in the code).
+Alerts are recorded in `system_alerts` through `app.alerts` (`docs/alerting.md`): kind `invite_failed`, source
+`onboarding`, the reason code, and `signup_id` (plus `invite_id` after a failed email). They are delivered to the
+operator channel like every other alert. Recording is best effort: an alert that cannot be written is logged and never
+stops the loop.
 
 ## Admin view
 

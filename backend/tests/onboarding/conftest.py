@@ -6,6 +6,7 @@ import itertools
 import pytest
 
 from app.admin.applications import ApplicationRepository
+from app.alerts import Alerts
 from app.auth.email import EmailDeliveryError
 from app.cli import connection_factory
 from app.core.config import Settings
@@ -83,8 +84,23 @@ def approved(repo):
     return make
 
 
+def alerts(signup_id: str) -> list[tuple]:
+    """The invite_failed alerts recorded for an application: (source, code, context)."""
+    with db() as conn:
+        return conn.execute("SELECT source, message, context FROM public.system_alerts WHERE context->>'kind' = "
+                            "'invite_failed' AND context->>'signup_id' = %s ORDER BY created_at",
+                            (signup_id,)).fetchall()
+
+
 @pytest.fixture
-def inviter(repo):
+def inviter(repo, strict_scratch_db):
+    """Alert rows carry no synthetic marker: the table is emptied around the test, as tests/alerts does."""
+    with db() as conn:
+        conn.execute("DELETE FROM public.system_alerts")
+    store = Alerts(connection_factory(Settings()))
+
     def make(sender, **kw) -> AutoInviter:
-        return AutoInviter(repo, sender, frontend_url=FRONT, ttl_days=7, poll_seconds=60, **kw)
-    return make
+        return AutoInviter(repo, sender, store, frontend_url=FRONT, ttl_days=7, poll_seconds=60, **kw)
+    yield make
+    with db() as conn:
+        conn.execute("DELETE FROM public.system_alerts")

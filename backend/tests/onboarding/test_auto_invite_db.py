@@ -2,7 +2,6 @@
 as the worker's own role (hyperchat_app). Fake email senders only; synthetic rows only."""
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -13,17 +12,13 @@ from app.auth.tokens import sha256_hex
 from app.onboarding.auto_invite import MAX_ATTEMPTS
 from app.stepup.grants import StepUpRequired
 from tests.integration import db, make_user, requires_db
-from tests.onboarding.conftest import FakeSender, age_events, events, invites, set_enforcement
+from tests.onboarding.conftest import FakeSender, age_events, alerts, events, invites, set_enforcement
 
 pytestmark = requires_db
 
 
 def _token(email) -> str:
     return email.text.split("\n")[3].split("token=", 1)[1]
-
-
-def _alerts(caplog) -> list[str]:
-    return [r.reason for r in caplog.records if r.getMessage() == "onboarding alert"]
 
 
 def test_one_approval_gets_exactly_one_invitation_and_one_email(approved, inviter):
@@ -70,16 +65,18 @@ def test_a_send_failure_revokes_the_link_and_retries_after_the_backoff(approved,
     assert [(i[0] == first, i[3]) for i in invites(sid)] == [(True, True), (False, False)]  # a fresh link
 
 
-def test_the_fifth_failure_alerts_and_stops(approved, inviter, caplog):
+def test_the_fifth_failure_alerts_and_stops(approved, inviter):
     sid, _, _ = approved("auto-five")
     sender = FakeSender(fail=-1)
     loop = inviter(sender)
-    with caplog.at_level(logging.WARNING, logger="hyperchat.onboarding"):
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            assert asyncio.run(loop.run_once()) == [(sid, "failed")], attempt
-            assert _alerts(caplog) == ([] if attempt < MAX_ATTEMPTS else ["transient"])
-            age_events(sid)
-        assert asyncio.run(loop.run_once()) == []  # no sixth attempt, however long it waits
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        assert asyncio.run(loop.run_once()) == [(sid, "failed")], attempt
+        assert len(alerts(sid)) == (0 if attempt < MAX_ATTEMPTS else 1)
+        age_events(sid)
+    assert asyncio.run(loop.run_once()) == []  # no sixth attempt, however long it waits
+    [(source, code, context)] = alerts(sid)
+    assert (source, code) == ("onboarding", "transient")
+    assert context == {"kind": "invite_failed", "signup_id": sid, "invite_id": invites(sid)[-1][0]}  # ids only
     assert sender.attempts == MAX_ATTEMPTS and all(i[3] for i in invites(sid))
     assert [e[2] for e in events(sid)].count("auto") == MAX_ATTEMPTS
 
@@ -134,14 +131,13 @@ def test_two_workers_never_invite_the_same_application_twice(approved, inviter):
         assert len(invites(sid)) == 1 and [e[2] for e in events(sid)].count("auto") == 1
 
 
-def test_a_step_up_refusal_is_recorded_and_pauses_the_application(approved, inviter, caplog):
+def test_a_step_up_refusal_is_recorded_and_pauses_the_application(approved, inviter):
     sid, _, _ = approved("auto-stepup")
     sender = FakeSender()
     set_enforcement("active")  # Q14: the loop must survive the step-up state it was not built for
     try:
-        with caplog.at_level(logging.WARNING, logger="hyperchat.onboarding"):
-            assert asyncio.run(inviter(sender).run_once()) == [(sid, "paused")]
-        assert _alerts(caplog) == ["stepup_refused"]
+        assert asyncio.run(inviter(sender).run_once()) == [(sid, "paused")]
+        assert [(a[0], a[1]) for a in alerts(sid)] == [("onboarding", "stepup_refused")]
     finally:
         set_enforcement("draft")
     assert events(sid)[-1] == ("note", None, "auto:paused:stepup_refused") and invites(sid) == []

@@ -17,8 +17,8 @@ outcome is kept as actor-less application_events rows (codes only, never an addr
   note 'auto:failed:<code>'               its email failed: the link was revoked, a later pass retries
   note 'auto:skipped:<code>'              account_exists (owner decision Q2: the manual owner-assign path) or similar
   note 'auto:paused:<code>'               the database refused the insert (step-up 'active' before migration 0037)
-After the MAX_ATTEMPTS-th failure, or on a pause, an `invite_failed` alert is raised and the application is left to
-the manual resend route.
+After the MAX_ATTEMPTS-th failure, or on a pause, an `invite_failed` alert is recorded (app.alerts, source
+'onboarding', ids only) and the application is left to the manual resend route.
 
 shortcut: an invitation committed but never sent (the worker died between commit and send) stays open until it
 expires and is never retried automatically; the admin view shows it as pending with no failure. Upgrade with the
@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 
 from app.admin.applications import ApplicationRepository
+from app.alerts import Alerts
 from app.auth.email import EmailDeliveryError, EmailSender, render
 from app.auth.tokens import new_hex_token, sha256_hex
 
@@ -83,18 +84,19 @@ def failure_code(exc: Exception) -> str:
             "EmailRecipientNotAllowed": "recipient_not_allowed"}.get(type(exc).__name__, "send_error")
 
 
-def alert(kind: str, code: str, **ids) -> None:
-    # TODO(PR #148): record through app.alerts.Alerts.record(kind="invite_failed", source="auto_invite", code=code,
-    # **ids) once S4 alerting is on main (add "invite_failed" to its KINDS). Until then: a warning, ids only.
-    log.warning("onboarding alert", extra={"alert": kind, "reason": code, **ids})
-
-
 class AutoInviter:
-    def __init__(self, repo: ApplicationRepository, sender: EmailSender, *, frontend_url: str, ttl_days: int,
-                 poll_seconds: float, started_at: datetime | None = None) -> None:
-        self.repo, self.sender = repo, sender
+    def __init__(self, repo: ApplicationRepository, sender: EmailSender, alerts: Alerts, *, frontend_url: str,
+                 ttl_days: int, poll_seconds: float, started_at: datetime | None = None) -> None:
+        self.repo, self.sender, self.alerts = repo, sender, alerts
         self.frontend_url, self.ttl_days, self.poll_seconds = frontend_url.rstrip("/"), ttl_days, poll_seconds
         self.started_at = started_at or datetime.now(UTC)  # the enable time, in memory only
+
+    async def _alert(self, code: str, **ids: str) -> None:
+        log.warning("automatic invitation alert", extra={"reason": code, **ids})
+        try:
+            await self.alerts.record(kind="invite_failed", source="onboarding", code=code, **ids)
+        except Exception as exc:  # noqa: BLE001 - alerting never fails what it reports on (app.alerts)
+            log.warning("alert not recorded", extra={"kind": "invite_failed", "error": type(exc).__name__})
 
     def _params(self, signup_id: str | None) -> dict:
         return {"id": signup_id, "since": self.started_at - WINDOW, "window_days": WINDOW.days,
@@ -131,7 +133,7 @@ class AutoInviter:
                 raise
             code = "stepup_refused" if "step-up" in str(exc) else "guard_refused"
             await self.repo.auto_outcome(picked["id"], f"auto:paused:{code}")
-            alert("invite_failed", code, signup_id=picked["id"])
+            await self._alert(code, signup_id=picked["id"])
             return picked["id"], "paused"
         if result == "none_due":
             return None
@@ -148,7 +150,7 @@ class AutoInviter:
                 "signup_id": signup_id, "invite_id": invite["id"], "reason": code, "attempt": attempt,
                 "max_attempts": MAX_ATTEMPTS, "retry_in_s": retry_delay(attempt) if attempt < MAX_ATTEMPTS else None})
             if attempt >= MAX_ATTEMPTS:
-                alert("invite_failed", code, signup_id=signup_id, invite_id=invite["id"])
+                await self._alert(code, signup_id=signup_id, invite_id=invite["id"])
             return signup_id, "failed"
         log.info("automatic invitation sent", extra={"signup_id": signup_id, "invite_id": invite["id"],
                                                      "attempt": picked["attempt"], "count": invite["replaced"]})

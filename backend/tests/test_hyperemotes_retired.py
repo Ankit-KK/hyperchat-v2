@@ -20,8 +20,8 @@ from app.soundboard import models as soundboard_models
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 WORD = re.compile(r"hyper.?emote", re.IGNORECASE)
 # The only mentions left in application code: comments recording the decision (validation.py), never a field name.
-ALLOWED = {("dashboard/validation.py", "# ── settings (legacy update-streamer-settings allowlist, minus the read-only "
-                                       "amount and HyperEmotes) ──"),
+ALLOWED = {("dashboard/validation.py", "# ── settings (legacy update-streamer-settings allowlist minus HyperEmotes, "
+                                       "plus the PAY-14 pricing fields) ──"),
            ("dashboard/validation.py", "# HyperEmotes are discontinued (owner decision 2026-11-13): their streamer "
                                        "columns stay in the schema until a later")}
 
@@ -52,7 +52,7 @@ def test_no_request_or_response_model_has_a_hyperemote_field():
 
 
 def test_settings_cannot_enable_configure_or_price_hyperemotes():
-    assert not [s for s in (*validation.WRITABLE_SETTINGS, *validation.READ_ONLY_SETTINGS) if WORD.search(s)]
+    assert not [s for s in validation.WRITABLE_SETTINGS if WORD.search(s)]
     for body in ({"hyperemotes_enabled": True}, {"hyperemotes_enabled": False}, {"hyperemotes_min_amount": 1}):
         with pytest.raises(pydantic.ValidationError):
             dashboard_models.SettingsPatch.model_validate(body)

@@ -9,6 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
+from app import alerts
 from app.auth.dependencies import CurrentUser, require_admin
 from app.auth.service import AuthError
 from app.core.config import get_settings
@@ -84,3 +85,17 @@ async def list_jobs(request: Request, status: Literal["queued", "running", "succ
     admin_service(request)  # 503 without a database
     rows = await JobQueue(request.app.state.db.connection).list(status=status, kind=kind, limit=limit, offset=offset)
     return {"limit": limit, "offset": offset, "jobs": rows}
+
+
+@router.get("/alerts")
+async def list_alerts(request: Request, kind: str | None = None, delivered: bool | None = None,
+                      limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0, le=100_000),
+                      current: CurrentUser = Depends(require_admin)) -> dict:
+    """Operator failure alerts (docs/alerting.md), newest first: source, severity, kind, reason code, entity ids,
+    created_at and notified_at (null = not delivered); optionally one kind and/or one delivery state."""
+    if kind is not None and kind not in alerts.KINDS:
+        raise AuthError(400, "Invalid alert kind", "bad_kind")
+    admin_service(request)  # 503 without a database
+    rows = await alerts.Alerts(request.app.state.db.connection).list(kind=kind, delivered=delivered, limit=limit,
+                                                                     offset=offset)
+    return {"limit": limit, "offset": offset, "alerts": rows}
