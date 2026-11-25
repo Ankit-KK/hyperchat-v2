@@ -1,4 +1,5 @@
-"""Creator dashboard API (Phase 5): /api/v1/dashboard/streamers/{streamer}/... and /api/v1/me/terms.
+"""Creator dashboard API (Phase 5): /api/v1/dashboard/streamers/{streamer}/..., /api/v1/me/terms and the
+read-only onboarding checklist /api/v1/me/onboarding (app.onboarding.checklist).
 
 Creator routes depend on require_streamer_access (owner, linked account or admin; an unclaimed creator
 is admin-only); POST/PATCH/DELETE also pass require_user's Origin + CSRF check. Responses on these
@@ -36,6 +37,7 @@ from app.dashboard.models import (
     UnbanResult,
 )
 from app.dashboard.service import DashboardService
+from app.onboarding import checklist
 
 dashboard_router = APIRouter(prefix="/api/v1/dashboard/streamers/{streamer}", tags=["dashboard"])
 me_router = APIRouter(prefix="/api/v1/me", tags=["dashboard"])
@@ -44,7 +46,8 @@ me_router = APIRouter(prefix="/api/v1/me", tags=["dashboard"])
 def is_private_path(path: str) -> bool:
     """Dashboard and terms paths: per-user data that no browser or proxy may cache."""
     return (path == "/api/v1/dashboard" or path.startswith("/api/v1/dashboard/")
-            or path == "/api/v1/me/terms" or path.startswith("/api/v1/me/terms/"))
+            or path == "/api/v1/me/terms" or path.startswith("/api/v1/me/terms/")
+            or path == "/api/v1/me/onboarding")
 
 
 def install_no_store(app: FastAPI) -> None:
@@ -169,3 +172,19 @@ async def terms_status(request: Request, current: CurrentUser = Depends(require_
 async def accept_terms(body: TermsAccept, request: Request,
                        current: CurrentUser = Depends(require_user)) -> TermsAccepted:
     return await _service(request).accept_terms(current.user, body.version, request.headers.get("user-agent"))
+
+
+# ── Onboarding Stage 5 Phase A: the read-only checklist (owner or linked account; nothing activates) ─────────
+
+@me_router.get("/onboarding")
+async def my_onboarding(request: Request, current: CurrentUser = Depends(require_user)) -> dict:
+    state = request.app.state
+    admin, kyc = getattr(state, "admin", None), getattr(state, "kyc", None)
+    if admin is None:
+        raise ApiError(503, "Onboarding is unavailable right now. Please try again later.", "admin_not_configured")
+    creators = await checklist.creator_checklist(
+        state.db.connection, user_id=current.user.id, linked_streamer_id=current.user.streamer_id,
+        environment=kyc.environment if kyc else None, accounts=admin.payment_accounts)
+    if not creators:
+        raise ApiError(403, "Only a creator's owner or linked account has an onboarding checklist", "not_creator_member")
+    return {"creators": creators}

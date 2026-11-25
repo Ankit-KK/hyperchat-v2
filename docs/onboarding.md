@@ -88,3 +88,54 @@ stops the loop.
   stays open until it expires. It is not retried automatically, and the admin view shows it as `pending`.
 - **Imports.** The worker now imports `app.admin.applications`, which pulls in `app.payments.figures` (read helpers
   for the admin donation list). The loop never calls it and never touches payment or accounting tables.
+
+# Onboarding checklist (Stage 5, Phase A)
+
+A read-only view of how far each creator is from activation, computed from existing data. Phase A adds no migration,
+table, role, grant or job kind, and changes no lifecycle path. **Activation stays manual** (`POST
+/api/v1/admin/creators/{id}/activate`) until Stage 5 Phase B (migration 0040, after the PAY-15 soak). Code:
+`backend/app/onboarding/checklist.py`, shared by both routes. Each request uses one connection and one `READ ONLY`
+transaction on the API's own role (`hyperchat_app`); it calls `kyc_activation_block` once per creator, which that role
+may already execute (migration 0023).
+
+## Routes
+
+| Route | Who | Answer |
+|---|---|---|
+| `GET /api/v1/me/onboarding` | the signed-in owner or linked account of at least one creator (403 otherwise, 401 signed out) | `{creators: [...]}`, one entry per creator the user may manage |
+| `GET /api/v1/admin/onboarding?status=pending\|active&blocked_by=<condition>&limit=50&offset=0` | admins | `{total, limit, offset, creators: [...]}`, newest first; `limit` at most 200 |
+
+Both answer `Cache-Control: no-store`. Each creator entry holds:
+
+- `streamer_id`, `slug`, `status` (`pending`, `active`, `suspended`, `rejected`) and `track` (`standard`, `legacy`);
+- `qualifies_for_auto_activation`: the creator came from an application and is on the standard KYC track (owner
+  decision Q12);
+- `conditions`: one row per condition below, `{condition, state, detail, blocking}`;
+- `ready_for_activation`: true only for a qualifying `pending` creator with no blocking row. The PAN row blocks
+  while its policy is pending, so this is never true before Stage 3.
+
+The admin view adds `signup_id` and `invite_delivery` (`{status, auto_attempts, last_failure}`, the same derivation as
+`GET /api/v1/admin/applications/{id}`). `blocked_by` keeps only creators that condition blocks; an unknown code is
+400. It answers ids and slugs only, never the applicant's name, email or phone, nor the creator's display name.
+
+## Conditions
+
+Every row is evaluated against the creator's **current owner** (`streamers.user_id`), never the viewer. The owner, a
+linked account (full owner power) and an admin therefore see the same rows. States are `ok` or `set` (met), and
+`missing`, `blocked` or `policy_pending` (blocking). `detail` is a code or `null`, never a value.
+
+| `condition` | Met when | `detail` when not met |
+|---|---|---|
+| `application_approved` | the creator's application (`user_signups.streamer_id`) is `approved` | the review status, or `no_application` |
+| `invitation_accepted` | an invitation of that application was accepted (accepted invitations are never purged) | the latest invitation's state, or `no_invitation` |
+| `ownership_confirmed` | the user who accepted it is the current owner, and that account is active | `no_owner`, `owner_not_invitee` (an owner linked by an admin), `owner_inactive` |
+| `kyc_approved` | the owner's Didit KYC is approved for this server's Didit environment (`user_kyc_approved`) | `no_owner`, `owner_kyc_required` |
+| `pan_policy` | never in Phase A: state `policy_pending` until Stage 3 (migration 0038) records PAN evidence. PAN-only applies to automatic activation only (owner decision Q6) | `pan_evidence_not_recorded` |
+| `profile_picture` | `brand_logo_url` is an https URL under the `creator-assets/` prefix: state `set`, detail `validation_not_recorded` (informational until Phase B records validation) | `legacy_path` for an `/assets/...` path or any other value; `null` when empty |
+| `background` | the same rule on `background_url` | the same codes |
+| `no_restriction` | no `kyc_restrictions` row with `lifted_at IS NULL` | `open_restriction` (state `blocked`) |
+| `razorpay_account` | the creator's `razorpay_account` is one of this server's configured accounts, as admin activation checks it | `account_not_configured` |
+| `lifecycle_eligible` | `kyc_activation_block(streamer_id)` is NULL | its code: `restricted`, `no_owner`, `kyc_required` (state `blocked`) |
+
+Nothing in either route writes or activates. A creator `pending` with every row met except PAN still waits for an
+admin's activation.
