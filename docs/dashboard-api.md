@@ -85,13 +85,13 @@ allowlist minus HyperEmotes and the server-owned `goal_activated_at`, plus the P
 | `brand_color` | `#RRGGBB` |
 | `el_voice_id` | 10–64 letters/digits; `""` or null clears it (stored as NULL) |
 | `message_min_amount` | PAY-14: JSON number in INR, 40 (the text platform floor) – 10,000; stored as `min_text_amount_inr`. Served `null` until set (the floor applies) |
-| `voice_min_amount` | PAY-14: JSON number in INR, 0 (the voice platform floor) – 10,000; stored as `min_voice_amount_inr` |
-| `media_min_amount` | PAY-14: JSON number in INR, 0 (the media platform floor) – 10,000 |
+| `voice_min_amount` | PAY-14: JSON number in INR, 150 – 10,000 (owner decision 2026-11-25: voice notes incur paid transcription); stored as `min_voice_amount_inr` |
+| `media_min_amount` | PAY-14: JSON number in INR, 100 – 10,000 (owner decision 2026-11-25) |
 | `message_char_tiers` | PAY-14: list of `{min_amount, max_chars}` (integers): at most 5; `max_chars` 50–500; `min_amount` 0–10,000; both strictly increasing. `[]` clears it (no character limit) |
 | `voice_tiers` | PAY-14: list of `{min_amount, max_duration_seconds}` (integers): at most 5; seconds 5–30; `min_amount` 0–10,000; both strictly increasing. Replaces the creator's `streamer_voice_tiers` rows in the same transaction (inactive rows included); `[]` deletes them, so the platform tiers apply. Served as the active rows (`[]` = platform tiers) |
 | `hyperemotes_enabled`, `hyperemotes_min_amount` | not fields: HyperEmotes are discontinued (owner decision D16, 2026-11-13); sending either is a 422 |
 
-The floors are the platform floors checkout already enforces (D-M3a, raising or lowering them, is not approved).
+The voice and media floors are the new-creator defaults and bind PATCH values only: a creator may raise its minimum but never set it below ₹150 / ₹100. Checkout keeps the platform floors (text ₹40, voice and media ₹0), so a legacy creator already below ₹150 / ₹100 is untouched until it sets a new value.
 Types and shapes (a string amount, a missing or extra tier key, a fractional tier amount, null) are 422; a value
 outside these rules is `400 {"error": "<field> <rule>"}` (e.g. `message_min_amount must be 40-10000`,
 `voice_tiers allows at most 5 tiers`), nothing written. Checkout and the public pricing endpoint read these exact

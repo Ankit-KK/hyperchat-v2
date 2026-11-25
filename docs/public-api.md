@@ -19,7 +19,7 @@ CORS and rate limiting restrict browsers and volume; they are not authentication
 | # | Endpoint | Cache-Control | Response fields |
 |---|---|---|---|
 | E1 | `GET /api/v1/public/streamers/{slug}` | 60 s | `slug, name, brand_color, brand_logo_url, background_url, tts_enabled, media_upload_enabled, media_max_file_size_mb, soundboard_enabled` |
-| E2 | `GET …/{slug}/pricing?currency=INR` | 60 s | `currency, min_text, min_tts, min_voice, min_hypersound, min_media, tts_enabled, message_char_tiers[{min_amount, max_chars}] \| null, voice_duration_tiers[{min_amount, max_duration_seconds}]`. `min_text`, `min_voice`, `min_media`, `message_char_tiers` and `voice_duration_tiers` follow what the creator set in the dashboard (PAY-14, `docs/dashboard-api.md` G1), never below the platform floors; unset values keep the earlier defaults |
+| E2 | `GET …/{slug}/pricing?currency=INR` | 60 s | `currency, min_text, min_tts, min_voice, min_hypersound, min_media, tts_enabled, message_char_tiers[{min_amount, max_chars}] \| null, voice_duration_tiers[{min_amount, max_duration_seconds}]`. `min_text`, `min_voice`, `min_media`, `message_char_tiers` and `voice_duration_tiers` follow what the creator set in the dashboard (PAY-14, `docs/dashboard-api.md` G1), never below their floors (`docs/dashboard-api.md` G1); unset values keep the earlier defaults |
 | E3 | ~~`GET …/{slug}/overlay-config`~~ | – | **removed (2026-10-15)**: OBS-token data, `GET /api/v1/obs/overlay-config` (the token's creator) |
 | E4 | `GET …/{slug}/soundboard` | 60 s | `sounds[{id, display_name, audio_url, thumb_url}]` |
 | E5 | ~~`GET …/{slug}/leaderboard`~~ | – | **removed (2026-10-15)**: OBS-token data, `GET /api/v1/obs/leaderboard` (the token's creator) |

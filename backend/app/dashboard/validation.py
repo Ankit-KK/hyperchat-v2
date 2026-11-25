@@ -89,15 +89,16 @@ def goal_name(value: str) -> str:
 
 
 # ── PAY-14 creator pricing (D-M3b limits, 2026-10-29). Types and shapes are the model's (422); these business rules
-#    answer 400 naming the field. The floors are the platform floors checkout already enforces (D-M3a not approved:
-#    they are unchanged); a creator may never go below them, nor above PRICING_MAX_INR for any type. ──────────────
+#    answer 400 naming the field. A creator may never set a minimum below its floor, nor above PRICING_MAX_INR. ──
 
 PRICING_MAX_INR = 10_000
 TIERS_MAX = 5
 CHAR_TIER_RANGE = (50, 500)
 VOICE_TIER_SECONDS = (5, 30)
-MINIMUM_FLOORS = {"message_min_amount": PLATFORM_FLOORS_INR["text"], "voice_min_amount": PLATFORM_FLOORS_INR["voice"],
-                  "media_min_amount": PLATFORM_FLOORS_INR["media"]}
+# Owner decision 2026-11-25: voice / media floors for a PATCH are the new-creator defaults (Rs 150 / Rs 100; voice notes
+# incur paid transcription). They bind PATCH values only: checkout keeps PLATFORM_FLOORS_INR, so a legacy creator
+# already below them is untouched until it sets a new value.
+MINIMUM_FLOORS = {"message_min_amount": PLATFORM_FLOORS_INR["text"], "voice_min_amount": 150, "media_min_amount": 100}
 
 
 def _bad(field: str, rule: str) -> ApiError:

@@ -34,19 +34,21 @@ def _voice(*pairs):
 
 # ── the validation matrix: (body, error or None when accepted). Every row is also in the PR description. ──────────
 MATRIX = [
-    # per-type minimums: platform floor (text 40, voice 0, media 0; D-M3a not approved) .. 10,000
+    # per-type minimums: floor (message 40 = the text platform floor; voice 150 / media 100, owner 2026-11-25) .. 10,000
     ({"message_min_amount": 40}, None),
     ({"message_min_amount": 10_000}, None),
     ({"message_min_amount": 39.99}, "message_min_amount must be 40-10000"),
     ({"message_min_amount": 10_000.01}, "message_min_amount must be 40-10000"),
-    ({"voice_min_amount": 0}, None),
     ({"voice_min_amount": 150}, None),
-    ({"voice_min_amount": -1}, "voice_min_amount must be 0-10000"),
-    ({"voice_min_amount": 10_001}, "voice_min_amount must be 0-10000"),
-    ({"media_min_amount": 0}, None),
+    ({"voice_min_amount": 10_000}, None),
+    ({"voice_min_amount": 0}, "voice_min_amount must be 150-10000"),
+    ({"voice_min_amount": 149.99}, "voice_min_amount must be 150-10000"),
+    ({"voice_min_amount": 10_001}, "voice_min_amount must be 150-10000"),
+    ({"media_min_amount": 100}, None),
     ({"media_min_amount": 10_000}, None),
-    ({"media_min_amount": -0.01}, "media_min_amount must be 0-10000"),
-    ({"media_min_amount": 10_000.5}, "media_min_amount must be 0-10000"),
+    ({"media_min_amount": 0}, "media_min_amount must be 100-10000"),
+    ({"media_min_amount": 99.99}, "media_min_amount must be 100-10000"),
+    ({"media_min_amount": 10_000.5}, "media_min_amount must be 100-10000"),
     # message character tiers: at most 5, max_chars 50-500, min_amount 0-10,000, both strictly increasing
     ({"message_char_tiers": []}, None),
     ({"message_char_tiers": _char((0, 50))}, None),
@@ -79,6 +81,7 @@ MATRIX = [
      "voice_tiers tiers must have strictly increasing min_amount and max_duration_seconds"),
     # several fields: the first broken rule (fixed field order) is reported
     ({"media_min_amount": 50, "message_min_amount": 10}, "message_min_amount must be 40-10000"),
+    ({"voice_min_amount": 200, "media_min_amount": 50}, "media_min_amount must be 100-10000"),
 ]
 
 
@@ -180,7 +183,8 @@ def test_voice_tiers_replace_the_whole_set_atomically(app):
 
 @requires_db
 def test_existing_creators_are_unchanged_when_they_set_nothing(app):
-    sid, headers = owned_creator(app, "authtest-keep14", min_voice_amount_inr=150,
+    # a legacy creator already below today's PATCH floors (voice 150, media 100): kept as it is
+    sid, headers = owned_creator(app, "authtest-keep14", min_voice_amount_inr=50, media_min_amount=20,
                                  message_char_tiers='[{"min_amount": 40, "max_chars": 200}]')
     with fixture_db() as conn:
         conn.execute("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) "
@@ -192,6 +196,11 @@ def test_existing_creators_are_unchanged_when_they_set_nothing(app):
     assert _cols(sid)[:4] == cols and _tiers(sid) == tiers
     assert {k: val for k, val in app.get(f"{P}/authtest-keep14/pricing").json().items() if k != "tts_enabled"} == {
         k: val for k, val in pricing.items() if k != "tts_enabled"}
+    assert (pricing["min_voice"], pricing["min_media"]) == (50.0, 20.0)  # checkout still uses the platform floors
+    # setting a new value is held to the floors; re-sending the stored legacy value is a change, so it is too
+    r = app.patch(f"{S}/authtest-keep14/settings", json={"voice_min_amount": 50}, headers=headers)
+    assert (r.status_code, r.json()["error"]) == (400, "voice_min_amount must be 150-10000")
+    assert _cols(sid)[:4] == cols
 
 
 @requires_db
