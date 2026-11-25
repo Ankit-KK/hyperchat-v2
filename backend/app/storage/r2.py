@@ -17,6 +17,11 @@ Every operation is limited to the key patterns it needs, so a bug can never touc
   delete (delete_object)            creator soundboard keys ONLY (never hypersounds/, hypersound-thumbs/,
                                     voice-messages/, donation-media/ or anything else)
   list (list_keys)                  the platform library prefixes hypersounds/ and hypersound-thumbs/
+  write (put_object)                + creator images creator-assets/<creator uuid>/<logo|background>/<sha256>.<ext>
+                                    (S6 CREATOR_ASSET_KEY; onboarding Stage 4 writes .webp variants)
+  metadata (head_creator_asset)     creator image keys: an upload skips a content-addressed object that exists
+  delete (delete_creator_asset)     creator image .webp keys only; the caller deletes only objects its own failed
+                                    upload created (never a legacy copy, never an object that existed before)
   list (list_uploads)               the donor upload prefixes voice-messages/ and donation-media/: keys and
                                     LastModified only (D9 abandoned-upload cleanup, CLI only)
   delete (delete_upload)            one donor upload key matching the upload pattern (D9 cleanup, CLI only;
@@ -56,8 +61,16 @@ VOICE_KEY = re.compile(rf"^voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm$
 SILENCE_KEY = "system/silence.mp3"
 _GENERATED = rf"tts-audio/{_UUID}/{_UUID}\.mp3|system/silence\.mp3"
 GENERATED_KEY = re.compile(rf"^({_GENERATED})$")
-# Server-generated keys: donor uploads, soundboard objects and generated audio.
-WRITABLE_KEY = re.compile(rf"^({_UPLOAD}|soundboards/{_SLUG}/{_UUID}\.(mp3|jpg|png|webp|gif)|{_GENERATED})$")
+# Creator images (S6 scheme, docs/operations/legacy-asset-migration-plan.md section 2): content-addressed by the
+# object's own bytes, so a key is never rewritten with other content.
+_CREATOR_ASSET = rf"creator-assets/{_UUID}/(logo|background)/[0-9a-f]{{64}}\.(jpg|png|webp|gif)"
+CREATOR_ASSET_KEY = re.compile(rf"^{_CREATOR_ASSET}$")
+# Deletable: pipeline output (.webp) only. Legacy copies keep their original extension; the caller additionally
+# deletes only keys its own failed upload created.
+CREATOR_ASSET_DELETABLE_KEY = re.compile(rf"^creator-assets/{_UUID}/(logo|background)/[0-9a-f]{{64}}\.webp$")
+# Server-generated keys: donor uploads, soundboard objects, generated audio and creator images.
+WRITABLE_KEY = re.compile(
+    rf"^({_UPLOAD}|soundboards/{_SLUG}/{_UUID}\.(mp3|jpg|png|webp|gif)|{_GENERATED}|{_CREATOR_ASSET})$")
 LISTABLE_PREFIXES = ("hypersounds/", "hypersound-thumbs/")
 UPLOAD_PREFIXES = ("voice-messages/", "donation-media/")  # D9: listed (and pruned) only by the cleanup CLI
 IMMUTABLE = "public, max-age=31536000, immutable"  # keys are unique and never rewritten
@@ -98,6 +111,10 @@ class ObjectStore(Protocol):
 
     async def head_generated(self, key: str) -> ObjectHead | None: ...
 
+    async def head_creator_asset(self, key: str) -> ObjectHead | None: ...
+
+    async def delete_creator_asset(self, key: str) -> None: ...
+
     async def get_voice(self, key: str, *, max_bytes: int) -> bytes: ...
 
     async def get_object(self, key: str, *, max_bytes: int) -> bytes: ...
@@ -131,6 +148,16 @@ def check_upload_key(key: str) -> None:
 def check_generated_key(key: str) -> None:
     if not isinstance(key, str) or not GENERATED_KEY.match(key):
         raise ValueError("refusing to inspect an object outside the generated audio patterns")
+
+
+def check_creator_asset_key(key: str) -> None:
+    if not isinstance(key, str) or not CREATOR_ASSET_KEY.match(key):
+        raise ValueError("refusing to inspect an object outside creator-assets/<uuid>/<kind>/<sha256>.<ext>")
+
+
+def check_creator_asset_deletable(key: str) -> None:
+    if not isinstance(key, str) or not CREATOR_ASSET_DELETABLE_KEY.match(key):
+        raise ValueError("refusing to delete an object outside creator-assets/<uuid>/<kind>/<sha256>.webp")
 
 
 def check_voice_key(key: str) -> None:
@@ -295,6 +322,24 @@ class R2Store:
                 raise
             return ObjectHead(int(r.get("ContentLength", 0)), str(r.get("ContentType", "")))
         return await self._call(head)
+
+    async def head_creator_asset(self, key: str) -> ObjectHead | None:
+        """Size and type of a creator image; None when it does not exist."""
+        check_creator_asset_key(key)
+
+        def head():
+            try:
+                r = self._s3().head_object(Bucket=self._config.bucket, Key=key)
+            except Exception as exc:  # noqa: BLE001
+                if _not_found(exc):
+                    return None
+                raise
+            return ObjectHead(int(r.get("ContentLength", 0)), str(r.get("ContentType", "")))
+        return await self._call(head)
+
+    async def delete_creator_asset(self, key: str) -> None:
+        check_creator_asset_deletable(key)
+        await self._call(lambda: self._s3().delete_object(Bucket=self._config.bucket, Key=key))
 
     async def get_voice(self, key: str, *, max_bytes: int) -> bytes:
         """A donor voice message's bytes; StorageError("too_large") above max_bytes (never read past it)."""

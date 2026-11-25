@@ -24,6 +24,7 @@ jmespath==1.1.0
 Mako==1.4.3
 MarkupSafe==3.0.4
 mutagen==1.48.1
+pillow==13.0.0
 psycopg-binary==3.3.6
 psycopg-pool==3.3.3
 psycopg==3.3.6

@@ -121,6 +121,8 @@ Owner, linked account or admin (`require_streamer_access`); CSRF + Origin on eve
 | `GET .../moderation/queue`, `POST .../donations/{id}/moderation` | queue + approve / reject / hide / unhide / ban in one transaction (database state only) |
 | `GET`, `POST .../moderators`, `PATCH`, `DELETE .../moderators/{id}` | Telegram/Discord moderators; PATCH edits role / `can_*` (D-M7) |
 | `GET /api/v1/me/terms`, `POST /api/v1/me/terms/accept` | terms-of-service status and acceptance (server-owned version) |
+| `PUT /api/v1/streamers/{streamer}/images/profile`, `…/images/background` | onboarding Stage 4: raw JPEG / PNG / WebP (5 MB / 10 MB, owner decision Q8), validated, decoded under a 40 MP cap, metadata stripped and re-encoded to WebP variants in R2 (`creator-assets/<uuid>/<logo\|background>/<sha256>.webp`); the background is cropped to 16:9 (optional `crop_*` query) and must be ≥ 1920x1080; sets `brand_logo_url` (Q9) or `background_url`; 20 / creator / day; pending creators allowed. See [`../docs/creator-images.md`](../docs/creator-images.md) |
+| `GET /api/v1/streamers/{streamer}/images` | the two current image pointers |
 
 ## Trusted browser origins
 `Settings.browser_origins` = the origin of `HYPERCHAT_FRONTEND_URL` + `HYPERCHAT_ALLOWED_ORIGINS`

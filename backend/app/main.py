@@ -48,6 +48,7 @@ from app.routers import (
     admin_reads,
     auth,
     bots,
+    creator_images,
     dashboard,
     health,
     kyc,
@@ -279,6 +280,7 @@ def create_app() -> FastAPI:
     app.include_router(bots.router)
     app.include_router(dashboard.me_router)
     app.include_router(soundboard.soundboard_router)
+    app.include_router(creator_images.router)
     app.include_router(kyc.me_router)
     app.include_router(kyc.webhook_router)
     app.include_router(kyc.admin_router)
