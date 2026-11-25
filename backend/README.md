@@ -114,7 +114,7 @@ Owner, linked account or admin (`require_streamer_access`); CSRF + Origin on eve
 
 | Endpoint | Purpose |
 |---|---|
-| `GET`, `PATCH .../settings` | creator settings (21 writable fields, strict validation, only changed values written) |
+| `GET`, `PATCH .../settings` | creator settings (24 writable fields incl. the PAY-14 minimums and message / voice tiers, strict validation, only changed values written) |
 | `GET .../donations`, `.../donations/stats`, `.../donations/export.csv` | approved donations (keyset pages), IST revenue stats, CSV export (≤ 366 days, ≤ 10,000 rows) |
 | `GET .../moderation/queue`, `POST .../donations/{id}/moderation` | queue + approve / reject / hide / unhide / ban in one transaction (database state only) |
 | `GET`, `POST .../moderators`, `PATCH`, `DELETE .../moderators/{id}` | Telegram/Discord moderators; PATCH edits role / `can_*` (D-M7) |

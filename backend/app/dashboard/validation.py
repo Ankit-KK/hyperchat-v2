@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timedelta
 
 from app.core.errors import ApiError
 from app.core.timezones import IST
+from app.public.pricing import PLATFORM_FLOORS_INR
 
 
 def parse_uuid(value: str | None) -> str | None:
@@ -18,7 +19,7 @@ def parse_uuid(value: str | None) -> str | None:
         return None
 
 
-# ── settings (legacy update-streamer-settings allowlist, minus the read-only amount and HyperEmotes) ──
+# ── settings (legacy update-streamer-settings allowlist minus HyperEmotes, plus the PAY-14 pricing fields) ──
 
 WRITABLE_SETTINGS = (
     "moderation_mode", "telegram_moderation_enabled", "discord_moderation_enabled", "tts_enabled",
@@ -26,9 +27,9 @@ WRITABLE_SETTINGS = (
     "media_upload_enabled", "media_moderation_enabled", "tts_language_boost",
     "alert_overlay_id", "leaderboard_overlay_id", "overlay_adjust_mode", "leaderboard_bg_enabled",
     "goal_overlay_id", "brand_color", "leaderboard_widget_enabled", "el_voice_id",
+    # PAY-14 (D-M3b, approved 2026-11-25): the creator's own minimums and tiers; voice_tiers is its own table
+    "message_min_amount", "voice_min_amount", "media_min_amount", "message_char_tiers", "voice_tiers",
 )
-# Shown by GET but not writable until limits are approved (A1): no legacy UI ever wrote them.
-READ_ONLY_SETTINGS = ("media_min_amount",)
 # HyperEmotes are discontinued (owner decision 2026-11-13): their streamer columns stay in the schema until a later
 # forward-only migration drops them, but no API reads or writes them. Sending one is an unknown field (422).
 # Shown by GET, never accepted from clients (D-G): the server stamps each goal activation, so progress cannot be
@@ -85,6 +86,47 @@ def goal_name(value: str) -> str:
     if not 1 <= len(value) <= GOAL_NAME_MAX:
         raise ValueError(f"must be 1-{GOAL_NAME_MAX} characters")
     return value
+
+
+# ── PAY-14 creator pricing (D-M3b limits, 2026-10-29). Types and shapes are the model's (422); these business rules
+#    answer 400 naming the field. A creator may never set a minimum below its floor, nor above PRICING_MAX_INR. ──
+
+PRICING_MAX_INR = 10_000
+TIERS_MAX = 5
+CHAR_TIER_RANGE = (50, 500)
+VOICE_TIER_SECONDS = (5, 30)
+# Owner decision 2026-11-25: voice / media floors for a PATCH are the new-creator defaults (Rs 150 / Rs 100; voice notes
+# incur paid transcription). They bind PATCH values only: checkout keeps PLATFORM_FLOORS_INR, so a legacy creator
+# already below them is untouched until it sets a new value.
+MINIMUM_FLOORS = {"message_min_amount": PLATFORM_FLOORS_INR["text"], "voice_min_amount": 150, "media_min_amount": 100}
+
+
+def _bad(field: str, rule: str) -> ApiError:
+    return ApiError(400, f"{field} {rule}", "invalid_pricing")
+
+
+def _tiers(field: str, tiers: list, size: str, bounds: tuple[int, int], label: str) -> None:
+    if len(tiers) > TIERS_MAX:
+        raise _bad(field, f"allows at most {TIERS_MAX} tiers")
+    for tier in tiers:
+        if not bounds[0] <= tier[size] <= bounds[1]:
+            raise _bad(field, f"{size} must be {bounds[0]}-{bounds[1]} {label}")
+        if not 0 <= tier["min_amount"] <= PRICING_MAX_INR:
+            raise _bad(field, f"min_amount must be 0-{PRICING_MAX_INR}")
+    for lower, upper in zip(tiers, tiers[1:]):
+        if upper["min_amount"] <= lower["min_amount"] or upper[size] <= lower[size]:
+            raise _bad(field, f"tiers must have strictly increasing min_amount and {size}")
+
+
+def pricing_rules(changes: dict) -> None:
+    """Raise ApiError(400) for the first pricing field in `changes` that breaks a D-M3b rule."""
+    for field, floor in MINIMUM_FLOORS.items():
+        if field in changes and not floor <= changes[field] <= PRICING_MAX_INR:
+            raise _bad(field, f"must be {floor:g}-{PRICING_MAX_INR}")
+    if "message_char_tiers" in changes:
+        _tiers("message_char_tiers", changes["message_char_tiers"], "max_chars", CHAR_TIER_RANGE, "characters")
+    if "voice_tiers" in changes:
+        _tiers("voice_tiers", changes["voice_tiers"], "max_duration_seconds", VOICE_TIER_SECONDS, "seconds")
 
 
 # ── moderators (A7) ─────────────────────────────────────────────────────────────
