@@ -1,0 +1,5 @@
+openapi/
+packages/api-client/src/schema.d.ts
+pnpm-lock.yaml
+.next/
+next-env.d.ts

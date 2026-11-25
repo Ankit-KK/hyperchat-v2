@@ -40,6 +40,57 @@ jobs:
         working-directory: database
         run: python -m pytest -q
 
+  frontend:
+    # PDP v2.0 Phase 2 (frontend/README.md). Only when frontend/ or CI changed (otherwise it ends after the scope
+    # check). Builds use the DEV API; nothing is deployed. Playwright (frontend/e2e) does not run here yet.
+    name: Frontend (lint, typecheck, tests, build, guards)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_PUBLIC_API_BASE_URL: https://api.quicktestspace.site
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scope (frontend or CI changes)
+        id: scope
+        working-directory: .
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: bash .github/scripts/frontend-scope.sh "$BASE"
+      - uses: actions/setup-node@v4
+        if: steps.scope.outputs.run == 'true'
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: pnpm (the version pinned in frontend/package.json packageManager)
+        if: steps.scope.outputs.run == 'true'
+        run: corepack enable && pnpm --version
+      - if: steps.scope.outputs.run == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Production API guard (no api.hyperchat.space outside production configuration)
+        if: steps.scope.outputs.run == 'true'
+        run: pnpm guard
+      - name: API client is generated from the committed OpenAPI snapshot
+        if: steps.scope.outputs.run == 'true'
+        run: pnpm check:api
+      - name: Format
+        if: steps.scope.outputs.run == 'true'
+        run: pnpm format:check
+      - name: Lint (eslint, jsx-a11y, Next.js rules)
+        if: steps.scope.outputs.run == 'true'
+        run: pnpm lint
+      - name: Typecheck
+        if: steps.scope.outputs.run == 'true'
+        run: pnpm typecheck
+      - name: Unit and component tests
+        if: steps.scope.outputs.run == 'true'
+        run: pnpm test
+      - name: Build both apps against the DEV API
+        if: steps.scope.outputs.run == 'true'
+        run: pnpm build
+
   deploy-config:
     name: Deployment configuration (nginx syntax + rate limits)
     runs-on: ubuntu-24.04

@@ -1,0 +1,12 @@
+packages:
+  - apps/*
+  - packages/*
+  - e2e
+
+# Every package version, transitive ones included, must have been published at least 14 days before it is installed.
+minimumReleaseAge: 20160
+# Build scripts run only for packages listed here (none are needed yet).
+onlyBuiltDependencies: []
+# msw only copies its browser worker on install; the tests use msw/node.
+ignoredBuiltDependencies:
+  - msw

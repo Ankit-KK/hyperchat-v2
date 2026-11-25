@@ -1,0 +1,39 @@
+/*
+ * HyperChat design tokens: THE ONE FILE TO REPLACE when the owner's week-1 palette and type decision lands.
+ * Everything else (the Tailwind preset in preset.css, every component) reads only these variables, so changing
+ * this file re-themes both apps. Keep the variable names; change the values. The colours are neutral placeholders
+ * chosen for WCAG AA contrast (foreground on background, primary-foreground on primary, destructive on background).
+ */
+:root {
+  /* Colour */
+  --hc-color-background: #ffffff;
+  --hc-color-foreground: #111827;
+  --hc-color-muted: #f3f4f6;
+  --hc-color-muted-foreground: #4b5563;
+  --hc-color-border: #d1d5db;
+  --hc-color-ring: #2563eb;
+  --hc-color-primary: #111827;
+  --hc-color-primary-foreground: #ffffff;
+  --hc-color-destructive: #b91c1c;
+  --hc-color-destructive-foreground: #ffffff;
+  --hc-color-overlay: rgb(17 24 39 / 0.6);
+
+  /* Type */
+  --hc-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --hc-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --hc-text-xs: 0.75rem;
+  --hc-text-sm: 0.875rem;
+  --hc-text-base: 1rem;
+  --hc-text-lg: 1.125rem;
+  --hc-text-xl: 1.25rem;
+  --hc-text-2xl: 1.5rem;
+  --hc-text-3xl: 1.875rem;
+
+  /* Spacing: Tailwind multiplies its spacing scale (p-4, gap-2, ...) by this unit */
+  --hc-spacing: 0.25rem;
+
+  /* Radius */
+  --hc-radius-sm: 0.25rem;
+  --hc-radius-md: 0.375rem;
+  --hc-radius-lg: 0.5rem;
+}

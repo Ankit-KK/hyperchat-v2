@@ -1,0 +1,44 @@
+/*
+ * Tailwind v4 preset: maps the tokens in tokens.css onto Tailwind's theme, so utilities such as bg-primary,
+ * text-muted-foreground, rounded-md and p-4 use them. Each app's global stylesheet imports, in this order:
+ *   @import "tailwindcss";  @import "@hyperchat/ui/preset.css";  @source "<relative path to packages/ui/src>";
+ */
+@import "./tokens.css";
+
+@theme inline {
+  --color-background: var(--hc-color-background);
+  --color-foreground: var(--hc-color-foreground);
+  --color-muted: var(--hc-color-muted);
+  --color-muted-foreground: var(--hc-color-muted-foreground);
+  --color-border: var(--hc-color-border);
+  --color-ring: var(--hc-color-ring);
+  --color-primary: var(--hc-color-primary);
+  --color-primary-foreground: var(--hc-color-primary-foreground);
+  --color-destructive: var(--hc-color-destructive);
+  --color-destructive-foreground: var(--hc-color-destructive-foreground);
+  --color-overlay: var(--hc-color-overlay);
+
+  --font-sans: var(--hc-font-sans);
+  --font-mono: var(--hc-font-mono);
+  --text-xs: var(--hc-text-xs);
+  --text-sm: var(--hc-text-sm);
+  --text-base: var(--hc-text-base);
+  --text-lg: var(--hc-text-lg);
+  --text-xl: var(--hc-text-xl);
+  --text-2xl: var(--hc-text-2xl);
+  --text-3xl: var(--hc-text-3xl);
+
+  --spacing: var(--hc-spacing);
+
+  --radius-sm: var(--hc-radius-sm);
+  --radius-md: var(--hc-radius-md);
+  --radius-lg: var(--hc-radius-lg);
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+}
