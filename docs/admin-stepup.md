@@ -112,7 +112,7 @@ answer carries the exact `{action, target, params}` to approve.
 | `POST /api/v1/admin/creators` | `creator.create` | `creator:new` | `{slug, name, razorpay_account}` |
 | `POST /api/v1/admin/creators/{id}/owner` | `creator.owner.assign` | `creator:{id}` | `{user_id}` |
 | `POST /api/v1/admin/creators/{id}/owner/transfer` | `creator.owner.transfer` | `creator:{id}` | `{user_id, expected_owner_id}` |
-| `POST /api/v1/admin/applications/{id}/approve` | `application.approve` | `application:{id}` | `{slug, name, razorpay_account}` |
+| `POST /api/v1/admin/applications/{id}/approve` | `application.approve` | `application:{id}` | `{slug, name, razorpay_account, email}`: `email` is the applicant's address, lower-cased (NV-3, migration 0037) |
 | `POST /api/v1/admin/applications/{id}/invite` | `application.invite` | `application:{id}` | `{}` (the application's own address and creator: the database checks both). Grant optional since onboarding Stage 2 (Q3): the route never asks for one; a presented one is consumed; with enforcement `active` the database still refuses without one (403 `step_up_required`) until migration 0037 |
 | `POST /api/v1/auth/invites` **with `role: admin` or a `streamer_id`** | `admin.invite` | `invite` | `{email, role, streamer_id}` |
 | `PATCH /api/v1/admin/users/{id}` | `admin.user.change` | `user:{id}` | the account's **resulting** `{role, is_active, streamer_id}` |
@@ -233,7 +233,7 @@ Every write path to the tables below was traced (repositories, services, definer
 | old owner's `users.streamer_id` → NULL | same transaction | effect `old_owner_unlinked` | only the account the claimed transfer names as previous owner |
 | `INSERT streamers` | `AdminRepository.create_creator` (`app`) | anchor `streamers.insert` (checked at commit) | `creator.create`, `creator:new`, `{slug, name, razorpay_account}` |
 | `INSERT streamers` for an approval | `ApplicationRepository.approve` (`app`) | effect `creator_created` (checked at commit) | of the approval that references it |
-| `user_signups.review_status` → approved | same | anchor `user_signups.review_status` | `application.approve`, `application:<id>`, `{slug, name, razorpay_account}` of the referenced creator, which must have been created in this transaction and be unclaimed |
+| `user_signups.review_status` → approved | same | anchor `user_signups.review_status` | `application.approve`, `application:<id>`, `{slug, name, razorpay_account}` of the referenced creator, which must have been created in this transaction and be unclaimed, plus `email`: lower(user_signups.email) (0037; the creator_created effect hashes the same); an API role may never change `user_signups.email` (0037) |
 | `INSERT user_invites` with `signup_id` | `ApplicationRepository.issue_invite` (`app`) | anchor `user_invites.insert` | `application.invite`, `application:<signup>`, `{}`; the row must carry the approved application's own address and creator, role `streamer` |
 | `INSERT user_invites` role admin or with `streamer_id` | `AuthRepository.create_invite` (`auth`) | anchor `user_invites.insert` | `admin.invite`, `invite`, `{email (lowercase), role, streamer_id}` |
 | `users.role` / `is_active` / `streamer_id` | `AdminRepository.update_user` (`auth`); `transfer_owner` (`app`) | anchor `users.privileges` | `admin.user.change`, `user:<id>`, the resulting `{role, is_active, streamer_id}` |

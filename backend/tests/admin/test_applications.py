@@ -161,8 +161,11 @@ def test_a_manual_resend_needs_no_step_up_grant(app, monkeypatch):
         return "active"
 
     monkeypatch.setattr(app.app_state.auth.repo, "stepup_enforcement", active)
-    assert app.post(f"{AP}/{sid}/approve", json={"slug": "authtest-apps-q3b", "name": "A"},
-                    headers=headers).json()["reason"] == "step_up_required"  # approval still needs its grant
+    needs = app.post(f"{AP}/{sid}/approve", json={"slug": "authtest-apps-q3b", "name": "A"}, headers=headers).json()
+    assert needs["reason"] == "step_up_required"  # approval still needs its grant
+    # NV-3 (0037): what the administrator signs names the applicant's address, as the database recomputes it
+    assert needs["step_up"]["params"] == {"slug": "authtest-apps-q3b", "name": "A", "razorpay_account": "primary",
+                                          "email": ("apps-q3" + DOMAIN).lower()}
     monkeypatch.undo()
     r = app.post(f"{AP}/{sid}/invite", headers=headers)
     assert r.status_code == 200, r.text

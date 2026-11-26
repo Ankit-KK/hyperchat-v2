@@ -261,6 +261,14 @@ class ApplicationService:
         rows, total = await self.repo.search(None if status == "all" else status, limit, offset)
         return {"applications": [public_application(r) for r in rows], "total": total}
 
+    async def approval_params(self, signup_id: str, creator_params: dict) -> dict:
+        """The application.approve step-up parameters: the new creator's {slug, name, razorpay_account} and, since
+        NV-3 (migration 0037), the applicant's lower-cased address, which the database recomputes from the row."""
+        row, _, _ = await self.repo.get(self._id(signup_id))
+        if row is None:
+            raise AuthError(404, "Application not found", "not_found")
+        return {**creator_params, "email": str(row["email"]).lower()}
+
     async def get(self, signup_id: str) -> dict:
         row, events, invite = await self.repo.get(self._id(signup_id))
         if row is None:

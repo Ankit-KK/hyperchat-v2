@@ -361,7 +361,8 @@ def test_a_transfer_unlinks_only_the_previous_owner_once(mode):
 
 def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(mode):
     active = mode
-    params = {"slug": "authtest-s3-approved", "name": "Approved", "razorpay_account": "primary"}
+    params = {"slug": "authtest-s3-approved", "name": "Approved", "razorpay_account": "primary",
+              "email": ("s3-approve" + DOMAIN).lower()}  # NV-3 (0037): the applicant's address is bound too
     app = signup("s3-approve")
     g, args = approved(active,"s3-approve", "application.approve", f"application:{app}", params)
     old = make_streamer("authtest-s3-old-creator", name="Old")
@@ -369,7 +370,7 @@ def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(mode):
         slug, name, account = conn.execute("SELECT streamer_slug, streamer_name, razorpay_account FROM public.streamers "
                                            "WHERE id = %s", (old,)).fetchone()
     _, adopt = approved(active, "s3-adopt", "application.approve", f"application:{app}",
-                        {"slug": slug, "name": name, "razorpay_account": account})
+                        {"slug": slug, "name": name, "razorpay_account": account, "email": params["email"]})
     with refused_tx("hyperchat_app") as conn:  # an approval never adopts an existing creator, even one it names
         assert conn.execute(CONSUME, adopt).fetchone()[0] == "ok"
         conn.execute("UPDATE public.user_signups SET review_status = 'approved', streamer_id = %s WHERE id = %s",
@@ -399,6 +400,39 @@ def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(mode):
         assert conn.execute(CONSUME, args2).fetchone()[0] == "ok"
         conn.execute(invite, ("S3-Approve" + DOMAIN, cid, key_hash(), app))
     assert grant_row(g2["grant_id"]) == (True, "user_invites.insert")
+
+def test_an_approval_binds_the_applicants_address(mode):
+    """NV-3 (migration 0037): application.approve hashes the applicant's lower-cased address too, so a grant over
+    the old three keys, or over an address the row no longer has, authorizes nothing; and no API role can change a
+    submitted application's address (the schema owner can)."""
+    active = mode
+    app = signup("S3-NV3")  # mixed case: the binding is lower(email)
+    params = {"slug": "authtest-s3-nv3", "name": "NV3", "razorpay_account": "primary"}
+    _, three_keys = approved(active, "s3-nv3-old", "application.approve", f"application:{app}", params)
+    approve = "UPDATE public.user_signups SET review_status = 'approved', streamer_id = %s WHERE id = %s"
+    with refused_tx("hyperchat_app") as conn:  # the pre-0037 parameter set
+        assert conn.execute(CONSUME, three_keys).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], app))
+    bound = {**params, "email": ("S3-NV3" + DOMAIN).lower()}
+    g, args = approved(active, "s3-nv3-new", "application.approve", f"application:{app}", bound)
+    with fixture_db() as conn:  # the address changes after the administrator signed (as the owner: no guard)
+        conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("s3-nv3-swapped" + DOMAIN, app))
+    with refused_tx("hyperchat_app") as conn:
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], app))
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("S3-NV3" + DOMAIN, app))
+    with db() as conn, conn.transaction():  # the exact grant: approval and its creator_created effect both claim it
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], app))
+    assert grant_row(g["grant_id"]) == (True, "user_signups.review_status")
+    other = signup("s3-nv3-freeze")
+    for role in ("hyperchat_app", "hyperchat_worker"):  # never from an API role, approved or not
+        with refused_tx(role) as conn:
+            conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("attacker" + DOMAIN, other))
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("s3-nv3-fixed" + DOMAIN, other))
+
 
 
 def test_invite_acceptance_stays_internal_but_cannot_be_forged(mode):

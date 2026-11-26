@@ -86,8 +86,5 @@ def test_every_action_has_a_purpose_known_to_the_database():
     spec = util.spec_from_file_location("m_actions", path)
     module = util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # SEC-A: bound in the API, not yet allowed by 0025's CHECK (no grant can be issued, so 'active' refuses their
-    # routes). The follow-up migration widens the CHECK and deletes this set.
-    pending_database = {"creator.soundboard", "application.reopen"}
-    assert set(module.ACTIONS) == set(canonical.ACTIONS) - pending_database
+    assert set(module.ACTIONS) == set(canonical.ACTIONS)  # 0037 widened the CHECK for the SEC-A actions
     assert set(canonical.ACTIONS.values()) == {"session", "register", "action"}
