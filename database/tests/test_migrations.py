@@ -189,6 +189,9 @@ def _accounts18() -> dict:
                                  "WHERE streamer_slug = ANY(%s)", (list(MIG18),)).fetchall())
 
 
+HEAD = sorted(p.name[:4] for p in (DATABASE / "migrations" / "versions").glob("[0-9]*_*.py"))[-1]
+
+
 def _version() -> str:
     with _owner() as conn:
         return conn.execute("SELECT version_num FROM public.alembic_version").fetchone()[0]
@@ -1885,7 +1888,7 @@ def test_pay15_6b_packet_sql_on_a_fresh_0029_to_0035_upgrade(monkeypatch):
         with _owner() as conn:
             _clean_6b(conn)
         command.upgrade(cfg, "head")
-    assert _version() == "0036"
+    assert _version() == HEAD
 
 
 # ── 0036: PAY-14 creator pricing limits (runtime roles only; backend/tests/dashboard/test_pricing_settings.py proves
@@ -1944,4 +1947,82 @@ def test_0036_pricing_limits_round_trip_keep_legacy_rows_and_never_restrict_the_
         with _owner() as conn:
             conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest36'")  # cascades tiers
         command.upgrade(cfg, "head")
-    assert _version() == "0036"
+    assert _version() == HEAD
+
+
+
+PG_TEMP_FUNCTIONS = ("donation_accounting_apply", "donation_accounting_core", "donations_credit_writer",
+                     "payment_accounting_apply_evaluation", "payment_accounting_keep", "payment_accounting_lock_state",
+                     "payment_accounting_open_run", "payment_accounting_reconcile", "payment_accounting_revert",
+                     "payment_accounting_set_state", "payment_evidence_fp")
+NV3_FUNCTIONS = ("stepup_guard_user_signups", "stepup_guard_streamer_insert")
+
+
+def _functions_0037() -> dict:
+    """{name: (md5 of the body, proconfig)} of the functions 0037 changes, and the user_signups / streamers triggers."""
+    with _owner() as conn:
+        rows = conn.execute("SELECT p.proname, md5(p.prosrc), coalesce(p.proconfig, '{}')::text[] FROM pg_proc p "
+                            "WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY(%s)",
+                            (list(PG_TEMP_FUNCTIONS + NV3_FUNCTIONS),)).fetchall()
+        triggers = conn.execute("SELECT c.relname, t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+                                "WHERE NOT t.tgisinternal AND c.relnamespace = 'public'::regnamespace "
+                                "AND c.relname IN ('user_signups', 'streamers')").fetchall()
+    return {"functions": {n: (h, tuple(c)) for n, h, c in rows}, "triggers": sorted(triggers)}
+
+
+def _data_0037() -> list:
+    """Every user_signups row and every streamer id, as the owner sees them: 0037 must never change data."""
+    with _owner() as conn:
+        return [conn.execute("SELECT * FROM public.user_signups ORDER BY id").fetchall(),
+                conn.execute("SELECT id, updated_at FROM public.streamers ORDER BY id").fetchall()]
+
+
+def test_0037_round_trip_changes_only_its_functions_and_triggers_never_data(monkeypatch):
+    """0037 (SEC-A + NV-3 + pg_temp): the upgrade puts pg_temp last in the 11 SECURITY DEFINER payment search paths
+    (lock_timeout kept), re-creates the two 0027 guards with the applicant's address and adds the two SEC-A triggers;
+    the downgrade to 0036 restores exactly the 0036 catalog of those objects; neither reads nor writes a row."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0036")
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest37@authtest.invalid'")
+            conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES "
+                         "('M37', 'migtest37@authtest.invalid', '+91 90000 00037')")
+        at_0036, data = _functions_0037(), _data_0037()
+        assert set(at_0036["functions"]) == set(PG_TEMP_FUNCTIONS + NV3_FUNCTIONS)
+        command.upgrade(cfg, "0037")
+        assert _version() == "0037" and _data_0037() == data
+        at_0037 = _functions_0037()
+        for name in PG_TEMP_FUNCTIONS:
+            body, config = at_0037["functions"][name]
+            assert body == at_0036["functions"][name][0], name  # ALTER FUNCTION: the body is untouched
+            assert config[0] == "search_path=pg_catalog, public, pg_temp", (name, config)
+            assert config[1:] == at_0036["functions"][name][1][1:], name  # lock_timeout on set_state kept
+        for name in NV3_FUNCTIONS:
+            assert at_0037["functions"][name][0] != at_0036["functions"][name][0], name  # re-created with the email
+        added = set(at_0037["triggers"]) - set(at_0036["triggers"])
+        assert added == {("streamers", "aad_stepup_guard_soundboard"), ("user_signups", "aad_stepup_guard_reopen")}
+        command.downgrade(cfg, "0036")  # restores exactly the 0036 objects, keeps every row
+        assert _version() == "0036" and _functions_0037() == at_0036 and _data_0037() == data
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest37@authtest.invalid'")
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+def test_every_security_definer_function_puts_pg_temp_last(monkeypatch):
+    """Security audit 2026-11-26 (0037): at head, no SECURITY DEFINER function in public lets a caller's TEMP table
+    shadow a name: each sets search_path, and pg_temp is its last entry. A catalog query, so it guards future
+    migrations as well."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    command.upgrade(_cfg(), "head")
+    with _owner() as conn:
+        rows = conn.execute("SELECT p.oid::regprocedure::text, (SELECT c FROM unnest(p.proconfig) c "
+                            "WHERE c LIKE 'search_path=%%') FROM pg_proc p "
+                            "WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef").fetchall()
+    assert rows  # the schema has SECURITY DEFINER functions
+    bad = [(fn, sp) for fn, sp in rows if sp is None or sp.replace(" ", "").split(",")[-1] != "pg_temp"]
+    assert bad == [], bad

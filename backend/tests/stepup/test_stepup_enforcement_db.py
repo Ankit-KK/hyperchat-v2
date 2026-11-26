@@ -434,6 +434,34 @@ def test_an_approval_binds_the_applicants_address(mode):
         conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("s3-nv3-fixed" + DOMAIN, other))
 
 
+def test_deleting_and_reinserting_an_application_cannot_redirect_a_signed_approval(mode):
+    """NV-3 with DELETE (hyperchat_app keeps DELETE and INSERT on user_signups): the approval anchor targets
+    application:<id> and hashes the row's address, so a submitted application deleted and re-inserted under another
+    address is refused whether it reuses the id (the address differs) or not (another target), and a re-inserted
+    row starts unreviewed (0027's insert guard). What delete + re-insert CAN still do: replace an application before
+    any administrator looks at it; the administrator then sees and signs the new address."""
+    active = mode
+    victim = signup("s3-nv3-victim")
+    params = {"slug": "authtest-s3-nv3-del", "name": "Del", "razorpay_account": "primary",
+              "email": ("s3-nv3-victim" + DOMAIN).lower()}
+    _, args = approved(active, "s3-nv3-del", "application.approve", f"application:{victim}", params)
+    approve = "UPDATE public.user_signups SET review_status = 'approved', streamer_id = %s WHERE id = %s"
+    with db() as conn:  # the runtime role swaps the row, keeping its id
+        conn.execute("DELETE FROM public.user_signups WHERE id = %s", (victim,))
+        conn.execute("INSERT INTO public.user_signups (id, name, email, mobile_number) VALUES (%s, 'S', %s, "
+                     "'+91 90000 00009')", (victim, "s3-nv3-attacker" + DOMAIN))
+    with refused_tx("hyperchat_app") as conn:  # same id, another address: the signed hash does not match
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], victim))
+    fresh = signup("s3-nv3-attacker2")  # a new id: the grant names application:<victim>, never this one
+    with refused_tx("hyperchat_app") as conn:
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], fresh))
+    with refused_tx("hyperchat_app") as conn:  # and a re-insert can never arrive already approved
+        conn.execute("INSERT INTO public.user_signups (name, email, mobile_number, review_status) VALUES "
+                     "('S', %s, '+91 90000 00009', 'approved')", ("s3-nv3-preapproved" + DOMAIN,))
+
+
 
 def test_invite_acceptance_stays_internal_but_cannot_be_forged(mode):
     sid = make_streamer("authtest-s3-accept")
