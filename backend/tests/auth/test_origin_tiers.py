@@ -272,3 +272,113 @@ def test_google_redirect_allow_list_is_configurable():
     s = settings(dashboard_url=DASH, google_redirect_origins=f"{DASH},{AUTH}")
     assert _safe_redirect(f"{AUTH}/welcome", s) == f"{AUTH}/welcome"
     assert _safe_redirect(f"{FRONT}/x", s) == f"{DASH}/dashboard"
+
+
+def test_a_stored_target_round_trips_through_the_callback(monkeypatch):
+    """/google/start stores the checked absolute target; the callback must land exactly there (a fragment included)
+    and still accept a relative path from a cookie issued before G3."""
+    from app.auth.tokens import sign_payload
+    from app.routers import auth as auth_router
+
+    async def fake_login(*args):
+        now = datetime.now(UTC)
+        return _user("g", "streamer"), type("Issued", (), {"token": "t", "session": Session(
+            id="s", user_id="g", idle_expires_at=now, absolute_expires_at=now + timedelta(hours=1))})()
+
+    s = settings(dashboard_url=DASH, auth_secret="x" * 40)
+    stub = type("Svc", (), {"settings": s, "secret": "x" * 40, "google_login": staticmethod(fake_login)})()
+    monkeypatch.setattr(auth_router, "auth_service", lambda request: stub)
+    app = FastAPI()
+    app.include_router(auth_router.router)
+    client = TestClient(app, base_url="https://testserver")
+    for given, landed in (("/x#frag", f"{DASH}/x#frag"), ("/onboarding", f"{DASH}/onboarding")):
+        for stored in (_safe_redirect(given, s), given):  # as /google/start stores it now; a pre-G3 cookie
+            client.cookies.set("__Host-hc_oauth", sign_payload("x" * 40, {"s": "st", "n": "n", "v": "v",
+                                                                         "r": stored}, 600))
+            r = client.get("/api/v1/auth/google/callback", params={"code": "c", "state": "st"},
+                           follow_redirects=False)
+            assert r.status_code == 302 and r.headers["location"] == landed, (given, stored)
+
+
+# ── G2: every link is built from its own URL setting ───────────────────────────
+
+
+class Recorder:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, email):
+        self.sent.append(email)
+
+
+class LinkRepo:
+    async def user_by_email(self, email):
+        return _user("r", "streamer") if email.startswith("known") else None
+
+    async def create_reset_token(self, *args):
+        pass
+
+    async def create_invite(self, *args):
+        return {"id": "i1", "expires_at": datetime.now(UTC)}
+
+
+LINKS = {"auth_url": AUTH, "dashboard_url": DASH, "public_url": FRONT, "frontend_url": "https://old.example"}
+
+
+def test_reset_and_invite_links_use_the_auth_url():
+    import asyncio
+
+    from app.auth.service import AuthService
+
+    sender = Recorder()
+    svc = AuthService(settings(**LINKS), LinkRepo(), sender, None)
+    asyncio.run(svc.send_reset_link("known@authtest.invalid", None))
+    asyncio.run(svc.create_invite(_user("admin", "admin"), "new@authtest.invalid", "streamer", None, None))
+    assert f"{AUTH}/reset-password?token=" in sender.sent[0].html
+    assert f"{AUTH}/invite?token=" in sender.sent[1].html
+
+
+def test_the_kyc_return_url_uses_the_dashboard_url():
+    import asyncio
+
+    from app.kyc.service import KycService
+
+    calls = []
+
+    class Repo:
+        async def owns_creator(self, user_id):
+            return True
+
+        async def sessions(self, user_id):
+            return []
+
+        async def record_session(self, *args):
+            return {"session_id": "k1", "provider_status": "Not Started"}
+
+    class Client:
+        workflow_id = "wf"
+
+        async def create_session(self, user_id, callback):
+            calls.append(callback)
+            return type("Created", (), {"url": "https://verify.example/k1"})()
+
+    class Limiter:
+        async def hit_rate_limit(self, *args):
+            return True
+
+    svc = KycService(Repo(), settings(**LINKS), client=Client(), limiter=Limiter())
+    asyncio.run(svc.start(_user("c", "streamer"), None))
+    assert calls == [f"{DASH}/kyc/return"]
+
+
+def test_worker_wiring_bot_links_to_the_dashboard_and_auto_invites_to_the_auth_url(monkeypatch):
+    from types import SimpleNamespace
+
+    from app import worker
+
+    handlers = worker.build_handlers(settings(**LINKS), None, None)
+    assert handlers["moderator_notify"].frontend_url == DASH
+    monkeypatch.setattr(worker, "sender_from_settings", lambda s: Recorder())
+    ns = SimpleNamespace(auto_invite_enabled=True, email_backend="resend", email_categories=("onboarding",),
+                         auth_link_url=AUTH, invite_ttl_days=7, auto_invite_poll_seconds=60)
+    assert worker.build_auto_inviter(ns, None).frontend_url == AUTH

@@ -206,8 +206,10 @@ async def google_callback(request: Request, code: str | None = None, state: str 
                                               request.headers.get("user-agent"))
     except AuthError as exc:
         return fail(exc.reason)
-    # Re-checked here too: a cookie issued before G3 carries a relative path.
-    resp = RedirectResponse(_safe_redirect(payload.get("r"), svc.settings), status_code=302)
+    # The signed cookie holds the target /google/start checked; one issued before G3 holds a relative path.
+    target = payload.get("r") or ""
+    resp = RedirectResponse(target if target.startswith("https://") or target.startswith("http://")
+                            else _safe_redirect(target, svc.settings), status_code=302)
     set_session_cookie(resp, svc, issued.token, issued.session)
     resp.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
     return resp
