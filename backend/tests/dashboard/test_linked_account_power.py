@@ -48,12 +48,12 @@ def test_a_linked_account_has_the_same_power_as_the_owner(app, who):
     b, h = _browser(app, f"t3-{who}-{who}" + DOMAIN)  # t3-owner-owner or t3-linked-linked
     base = f"{S}/{slug}"
 
-    r = b.patch(f"{base}/settings", json={"moderation_mode": "auto_approve", "media_moderation_enabled": False},
-                headers=h)
-    assert r.status_code == 200, r.text
+    # A new creator auto-approves with media moderation on: both values here differ from it.
+    r = b.patch(f"{base}/settings", json={"moderation_mode": "manual", "media_moderation_enabled": False}, headers=h)
+    assert r.status_code == 200 and {"moderation_mode", "media_moderation_enabled"} <= set(r.json()["changed"]), r.text
     with db() as conn:
         assert conn.execute("SELECT moderation_mode, media_moderation_enabled FROM public.streamers WHERE id = %s",
-                            (sid,)).fetchone() == ("auto_approve", False)
+                            (sid,)).fetchone() == ("manual", False)
 
     r = b.post(f"{base}/moderators", json={"mod_name": "T3 Mod", "telegram_user_id": "987654321"}, headers=h)
     assert r.status_code == 201, r.text
@@ -86,7 +86,7 @@ def test_a_stranger_is_403_on_each_and_changes_nothing(app):
     before, tokens = creator_state(sid), _tokens(sid)
     base = f"{S}/{slug}"
     calls = [
-        ("PATCH", "/settings", {"moderation_mode": "auto_approve", "media_moderation_enabled": False}),
+        ("PATCH", "/settings", {"moderation_mode": "manual", "media_moderation_enabled": False}),
         ("POST", "/moderators", {"mod_name": "Evil", "telegram_user_id": "111111111"}),
         ("DELETE", f"/moderators/{moderator}", None),
         ("POST", "/obs-tokens", None),
