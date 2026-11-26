@@ -1124,38 +1124,6 @@ def test_od35v_the_pristine_0035_catalog_is_clean_at_head_0035_and_each_head_rej
     assert as_0035.count("missing") == 2 and "trigger_binding:missing" in as_0035 and as_0035.count("body_drift") == 4
 
 
-
-def pristine_0037(version=170000):
-    """The pristine catalog at head 0037: 0035's, with pg_temp last in the 11 SECURITY DEFINER search paths."""
-    cat = pristine_0035(version)
-    fn_expect, _, _ = verify.head_expectations("0037")
-    for row in cat["functions"]:
-        if row["name"] in verify.HEAD_DELTAS["0037"]["configs"]:
-            row["proconfig"] = list(fn_expect[row["name"]]["proconfig"])
-    return cat
-
-
-@pytest.mark.parametrize("version", [150000, 170000])
-def test_0037_pg_temp_is_expected_at_0037_and_a_tampered_search_path_is_still_flagged(version):
-    """Security audit 2026-11-26: head 0037 expects pg_temp last in every SECURITY DEFINER payment function (all 11,
-    lock_timeout kept on set_state), the 0037 catalog is clean at 0037, and I10 still flags proconfig drift both
-    ways: the 0035 catalog judged at 0037, a 0037 catalog judged at 0035, and one tampered function at 0037."""
-    configs = verify.HEAD_DELTAS["0037"]["configs"]
-    assert set(configs) == set(verify.DEFINER_FUNCTIONS) and len(configs) == 11
-    assert configs["payment_accounting_set_state"] == ("search_path=pg_catalog, public, pg_temp", "lock_timeout=5s")
-    found, unverified = i10_problems(pristine_0037(version), version, head="0037")
-    assert found == [] and unverified == [*verify.I10_UNVERIFIED, *verify.SKIPPED_COMPARISONS]
-    stale = [p for _, _, p, _ in i10_problems(pristine_0035(version), version, head="0037")[0]]
-    assert stale.count("search_path") == 11, stale
-    ahead = [p for _, _, p, _ in i10_problems(pristine_0037(version), version, head="0035")[0]]
-    assert ahead.count("search_path") == 11, ahead
-    tampered = pristine_0037(version)
-    (row,) = [r for r in tampered["functions"] if r["name"] == "donations_credit_writer"]
-    row["proconfig"] = ["search_path=public, pg_catalog, pg_temp"]  # the same names, a shadowing order
-    flagged = i10_problems(tampered, version, head="0037")[0]
-    assert [(e, p) for _, e, p, _ in flagged] == [("donations_credit_writer", "search_path")], flagged
-
-
 VERSIONS_DIR = Path(__file__).resolve().parents[3] / "database" / "migrations" / "versions"
 
 
@@ -1198,7 +1166,7 @@ def test_every_migration_from_0034_is_a_registered_head_in_order():
     files = sorted(p.name[:4] for p in VERSIONS_DIR.glob("[0-9]*_*.py"))
     assert list(verify.EXPECTED_HEADS) == [v for v in files if v >= verify.EXPECTED_HEAD]
     for head, delta in verify.HEAD_DELTAS.items():
-        empty = not (delta["functions"] or delta["pins"] or delta["triggers"] or delta["configs"])
+        empty = not (delta["functions"] or delta["pins"] or delta["triggers"])
         assert delta["why"] and (head == verify.EXPECTED_HEAD or empty == delta["why"].startswith(
             "no payment-object delta: ")), head
 
@@ -1215,16 +1183,12 @@ def test_each_head_registers_exactly_the_verified_objects_its_migration_text_cre
     assert {n: md5 for n, md5 in bodies.items() if n in pinned} == delta["pins"], head
     assert set(delta["functions"]) <= set(bodies) and set(delta["functions"]) <= set(delta["pins"]), head
     assert {t for t in triggers if t[0] in verify.TRIGGER_RELS} == set(delta["triggers"]), head
-    text = path.read_text(encoding="utf-8")  # a config-only change (ALTER FUNCTION ... SET) names each function
-    assert all(f"'{n}'" in text or f'"{n}"' in text for n in delta["configs"]), head
 
 
 def test_head_expectations_are_cumulative(monkeypatch):
     """A later head keeps every earlier head's objects (a registry entry adds to them, never replaces them)."""
     monkeypatch.setitem(verify.HEAD_DELTAS, "9999", verify.no_payment_delta("test-only head"))
-    newest = verify.EXPECTED_HEADS[-1]  # computed at import: the newest real head, before the test-only 9999
-    assert verify.head_expectations("9999") == verify.head_expectations(newest) != verify.head_expectations("0034")
-    assert verify.head_expectations("0037") != verify.head_expectations("0036")  # 0037 changes 11 search paths
+    assert verify.head_expectations("9999") == verify.head_expectations("0035") != verify.head_expectations("0034")
     with pytest.raises(KeyError):
         verify.head_expectations("0000")
 

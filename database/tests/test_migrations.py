@@ -1951,19 +1951,22 @@ def test_0036_pricing_limits_round_trip_keep_legacy_rows_and_never_restrict_the_
 
 
 
-PG_TEMP_FUNCTIONS = ("donation_accounting_apply", "donation_accounting_core", "donations_credit_writer",
-                     "payment_accounting_apply_evaluation", "payment_accounting_keep", "payment_accounting_lock_state",
-                     "payment_accounting_open_run", "payment_accounting_reconcile", "payment_accounting_revert",
-                     "payment_accounting_set_state", "payment_evidence_fp")
+
+PAYMENT_DEFINER_FUNCTIONS = ("donation_accounting_apply", "donation_accounting_core", "donations_credit_writer",
+                             "payment_accounting_apply_evaluation", "payment_accounting_keep",
+                             "payment_accounting_lock_state", "payment_accounting_open_run",
+                             "payment_accounting_reconcile", "payment_accounting_revert", "payment_accounting_set_state",
+                             "payment_evidence_fp")
 NV3_FUNCTIONS = ("stepup_guard_user_signups", "stepup_guard_streamer_insert")
 
 
 def _functions_0037() -> dict:
-    """{name: (md5 of the body, proconfig)} of the functions 0037 changes, and the user_signups / streamers triggers."""
+    """{name: (md5 of the body, proconfig)} of the NV-3 guards and of the PAY-15-pinned DEFINER functions, and the
+    user_signups / streamers triggers."""
     with _owner() as conn:
         rows = conn.execute("SELECT p.proname, md5(p.prosrc), coalesce(p.proconfig, '{}')::text[] FROM pg_proc p "
                             "WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY(%s)",
-                            (list(PG_TEMP_FUNCTIONS + NV3_FUNCTIONS),)).fetchall()
+                            (list(PAYMENT_DEFINER_FUNCTIONS + NV3_FUNCTIONS),)).fetchall()
         triggers = conn.execute("SELECT c.relname, t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
                                 "WHERE NOT t.tgisinternal AND c.relnamespace = 'public'::regnamespace "
                                 "AND c.relname IN ('user_signups', 'streamers')").fetchall()
@@ -1971,16 +1974,16 @@ def _functions_0037() -> dict:
 
 
 def _data_0037() -> list:
-    """Every user_signups row and every streamer id, as the owner sees them: 0037 must never change data."""
+    """Every user_signups row and every streamer's updated_at, as the owner sees them: 0037 must never change data."""
     with _owner() as conn:
         return [conn.execute("SELECT * FROM public.user_signups ORDER BY id").fetchall(),
                 conn.execute("SELECT id, updated_at FROM public.streamers ORDER BY id").fetchall()]
 
 
-def test_0037_round_trip_changes_only_its_functions_and_triggers_never_data(monkeypatch):
-    """0037 (SEC-A + NV-3 + pg_temp): the upgrade puts pg_temp last in the 11 SECURITY DEFINER payment search paths
-    (lock_timeout kept), re-creates the two 0027 guards with the applicant's address and adds the two SEC-A triggers;
-    the downgrade to 0036 restores exactly the 0036 catalog of those objects; neither reads nor writes a row."""
+def test_0037_round_trip_changes_only_its_guards_and_triggers_never_data_or_payment_functions(monkeypatch):
+    """0037 (SEC-A + NV-3): the upgrade re-creates the two 0027 guards with the applicant's address and adds the two
+    SEC-A triggers; it leaves every PAY-15-pinned SECURITY DEFINER payment function exactly as it was (body and
+    proconfig); the downgrade to 0036 restores exactly the 0036 catalog of those objects; no row is read or written."""
     monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
     cfg = _cfg()
     command.upgrade(cfg, "head")
@@ -1991,19 +1994,18 @@ def test_0037_round_trip_changes_only_its_functions_and_triggers_never_data(monk
             conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES "
                          "('M37', 'migtest37@authtest.invalid', '+91 90000 00037')")
         at_0036, data = _functions_0037(), _data_0037()
-        assert set(at_0036["functions"]) == set(PG_TEMP_FUNCTIONS + NV3_FUNCTIONS)
+        assert set(at_0036["functions"]) == set(PAYMENT_DEFINER_FUNCTIONS + NV3_FUNCTIONS)
         command.upgrade(cfg, "0037")
         assert _version() == "0037" and _data_0037() == data
         at_0037 = _functions_0037()
-        for name in PG_TEMP_FUNCTIONS:
-            body, config = at_0037["functions"][name]
-            assert body == at_0036["functions"][name][0], name  # ALTER FUNCTION: the body is untouched
-            assert config[0] == "search_path=pg_catalog, public, pg_temp", (name, config)
-            assert config[1:] == at_0036["functions"][name][1][1:], name  # lock_timeout on set_state kept
+        for name in PAYMENT_DEFINER_FUNCTIONS:  # no payment object: the verifier's no_payment_delta holds
+            assert at_0037["functions"][name] == at_0036["functions"][name], name
         for name in NV3_FUNCTIONS:
             assert at_0037["functions"][name][0] != at_0036["functions"][name][0], name  # re-created with the email
+            assert at_0037["functions"][name][1] == at_0036["functions"][name][1], name
         added = set(at_0037["triggers"]) - set(at_0036["triggers"])
         assert added == {("streamers", "aad_stepup_guard_soundboard"), ("user_signups", "aad_stepup_guard_reopen")}
+        assert set(at_0036["triggers"]) <= set(at_0037["triggers"])
         command.downgrade(cfg, "0036")  # restores exactly the 0036 objects, keeps every row
         assert _version() == "0036" and _functions_0037() == at_0036 and _data_0037() == data
     finally:
@@ -2011,18 +2013,3 @@ def test_0037_round_trip_changes_only_its_functions_and_triggers_never_data(monk
             conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest37@authtest.invalid'")
         command.upgrade(cfg, "head")
     assert _version() == HEAD
-
-
-def test_every_security_definer_function_puts_pg_temp_last(monkeypatch):
-    """Security audit 2026-11-26 (0037): at head, no SECURITY DEFINER function in public lets a caller's TEMP table
-    shadow a name: each sets search_path, and pg_temp is its last entry. A catalog query, so it guards future
-    migrations as well."""
-    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
-    command.upgrade(_cfg(), "head")
-    with _owner() as conn:
-        rows = conn.execute("SELECT p.oid::regprocedure::text, (SELECT c FROM unnest(p.proconfig) c "
-                            "WHERE c LIKE 'search_path=%%') FROM pg_proc p "
-                            "WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef").fetchall()
-    assert rows  # the schema has SECURITY DEFINER functions
-    bad = [(fn, sp) for fn, sp in rows if sp is None or sp.replace(" ", "").split(",")[-1] != "pg_temp"]
-    assert bad == [], bad

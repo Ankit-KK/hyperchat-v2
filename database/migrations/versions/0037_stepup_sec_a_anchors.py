@@ -25,16 +25,8 @@ application's email right before an administrator approved it. Here both 0027 fu
 The API binds the same parameters (app.routers.admin.approve_application). A challenge issued before the deploy
 has the 3-key hash and is refused after it (enforcement 'active'); challenges live 5 minutes.
 
-pg_temp (security audit 2026-11-26, run-2/hardening-0037-pg-temp.md): the 11 SECURITY DEFINER payment functions
-of 0031/0032/0034/0035 set search_path = pg_catalog, public and omitted pg_temp, which PostgreSQL then searches
-FIRST for relations, so a caller's TEMP table could shadow an unqualified name inside them. ALTER FUNCTION ... SET
-search_path = pg_catalog, public, pg_temp changes only that setting (lock_timeout on payment_accounting_set_state is
-kept; bodies, owners and grants are unchanged); the PAY-15 verifier registers the new proconfig as head 0037's
-"configs" (app.payments.verify.HEAD_DELTAS). Every other SECURITY DEFINER function already ends in pg_temp.
-
 Downgrade drops the two guards and restores 0025's CHECK as NOT VALID (challenges already issued for the two
-actions stay as audit history), re-creates the two 0027 functions exactly as 0027 wrote them, and restores the
-11 search paths. Nothing in upgrade or downgrade reads or writes table data.
+actions stay as audit history), and re-creates the two 0027 functions exactly as 0027 wrote them.
 """
 
 import importlib.util
@@ -99,11 +91,9 @@ def upgrade() -> None:
         op.execute(f"REVOKE ALL ON FUNCTION public.{fn}() FROM {EVERYONE}")
     for sql in nv3_functions():  # CREATE OR REPLACE keeps 0027's grants (REVOKE ALL) and its triggers
         op.execute(sql)
-    op.execute(search_path_sql("pg_catalog, public, pg_temp"))
 
 
 def downgrade() -> None:
-    op.execute(search_path_sql("pg_catalog, public"))
     for trigger, table, _, fn in GUARDS:
         op.execute(f"DROP TRIGGER {trigger} ON public.{table}")
         op.execute(f"DROP FUNCTION public.{fn}()")
@@ -159,30 +149,3 @@ def nv3_functions() -> list[str]:
                     "'razorpay_account', s.razorpay_account,\n"
                     "                                       'email', lower(signup_email)), 'creator_created');")
     return [signups, inserts]
-
-
-# ── pg_temp: the SECURITY DEFINER payment functions (the PAY-15 verifier's DEFINER_FUNCTIONS) ───────────────────
-PG_TEMP_FUNCTIONS = ("donation_accounting_apply", "donation_accounting_core", "donations_credit_writer",
-                     "payment_accounting_apply_evaluation", "payment_accounting_keep", "payment_accounting_lock_state",
-                     "payment_accounting_open_run", "payment_accounting_reconcile", "payment_accounting_revert",
-                     "payment_accounting_set_state", "payment_evidence_fp")
-
-
-def search_path_sql(path: str) -> str:
-    """ALTER FUNCTION ... SET search_path for exactly these 11 functions (one each; their exact signatures from the
-    catalog), refused unless all 11 are found: a schema that drifted stops the migration instead of half-applying."""
-    names = ", ".join(f"'{n}'" for n in PG_TEMP_FUNCTIONS)
-    return f"""
-        DO $$
-        DECLARE f regprocedure; n integer := 0;
-        BEGIN
-            FOR f IN SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace s ON s.oid = p.pronamespace
-                     WHERE s.nspname = 'public' AND p.prosecdef AND p.proname IN ({names}) ORDER BY p.proname LOOP
-                EXECUTE format('ALTER FUNCTION %s SET search_path = {path}', f);
-                n := n + 1;
-            END LOOP;
-            IF n <> {len(PG_TEMP_FUNCTIONS)} THEN
-                RAISE EXCEPTION 'expected {len(PG_TEMP_FUNCTIONS)} SECURITY DEFINER payment functions, found %', n;
-            END IF;
-        END $$
-    """
