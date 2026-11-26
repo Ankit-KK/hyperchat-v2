@@ -230,7 +230,7 @@ def vdb(verify_db) -> DB:
 
 
 MAX_SECONDS = 600  # test budget only (owner item 8: the production budget is pending)
-HEAD = "0035"  # the migration head CI tests at (OD-35-V: the verifier accepts 0034 and 0035)
+HEAD = verify.EXPECTED_HEADS[-1]  # the head CI tests at: the newest registered head (the registry test pins it)
 
 
 def found(report, invariant=None, cls=None, problem=None) -> list[dict]:
