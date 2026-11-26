@@ -1229,6 +1229,8 @@ HEAD_DELTAS = {
                              "streamer_voice_tiers (not TRIGGER_RELS), no pinned function"),
     "0037": no_payment_delta("SEC-A soundboard / reopen step-up anchors and NV-3 (the applicant's address in "
                              "application.approve): step-up guards only, no payment object"),
+    "0038": no_payment_delta("onboarding invite guard exception: onboarding_issue_invite (lifecycle-only definer) "
+                             "and the user_invites step-up guard (not TRIGGER_RELS), no pinned function"),
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD

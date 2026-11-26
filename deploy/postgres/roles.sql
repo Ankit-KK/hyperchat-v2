@@ -48,5 +48,5 @@ COMMENT ON ROLE hyperchat_app      IS 'FastAPI runtime: DML only.';
 COMMENT ON ROLE hyperchat_worker   IS 'Background worker runtime: DML only.';
 COMMENT ON ROLE hyperchat_readonly IS 'Read-only reporting and verification.';
 COMMENT ON ROLE hyperchat_auth IS 'Authentication flows only: sign-in, sessions, password change / reset, invites, identities, admin user management (migration 0024).';
-COMMENT ON ROLE hyperchat_lifecycle IS 'Admin creator status transitions only (EXECUTE on kyc_change_creator_status; no table access).';
+COMMENT ON ROLE hyperchat_lifecycle IS 'Creator lifecycle and onboarding transitions only (EXECUTE on kyc_change_creator_status and onboarding_issue_invite; no table access).';
 COMMENT ON ROLE hyperchat_stepup IS 'Step-up (passkey) verifier only: records verified WebAuthn ceremonies, challenges, grants and session assurance (migration 0025). Mapped only to its own OS user.';

@@ -1,5 +1,6 @@
-"""Onboarding Stage 2 Phase A: the automatic invitation loop (app.onboarding.auto_invite) on the scratch database,
-as the worker's own role (hyperchat_app). Fake email senders only; synthetic rows only."""
+"""Onboarding Stage 2: the automatic invitation loop (app.onboarding.auto_invite) on the scratch database, as the
+worker's own roles (hyperchat_app picks, hyperchat_lifecycle issues: migration 0038). Fake email senders only;
+synthetic rows only."""
 
 import asyncio
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,6 @@ import pytest
 from app.admin.applications import ApplicationService
 from app.auth.tokens import sha256_hex
 from app.onboarding.auto_invite import MAX_ATTEMPTS
-from app.stepup.grants import StepUpRequired
 from tests.integration import db, make_user, requires_db
 from tests.onboarding.conftest import FakeSender, age_events, alerts, events, invites, set_enforcement
 
@@ -131,29 +131,40 @@ def test_two_workers_never_invite_the_same_application_twice(approved, inviter):
         assert len(invites(sid)) == 1 and [e[2] for e in events(sid)].count("auto") == 1
 
 
-def test_a_step_up_refusal_is_recorded_and_pauses_the_application(approved, inviter):
-    sid, _, _ = approved("auto-stepup")
+@pytest.mark.parametrize("state", ["draft", "active"])
+def test_the_loop_invites_in_both_step_up_states(approved, inviter, state):
+    """Q14 (migration 0038): the automatic invitation needs no passkey grant, whatever the step-up state."""
+    sid, _, email = approved(f"auto-stepup-{state}")
     sender = FakeSender()
-    set_enforcement("active")  # Q14: the loop must survive the step-up state it was not built for
+    set_enforcement(state)
     try:
-        assert asyncio.run(inviter(sender).run_once()) == [(sid, "paused")]
-        assert [(a[0], a[1]) for a in alerts(sid)] == [("auto_invite", "stepup_refused")]
+        assert asyncio.run(inviter(sender).run_once()) == [(sid, "sent")]
     finally:
         set_enforcement("draft")
-    assert events(sid)[-1] == ("note", None, "auto:paused:stepup_refused") and invites(sid) == []
-    assert asyncio.run(inviter(sender).run_once()) == [] and sender.attempts == 0  # paused: the manual route
+    assert [m.to for m in sender.sent] == [email] and alerts(sid) == []
+    assert events(sid)[-1] == ("invite", None, "auto") and len(invites(sid)) == 1
 
 
-def test_a_manual_resend_refused_by_the_database_answers_step_up_required(app, approved, repo):
-    """Q3: the route asks for no grant; while enforcement is 'active' the 0027 guard still does (until 0037), and
-    that refusal is the usual 403 step_up_required, not a server error."""
-    sid, _, _ = approved("auto-q3")
+@pytest.mark.parametrize("state", ["draft", "active"])
+def test_a_manual_resend_needs_no_grant_and_its_link_claims_the_creator_in_both_states(app, approved, repo, state):
+    """Q3 (migration 0038): the route asks for no grant, and the database no longer does either; the applicant then
+    accepts and owns the creator (acceptance was already internal under 0027)."""
+    from tests.admin.test_applications import _accept
+
+    sid, cid, email = approved(f"auto-q3-{state}")
     svc = ApplicationService(repo, admin=app.app_state.admin, auth=app.app_state.auth)
-    admin = SimpleNamespace(id=make_user("auto-q3-boss@authtest.invalid", role="admin"))
-    set_enforcement("active")
+    admin = SimpleNamespace(id=make_user(f"auto-q3-{state}-boss@authtest.invalid", role="admin"))
+    set_enforcement(state)
     try:
-        with pytest.raises(StepUpRequired):
-            asyncio.run(svc.invite(admin, sid, None))
+        asyncio.run(svc.invite(admin, sid, None))
+        again = asyncio.run(svc.invite(admin, sid, None))
+        assert again["replaced_invites"] == 1
+        accepted = _accept(app, app.app_state.auth.sender.last_token())
+        assert accepted.status_code == 200, accepted.text
     finally:
         set_enforcement("draft")
-    assert invites(sid) == []
+    rows = invites(sid)
+    assert [r[3] for r in rows] == [True, False] and str(rows[1][2]) == admin.id and rows[1][4] == email
+    with db() as conn:
+        assert conn.execute("SELECT user_id::text FROM public.streamers WHERE id = %s",
+                            (cid,)).fetchone()[0] == accepted.json()["user"]["id"]

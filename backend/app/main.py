@@ -111,7 +111,7 @@ async def lifespan(app: FastAPI):
                                        pusher_groups=tuple(settings.pusher_groups_configured))
         app.state.kyc = KycService.from_settings(KycRepository(app.state.db.connection), settings,
                                                  limiter=app.state.auth.repo)  # 503 until Didit is configured
-        app.state.applications = ApplicationService(ApplicationRepository(app.state.db.connection),
+        app.state.applications = ApplicationService(ApplicationRepository(app.state.db.connection, lifecycle),
                                                     admin=app.state.admin, auth=app.state.auth)
         conn = app.state.db.connection
         witness = KycWitness(settings.kyc_witness_path)  # KYC PR4: restore detection outside PostgreSQL

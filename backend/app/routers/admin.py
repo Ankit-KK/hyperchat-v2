@@ -250,8 +250,9 @@ async def invite_application(signup_id: str, request: Request, current: CurrentU
                              stepup: StepUp = Depends(step_up("application.invite"))) -> dict:
     """Send (or resend: the previous open link is revoked) the applicant's account invitation; accepting it makes
     them the owner of the application's still-unclaimed creator. Q3 (owner 2026-11-25): no passkey grant is
-    required here; a presented one is still consumed. While step-up enforcement is 'active' the database (0027)
-    still asks for one until migration 0037, and its refusal answers 403 step_up_required (docs/onboarding.md)."""
+    required here, in any step-up state: without one the invitation is issued by migration 0038's
+    onboarding_issue_invite on hyperchat_lifecycle; a presented one is consumed and claimed as before
+    (docs/onboarding.md)."""
     target = f"application:{uid(signup_id) or signup_id}"
     grant = stepup.bind(target, {}) if stepup.presented is not None else None
     return await application_service(request).invite(current.user, signup_id, client_ip(request), grant)

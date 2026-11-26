@@ -100,8 +100,9 @@ export interface paths {
          * Invite Application
          * @description Send (or resend: the previous open link is revoked) the applicant's account invitation; accepting it makes
          *     them the owner of the application's still-unclaimed creator. Q3 (owner 2026-11-25): no passkey grant is
-         *     required here; a presented one is still consumed. While step-up enforcement is 'active' the database (0027)
-         *     still asks for one until migration 0037, and its refusal answers 403 step_up_required (docs/onboarding.md).
+         *     required here, in any step-up state: without one the invitation is issued by migration 0038's
+         *     onboarding_issue_invite on hyperchat_lifecycle; a presented one is consumed and claimed as before
+         *     (docs/onboarding.md).
          */
         post: operations["invite_application_api_v1_admin_applications__signup_id__invite_post"];
         delete?: never;

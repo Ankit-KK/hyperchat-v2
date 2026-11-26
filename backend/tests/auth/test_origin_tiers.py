@@ -380,5 +380,6 @@ def test_worker_wiring_bot_links_to_the_dashboard_and_auto_invites_to_the_auth_u
     assert handlers["moderator_notify"].frontend_url == DASH
     monkeypatch.setattr(worker, "sender_from_settings", lambda s: Recorder())
     ns = SimpleNamespace(auto_invite_enabled=True, email_backend="resend", email_categories=("onboarding",),
-                         auth_link_url=AUTH, invite_ttl_days=7, auto_invite_poll_seconds=60)
+                         auth_link_url=AUTH, invite_ttl_days=7, auto_invite_poll_seconds=60,
+                         db_lifecycle_user="hyperchat_lifecycle", db_conninfo=lambda role=None: "dbname=unused")
     assert worker.build_auto_inviter(ns, None).frontend_url == AUTH

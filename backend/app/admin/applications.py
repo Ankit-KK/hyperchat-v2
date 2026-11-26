@@ -60,9 +60,15 @@ def public_application(row: dict) -> dict:
     return {**row, "created_at": _iso(row["created_at"]), "reviewed_at": _iso(row["reviewed_at"])}
 
 
+# Migration 0038: an approved application's invitation without a step-up grant (Q3 resend, automatic invitations),
+# executable by hyperchat_lifecycle only. The address and creator come from the locked application row.
+ISSUE_WITHOUT_GRANT = "SELECT * FROM public.onboarding_issue_invite(%s, %s, %s, %s, %s)"
+
+
 class ApplicationRepository:
-    def __init__(self, connection_factory) -> None:
+    def __init__(self, connection_factory, lifecycle_factory=None) -> None:
         self._conn = connection_factory
+        self._lifecycle = lifecycle_factory  # hyperchat_lifecycle (migration 0038); None: no grant-free invitation
 
     async def search(self, status: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
         cond, params = ("a.review_status = %s", [status]) if status else ("true", [])
@@ -167,19 +173,33 @@ class ApplicationRepository:
         so a retry racing an acceptance waits instead of deadlocking (and then sees the creator claimed)."""
         return await self._run(lambda cur: self._issue(cur, signup_id, actor_id, token_hash, ttl_days), grant)
 
-    async def issue_auto_invite(self, pick, token_hash: str, ttl_days: int):
-        """The automatic invitation (app.onboarding.auto_invite): `pick(cur)` locks one due application in this same
-        transaction, so the claim and the invitation commit together. No actor; the event note is 'auto'.
-        Returns (result, invite, signup_id); result 'none_due' when nothing was picked."""
-        picked = {}
+    async def issue_without_grant(self, signup_id: str, actor_id: str | None, token_hash: str, ttl_days: int,
+                                  automatic: bool = False) -> tuple[str, dict | None]:
+        """The approved application's invitation without a passkey grant (migration 0038, onboarding_issue_invite on
+        hyperchat_lifecycle): the same lock order, revocation, refusals and event as _issue, in one transaction of
+        its own. Automatic (actor None, note 'auto'): also refused as 'not_due' while an earlier invitation is
+        unrevoked and unaccepted or after a manual one, and 'attempts_exhausted' after 5 (Q4)."""
+        if self._lifecycle is None:
+            return "lifecycle_unavailable", None
+        async with self._lifecycle() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(ISSUE_WITHOUT_GRANT, (signup_id, token_hash, ttl_days, actor_id, automatic))
+            row = await cur.fetchone()
+        if row["o_result"] != "ok":
+            return row["o_result"], None
+        return "ok", {"id": str(row["o_invite_id"]), "expires_at": row["o_expires_at"], "email": row["o_email"],
+                      "replaced": row["o_replaced"]}
 
-        async def work(cur):
-            picked["id"] = await pick(cur)
-            if picked["id"] is None:
-                raise _Stop("none_due")
-            return await self._issue(cur, picked["id"], None, token_hash, ttl_days, note="auto")
-        result, invite = await self._run(work)
-        return result, invite, picked.get("id")
+    async def issue_auto_invite(self, pick, token_hash: str, ttl_days: int):
+        """The automatic invitation (app.onboarding.auto_invite): `pick(cur)` reads one due application (no lock: the
+        lifecycle function locks it and re-checks), then onboarding_issue_invite issues it. No actor; note 'auto'.
+        Returns (result, invite, signup_id); result 'none_due' when nothing was picked, 'not_due' when another
+        worker issued it first."""
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            signup_id = await pick(cur)
+        if signup_id is None:
+            return "none_due", None, None
+        result, invite = await self.issue_without_grant(signup_id, None, token_hash, ttl_days, automatic=True)
+        return result, invite, signup_id
 
     async def auto_outcome(self, signup_id: str, note: str, revoke_invite_id: str | None = None) -> None:
         """Record an automatic attempt's outcome as an actor-less note event (codes only), in the same transaction
@@ -224,6 +244,9 @@ _REFUSALS = {
     "not_rejected": (409, "Only a rejected application can be reopened"),
     "not_approved": (409, "Only an approved application can be invited"),
     "creator_claimed": (409, "The application's creator already has an owner"),
+    "not_authorized": (403, "Only an active administrator can invite"),
+    "lifecycle_unavailable": (503, "Invitations without a step-up grant are unavailable: HYPERCHAT_DB_LIFECYCLE_USER "
+                                   "is not set"),
     "account_exists": (409, "An account with this email already exists: link it to the creator with "
                             "POST /api/v1/admin/creators/{id}/owner"),
 }
@@ -320,14 +343,16 @@ class ApplicationService:
         then email it. A failed email leaves the new invitation in place and answers 502: retrying issues a fresh
         link and revokes this one; the creator is never created twice."""
         signup_id = self._id(signup_id)
-        token = new_hex_token(32)
-        try:
-            result, invite = await self.repo.issue_invite(signup_id, admin.id, sha256_hex(token),
-                                                          self.auth.settings.invite_ttl_days, grant)
-        except psycopg.errors.InsufficientPrivilege as exc:  # Q3: the route asks for no grant; 0027 still may
-            if "step-up" not in str(exc):
-                raise
-            raise StepUpRequired("application.invite", f"application:{signup_id}", {}) from None
+        token, ttl = new_hex_token(32), self.auth.settings.invite_ttl_days
+        if grant is None:  # Q3: no passkey for an approved application's invitation (migration 0038), any state
+            result, invite = await self.repo.issue_without_grant(signup_id, admin.id, sha256_hex(token), ttl)
+        else:
+            try:  # a presented grant is consumed and claimed by 0027's anchor, as before
+                result, invite = await self.repo.issue_invite(signup_id, admin.id, sha256_hex(token), ttl, grant)
+            except psycopg.errors.InsufficientPrivilege as exc:
+                if "step-up" not in str(exc):
+                    raise
+                raise StepUpRequired("application.invite", f"application:{signup_id}", {}) from None
         self._check(result)
         url = f"{self.auth.settings.auth_link_url}/invite?token={token}"
         try:

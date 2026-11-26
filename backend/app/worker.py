@@ -1,7 +1,7 @@
 """The background worker: python -m app.worker (deploy/systemd/hyperchat-worker.service).
 
 Reads the same environment as the API (EnvironmentFile), connects as the same DML-only role (hyperchat_app,
-D6) and processes donation_audio and voice_transcription jobs with HYPERCHAT_WORKER_CONCURRENCY slots.
+D6; the automatic invitations also open hyperchat_lifecycle, migration 0038) and processes donation_audio and voice_transcription jobs with HYPERCHAT_WORKER_CONCURRENCY slots.
 Next to them, one loop publishes the realtime outbox to Pusher (Phase 9, app.realtime.publisher); while
 HYPERCHAT_REALTIME_ENABLED is false it only marks events 'skipped'. A third loop records payment-hold alerts and
 delivers operator alerts to Discord (app.alerts, docs/alerting.md); failed jobs are recorded as alerts too.
@@ -28,7 +28,7 @@ from app.auth.email import sender_from_settings
 from app.bots.repository import BotRepository
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
-from app.db.pool import Database
+from app.db.pool import Database, single_connection_factory
 from app.jobs.queue import JobQueue
 from app.jobs.runner import Worker
 from app.onboarding.auto_invite import AutoInviter
@@ -82,7 +82,11 @@ def build_auto_inviter(settings: Settings, connection_factory) -> AutoInviter | 
     if settings.email_backend != "resend" or "onboarding" not in settings.email_categories:
         log.warning("automatic invitations not started", extra={"reason": "onboarding_email_inactive"})
         return None
-    return AutoInviter(ApplicationRepository(connection_factory), sender_from_settings(settings),
+    if not settings.db_lifecycle_user:  # migration 0038: the invitation is issued on hyperchat_lifecycle
+        log.warning("automatic invitations not started", extra={"reason": "lifecycle_role_unset"})
+        return None
+    lifecycle = single_connection_factory(settings.db_conninfo(role="lifecycle"))
+    return AutoInviter(ApplicationRepository(connection_factory, lifecycle), sender_from_settings(settings),
                        Alerts(connection_factory),
                        frontend_url=settings.auth_link_url, ttl_days=settings.invite_ttl_days,
                        poll_seconds=settings.auto_invite_poll_seconds)

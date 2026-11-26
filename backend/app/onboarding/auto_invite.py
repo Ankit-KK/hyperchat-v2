@@ -8,15 +8,18 @@ Each pass invites, one transaction per application, every approved application t
   * no admin invited it by hand (a manual invite takes over for good) and no automatic attempt was skipped or paused;
   * every earlier automatic attempt failed, there were fewer than MAX_ATTEMPTS, and the backoff since the last one
     has passed. An expired automatic invitation is never re-sent (owner decision Q4).
-The application row is locked FOR UPDATE SKIP LOCKED inside the transaction that issues the invitation
-(ApplicationRepository.issue_auto_invite), so two worker processes never invite the same application twice.
+The pick only reads (hyperchat_app). The invitation itself is issued by migration 0038's onboarding_issue_invite on
+the worker's hyperchat_lifecycle connection, which locks the application and refuses ('not_due') while an earlier
+invitation is still unrevoked and unaccepted, so two worker processes never invite the same application twice, and it
+works with step-up enforcement 'draft' or 'active' (Q14). It also enforces the 5-attempt cap and Q4's "no automatic
+resend after the expiry" itself.
 
 The send happens after commit, through the `onboarding` category, exactly as ApplicationService.invite does. The
 outcome is kept as actor-less application_events rows (codes only, never an address, link or provider text):
   invite / note 'auto'                    an automatic attempt (its invitation)
   note 'auto:failed:<code>'               its email failed: the link was revoked, a later pass retries
   note 'auto:skipped:<code>'              account_exists (owner decision Q2: the manual owner-assign path) or similar
-  note 'auto:paused:<code>'               the database refused the insert (step-up 'active' before migration 0037)
+  note 'auto:paused:<code>'               a database guard refused the insert (never expected since migration 0038)
 After the MAX_ATTEMPTS-th failure, or on a pause, an `invite_failed` alert is recorded (app.alerts, source
 'auto_invite', ids only) and the application is left to the manual resend route.
 
@@ -47,8 +50,7 @@ BATCH = 10  # applications per pass at most
 
 _AUTO = "e.signup_id = a.id AND e.action = 'invite' AND e.note = 'auto'"
 _OUTCOME = "e.signup_id = a.id AND e.action = 'note' AND e.actor_user_id IS NULL AND e.note LIKE"
-# One due application, locked. Run again with its id inside the same transaction: the second statement takes a new
-# snapshot, so an invitation another worker committed meanwhile is seen and nothing is sent twice.
+# One due application (read only: onboarding_issue_invite locks it and re-checks under the lock).
 PICK = f"""
 SELECT a.id::text, (SELECT count(*) FROM public.application_events e WHERE {_AUTO}) AS attempts
 FROM public.user_signups a JOIN public.streamers s ON s.id = a.streamer_id
@@ -68,7 +70,6 @@ WHERE a.review_status = 'approved' AND (%(id)s::uuid IS NULL OR a.id = %(id)s::u
                 FROM public.application_events e WHERE {_AUTO}), '-infinity') <= now()
 ORDER BY a.reviewed_at, a.id
 LIMIT 1
-FOR UPDATE OF a SKIP LOCKED
 """
 
 
@@ -109,7 +110,8 @@ class AutoInviter:
             outcome = await self._one()
             if outcome is None:
                 break
-            handled.append(outcome)
+            if outcome[1] != "raced":  # another worker issued it first: nothing done here
+                handled.append(outcome)
         return handled
 
     async def _one(self) -> tuple[str, str] | None:
@@ -118,9 +120,6 @@ class AutoInviter:
         async def pick(cur):
             await cur.execute(PICK, self._params(None))
             row = await cur.fetchone()
-            if row is not None:
-                await cur.execute(PICK, self._params(row["id"]))
-                row = await cur.fetchone()
             if row is not None:
                 picked.update(id=row["id"], attempt=row["attempts"] + 1)
             return picked.get("id")
@@ -137,7 +136,9 @@ class AutoInviter:
             return picked["id"], "paused"
         if result == "none_due":
             return None
-        if result != "ok":  # account_exists, creator_claimed: never retried automatically
+        if result == "not_due":
+            return signup_id, "raced"
+        if result != "ok":  # account_exists, creator_claimed, attempts_exhausted: never retried automatically
             await self.repo.auto_outcome(signup_id, f"auto:skipped:{result}")
             log.warning("automatic invitation skipped", extra={"signup_id": signup_id, "reason": result})
             return signup_id, "skipped"
