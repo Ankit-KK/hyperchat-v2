@@ -27,9 +27,10 @@ CORS and rate limiting restrict browsers and volume; they are not authentication
 | E7 | `GET /api/v1/metrics/platform` | 300 s (+ in-process cache) | `total_interactions, total_alerts, active_streams` |
 | E8 | `GET /api/v1/metrics/showcase` | 60 s (+ in-process cache) | `streamers_live, alerts_last_24h, last_sync` |
 | E9 | `GET /api/v1/public/config` (D5) | 300 s | `contact {name, email, phones[], discord_url}` |
+| E10 | `GET /api/v1/public/streamers?limit=50&cursor=&q=` (G5) | 60 s | `creators[{slug, name, brand_logo_url, background_url, brand_color}], next_cursor, has_more`: **active** creators only (see [Creator list](#creator-list-e10-review-gap-g5)) |
 
 Errors: `404 {"error": "Streamer not found"}` for unknown, malformed, `pending` and `rejected` slugs
-(identical, so the endpoints cannot be used to discover creators); `404 {"error": "Soundboard not
+(identical, so the endpoints cannot tell a hidden creator from an unknown slug; active creators are listed by E10); `404 {"error": "Soundboard not
 enabled"}` (the Custom Soundboard is served only while the creator is eligible **and** its owner accepted the
 current terms, D3; the profile's `soundboard_enabled` means exactly that); `400 {"error": "Unsupported currency"}`; `429 {"error": "Too many requests"}` from Nginx.
 
@@ -54,10 +55,37 @@ There is no per-creator code or route.
 - **Suspension:** hides the page the same way.
 - **Donations:** gated separately at checkout (eligibility, payment readiness, KYC enforcement).
 - **Slugs:**
-  - new slugs refuse the site's own top-level paths (`RESERVED_SLUGS` in `app/admin/service.py`);
+  - new slugs refuse the site's own top-level paths and the marketing site's paths (`RESERVED_SLUGS` in `app/admin/service.py`; see [Creator list](#creator-list-e10-review-gap-g5));
   - slugs cannot be changed afterwards.
 
 **Frontend (phase 13):** one dynamic `/:slug` route that calls `GET /api/v1/public/streamers/{slug}`, with no creator-specific pages or bundled per-creator assets. Its top-level routes must be kept within `RESERVED_SLUGS`.
+
+## Creator list (E10, review gap G5)
+
+`GET /api/v1/public/streamers` feeds the marketing site's live creator list (owner decision R7, 2026-11-26) and later
+the apex sitemap. It is anonymous and sets no cookie, like E1.
+
+- **Who:** only `active` creators. It uses the same rule as E1 (`VISIBLE` in `app/public/repository.py`). Pending,
+  rejected and suspended creators never appear.
+- **Fields:** exactly `slug, name, brand_logo_url, background_url, brand_color` (the creator-card fields; extra fields
+  are forbidden by the response model). Nothing else from E1 is listed.
+- **Order and paging:** ordered by slug (database collation). The cursor is opaque: pass `next_cursor` back as
+  `cursor` while `has_more` is true. `limit` is 1-200, default 50; outside that range is 422, and a malformed cursor
+  is `400 {"error": "Invalid cursor"}`. Keyset paging stays complete and duplicate-free while creators are added.
+- **Search:** optional `q` (at most 64 characters) is a case-insensitive literal prefix of the slug or the name
+  (`_` and `%` are not wildcards).
+- **Cache:** `Cache-Control: public, max-age=60` on success, so a newly activated or suspended creator shows up or
+  disappears within 60 s; errors are not cached. Rate limits are the Nginx `/api/v1/public/` limits above.
+
+**Reserved marketing paths (owner decision R6).** The Next.js app owns the `hyperchat.space` apex and forwards the
+marketing site's paths to it (PDP v2.0 addendum §2.1), so these are reserved and no creator can take them:
+`features`, `creators`, `company`, `whats-new`, `demo-signup`, `viewer-terms`, `shipping`, `legal-archive`, the
+static folders `images`, `intro`, `licenses`, `mascot`, `partners`, `sculpture`, `social`, and `robots`. `support`,
+`privacy-policy`, `terms-and-conditions`, `cancellation-refunds`, `feature-showcase`, `about`, `contact`, `assets`
+and `sitemap` were already reserved. Any new marketing route needs its name reserved first. Existing creators holding
+one of these slugs are found with the read-only `deploy/tools/reserved_slug_clashes.py` (`HYPERCHAT_READONLY_DSN`;
+prints slug and id prefix only; exit 0 = none, 1 = clashes, 2 = no DSN or read failed), run by the owner on DEV and
+production.
 
 ## Intentional differences from the legacy Edge Functions (decisions D1-D10)
 | Topic | Legacy | v2 |

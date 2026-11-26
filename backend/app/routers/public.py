@@ -16,6 +16,7 @@ from app.public.models import (
     Goal,
     PublicConfig,
     PublicContact,
+    PublicCreatorPage,
     PlatformMetrics,
     Pricing,
     PublicStreamer,
@@ -28,7 +29,7 @@ streamers_router = APIRouter(prefix="/api/v1/public/streamers", tags=["public"])
 metrics_router = APIRouter(prefix="/api/v1/metrics", tags=["public"])
 config_router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
-CACHE_SECONDS = {"profile": 60, "pricing": 60, "soundboard": 60, "goal": 10,
+CACHE_SECONDS = {"profile": 60, "creators": 60, "pricing": 60, "soundboard": 60, "goal": 10,
                  "platform": 300, "showcase": 60, "config": 300}
 
 
@@ -41,6 +42,16 @@ def _service(request: Request) -> PublicService:
 
 def _cache(response: Response, key: str) -> None:
     response.headers["Cache-Control"] = f"public, max-age={CACHE_SECONDS[key]}"
+
+
+@streamers_router.get("", response_model=PublicCreatorPage)
+async def creators(request: Request, response: Response, limit: int = Query(50, ge=1, le=200),
+                   cursor: str | None = Query(None, max_length=100),
+                   q: str | None = Query(None, max_length=64)) -> PublicCreatorPage:
+    """E10 (G5): active creators only, ordered by slug; card fields only."""
+    result = await _service(request).creators(limit, cursor, q)
+    _cache(response, "creators")
+    return result
 
 
 @streamers_router.get("/{slug}", response_model=PublicStreamer)

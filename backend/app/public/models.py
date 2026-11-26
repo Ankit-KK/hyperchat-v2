@@ -33,6 +33,20 @@ class PublicStreamer(_Model):  # E1
     soundboard_enabled: bool
 
 
+class PublicCreator(_Model):  # E10 list item (G5): the creator-card fields only
+    slug: str
+    name: str
+    brand_logo_url: str | None
+    background_url: str | None
+    brand_color: str | None
+
+
+class PublicCreatorPage(_Model):  # E10: keyset page ordered by slug
+    creators: list[PublicCreator]
+    next_cursor: str | None
+    has_more: bool
+
+
 class AmountTier(_Model):
     min_amount: float
     max_chars: int
