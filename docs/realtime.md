@@ -128,10 +128,16 @@ id)` (16 hex). Each `new-donation` / `donation-updated` is published to the sess
 
 So a logout or revoked session, an idle or absolute expiry, a removed link, an owner transfer, a deactivated user, a
 removed admin role and a lapsed (or newly required) admin assurance all take effect at the next event; a new owner,
-link or session receives at once. An event with no such session is `skipped` (`no_dashboard_session`). The cost is
-one Pusher message per receiving session per event (non-admin sessions idle out after `HYPERCHAT_SESSION_IDLE_DAYS`,
-admin sessions after 2 h). Moderators are not dashboard-channel principals (`app.authz.access_via`), so removing a
+link or session receives at once. An event with no such session is `skipped` (`no_dashboard_session`). Fan-out:
+every receiving session is one channel of the event. Pusher counts deliveries per channel, as far as I know (not
+re-checked against its billing docs). Every live **administrator** session receives every creator's dashboard
+events, as an administrator may open any creator. Non-admin sessions idle out after `HYPERCHAT_SESSION_IDLE_DAYS`,
+admin sessions after 2 h. Moderators are not dashboard-channel principals (`app.authz.access_via`), so removing a
 moderator changes nothing here.
+
+**Client rule:** listening on the WebSocket does not slide the session's idle expiry; only authenticated API requests
+do. A dashboard page must keep making them (it does while it is used), or delivery stops silently once its session
+idles out: for an administrator, after 2 hours.
 
 The client takes its name from `GET /api/v1/dashboard/streamers/{streamer}/realtime` (the same access as every
 dashboard route): `{key, cluster, auth_endpoint, channel}`. Subscribe to exactly `channel`: the untagged name and
