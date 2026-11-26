@@ -10,6 +10,7 @@ request gets 401 and a security event (reason code only). Responses are never ca
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
+from app.bots.discord import MAX_BODY as DISCORD_MAX_BODY
 from app.security.audit import security_event
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["bots"])
@@ -39,7 +40,17 @@ async def discord_webhook(request: Request):
     bot = getattr(request.app.state, "discord_bot", None)
     if bot is None:
         return _reply(503, {"error": "Bots are not available"})
-    status, body = await bot.handle(await request.body(), request.headers.get("x-signature-ed25519"),
+    # Security audit 2026-11-26: the body is unauthenticated until its signature is checked, so stop reading at
+    # the cap (as the Razorpay and Didit webhooks do) instead of buffering any size first.
+    length = request.headers.get("content-length")
+    if length is not None and (not length.isascii() or not length.isdigit() or int(length) > DISCORD_MAX_BODY):
+        return _reply(413, None)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > DISCORD_MAX_BODY:
+            return _reply(413, None)
+    status, body = await bot.handle(bytes(raw), request.headers.get("x-signature-ed25519"),
                                     request.headers.get("x-signature-timestamp"))
     if status == 401:
         security_event("bot_webhook_rejected", reason="bad_discord_signature", path=request.url.path)

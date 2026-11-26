@@ -23,6 +23,11 @@ dist/
 *.7z
 *.sql.gz
 report*.txt
+*.tar
+
+# Keys and certificates (security audit 2026-11-26)
+*.pem
+*.key
 
 # Editors / OS
 .idea/

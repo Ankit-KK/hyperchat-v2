@@ -8,9 +8,12 @@ is the LARGER of the two. Bounded by the 1.5 MB size cap; run it in a worker thr
 """
 
 import io
+import struct
 from dataclasses import dataclass
 
 from mutagen import MutagenError
+from mutagen.id3 import Frames
+from mutagen.id3._tags import determine_bpi
 from mutagen.mp3 import MP3
 
 _BITRATES_KBPS = {
@@ -69,7 +72,32 @@ def _audio_start(data: bytes) -> int:
     start = 10 + size + (10 if data[5] & 0x10 else 0)
     if start >= len(data):
         raise Mp3Error("no_audio")
+    _check_id3_frames(data[3], data[5], data[10:10 + size])
     return start
+
+
+def _check_id3_frames(version: int, flags: int, tag: bytes) -> None:
+    """Security audit 2026-11-26 NV-5: mutagen zlib-inflates compressed ID3 frames with no output bound, so a
+    1.5 MB upload could expand to ~1 GB. Refuse, before mutagen runs: an unsynchronised tag, an extended header
+    (v2.3/2.4) or a compressed tag (v2.2); and any v2.3/2.4 frame that is compressed or unsynchronised or that
+    declares more bytes than the tag has left. Frames are walked exactly as mutagen walks them."""
+    if flags & 0xC0:
+        raise Mp3Error("bad_id3")
+    if version not in (3, 4):
+        return  # v2.2 frames carry no flags; mutagen refuses other versions itself (not_mp3)
+    refused = 0x0080 if version == 3 else 0x0008 | 0x0002  # v2.3 compression; v2.4 compression, unsynchronisation
+    # shortcut: determine_bpi is private to the pinned mutagen 1.48.1 (it guesses synchsafe vs plain v2.4 sizes);
+    # reusing it keeps this walk on the same frame boundaries as mutagen. Re-check it on a mutagen upgrade.
+    bpi = int if version == 3 else determine_bpi(tag, Frames)
+    pos = 0
+    while len(tag) - pos >= 10:
+        name, size, frame_flags = struct.unpack(">4sLH", tag[pos:pos + 10])
+        if name.strip(b"\x00") == b"":
+            return  # padding
+        size = bpi(size)
+        if frame_flags & refused or size > len(tag) - pos - 10:
+            raise Mp3Error("bad_id3")
+        pos += 10 + size
 
 
 def _walk(data: bytes, start: int) -> tuple[int, float]:
@@ -99,11 +127,15 @@ def parse_mp3(data: bytes) -> Mp3Info:
         raise Mp3Error("not_mp3")
     data = bytes(data)
     start = _audio_start(data)
+    if data[start:start + 3] == b"ID3":
+        raise Mp3Error("bad_id3")  # a second, chained tag: mutagen would parse it below (NV-5)
     frames, walked = _walk(data, start)
     if frames == 0:
         raise Mp3Error("no_audio")
     try:
-        info = MP3(io.BytesIO(data)).info
+        # NV-5: mutagen only ever sees the audio, never the ID3 tag (CHAP/CTOC frames nest sub-frames that the
+        # top-level walk in _check_id3_frames does not reach, and mutagen would inflate those too).
+        info = MP3(io.BytesIO(data[start:])).info
     except (MutagenError, ValueError, IndexError) as exc:
         raise Mp3Error("not_mp3") from None
     if getattr(info, "layer", 3) != 3 or not info.length or info.length <= 0:

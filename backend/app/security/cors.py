@@ -14,7 +14,8 @@ upload grant or a donation status token; signed server-to-server requests do not
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-ALLOWED_HEADERS = ", ".join(["content-type", "x-csrf-token", "x-obs-token", "x-upload-grant", "x-status-token"])
+ALLOWED_HEADERS = ", ".join(["content-type", "x-csrf-token", "x-obs-token", "x-upload-grant", "x-status-token",
+                             "x-step-up-grant"])  # step-up grant: app.stepup.actions.GRANT_HEADER (audit 2026-11-26)
 ADMIN_PATHS = ("/api/v1/admin", "/api/v1/auth/mfa")
 
 

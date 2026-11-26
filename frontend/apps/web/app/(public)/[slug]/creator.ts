@@ -48,6 +48,20 @@ export function imageSrc(url: string | null | undefined): string | null {
   return url && /^https:\/\/[^/]/i.test(url) ? url : null;
 }
 
+/**
+ * The picture the server itself fetches for the share card (next/og): only one under the platform's media base,
+ * `HYPERCHAT_MEDIA_BASE_URL` (the R2 public base URL), so a creator-set URL never makes the server fetch another
+ * host (security audit 2026-11-26). Unset or not https: no picture, and the card draws the initial instead.
+ */
+export function ogImageSrc(
+  url: string | null | undefined,
+  base: string | undefined = process.env.HYPERCHAT_MEDIA_BASE_URL,
+): string | null {
+  const src = imageSrc(url);
+  const prefix = base ? `${base.replace(/\/+$/, "")}/` : "";
+  return src && /^https:\/\/[^/]+\//i.test(prefix) && src.startsWith(prefix) ? src : null;
+}
+
 const COPPER_HUE = 28; // #B8702F, the palette's copper
 
 /**

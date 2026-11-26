@@ -20,6 +20,9 @@ SWAP_BUDGET = 15
 SWAP_WINDOW = timedelta(days=7)
 SLOT_COOLDOWN = timedelta(hours=24)
 UPLOAD_RATE = ("soundboard:upload", 30, 600)  # presigned URLs per user per 10 minutes
+# NV-7: confirmations per user per 10 minutes. A ticket's PUT URL can be replayed and its key confirmed again (each
+# time sealing a new copy), so the ticket rate alone no longer bounds objects and slots; this restores that bound.
+CONFIRM_RATE = ("soundboard:confirm", 30, 600)
 MAX_CHANGES = 100  # entries per list in one PATCH
 
 AUDIO_TYPES = {"audio/mpeg": "mp3", "audio/mp3": "mp3"}
