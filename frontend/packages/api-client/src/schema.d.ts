@@ -1209,6 +1209,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dashboard/streamers/{streamer}/realtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Dashboard Realtime
+         * @description The Pusher config and this session's own dashboard channel. Losing access (logout, revoked or expired session,
+         *     removed link, owner transfer, deactivation, lost admin role or assurance) stops delivery to it at the next event.
+         */
+        get: operations["dashboard_realtime_api_v1_dashboard_streamers__streamer__realtime_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/dashboard/streamers/{streamer}/settings": {
         parameters: {
             query?: never;
@@ -2401,6 +2422,17 @@ export interface components {
             expected_status: "pending" | "active" | "suspended";
             /** Reason */
             reason?: string | null;
+        };
+        /** DashboardRealtime */
+        DashboardRealtime: {
+            /** Auth Endpoint */
+            auth_endpoint: string;
+            /** Channel */
+            channel: string;
+            /** Cluster */
+            cluster: string;
+            /** Key */
+            key: string;
         };
         /** DashboardSettings */
         DashboardSettings: {
@@ -5620,6 +5652,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dashboard_realtime_api_v1_dashboard_streamers__streamer__realtime_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                streamer: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardRealtime"];
                 };
             };
             /** @description Validation Error */

@@ -2,20 +2,32 @@
 
   POST /api/v1/realtime/pusher/auth           OBS token -> overlay channels; session + CSRF -> dashboard
   GET  /api/v1/realtime/config?streamer=slug  {key, cluster, auth_endpoint}
+  GET  /api/v1/dashboard/streamers/{streamer}/realtime   {key, cluster, auth_endpoint, channel}: this session's
+       own dashboard channel (NV-4b); the same access as every dashboard route
 """
 
 import json
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.auth.dependencies import auth_service, client_ip, enforce_csrf, optional_user, require_admin_assurance
+from app.authz.dependencies import StreamerAccess, require_streamer_access
 from app.realtime.auth import RATE_CONFIG, RATE_IP, RealtimeService
 from app.security.dependencies import SecurityError
 from app.security.obs_token import is_obs_origin_allowed, own_origin, validate_obs_token
 
 router = APIRouter(prefix="/api/v1/realtime", tags=["realtime"])
+dashboard_router = APIRouter(prefix="/api/v1/dashboard/streamers/{streamer}", tags=["realtime"])
+
+
+class DashboardRealtime(BaseModel):
+    key: str
+    cluster: str
+    auth_endpoint: str
+    channel: str  # subscribe to exactly this name: it is this session's, and only it is published to (NV-4b)
 MAX_BODY = 2048
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -73,7 +85,7 @@ async def pusher_auth(request: Request):
                      admin=current.user.role == "admin")  # AuthError 403 (bad_origin / bad_csrf)
         body = await svc.authorize_session(current.user, socket_id, channel, slug, suffix,
                                            assure_admin=lambda: require_admin_assurance(request, current.session),
-                                           tag=tag)
+                                           tag=tag, session_id=current.session.id)
     return JSONResponse(body, headers=NO_STORE)
 
 
@@ -83,3 +95,13 @@ async def realtime_config(request: Request, streamer: str = ""):
     svc.require_available()
     await svc.limit(f"ip:{client_ip(request)}", RATE_CONFIG)
     return JSONResponse(await svc.config(streamer), headers={"Cache-Control": "public, max-age=300"})
+
+
+@dashboard_router.get("/realtime", response_model=DashboardRealtime)
+async def dashboard_realtime(request: Request, access: StreamerAccess = Depends(require_streamer_access)) -> dict:
+    """The Pusher config and this session's own dashboard channel. Losing access (logout, revoked or expired session,
+    removed link, owner transfer, deactivation, lost admin role or assurance) stops delivery to it at the next event."""
+    svc = _service(request)
+    svc.require_available()
+    await svc.limit(f"user:{access.current.user.id}", RATE_CONFIG)
+    return await svc.dashboard_config(access.streamer.slug, access.current.session.id)

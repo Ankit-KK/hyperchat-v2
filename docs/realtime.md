@@ -105,7 +105,7 @@ Exactly one credential:
 | Credential | Channels | Checks |
 |---|---|---|
 | OBS token (`x-obs-token`, or `?token=` for the OBS browser source) | `alerts`, `audio`, `settings`, `leaderboard` of the token's own creator, **under this token's own names** `private-{slug}-{suffix}-t{tag}` (see below) | Origin absent or allowlisted; the tag is this token's; token hash active, unrevoked, unexpired; channel exactly in the token's scope (`obs_tokens.pusher_channel_scope`, else the default scope); never `dashboard`, whatever a stored scope says |
-| Session cookie | `dashboard` | Origin allowlisted + CSRF token (`x-csrf-token`); owner, linked account or admin (`app.authz`); unclaimed creators admin-only; inactive users refused |
+| Session cookie | `dashboard`, **under this session's own name** `private-{slug}-dashboard-s{tag}` (see below) | Origin allowlisted + CSRF token (`x-csrf-token`); the tag is this session's; owner, linked account or admin (`app.authz`); unclaimed creators admin-only; inactive users refused; an admin also needs the assurance rule |
 
 **Per-token overlay channels (security audit NV-4, 2026-11-26).** Pusher signs a subscription once and has no way to
 drop it, so an overlay that stays connected would keep receiving after its token is revoked. Overlay channels are
@@ -114,7 +114,37 @@ published to the channels of the creator's **active** tokens only (one Pusher re
 and an event with no active token is `skipped` (`no_active_obs_token`). A revoke (or expiry) takes effect at the
 next event, also for connections that are already open. Clients take their names from `GET /api/v1/obs/session`
 (`realtime.channels`, and `realtime.audio_channel` as before); the untagged names are refused for OBS tokens and
-never published. `dashboard` and the public `{slug}-goal` are unchanged. The tables in this file keep the base names.
+never published. The public `{slug}-goal` is unchanged. The tables in this file keep the base names.
+
+**Per-session dashboard channel (security audit NV-4b, 2026-11-26).** The dashboard channel carries new and pending
+donations, so losing access has to reach an open connection too. It is per session: `{tag}` is `session_tag(session
+id)` (16 hex). Each `new-donation` / `donation-updated` is published to the sessions that hold access to the creator
+**right now** (`RealtimeRepository.dashboard_session_ids`, the request rules in SQL), batched by 100 channels:
+- the session is valid: not revoked, within its idle and absolute expiry, and an administrator's within the admin
+  limits (`HYPERCHAT_ADMIN_SESSION_IDLE_HOURS` / `_ABSOLUTE_HOURS`, the worker reads the same settings);
+- its user is active, and has access: an administrator (any creator), else the creator's owner or its linked account
+  (never for an unclaimed creator);
+- an administrator's session also has passkey assurance (`stepup_session_aal` = 2) unless enforcement is `draft`.
+
+So a logout or revoked session, an idle or absolute expiry, a removed link, an owner transfer, a deactivated user, a
+removed admin role and a lapsed (or newly required) admin assurance all take effect at the next event; a new owner,
+link or session receives at once. An event with no such session is `skipped` (`no_dashboard_session`). Fan-out:
+every receiving session is one channel of the event. Pusher counts deliveries per channel, as far as I know (not
+re-checked against its billing docs). Every live **administrator** session receives every creator's dashboard
+events, as an administrator may open any creator. Non-admin sessions idle out after `HYPERCHAT_SESSION_IDLE_DAYS`,
+admin sessions after 2 h. Moderators are not dashboard-channel principals (`app.authz.access_via`), so removing a
+moderator changes nothing here.
+
+**Client rule:** listening on the WebSocket does not slide the session's idle expiry; only authenticated API requests
+do. A dashboard page must keep making them (it does while it is used), or delivery stops silently once its session
+idles out: for an administrator, after 2 hours.
+
+The client takes its name from `GET /api/v1/dashboard/streamers/{streamer}/realtime` (the same access as every
+dashboard route): `{key, cluster, auth_endpoint, channel}`. Subscribe to exactly `channel`: the untagged name and
+other sessions' names are refused. After a new sign-in (a new session) fetch it again.
+
+**Deploying NV-4b:** dashboards that are open during the deploy keep the old channel name and get no live events
+until they reload (they then fetch their channel from the endpoint above). No v2 dashboard page subscribes yet.
 
 Requests are refused when they carry both or neither credential, or have a malformed `socket_id` (`\d+.\d+`).
 `presence-`, `private-encrypted-`, public and unknown channels are refused too. Channel names are parsed with
