@@ -66,7 +66,7 @@ def build_handlers(settings: Settings, connection_factory, store) -> dict:
     handlers["moderator_notify"] = ModeratorNotifyHandler(
         BotRepository(connection_factory), telegram=telegram, discord=discord,
         enabled=settings.bots_enabled and (telegram is not None or discord is not None),
-        recipients=settings.bot_recipients, frontend_url=settings.frontend_url,
+        recipients=settings.bot_recipients, frontend_url=settings.dashboard_link_url,
         public_base=settings.r2_public_base if store is not None else None, creators=settings.bot_creators)
     if store is not None:  # donation audio needs R2 (generated audio and the silence object)
         handlers["donation_audio"] = DonationAudioHandler(
@@ -84,7 +84,7 @@ def build_auto_inviter(settings: Settings, connection_factory) -> AutoInviter | 
         return None
     return AutoInviter(ApplicationRepository(connection_factory), sender_from_settings(settings),
                        Alerts(connection_factory),
-                       frontend_url=settings.frontend_url, ttl_days=settings.invite_ttl_days,
+                       frontend_url=settings.auth_link_url, ttl_days=settings.invite_ttl_days,
                        poll_seconds=settings.auto_invite_poll_seconds)
 
 

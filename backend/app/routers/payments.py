@@ -37,7 +37,7 @@ def _guard(action: str, *, origin: bool):
     async def dependency(request: Request) -> PaymentService:
         if origin:
             value = request.headers.get("origin")
-            if not value or value not in request.app.state.settings.browser_origins:
+            if not value or value not in request.app.state.settings.donor_tier:
                 security_event("payment_rejected", reason="bad_origin", client_ip=client_ip(request))
                 raise ApiError(403, "Request origin not allowed", "bad_origin")
         service = _service(request)

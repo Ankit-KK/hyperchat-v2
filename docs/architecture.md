@@ -59,8 +59,9 @@ Telegram and Discord bots where features need them.
 - Creator access: owner (`streamers.user_id`) or linked account (`users.streamer_id`); creators nobody
   has claimed are admin-only. Enforced by `require_streamer_access` on every creator-scoped route.
 - Role, status or creator-link changes revoke the user's sessions immediately.
-- Browser trust is an explicit origin list (frontend + `HYPERCHAT_ALLOWED_ORIGINS`), shared by CORS,
-  the CSRF/Origin check and the OBS origin gate.
+- Browser trust is an explicit origin list (frontend + `HYPERCHAT_ALLOWED_ORIGINS`), split into optional tiers
+  (admin, session, donor, overlay; `docs/admin-auth-boundary.md` "Origin tiers") that drive CORS, the CSRF/Origin
+  check, the donor Origin checks and the OBS origin gate. Unset, every tier is that one list.
 - Moderators (Telegram/Discord bot identities, `streamers_moderators`) are authorized with the bot
   features, not as web users.
 

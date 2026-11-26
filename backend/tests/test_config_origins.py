@@ -74,3 +74,29 @@ def test_production_accepts_https_origins_and_lax():
 def test_development_origin_classification():
     assert is_development_origin("http://localhost:5173") and is_development_origin("https://127.0.0.1:8443")
     assert not is_development_origin("https://hyperchat.space")
+
+
+# ── PDP v2.0 G1/G2 tiers and link URLs (behaviour: tests/auth/test_origin_tiers.py) ──
+
+
+@pytest.mark.parametrize("field", ["admin_origins", "session_origins", "donor_origins", "overlay_origins",
+                                   "google_redirect_origins"])
+def test_every_tier_is_validated_like_allowed_origins(field):
+    with pytest.raises(ValueError):
+        settings(**{field: "https://*.hyperchat.space"})
+    with pytest.raises(ValueError):
+        settings(**{field: "http://hyperchat.space"})
+
+
+@pytest.mark.parametrize("kw", [{"admin_origins": "http://localhost:3001"},
+                                {"session_origins": "https://localhost:3000"},
+                                {"donor_origins": "http://127.0.0.1:3000"},
+                                {"overlay_origins": "http://localhost:3000"},
+                                {"google_redirect_origins": "http://localhost:3000"},
+                                {"public_url": "http://localhost:3000"},
+                                {"auth_url": "http://localhost:3000"},
+                                {"dashboard_url": "https://127.0.0.1:3000"}])
+def test_production_refuses_development_origins_in_every_list(kw):
+    with pytest.raises(ValueError):
+        settings(app_env="production", db_label="PRODUCTION", **kw)
+    settings(**kw)  # development accepts them

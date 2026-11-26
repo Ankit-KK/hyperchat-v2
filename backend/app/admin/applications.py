@@ -321,7 +321,7 @@ class ApplicationService:
                 raise
             raise StepUpRequired("application.invite", f"application:{signup_id}", {}) from None
         self._check(result)
-        url = f"{self.auth.settings.frontend_url.rstrip('/')}/invite?token={token}"
+        url = f"{self.auth.settings.auth_link_url}/invite?token={token}"
         try:
             await self.auth.sender.send(render("invite", invite["email"], url))
         except Exception as exc:  # noqa: BLE001 - any provider failure: report the class only, never the link

@@ -1,6 +1,6 @@
 """/api/v1/auth — FastAPI-managed authentication (replaces Supabase Auth)."""
 
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import RedirectResponse
@@ -18,6 +18,8 @@ from app.auth.dependencies import (
 )
 from app.auth.service import AuthError, public_user
 from app.auth.tokens import new_token, sign_payload, verify_payload
+from app.core.config import Settings
+from app.core.origins import OriginError, normalize_origin
 from app.stepup.actions import StepUp, step_up, uid
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -55,12 +57,27 @@ class AcceptIn(BaseModel):
     username: str | None = Field(default=None, max_length=50)
 
 
+class PublicUser(BaseModel):
+    """app.auth.service.public_user: the signed-in account as every frontend sees it."""
+    id: str
+    email: str
+    username: str | None
+    role: str
+    streamer_id: str | None
+
+
+class SignedIn(BaseModel):
+    """The session bootstrap: who is signed in, plus the CSRF token to send with every write."""
+    user: PublicUser
+    csrf_token: str
+
+
 def _signed_in(response: Response, request: Request, user, issued) -> dict:
     set_session_cookie(response, auth_service(request), issued.token, issued.session)
     return {"user": public_user(user), "csrf_token": issued.csrf_token}
 
 
-@router.post("/login")
+@router.post("/login", response_model=SignedIn)
 async def login(body: LoginIn, request: Request, response: Response) -> dict:
     svc = auth_service(request)
     if not svc.origin_allowed(request.headers.get("origin")):  # login CSRF protection
@@ -69,7 +86,7 @@ async def login(body: LoginIn, request: Request, response: Response) -> dict:
     return _signed_in(response, request, user, issued)
 
 
-@router.get("/session")
+@router.get("/session", response_model=SignedIn)
 async def session(request: Request, current: CurrentUser | None = Depends(optional_user)) -> dict:
     if current is None:
         raise AuthError(401, "Not signed in", "no_session")
@@ -124,7 +141,7 @@ async def create_invite(body: InviteIn, request: Request, current: CurrentUser =
     return await auth_service(request).create_invite(current.user, body.email, body.role, body.streamer_id, grant)
 
 
-@router.post("/invites/accept")
+@router.post("/invites/accept", response_model=SignedIn)
 async def accept_invite(body: AcceptIn, request: Request, response: Response) -> dict:
     svc = auth_service(request)
     if not svc.origin_allowed(request.headers.get("origin")):
@@ -134,8 +151,26 @@ async def accept_invite(body: AcceptIn, request: Request, response: Response) ->
     return _signed_in(response, request, user, issued)
 
 
-def _safe_redirect(path: str | None) -> str:
-    return path if path and path.startswith("/") and not path.startswith("//") and "\\" not in path else "/dashboard"
+def _safe_path(path: str | None) -> bool:
+    return bool(path) and path.startswith("/") and not path.startswith("//") and "\\" not in path
+
+
+def _safe_redirect(target: str | None, settings: Settings) -> str:
+    """G3: the absolute Google sign-in success target. A relative path (the original safe-path rule) lands on the
+    dashboard URL; an absolute URL only when its origin is allow-listed (HYPERCHAT_GOOGLE_REDIRECT_ORIGINS, default
+    the dashboard URL's origin) and its path passes the same rule; anything else falls back to the dashboard."""
+    base = settings.dashboard_link_url
+    if _safe_path(target):
+        return base + target
+    try:
+        parts = urlsplit(target or "")
+        origin = normalize_origin(f"{parts.scheme}://{parts.netloc}")
+    except (OriginError, ValueError):
+        return base + "/dashboard"
+    path = parts.path or "/"
+    if origin not in settings.google_redirect_tier or not _safe_path(path) or parts.fragment:
+        return base + "/dashboard"
+    return origin + path + (f"?{parts.query}" if parts.query else "")
 
 
 @router.get("/google/start")
@@ -144,7 +179,8 @@ async def google_start(request: Request, redirect: str | None = None) -> Redirec
     if svc.google is None:
         raise AuthError(404, "Google sign-in is not enabled", "google_disabled")
     state, nonce, verifier = new_token(24), new_token(24), new_token(48)
-    cookie = sign_payload(svc.secret, {"s": state, "n": nonce, "v": verifier, "r": _safe_redirect(redirect)}, 600)
+    target = _safe_redirect(redirect, svc.settings)
+    cookie = sign_payload(svc.secret, {"s": state, "n": nonce, "v": verifier, "r": target}, 600)
     resp = RedirectResponse(svc.google.authorization_url(state, nonce, verifier), status_code=302)
     resp.set_cookie(OAUTH_COOKIE, cookie, max_age=600, path="/", secure=True, httponly=True, samesite="lax")
     return resp
@@ -154,11 +190,10 @@ async def google_start(request: Request, redirect: str | None = None) -> Redirec
 async def google_callback(request: Request, code: str | None = None, state: str | None = None,
                           error: str | None = None) -> RedirectResponse:
     svc = auth_service(request)
-    front = svc.settings.frontend_url.rstrip("/")
     payload = verify_payload(svc.secret, request.cookies.get(OAUTH_COOKIE))
 
     def fail(reason: str) -> RedirectResponse:
-        resp = RedirectResponse(f"{front}/auth?error={quote(reason)}", status_code=302)
+        resp = RedirectResponse(f"{svc.settings.auth_link_url}/auth?error={quote(reason)}", status_code=302)
         resp.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
         return resp
 
@@ -171,7 +206,10 @@ async def google_callback(request: Request, code: str | None = None, state: str 
                                               request.headers.get("user-agent"))
     except AuthError as exc:
         return fail(exc.reason)
-    resp = RedirectResponse(f"{front}{payload.get('r', '/dashboard')}", status_code=302)
+    # The signed cookie holds the target /google/start checked; one issued before G3 holds a relative path.
+    target = payload.get("r") or ""
+    resp = RedirectResponse(target if target.startswith("https://") or target.startswith("http://")
+                            else _safe_redirect(target, svc.settings), status_code=302)
     set_session_cookie(resp, svc, issued.token, issued.session)
     resp.delete_cookie(OAUTH_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
     return resp

@@ -183,7 +183,7 @@ class KycService:
             raise ApiError(409, "Your identity is already verified", "kyc_already_approved")
         if state["state"] == "in_review":
             raise ApiError(409, "Your verification is being reviewed", "kyc_in_review")
-        callback = f"{self.settings.frontend_url.rstrip('/')}/kyc/return"  # never from the request
+        callback = f"{self.settings.dashboard_link_url}/kyc/return"  # never from the request
         try:
             created = await self.client.create_session(user.id, callback)
             row = await self.repo.record_session(user.id, created, self.client.workflow_id, self.environment)

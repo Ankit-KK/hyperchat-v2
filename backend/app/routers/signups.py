@@ -23,7 +23,7 @@ async def _guard(request: Request) -> SignupRepository:
     """Trusted Origin, then the per-IP rate limit; runs before the body is validated."""
     ip = client_ip(request)
     origin = request.headers.get("origin")
-    if not origin or origin not in request.app.state.settings.browser_origins:
+    if not origin or origin not in request.app.state.settings.donor_tier:
         security_event("signup_rejected", reason="bad_origin", client_ip=ip)
         raise ApiError(403, "Request origin not allowed", "bad_origin")
     repo = getattr(request.app.state, "signups", None)

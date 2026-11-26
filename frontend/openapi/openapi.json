@@ -2256,6 +2256,54 @@
         "title": "PublicStreamer",
         "type": "object"
       },
+      "PublicUser": {
+        "description": "app.auth.service.public_user: the signed-in account as every frontend sees it.",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "streamer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Streamer Id"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "username",
+          "role",
+          "streamer_id"
+        ],
+        "title": "PublicUser",
+        "type": "object"
+      },
       "QueueItem": {
         "additionalProperties": false,
         "properties": {
@@ -2868,6 +2916,24 @@
           "last_sync"
         ],
         "title": "ShowcaseMetrics",
+        "type": "object"
+      },
+      "SignedIn": {
+        "description": "The session bootstrap: who is signed in, plus the CSRF token to send with every write.",
+        "properties": {
+          "csrf_token": {
+            "title": "Csrf Token",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/PublicUser"
+          }
+        },
+        "required": [
+          "user",
+          "csrf_token"
+        ],
+        "title": "SignedIn",
         "type": "object"
       },
       "SignupRequest": {
@@ -5912,9 +5978,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Accept Invite Api V1 Auth Invites Accept Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SignedIn"
                 }
               }
             },
@@ -5955,9 +6019,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Login Api V1 Auth Login Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SignedIn"
                 }
               }
             },
@@ -6388,9 +6450,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Session Api V1 Auth Session Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SignedIn"
                 }
               }
             },
