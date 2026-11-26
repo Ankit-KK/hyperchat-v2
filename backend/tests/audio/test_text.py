@@ -87,6 +87,16 @@ def test_audio_tags_cannot_be_injected_and_are_stripped_for_plain_providers():
     assert t.strip_audio_tags("[excited] Ravi just sent 40 rupees! [gasps] wow") == "Ravi just sent 40 rupees! wow"
 
 
+def test_donor_name_cannot_carry_audio_tags():
+    # Security audit 2026-11-26 NV-6: moderation (spoken_parts) and the provider (announcement) see the same name.
+    assert t.spoken_parts("[shouting] Ravi", None, is_media=False, language_boost=None) == ("shouting Ravi", "")
+    assert t.spoken_parts("[]", None, is_media=False, language_boost=None)[0] == "Anonymous"
+    text = t.announcement(donor_name="[shouting] Ravi", amount=40, currency="INR", amount_inr=40, message=None,
+                          media_type=None, is_media=False, language_boost=None, rng=random.Random(3))
+    assert "shouting Ravi" in text and "[shouting]" not in text
+    assert text.replace("shouting Ravi", "{user_name}").replace("40 rupees", "{amount}") in t.HYPE_LINES["light"]
+
+
 def test_announcement_text_donation():
     rng = random.Random(7)
     text = t.announcement(donor_name="Ravi &amp; Co", amount=Decimal("40.00"), currency="INR",
