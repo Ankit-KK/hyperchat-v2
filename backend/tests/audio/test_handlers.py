@@ -314,6 +314,17 @@ def test_moderation_block_is_audited_with_a_hash_and_silenced():
     assert len(block["identity_hash"]) == 64 and "Rahul" not in block["identity_hash"].lower()
 
 
+@pytest.mark.parametrize("name, rule", [("Rahul " * 12 + "Om niggard", "rac.nword.3"),
+                                        ("Rahul " * 12 + "Ram rapeseed", "sv.rape.0")])
+def test_spoken_name_cut_is_moderated(name, rule):
+    # Security audit 2026-11-26: the full name is allowlisted, but the 80-char spoken cut ends in a blocked term.
+    from app.audio.moderation import moderate_for_tts
+    assert moderate_for_tts(name, None, "Creator A").allowed
+    w = World(donation(donor_name=name, message=None))
+    assert w.run().result == {"outcome": "silent", "reason": "moderation_blocked"} and w.provider_calls() == 0
+    assert w.repo.blocks[0]["decision"].rule_id == rule
+
+
 def test_probe_limit_blocks_clean_text_too():
     w = World(donation(message="nice stream"))
     w.repo.blocked = 3

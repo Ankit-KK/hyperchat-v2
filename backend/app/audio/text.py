@@ -259,13 +259,23 @@ def media_description(media_type: str | None) -> str:
     return "an image"
 
 
+def spoken_parts(donor_name: str | None, message: str | None, *, is_media: bool,
+                 language_boost: str | None) -> tuple[str, str]:
+    """The exact donor name and message the provider will speak. Moderation must see these, not only the stored
+    strings: the NAME_MAX cut and the emoji names can turn approved text into a blocked term."""
+    name = sanitize_for_tts(decode_html_entities(donor_name or ""), NAME_MAX) or "Anonymous"
+    if is_media or not message:
+        return name, ""
+    safe = sanitize_for_tts(message, MESSAGE_MAX)
+    spoken = convert_emojis_to_text(safe, language_boost) if safe and is_speakable(safe) else ""
+    return name, escape_audio_tags(spoken)
+
+
 def announcement(*, donor_name: str, amount, currency: str, amount_inr, message: str | None, media_type: str | None,
                  is_media: bool, language_boost: str | None, rng: random.Random | None = None) -> str:
     """The full text sent to the TTS provider (still carrying the hype line's audio tags)."""
-    name = sanitize_for_tts(decode_html_entities(donor_name or ""), NAME_MAX) or "Anonymous"
+    name, spoken = spoken_parts(donor_name, message, is_media=is_media, language_boost=language_boost)
     line = pick_hype_line(amount_inr, name, spoken_amount(amount, currency), rng)
     if is_media:
         return f"{line} And they sent {media_description(media_type)}."
-    safe = sanitize_for_tts(message, MESSAGE_MAX) if message else ""
-    spoken = convert_emojis_to_text(safe, language_boost) if safe and is_speakable(safe) else ""
-    return f"{line} {escape_audio_tags(spoken)}" if spoken else line
+    return f"{line} {spoken}" if spoken else line
