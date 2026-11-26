@@ -120,6 +120,32 @@ to Cloudflare R2 with short-lived grants from the API. Payments use Razorpay Che
 verified by the API. There is no contact form (retired, D5). The public layout shows the contact name, email,
 phones and Discord invite from `GET /api/v1/public/config` and hides whatever is empty.
 
+## Route map (apps/web)
+
+| Host (zone)   | Path                          | Served by                                                                             | Indexed                 |
+| ------------- | ----------------------------- | ------------------------------------------------------------------------------------- | ----------------------- |
+| apex (public) | marketing allow-list, `/`     | the marketing website, through the rewrites below                                     | the website's own rules |
+| apex (public) | `/{slug}`                     | `app/(public)/[slug]/page.tsx`: the creator page                                      | yes, active creators    |
+| apex (public) | `/{slug}/opengraph-image`     | `opengraph-image.tsx`: 1200x630 PNG from name, colour and profile picture (`next/og`) | image                   |
+| apex (public) | unknown or inactive `/{slug}` | `[slug]/not-found.tsx`, status 404                                                    | no (noindex)            |
+| apex (public) | `/{slug}` with the API down   | `[slug]/error.tsx`, status 500 ("temporarily unavailable")                            | no (noindex)            |
+| `www.`        | any                           | 308 to the apex                                                                       | no                      |
+| `auth.`       | any                           | `app/(auth)/auth/*`                                                                   | no                      |
+| `dashboard.`  | any                           | `app/(dashboard)/dashboard/*`                                                         | no                      |
+| `overlay.`    | any                           | `app/(overlay)/obs/*`                                                                 | no                      |
+
+The creator page is server-rendered from `GET /api/v1/public/streamers/{slug}`, `/pricing` and `/goal` with the 60 s
+revalidate in `lib/api.ts`. The API alone decides which creators exist: it answers 404 for unknown and non-active
+ones. Pricing and goal are optional; if either call fails the page renders without that section. Images load only
+from absolute https URLs. A legacy `/assets/...` path (now the website's bundle folder) or a missing image gets a
+placeholder. The creator's colour is used for decoration only (rings, the goal bar), never for text. "Send an
+interaction" is disabled until checkout (Phase 7). Metadata is the PDP §16 template with "interactions" in the
+description, canonical `https://hyperchat.space/{slug}`, Open Graph and Twitter card, and the website's Organization
+JSON-LD (Streamheart Private Limited).
+
+An App Router page cannot choose its status code, so "API unreachable" is answered with 500 rather than 503. It
+carries `noindex` and a retry button.
+
 ## Sharing the apex with the marketing website
 
 The `web` app owns `hyperchat.space` (addendum §2.1 mechanism A2, owner decision R2). `apps/web/lib/marketing.ts`
@@ -205,7 +231,7 @@ licensed replacement is a change to the `src` line in `font-config.css`.
 | Phase                     | Adds                                                                                                                                        |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | 3 Subdomains              | auth screens (login, Google, invites, registration, reset), the dashboard session flow, DNS for the dev hosts, backend origin tiers (G1-G4) |
-| 4 Creator pages           | the full `/{slug}` page, metadata and Open Graph images, discovery, sitemap, legacy OBS URL redirects                                       |
+| 4 Creator pages           | discovery, a sitemap with creator pages, legacy OBS URL redirects (the `/{slug}` page, metadata and Open Graph image exist)                 |
 | 5 Onboarding              | invite acceptance, onboarding checklist, KYC, profile and background uploads with crop                                                      |
 | 6 Dashboard               | donations, moderation, settings and pricing, soundboard, OBS tokens, live updates                                                           |
 | 7 Donations and OBS       | donation form, Razorpay Checkout, alerts and goal overlays                                                                                  |
