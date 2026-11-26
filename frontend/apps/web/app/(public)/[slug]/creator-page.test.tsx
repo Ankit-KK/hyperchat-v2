@@ -169,6 +169,7 @@ describe("metadata", () => {
     expect(meta.title).toEqual({ absolute: "Tsukii — Support on HyperChat" });
     expect(meta.description).toBe("Support Tsukii with live interactions and stream alerts on HyperChat.");
     expect(meta.alternates?.canonical).toBe("https://hyperchat.space/tsukii");
+    expect(String(meta.metadataBase)).toBe("https://hyperchat.space/"); // og:image is on the apex too
     expect(meta.openGraph).toMatchObject({ url: "https://hyperchat.space/tsukii", siteName: "HyperChat" });
     expect(meta.twitter).toMatchObject({ card: "summary_large_image" });
     expect(meta.robots).toBeUndefined(); // active creators may be indexed
