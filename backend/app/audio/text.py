@@ -262,8 +262,10 @@ def media_description(media_type: str | None) -> str:
 def spoken_parts(donor_name: str | None, message: str | None, *, is_media: bool,
                  language_boost: str | None) -> tuple[str, str]:
     """The exact donor name and message the provider will speak. Moderation must see these, not only the stored
-    strings: the NAME_MAX cut and the emoji names can turn approved text into a blocked term."""
-    name = sanitize_for_tts(decode_html_entities(donor_name or ""), NAME_MAX) or "Anonymous"
+    strings: the NAME_MAX cut and the emoji names can turn approved text into a blocked term. The name is escaped
+    too (security audit NV-6): a donor name must never carry an eleven_v3 [tag]."""
+    name = " ".join(escape_audio_tags(sanitize_for_tts(decode_html_entities(donor_name or ""), NAME_MAX)).split())
+    name = name or "Anonymous"
     if is_media or not message:
         return name, ""
     safe = sanitize_for_tts(message, MESSAGE_MAX)

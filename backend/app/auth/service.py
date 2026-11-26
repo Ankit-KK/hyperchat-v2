@@ -322,6 +322,9 @@ class AuthService:
     async def accept_invite(self, token: str, password: str, username: str | None, ip: str | None,
                             user_agent: str | None) -> tuple[User, IssuedSession]:
         self._check_new_password(password)
+        # Security audit 2026-11-26 NV-2 (F9 pattern): bound per-IP work before Argon2, as reset_password does.
+        if not await self.repo.hit_rate_limit(f"ip:{ip}", "auth:invite-accept", 20, 3600):
+            raise AuthError(429, TOO_MANY, "ip_rate_limited")
         password_hash = await _hash(password)  # Argon2 before any row lock
         session_token, csrf, row = self._new_session(None, ip, user_agent)
         try:
