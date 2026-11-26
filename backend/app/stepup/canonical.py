@@ -46,8 +46,7 @@ ACTIONS = {
     "admin.user.email": "action",
     "partner_key.create": "action",
     "mfa.credential.revoke": "action",
-    # SEC-A: not yet in 0025's stepup_challenges CHECK, so no grant can be issued for them until the follow-up
-    # migration; with enforcement 'active' their routes are refused (fail closed), in 'draft' they work as before.
+    # SEC-A (migration 0040 adds them to the action CHECK and anchors their writes)
     "creator.soundboard": "action",
     "application.reopen": "action",
 }

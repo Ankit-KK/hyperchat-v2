@@ -118,15 +118,12 @@ answer carries the exact `{action, target, params}` to approve.
 | `PATCH /api/v1/admin/users/{id}` | `admin.user.change` | `user:{id}` | the account's **resulting** `{role, is_active, streamer_id}` |
 | `PUT /api/v1/admin/users/{id}/email` | `admin.user.email` | `user:{id}` | `{email}` |
 | `POST /api/v1/admin/partner-keys` | `partner_key.create` | `partner_key` | `{partner_slug}` |
-| `PUT /api/v1/admin/creators/{id}/soundboard` | `creator.soundboard` | `creator:{id}` | `{enabled}` (SEC-A; API only, see below) |
-| `POST /api/v1/admin/applications/{id}/reopen` | `application.reopen` | `application:{id}` | `{}` (the note only annotates; SEC-A; API only, see below) |
+| `PUT /api/v1/admin/creators/{id}/soundboard` | `creator.soundboard` | `creator:{id}` | `{enabled}` (SEC-A) |
+| `POST /api/v1/admin/applications/{id}/reopen` | `application.reopen` | `application:{id}` | `{}` (the note only annotates; SEC-A) |
 
-- **SEC-A actions, API side only for now:** `creator.soundboard` and `application.reopen` are bound in the API and
-  consumed in the write's own transaction, like every other action, and `draft` keeps the no-grant path. They are
-  **not yet in 0025's `stepup_challenges.action` CHECK**, so the verifier cannot issue a challenge for them: with
-  enforcement `active` both routes answer `403 step_up_required` and no grant can satisfy it (fail closed). A
-  follow-up migration widens the CHECK and adds database anchors on `streamers.soundboard_enabled` and on
-  `user_signups.review_status` rejected → submitted; it must be deployed before enforcement is activated.
+- **SEC-A actions:** `creator.soundboard` and `application.reopen` (migration 0040: added to the action CHECK, and
+  anchored on `streamers.soundboard_enabled` and on `user_signups.review_status` rejected → submitted). Without
+  0040 the verifier cannot issue a challenge for them and `active` refuses both routes.
 - **Unbound actions:** `mfa.credential.revoke`. Passkeys are revoked by the operator only.
 - **Not step-up actions (aal2 only once enforcement is active):**
   - defensive actions: suspend, restrict, revoke grace, revoke sessions, revoke a partner key
@@ -242,6 +239,8 @@ Every write path to the tables below was traced (repositories, services, definer
 | `users.role` / `is_active` / `streamer_id` | `AdminRepository.update_user` (`auth`); `transfer_owner` (`app`) | anchor `users.privileges` | `admin.user.change`, `user:<id>`, the resulting `{role, is_active, streamer_id}` |
 | `users.email` | `AdminRepository.change_email` (`auth`) | anchor `users.email` | `admin.user.email`, `user:<id>`, `{email (lowercase)}` |
 | `INSERT partner_api_keys` | `PartnerRepository.create_key` (`app`) | anchor `partner_api_keys` | `partner_key.create`, `partner_key`, `{partner_slug}` |
+| `streamers.soundboard_enabled` (0040) | `AdminRepository.set_soundboard_eligibility` (`app`) | anchor `streamers.soundboard_enabled` | `creator.soundboard`, `creator:<id>`, `{enabled: NEW}` |
+| `user_signups.review_status` rejected → submitted (0040) | `ApplicationRepository.reopen` (`app`) | anchor `user_signups.reopen` | `application.reopen`, `application:<id>`, `{}` |
 
 **Closed outright for every API role** (no grant makes them possible; `hyperchat_auth` included, which 0024 did not
 cover):

@@ -3,8 +3,8 @@
 T-2  With enforcement 'active', an aal2 administrator can no longer grant soundboard eligibility or reopen an
      application without a passkey grant for exactly that action (403 step_up_required); in 'draft' both work
      without one, as every other action does. A presented grant is consumed in the operation's own transaction.
-     Until the follow-up migration widens 0025's action CHECK, no grant can be issued for these two actions, so
-     'active' refuses them outright (fail closed); that migration adds the end-to-end "succeeds with a grant" test.
+     With a correctly bound grant both succeed; the database (migration 0040) claims it at the anchor write and
+     refuses the write itself without one, whatever code issues it.
 SEC-F A missing stepup_enforcement row answers a clean 503 stepup_unavailable, never a 500 and never a skipped
      aal2 check.
 """
@@ -15,6 +15,7 @@ import os
 import tempfile
 import uuid
 
+import psycopg
 import pytest
 
 from app.auth.repository import AuthRepository
@@ -122,13 +123,39 @@ def test_active_refuses_soundboard_eligibility_and_reopen_without_a_grant(api):
         403, "step_up_refused", "not_found")
     assert soundboard(sid) is False and review_status(app_id) == "rejected"
 
-    # Until the follow-up migration, the database issues no challenge for the new actions (fail closed).
-    for action, target_ in (("creator.soundboard", f"creator:{sid}"), ("application.reopen", f"application:{app_id}")):
-        r = b.post(f"{MFA}/assertion/options", headers=h, json={"action": action, "target": target_, "params": {}})
-        assert r.status_code >= 400 and "challenge_id" not in r.text, (action, r.status_code, r.text)
+    # A grant bound to other parameters is refused; the exact grant succeeds, is consumed and claimed by the anchor.
+    wrong = ceremony(b, h, auth, "creator.soundboard", f"creator:{sid}", {"enabled": False})["grant_id"]
+    assert body(b.put(f"{A}/creators/{sid}/soundboard", json={"enabled": True}, headers={**h, GRANT: wrong})) == (
+        403, "step_up_refused", "mismatch")
+    grant = ceremony(b, h, auth, "creator.soundboard", f"creator:{sid}", {"enabled": True})["grant_id"]
+    r = b.put(f"{A}/creators/{sid}/soundboard", json={"enabled": True}, headers={**h, GRANT: grant})
+    assert r.status_code == 200 and r.json()["changed"] is True, r.text
+    grant = ceremony(b, h, auth, "application.reopen", f"application:{app_id}", {})["grant_id"]
+    r = b.post(f"{A}/applications/{app_id}/reopen", json={"note": "again"}, headers={**h, GRANT: grant})
+    assert r.status_code == 200, r.text
+    assert soundboard(sid) is True and review_status(app_id) == "submitted"
     with db() as conn:
-        assert conn.execute("SELECT count(*) FROM public.stepup_challenges WHERE action IN "
-                            "('creator.soundboard', 'application.reopen')").fetchone()[0] == 0
+        claimed = conn.execute("SELECT array_agg(claimed_anchor ORDER BY claimed_anchor) FROM public.stepup_grants "
+                               "WHERE action IN ('creator.soundboard', 'application.reopen') "
+                               "AND claimed_at IS NOT NULL").fetchone()[0]
+    assert claimed == ["streamers.soundboard_enabled", "user_signups.reopen"]
+
+
+@requires_db
+def test_active_the_database_refuses_both_writes_without_a_grant_whatever_the_caller(api):
+    sid = make_streamer("authtest-seca-guard", user_id=make_user("seca-guard-owner" + DOMAIN))
+    app_id = rejected_application("seca-guard-app")
+    set_enforcement("active")
+    for sql, args in (("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (sid,)),
+                      ("UPDATE public.user_signups SET review_status = 'submitted', rejection_reason = NULL "
+                       "WHERE id = %s", (app_id,))):
+        with db() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege, match="step-up required"):
+            conn.execute(sql, args)
+    assert soundboard(sid) is False and review_status(app_id) == "rejected"
+    set_enforcement("draft")  # the legacy path: no grant presented
+    with db() as conn:
+        conn.execute("UPDATE public.streamers SET soundboard_enabled = true WHERE id = %s", (sid,))
+    assert soundboard(sid) is True
 
 
 @requires_db
