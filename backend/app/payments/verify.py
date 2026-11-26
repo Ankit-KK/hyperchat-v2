@@ -1225,6 +1225,8 @@ HEAD_DELTAS = {
         "triggers": {("donation_accounting_evaluations", "donation_accounting_evaluations_ack_guard"):
                      ("payment_accounting_ack_guard", "BEFORE", "ROW", frozenset({"INSERT", "UPDATE"}))},
     },
+    "0036": no_payment_delta("PAY-14 creator pricing limits: runtime-role triggers on streamers and "
+                             "streamer_voice_tiers (not TRIGGER_RELS), no pinned function"),
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD

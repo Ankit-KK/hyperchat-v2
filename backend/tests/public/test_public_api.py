@@ -108,7 +108,7 @@ def test_unknown_inactive_and_malformed_slugs_are_identical_404s(app, suffix):
 def test_pricing_inr_default_creator_tiers_and_char_tiers(app):
     sid = streamer("authtest-price", min_tts_amount_inr=75, min_voice_amount_inr=150, media_min_amount=100,
                    message_char_tiers='[{"min_amount": 50, "max_chars": 100}, {"min_amount": 151, "max_chars": 200}]')
-    with db() as conn:
+    with fixture_db() as conn:  # legacy-shaped rows (a 60 s tier): migration 0036 limits only the runtime roles
         conn.execute("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds, "
                      "is_active) VALUES (%s, 0, 10, true), (%s, 200, 20, true), (%s, 500, 60, false)", (sid, sid, sid))
     r = app.get(f"{P}/authtest-price/pricing")
