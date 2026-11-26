@@ -23,6 +23,7 @@ from app.realtime.pusher import PusherApp, PusherApps, PusherClient
 SID, DID = str(uuid.uuid4()), str(uuid.uuid4())
 SECRET = "test-only-pusher-secret-42"
 APP = PusherApp(1, "123", "key123", SECRET, "ap2")
+TOKEN_HASH = "ab" * 32  # one active OBS token of the creator (NV-4 per-token channels)
 DONOR, MESSAGE = "Ravi Donor", "a very private donor message 9q"
 
 
@@ -137,6 +138,9 @@ class FakeRepo:
 
     async def streamer(self, sid):
         return self.s
+
+    async def obs_token_hashes(self, sid):  # the creator's active OBS tokens (NV-4)
+        return getattr(self, "hashes", [TOKEN_HASH])
 
     async def donation(self, did, sid):
         return self.d
@@ -472,3 +476,31 @@ def test_rate_limiter_spaces_sends():
             await limiter.wait()
     asyncio.run(go())
     assert slept == [0.1, 0.1]
+
+
+# ── NV-4: overlay events go to the channels of the creator's active OBS tokens only ──
+
+def test_overlay_events_fan_out_to_each_active_token_and_none_when_there_is_no_token():
+    from app.realtime.channels import token_tag
+    hashes = ["aa" * 32, "bb" * 32]
+    repo = FakeRepo(streamer=streamer_row(), donation=donation_row())
+    repo.hashes = hashes
+    r = asyncio.run(Renderer(repo).render(make_event("settings-updated", subject_id=None)))
+    assert r.channel == "private-ankit-settings"  # the untagged base name is never what is published
+    assert r.channels == tuple(f"private-ankit-settings-t{token_tag(h)}" for h in hashes)
+    repo.hashes = []
+    assert asyncio.run(Renderer(repo).render(make_event("settings-updated", subject_id=None))) == \
+        Skip("no_active_obs_token")
+    dashboard = asyncio.run(Renderer(repo).render(make_event("donation-updated", facts={"action": "approve"})))
+    assert dashboard.channels == ("private-ankit-dashboard",)  # session channels need no token
+
+
+def test_publisher_sends_at_most_100_channels_per_request():
+    from app.realtime.payloads import Rendered
+    channels = tuple(f"private-ankit-settings-t{i:016x}" for i in range(150))
+    q = FakeQueue([make_event("settings-updated", subject_id=None)])
+    p, calls = publisher(q, renderer=FakeRenderer(Rendered("private-ankit-settings", "settings-updated", {"v": 1},
+                                                           1, channels)))
+    assert asyncio.run(p.run_once()) == 1 and q.finished == [("settings-updated", "published", None)]
+    sent = [json.loads(c.content)["channels"] for c in calls]
+    assert [len(s) for s in sent] == [100, 50] and sum(sent, []) == list(channels)

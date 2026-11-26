@@ -8,7 +8,7 @@ import pytest
 
 from tests.integration import make_streamer, requires_db, update_streamer
 from tests.obs.test_obs_db import BASE, obs_token, queued
-from tests.realtime.test_realtime_db import auth, rt  # noqa: F401 (fixture: realtime enabled, TEST-ONLY Pusher)
+from tests.realtime.test_realtime_db import auth, own, rt  # noqa: F401 (fixture: realtime enabled, TEST-ONLY Pusher)
 
 pytestmark = requires_db
 SLUG = "authtest-t4-susp"
@@ -21,7 +21,7 @@ def call(client, endpoint: str, token: str):
     if endpoint == "claim":
         return client.post("/api/v1/obs/audio/claim", headers=hdr)
     if endpoint == "pusher-auth":
-        return auth(client, f"private-{SLUG}-alerts", hdr)
+        return auth(client, own(f"private-{SLUG}-alerts", token), hdr)  # the token's own channel (NV-4)
     return client.get(f"/api/v1/obs/{endpoint}", headers=hdr)
 
 

@@ -2,7 +2,9 @@
 
 POST /api/v1/realtime/pusher/auth   {socket_id, channel_name} (form or JSON), exactly ONE credential:
   OBS token  (x-obs-token header, or ?token= for the OBS browser source)
-             -> overlay channels only (alerts, audio, settings, leaderboard), exactly within the token's scope
+             -> overlay channels only (alerts, audio, settings, leaderboard), and only this token's own
+                per-token names (private-{slug}-{suffix}-t{token_tag}: app.realtime.channels, NV-4), exactly
+                within the token's scope
                 (obs_tokens.pusher_channel_scope, else the default scope of the token's own creator) AND for
                 the token's own creator. Never the dashboard channel, whatever a stored scope says.
   session    (cookie) + Origin + CSRF (x-csrf-token)
@@ -19,7 +21,7 @@ SecurityError: a security event with the reason code, never the token, cookie or
 """
 
 from app.authz.access import StreamerRef, access_via, denial_reason, parse_streamer_ref
-from app.realtime.channels import parse_private, valid_socket_id
+from app.realtime.channels import channel_name, parse_private, token_tag, valid_socket_id
 from app.realtime.payloads import RealtimeRepository
 from app.realtime.pusher import PusherApps, channel_auth
 from app.security.audit import security_event
@@ -53,7 +55,7 @@ class RealtimeService:
             raise SecurityError(429, "Too many requests", "rate_limited")
 
     @staticmethod
-    def parse(socket_id: str, channel: str) -> tuple[str, str]:
+    def parse(socket_id: str, channel: str) -> tuple[str, str, str | None]:
         if not valid_socket_id(socket_id):
             raise SecurityError(400, "Invalid socket_id", "bad_socket_id")
         parsed = parse_private(channel)
@@ -68,10 +70,11 @@ class RealtimeService:
         return {"auth": channel_auth(app, socket_id, channel)}
 
     async def authorize_obs(self, token: str, info: ObsTokenInfo, socket_id: str, channel: str,
-                            slug: str, suffix: str) -> dict:
+                            slug: str, suffix: str, tag: str | None) -> dict:
         await self.limit(f"obs:{sha256_hex(token)[:32]}", RATE_CREDENTIAL)
-        if suffix not in OVERLAY_SUFFIXES or slug != info.streamer_slug \
-                or not await obs_channel_allowed(self.obs_tokens, token, info, channel):
+        # NV-4: only this token's own channels; the scope (stored as untagged names) is checked on the base name
+        if suffix not in OVERLAY_SUFFIXES or slug != info.streamer_slug or tag != token_tag(sha256_hex(token)) \
+                or not await obs_channel_allowed(self.obs_tokens, token, info, channel_name(slug, suffix)):
             security_event("realtime_channel_denied", reason="obs_scope", streamer_id=info.streamer_id)
             raise SecurityError(403, "Forbidden", "channel_not_allowed")
         streamer = await self.repo.streamer_by_slug(slug)
@@ -80,11 +83,11 @@ class RealtimeService:
         return self._sign(streamer["pusher_group"], socket_id, channel)
 
     async def authorize_session(self, user, socket_id: str, channel: str, slug: str, suffix: str,
-                                assure_admin=None) -> dict:
+                                assure_admin=None, tag: str | None = None) -> dict:
         """`assure_admin` (async, no arguments) runs when the access is an administrator's: the admin assurance rule
         (app.auth.dependencies.require_admin_assurance)."""
         await self.limit(f"user:{user.id}", RATE_CREDENTIAL)
-        if suffix != "dashboard":
+        if suffix != "dashboard" or tag is not None:
             raise SecurityError(403, "Forbidden", "channel_not_allowed")
         streamer = await self.repo.streamer_by_slug(slug)
         if streamer is None:

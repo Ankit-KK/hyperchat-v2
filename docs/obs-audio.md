@@ -118,7 +118,7 @@ The `Origin` must be absent, allow-listed, or the API's own origin (the player i
 1. It reads the token from the fragment and immediately removes it from the address bar.
 2. It loads the session.
 3. It checks that audio can play (OBS allows autoplay; a normal browser tab shows one "Click to enable audio" button first).
-4. It subscribes to `private-{slug}-audio`, then claims items one at a time (single-flight, never while playing) on:
+4. It subscribes to its token's audio channel (`realtime.audio_channel` from the session: `private-{slug}-audio-t{tag}`, per token since NV-4, see `docs/realtime.md`), then claims items one at a time (single-flight, never while playing) on:
    - connecting
    - `audio-ready`
    - an item ending or failing

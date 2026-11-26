@@ -29,7 +29,7 @@ from psycopg.rows import dict_row
 
 from app.payments import figures
 from app.public.models import goal_active, goal_view
-from app.realtime.channels import channel_name
+from app.realtime.channels import OBS_SUFFIXES, channel_name, obs_channel_name, token_tag
 from app.realtime.outbox import OVERLAY_SETTINGS, Event
 
 VERSION = 1
@@ -41,10 +41,11 @@ _DONATION_FIELDS = ("id", "name", "amount", "currency", "message", "message_visi
 
 @dataclass(frozen=True)
 class Rendered:
-    channel: str  # full Pusher channel name
+    channel: str  # the untagged channel name (logging, tests); what is published is `channels`
     event: str
     data: dict
     pusher_group: int | None
+    channels: tuple[str, ...] = ()  # the Pusher channels to publish to; empty means (channel,)
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,15 @@ class RealtimeRepository:
                    goal_name, goal_target_amount, COALESCE(goal_is_active, false) AS goal_is_active, goal_activated_at
             FROM public.streamers WHERE id = %s
         """, (streamer_id,))
+
+    async def obs_token_hashes(self, streamer_id: str) -> list[str]:
+        """The hashes of the creator's OBS tokens that are valid now: the same rule as PostgresObsTokenStore.validate
+        (active, not revoked, not expired), so a revoked token's channels stop receiving at the next event (NV-4)."""
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT token_hash FROM public.obs_tokens WHERE streamer_id = %s AND is_active IS TRUE "
+                              "AND (revoked_at IS NULL OR revoked_at > now()) AND (expires_at IS NULL OR expires_at > now()) "
+                              "ORDER BY token_hash", (streamer_id,))
+            return [row[0] for row in await cur.fetchall()]
 
     async def streamer_by_slug(self, slug: str) -> dict | None:
         return await self._one("SELECT id::text AS id, streamer_slug AS slug, streamer_name AS name, "
@@ -158,7 +168,14 @@ class Renderer:
             return data
         if len(json.dumps(data, default=str).encode()) > SIZE_LIMIT:
             data = {**base, **({"donation_id": event.subject_id} if event.subject_id else {}), "truncated": True}
-        return Rendered(channel_name(s["slug"], event.channel), event.event, data, s["pusher_group"])
+        base = channel_name(s["slug"], event.channel)
+        if event.channel not in OBS_SUFFIXES:
+            return Rendered(base, event.event, data, s["pusher_group"], (base,))
+        hashes = await self.repo.obs_token_hashes(event.streamer_id)  # read now: a revoke counts from the next event
+        if not hashes:
+            return Skip("no_active_obs_token")
+        return Rendered(base, event.event, data, s["pusher_group"],
+                        tuple(obs_channel_name(s["slug"], event.channel, token_tag(h)) for h in hashes))
 
     async def _donation(self, event: Event, base: dict) -> dict | Skip:
         if event.subject_id is None:
