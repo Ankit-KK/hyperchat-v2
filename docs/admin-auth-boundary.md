@@ -97,3 +97,41 @@ Either one is what closes a compromised-process threat for admin actions. Stage 
 5. Then migrate (the migration grants to `hyperchat_auth`, so it fails safely if the role is missing).
 
 **PostgreSQL 15 (DEV):** the features used (row triggers, `to_jsonb(record)`, `FOR SHARE` in a sub-select, column grants) all exist in PostgreSQL 11+, but this is **not yet tested on 15**. The disposable `postgres:15` image still needs approval.
+
+## Origin tiers (PDP v2.0 G1-G3)
+
+With the frontend on several hosts (the PDP v2.0 Phase 1 architecture review, §3.4), one flat list of trusted origins would let every
+frontend host act with every session. The API therefore splits browser trust into tiers. **Each tier is unset by
+default, and an unset tier is the flat list (`HYPERCHAT_FRONTEND_URL`'s origin plus `HYPERCHAT_ALLOWED_ORIGINS`),
+so a deploy without these variables behaves exactly as before** (`backend/tests/auth/test_origin_tiers.py`, the
+`test_defaults_*` tests). An explicit tier is exactly its list, never widened by the frontend origin. Every list is
+validated like `HYPERCHAT_ALLOWED_ORIGINS`, and production refuses development origins in all of them.
+
+| Tier (variable) | Hosts | What it is trusted for |
+|---|---|---|
+| admin (`HYPERCHAT_ADMIN_ORIGINS`) | `admin.` | the only credentialed CORS origin on `/api/v1/admin/*` and `/api/v1/auth/mfa/*`; credentialed CORS elsewhere too (the admin app signs in and reads `/auth/session`); the CSRF Origin check for an administrator's session; login |
+| session (`HYPERCHAT_SESSION_ORIGINS`) | `auth.`, `dashboard.` | credentialed CORS outside the admin paths, the CSRF Origin check for every non-admin session, login and invite acceptance |
+| donor (`HYPERCHAT_DONOR_ORIGINS`) | the public site | the Origin check of donor POSTs (checkout, upload grants and uploads, signups); CORS **without** credentials |
+| overlay (`HYPERCHAT_OVERLAY_ORIGINS`) | `overlay.` | the OBS-token Origin gate (besides the API's own origin and no Origin at all, as before); CORS without credentials |
+
+**Administrator sessions answer only to the admin host.** When `HYPERCHAT_ADMIN_ORIGINS` is set, a request carrying
+an administrator's session with an `Origin` outside the admin tier is treated as signed out (401 `no_session`) on
+every route, `GET /api/v1/auth/session` included, so a dashboard, auth or public page cannot even learn that an
+administrator is signed in. A request with no `Origin` (not a browser page) is unaffected for reads; every write
+still needs an admin-tier Origin and the CSRF token. The rule is off while the variable is unset, because the flat
+list never distinguished administrators.
+
+**Links (G2).** `HYPERCHAT_AUTH_URL` builds invite and password-reset links and the Google sign-in failure page;
+`HYPERCHAT_DASHBOARD_URL` the Google sign-in success target, the KYC return URL and the bot dashboard links;
+`HYPERCHAT_PUBLIC_URL` is for public links (no backend-built link uses it yet). Each defaults to
+`HYPERCHAT_FRONTEND_URL`, and the paths (`/invite`, `/reset-password`, `/auth`, `/kyc/return`, `/dashboard/{slug}`)
+are unchanged.
+
+**Google redirect (G3).** `GET /api/v1/auth/google/start?redirect=` takes either a relative path (the original
+safe-path rule; it lands on the dashboard URL) or an absolute URL whose parsed origin is in
+`HYPERCHAT_GOOGLE_REDIRECT_ORIGINS` (default: only the dashboard URL's origin) and whose path passes the same rule.
+Anything else (another host, userinfo, plain http, `//`, a backslash, a fragment) falls back to `/dashboard` on the
+dashboard URL. The callback checks the target again, so a state cookie issued before this change still works.
+
+**Passkeys (G4).** The verifier's `HYPERCHAT_WEBAUTHN_ORIGINS` moves to the admin host before the first passkey is
+enrolled (`docs/admin-stepup.md` "Admin host (PDP v2.0 G4)").

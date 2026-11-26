@@ -36,7 +36,7 @@ def _guard(action: str):
     """Trusted Origin, configuration, then the per-IP rate limit; runs before the body is touched."""
     async def dependency(request: Request) -> UploadService:
         origin = request.headers.get("origin")
-        if not origin or origin not in request.app.state.settings.browser_origins:
+        if not origin or origin not in request.app.state.settings.donor_tier:
             security_event("upload_rejected", reason="bad_origin", client_ip=client_ip(request))
             raise ApiError(403, "Request origin not allowed", "bad_origin")
         service = _service(request)

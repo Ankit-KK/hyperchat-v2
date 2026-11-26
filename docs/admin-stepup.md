@@ -383,6 +383,21 @@ applied wherever administrator authority is used, not only under `/api/v1/admin`
   event; the guard stores NULL afterwards, so no later change inherits it.
 - **Not here:** activation stays a separately approved step.
 
+## Admin host (PDP v2.0 G4)
+
+Once the admin app has its own host, a ceremony must only be completable there. The verifier's
+`HYPERCHAT_WEBAUTHN_ORIGINS` then names the admin host instead of today's frontend; the relying-party id stays the
+same (every origin must be the RP ID or a subdomain of it, `app/stepup/config.py`), so passkeys stay valid:
+
+| Environment | `HYPERCHAT_WEBAUTHN_RP_ID` (unchanged) | `HYPERCHAT_WEBAUTHN_ORIGINS` today | with the admin host |
+|---|---|---|---|
+| DEV (`deploy/stepup.env.example`) | `quicktestspace.site` | `https://app.quicktestspace.site` | `https://admin.quicktestspace.site` |
+| production (`deploy/stepup.env.production.example`) | `hyperchat.space` | `https://hyperchat.space` | `https://admin.hyperchat.space` |
+
+The templates carry the new value as a comment only; the change is verifier runtime configuration, made in an
+approved window before the first passkey enrollment, together with the API's `HYPERCHAT_ADMIN_ORIGINS`
+(`docs/admin-auth-boundary.md` "Origin tiers").
+
 ## Canonical actions (`app/stepup/canonical.py`)
 
 `challenge = SHA-256("hyperchat-stepup-v1\n" ‖ canonical JSON)`, where the canonical JSON object is:

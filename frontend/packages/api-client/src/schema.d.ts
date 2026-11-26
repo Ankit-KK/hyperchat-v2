@@ -2793,6 +2793,22 @@ export interface components {
             /** Tts Enabled */
             tts_enabled: boolean;
         };
+        /**
+         * PublicUser
+         * @description app.auth.service.public_user: the signed-in account as every frontend sees it.
+         */
+        PublicUser: {
+            /** Email */
+            email: string;
+            /** Id */
+            id: string;
+            /** Role */
+            role: string;
+            /** Streamer Id */
+            streamer_id: string | null;
+            /** Username */
+            username: string | null;
+        };
         /** QueueItem */
         QueueItem: {
             /** Amount */
@@ -2938,6 +2954,15 @@ export interface components {
             last_sync: string;
             /** Streamers Live */
             streamers_live: number;
+        };
+        /**
+         * SignedIn
+         * @description The session bootstrap: who is signed in, plus the CSRF token to send with every write.
+         */
+        SignedIn: {
+            /** Csrf Token */
+            csrf_token: string;
+            user: components["schemas"]["PublicUser"];
         };
         /** SignupRequest */
         SignupRequest: {
@@ -4609,9 +4634,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SignedIn"];
                 };
             };
             /** @description Validation Error */
@@ -4644,9 +4667,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SignedIn"];
                 };
             };
             /** @description Validation Error */
@@ -5008,9 +5029,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SignedIn"];
                 };
             };
         };

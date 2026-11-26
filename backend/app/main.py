@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
                 secret=settings.telegram_webhook_secret.get_secret_value().strip(),
                 client=TelegramClient(settings.telegram_bot_token.get_secret_value().strip()), repo=bot_repo,
                 moderation=moderation_repo, nonces=app.state.security.nonces, limiter=app.state.auth.repo,
-                recipients=settings.bot_recipients, frontend_url=settings.frontend_url, public_base=public_base,
+                recipients=settings.bot_recipients, frontend_url=settings.dashboard_link_url, public_base=public_base,
                 creators=settings.bot_creators)
         if settings.bots_enabled and settings.discord_configured:
             app.state.discord_bot = DiscordBot(public_key=settings.discord_public_key.strip(), repo=bot_repo,
@@ -286,7 +286,8 @@ def create_app() -> FastAPI:
     app.include_router(kyc.admin_router)
     app.include_router(kyc.enforcement_router)
     # Outermost: preflights are answered before routing, every response gets CORS headers.
-    app.add_middleware(CorsMiddleware, allowed_origins=settings.browser_origins)
+    app.add_middleware(CorsMiddleware, allowed_origins=settings.session_tier | settings.admin_tier,
+                       admin_origins=settings.admin_tier, public_origins=settings.donor_tier | settings.overlay_tier)
     return app
 
 

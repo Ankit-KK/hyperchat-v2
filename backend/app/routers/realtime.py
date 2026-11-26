@@ -58,7 +58,7 @@ async def pusher_auth(request: Request):
         raise SecurityError(400, "Use one credential", "two_credentials")
     slug, suffix = svc.parse(socket_id, channel)
     if token:
-        if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.browser_origins,
+        if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.overlay_tier,
                                      own_origin(request.headers.get("host"))):  # Phase 10: the API-served player
             raise SecurityError(403, "Request origin not allowed", "bad_origin")
         result = await validate_obs_token(svc.obs_tokens, token)
@@ -69,7 +69,8 @@ async def pusher_auth(request: Request):
         current = await optional_user(request)
         if current is None:
             raise SecurityError(401, "Not signed in", "no_session")
-        enforce_csrf(request, auth_service(request), current.session)  # AuthError 403 (bad_origin / bad_csrf)
+        enforce_csrf(request, auth_service(request), current.session,
+                     admin=current.user.role == "admin")  # AuthError 403 (bad_origin / bad_csrf)
         body = await svc.authorize_session(current.user, socket_id, channel, slug, suffix,
                                            assure_admin=lambda: require_admin_assurance(request, current.session))
     return JSONResponse(body, headers=NO_STORE)
