@@ -1885,4 +1885,63 @@ def test_pay15_6b_packet_sql_on_a_fresh_0029_to_0035_upgrade(monkeypatch):
         with _owner() as conn:
             _clean_6b(conn)
         command.upgrade(cfg, "head")
-    assert _version() == "0035"
+    assert _version() == "0036"
+
+
+# ── 0036: PAY-14 creator pricing limits (runtime roles only; backend/tests/dashboard/test_pricing_settings.py proves
+#    the refusals and the boundaries as hyperchat_app) ──
+def _pricing_guards() -> set[str]:
+    with _owner() as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT tgname FROM pg_trigger WHERE tgname IN ('streamers_check_pricing', 'streamer_voice_tiers_check') "
+            "AND NOT tgisinternal")} | {r[0] for r in conn.execute(
+            "SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace "
+            "AND proname IN ('streamers_check_pricing', 'streamer_voice_tiers_check')")}
+
+
+def test_0036_pricing_limits_round_trip_keep_legacy_rows_and_never_restrict_the_owner(monkeypatch):
+    """Legacy rows out of today's range (below the 40 / 150 / 100 floors, above 10,000, 6 tiers, 60-90 s) exist
+    before 0036: the upgrade neither rewrites nor refuses them; the owner stays unrestricted; the downgrade removes
+    exactly the two triggers and their functions and keeps every row."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0035")
+    assert _pricing_guards() == set()
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest36'")
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, min_text_amount_inr, "
+                               "min_voice_amount_inr, media_min_amount, message_char_tiers) VALUES ('migtest36', "
+                               "'M36', 10, 0, 20000, '[{\"min_amount\": 0, \"max_chars\": 900}]') "
+                               "RETURNING id").fetchone()[0]
+            conn.execute("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) "
+                         "VALUES (%s, 0, 60)", (sid,))
+            before = conn.execute("SELECT min_text_amount_inr, min_voice_amount_inr, media_min_amount, "
+                                  "message_char_tiers, updated_at FROM public.streamers WHERE id = %s",
+                                  (sid,)).fetchone()
+        command.upgrade(cfg, "0036")
+        assert _version() == "0036"
+        assert _pricing_guards() == {"streamers_check_pricing", "streamer_voice_tiers_check"}
+        with _owner() as conn:  # nothing existing rewritten; the owner (migrations, legacy import) is not limited
+            assert conn.execute("SELECT min_text_amount_inr, min_voice_amount_inr, media_min_amount, "
+                                "message_char_tiers, updated_at FROM public.streamers WHERE id = %s",
+                                (sid,)).fetchone() == before
+            for n in range(6):
+                conn.execute("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, "
+                             "max_duration_seconds) VALUES (%s, %s, 90)", (sid, 100 + n))
+            conn.execute("UPDATE public.streamers SET min_text_amount_inr = 50000 WHERE id = %s", (sid,))
+            assert conn.execute("SELECT bool_or(has_function_privilege(r, 'public.streamers_check_pricing()', "
+                                "'EXECUTE') OR has_function_privilege(r, 'public.streamer_voice_tiers_check()', "
+                                "'EXECUTE')) FROM unnest(ARRAY['hyperchat_app', 'hyperchat_worker']) r"
+                                ).fetchone()[0] is False  # no grant
+        command.downgrade(cfg, "0035")  # drops only the guards: never refused, rows kept
+        assert _version() == "0035" and _pricing_guards() == set()
+        with _owner() as conn:
+            assert conn.execute("SELECT count(*) FROM public.streamer_voice_tiers WHERE streamer_id = %s",
+                                (sid,)).fetchone()[0] == 7
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest36'")  # cascades tiers
+        command.upgrade(cfg, "head")
+    assert _version() == "0036"

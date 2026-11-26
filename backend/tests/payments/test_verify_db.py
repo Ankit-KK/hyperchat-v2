@@ -343,7 +343,7 @@ def test_verify_refuses_a_connection_with_an_open_transaction_or_a_bad_scope(vdb
 
 def test_6a2_refuses_a_head_other_than_0034(vdb):
     with vdb.owner() as c:
-        c.execute("UPDATE public.alembic_version SET version_num = '0036'")
+        c.execute("UPDATE public.alembic_version SET version_num = '9999'")  # no such revision
     report = vdb.verify()
     assert report["status"] == "refused" and "0034" in report["reason"]
 
