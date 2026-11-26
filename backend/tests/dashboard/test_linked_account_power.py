@@ -68,7 +68,7 @@ def test_a_linked_account_has_the_same_power_as_the_owner(app, who):
     assert (r.status_code, r.json()["token"]["state"]) == (200, "revoked"), r.text
 
     r = b.get(f"{base}{EXPORT}")
-    assert r.status_code == 200 and "T3 Fan" in r.text and "t3 message" in r.text
+    assert r.status_code == 200 and ",T3 Fan,50,INR," in r.text, r.text  # the export carries no message column
 
 
 def test_a_stranger_is_403_on_each_and_changes_nothing(app):
