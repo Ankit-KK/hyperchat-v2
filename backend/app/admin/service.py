@@ -21,6 +21,10 @@ RESERVED_SLUGS = frozenset({
     "privacy-policy", "public", "register", "renew-hyperchat-brand-ambassador", "reset-password",
     "reset-password-request", "selected-as-hyperchat-brand-ambassador", "settings", "signup", "sitemap", "static",
     "status", "support", "terms", "terms-and-conditions", "www",
+    # The marketing site's paths and static folders, forwarded on the apex (PDP v2.0 addendum §2.1, owner R6
+    # 2026-11-26), plus robots (robots.txt). Any new marketing route needs its name reserved here first.
+    "company", "creators", "demo-signup", "features", "images", "intro", "legal-archive", "licenses", "mascot",
+    "partners", "robots", "sculpture", "shipping", "social", "viewer-terms", "whats-new",
 })
 ORDER_PREFIX = re.compile(r"[a-z0-9]{1,10}_rp_")  # legacy shape ("sx_rp_"); our order ids stay <= 40 characters
 CREATOR_NAME_MAX = 100

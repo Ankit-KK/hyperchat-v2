@@ -1,6 +1,8 @@
 """Public read use-cases: slug validation, active-creator lookup, response assembly, metrics cache."""
 
 import asyncio
+import base64
+import binascii
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -12,6 +14,8 @@ from app.public.models import (
     Goal,
     PlatformMetrics,
     Pricing,
+    PublicCreator,
+    PublicCreatorPage,
     PublicStreamer,
     ShowcaseMetrics,
     Soundboard,
@@ -30,6 +34,23 @@ def not_found() -> ApiError:
 
 def donations_unavailable() -> ApiError:  # generic on purpose: never says why (KYC, owner change, ...)
     return ApiError(503, "Donations are temporarily unavailable", "donations_unavailable")
+
+
+def encode_slug_cursor(slug: str) -> str:
+    return base64.urlsafe_b64encode(slug.encode()).decode().rstrip("=")
+
+
+def decode_slug_cursor(cursor: str) -> str:
+    """The last slug already shown. Checked by length only: legacy slugs may not match today's slug shape."""
+    try:
+        if not cursor or len(cursor) > 100:
+            raise ValueError
+        slug = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+        if not 1 <= len(slug) <= 64:
+            raise ValueError
+        return slug
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise ApiError(400, "Invalid cursor", "bad_cursor") from None
 
 
 PLATFORM_METRICS_TTL = 300
@@ -93,6 +114,16 @@ class PublicService:
                                streamer_slug=s["streamer_slug"])
                 raise donations_unavailable()
         return s
+
+    async def creators(self, limit: int, cursor: str | None, q: str | None) -> PublicCreatorPage:
+        """E10 (G5): active creators by slug, keyset-paged; `q` is a case-insensitive prefix of the slug or name."""
+        after = None if cursor is None else decode_slug_cursor(cursor)
+        q = (q or "").strip().lower() or None
+        rows = await self.repo.active_streamers(limit + 1, after, q)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return PublicCreatorPage(creators=[PublicCreator(**r) for r in rows], has_more=has_more,
+                                 next_cursor=encode_slug_cursor(rows[-1]["slug"]) if has_more else None)
 
     async def profile(self, slug: str) -> PublicStreamer:
         s = await self._streamer(slug)

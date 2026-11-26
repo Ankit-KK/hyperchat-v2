@@ -2085,6 +2085,95 @@
         "title": "PublicContact",
         "type": "object"
       },
+      "PublicCreator": {
+        "additionalProperties": false,
+        "properties": {
+          "background_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Background Url"
+          },
+          "brand_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Color"
+          },
+          "brand_logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Logo Url"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "brand_logo_url",
+          "background_url",
+          "brand_color"
+        ],
+        "title": "PublicCreator",
+        "type": "object"
+      },
+      "PublicCreatorPage": {
+        "additionalProperties": false,
+        "properties": {
+          "creators": {
+            "items": {
+              "$ref": "#/components/schemas/PublicCreator"
+            },
+            "title": "Creators",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "creators",
+          "next_cursor",
+          "has_more"
+        ],
+        "title": "PublicCreatorPage",
+        "type": "object"
+      },
       "PublicStreamer": {
         "additionalProperties": false,
         "properties": {
@@ -8358,6 +8447,86 @@
           }
         },
         "summary": "Create Signup",
+        "tags": [
+          "public"
+        ]
+      }
+    },
+    "/api/v1/public/streamers": {
+      "get": {
+        "description": "E10 (G5): active creators only, ordered by slug; card fields only.",
+        "operationId": "creators_api_v1_public_streamers_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicCreatorPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Creators",
         "tags": [
           "public"
         ]

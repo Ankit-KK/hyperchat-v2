@@ -137,6 +137,19 @@ def test_the_approve_form_defaults_the_razorpay_account_to_primary(app):
     assert bare.status_code == 422  # creating a creator directly still names the account (D12)
 
 
+@pytest.mark.parametrize("slug", ["features", "Whats-New", "viewer-terms", "legal-archive"])
+def test_approval_refuses_a_marketing_site_slug(app, slug):
+    """R6 (addendum §2.1): the apex forwards these paths to the marketing site, so no creator may take them."""
+    headers = _admin(app)
+    sid = _apply(app, f"apps-reserved-{slug.lower()}")
+    r = app.post(f"{AP}/{sid}/approve", json={"slug": slug, "name": "A", **NEW}, headers=headers)
+    assert (r.status_code, r.json()["error"]) == (400, "This slug is reserved"), r.text
+    assert _app_row(sid)[:2] == ("submitted", None)
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.streamers WHERE lower(streamer_slug) = %s",
+                            (slug.lower(),)).fetchone()[0] == 0
+
+
 def test_a_manual_resend_needs_no_step_up_grant(app, monkeypatch):
     """Q3: the invite route no longer asks for a grant even when the API reads enforcement as active (the database
     guard of 0027 is unchanged; tests/onboarding covers its refusal). The refusal rules stay."""
