@@ -120,6 +120,44 @@ to Cloudflare R2 with short-lived grants from the API. Payments use Razorpay Che
 verified by the API. There is no contact form (retired, D5). The public layout shows the contact name, email,
 phones and Discord invite from `GET /api/v1/public/config` and hides whatever is empty.
 
+## Route map (apps/web)
+
+| Host (zone)   | Path                          | Served by                                                                             | Indexed                 |
+| ------------- | ----------------------------- | ------------------------------------------------------------------------------------- | ----------------------- |
+| apex (public) | marketing allow-list, `/`     | the marketing website, through the rewrites below                                     | the website's own rules |
+| apex (public) | `/{slug}`                     | `app/(public)/[slug]/page.tsx`: the creator page                                      | yes, active creators    |
+| apex (public) | `/{slug}/opengraph-image`     | `opengraph-image.tsx`: 1200x630 PNG from name, colour and profile picture (`next/og`) | image                   |
+| apex (public) | unknown or inactive `/{slug}` | `[slug]/not-found.tsx`, status 404                                                    | no (noindex)            |
+| apex (public) | `/{slug}` with the API down   | `[slug]/error.tsx`, status 500 ("temporarily unavailable")                            | no (noindex)            |
+| `www.`        | any                           | 308 to the apex                                                                       | no                      |
+| `auth.`       | any                           | `app/(auth)/auth/*`                                                                   | no                      |
+| `dashboard.`  | any                           | `app/(dashboard)/dashboard/*`                                                         | no                      |
+| `overlay.`    | any                           | `app/(overlay)/obs/*`                                                                 | no                      |
+
+The creator page is server-rendered from `GET /api/v1/public/streamers/{slug}`, `/pricing` and `/goal` with the 60 s
+revalidate in `lib/api.ts`. The page still renders per request (the root layout's `force-dynamic`, for the CSP
+nonce), but those fetches stay cached: Next.js only turns `force-dynamic` into no-store for a fetch with no cache
+setting of its own. Checked 2026-11-26 with `next start` against a stub API that counts calls, starting from an
+empty fetch cache. Four views of one creator page and its Open Graph image made one call each to `/public/config`,
+the creator, `/pricing` and `/goal`. After 61 s, two more views made one more call to each. Every view got a
+fresh nonce. Only successful answers are cached. The API
+alone decides which creators exist: it answers 404 for unknown and non-active ones. Pricing and goal are optional;
+if either call fails the page renders without that section. Images load only from absolute https URLs. A legacy
+`/assets/...` path (now the website's bundle folder) or a missing image gets a placeholder.
+
+The creator's colour (`brand_color`) is decoration only (rings, the goal bar, the Open Graph image border), never
+text, and it must stay on the warm palette: `accentColor` in `[slug]/creator.ts` keeps near-greys (chroma under
+15%) and colours within 45° of hue of copper (hue 28°, so 343° to 73°: crimson and reds, oranges, ambers, browns,
+yellows), and uses copper for anything else (pink, purple, blue, teal, green, chartreuse) or a malformed value. "Send an interaction" is disabled until checkout (Phase 7). Metadata is the PDP §16 template with "interactions" in the
+description, canonical `https://hyperchat.space/{slug}`, Open Graph and Twitter card, and the website's Organization
+JSON-LD (Streamheart Private Limited).
+
+An App Router page cannot choose its status code, so "API unreachable" is answered with 500 rather than 503 (owner
+decision 2026-11-26). Checked with `next start`: the server HTML is Next.js's error shell with
+`<meta name="robots" content="noindex">` and only an error digest (no message, stack or API host); the browser then
+renders `[slug]/error.tsx` ("temporarily unavailable", a retry button). That text appears only after hydration, so
+a client without JavaScript gets a blank 500 page.
+
 ## Sharing the apex with the marketing website
 
 The `web` app owns `hyperchat.space` (addendum §2.1 mechanism A2, owner decision R2). `apps/web/lib/marketing.ts`
@@ -205,7 +243,7 @@ licensed replacement is a change to the `src` line in `font-config.css`.
 | Phase                     | Adds                                                                                                                                        |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | 3 Subdomains              | auth screens (login, Google, invites, registration, reset), the dashboard session flow, DNS for the dev hosts, backend origin tiers (G1-G4) |
-| 4 Creator pages           | the full `/{slug}` page, metadata and Open Graph images, discovery, sitemap, legacy OBS URL redirects                                       |
+| 4 Creator pages           | discovery, a sitemap with creator pages, legacy OBS URL redirects (the `/{slug}` page, metadata and Open Graph image exist)                 |
 | 5 Onboarding              | invite acceptance, onboarding checklist, KYC, profile and background uploads with crop                                                      |
 | 6 Dashboard               | donations, moderation, settings and pricing, soundboard, OBS tokens, live updates                                                           |
 | 7 Donations and OBS       | donation form, Razorpay Checkout, alerts and goal overlays                                                                                  |

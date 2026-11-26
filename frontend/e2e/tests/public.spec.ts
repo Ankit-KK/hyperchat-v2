@@ -43,3 +43,34 @@ test("www redirects permanently to the apex", async ({ request, baseURL }) => {
   expect(response.status()).toBe(308);
   expect(response.headers()["location"]).toBe(`${baseURL!.replace(/\/$/, "")}/features?x=1`);
 });
+
+test.describe("creator page", () => {
+  for (const width of [390, 820, 1440]) {
+    test(`fits ${width} px without horizontal scrolling`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`/${creator}`);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await expect(page.getByRole("button", { name: "Send an interaction" })).toBeDisabled();
+    });
+  }
+
+  test("has its metadata, canonical on the apex, and an Open Graph image", async ({ page, request }) => {
+    await page.goto(`/${creator}`);
+    await expect(page).toHaveTitle(/ — Support on HyperChat$/);
+    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+      "href",
+      `https://hyperchat.space/${creator}`,
+    );
+    const og = await page.locator('meta[property="og:image"]').getAttribute("content");
+    const image = await request.get(new URL(og!).pathname + new URL(og!).search);
+    expect(image.status()).toBe(200);
+    expect(image.headers()["content-type"]).toBe("image/png");
+  });
+
+  test("an unknown creator is a noindex 404", async ({ page }) => {
+    const response = await page.goto("/no-such-creator-e2e-404");
+    expect(response?.status()).toBe(404);
+    await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Stream not found");
+  });
+});
