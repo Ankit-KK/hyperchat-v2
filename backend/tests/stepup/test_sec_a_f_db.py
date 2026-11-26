@@ -3,7 +3,7 @@
 T-2  With enforcement 'active', an aal2 administrator can no longer grant soundboard eligibility or reopen an
      application without a passkey grant for exactly that action (403 step_up_required); in 'draft' both work
      without one, as every other action does. A presented grant is consumed in the operation's own transaction.
-     With a correctly bound grant both succeed; the database (migration 0040) claims it at the anchor write and
+     With a correctly bound grant both succeed; the database (migration 0037) claims it at the anchor write and
      refuses the write itself without one, whatever code issues it.
 SEC-F A missing stepup_enforcement row answers a clean 503 stepup_unavailable, never a 500 and never a skipped
      aal2 check.

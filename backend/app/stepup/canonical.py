@@ -46,7 +46,7 @@ ACTIONS = {
     "admin.user.email": "action",
     "partner_key.create": "action",
     "mfa.credential.revoke": "action",
-    # SEC-A (migration 0040 adds them to the action CHECK and anchors their writes)
+    # SEC-A (migration 0037 adds them to the action CHECK and anchors their writes)
     "creator.soundboard": "action",
     "application.reopen": "action",
 }

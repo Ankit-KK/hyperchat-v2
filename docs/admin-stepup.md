@@ -121,9 +121,9 @@ answer carries the exact `{action, target, params}` to approve.
 | `PUT /api/v1/admin/creators/{id}/soundboard` | `creator.soundboard` | `creator:{id}` | `{enabled}` (SEC-A) |
 | `POST /api/v1/admin/applications/{id}/reopen` | `application.reopen` | `application:{id}` | `{}` (the note only annotates; SEC-A) |
 
-- **SEC-A actions:** `creator.soundboard` and `application.reopen` (migration 0040: added to the action CHECK, and
+- **SEC-A actions:** `creator.soundboard` and `application.reopen` (migration 0037: added to the action CHECK, and
   anchored on `streamers.soundboard_enabled` and on `user_signups.review_status` rejected → submitted). Without
-  0040 the verifier cannot issue a challenge for them and `active` refuses both routes.
+  0037 the verifier cannot issue a challenge for them and `active` refuses both routes.
 - **Unbound actions:** `mfa.credential.revoke`. Passkeys are revoked by the operator only.
 - **Not step-up actions (aal2 only once enforcement is active):**
   - defensive actions: suspend, restrict, revoke grace, revoke sessions, revoke a partner key
@@ -239,8 +239,8 @@ Every write path to the tables below was traced (repositories, services, definer
 | `users.role` / `is_active` / `streamer_id` | `AdminRepository.update_user` (`auth`); `transfer_owner` (`app`) | anchor `users.privileges` | `admin.user.change`, `user:<id>`, the resulting `{role, is_active, streamer_id}` |
 | `users.email` | `AdminRepository.change_email` (`auth`) | anchor `users.email` | `admin.user.email`, `user:<id>`, `{email (lowercase)}` |
 | `INSERT partner_api_keys` | `PartnerRepository.create_key` (`app`) | anchor `partner_api_keys` | `partner_key.create`, `partner_key`, `{partner_slug}` |
-| `streamers.soundboard_enabled` (0040) | `AdminRepository.set_soundboard_eligibility` (`app`) | anchor `streamers.soundboard_enabled` | `creator.soundboard`, `creator:<id>`, `{enabled: NEW}` |
-| `user_signups.review_status` rejected → submitted (0040) | `ApplicationRepository.reopen` (`app`) | anchor `user_signups.reopen` | `application.reopen`, `application:<id>`, `{}` |
+| `streamers.soundboard_enabled` (0037) | `AdminRepository.set_soundboard_eligibility` (`app`) | anchor `streamers.soundboard_enabled` | `creator.soundboard`, `creator:<id>`, `{enabled: NEW}` |
+| `user_signups.review_status` rejected → submitted (0037) | `ApplicationRepository.reopen` (`app`) | anchor `user_signups.reopen` | `application.reopen`, `application:<id>`, `{}` |
 
 **Closed outright for every API role** (no grant makes them possible; `hyperchat_auth` included, which 0024 did not
 cover):

@@ -82,7 +82,7 @@ def test_unknown_actions_and_malformed_targets_are_refused(action, target):
 def test_every_action_has_a_purpose_known_to_the_database():
     from importlib import util
     # The latest migration that sets stepup_challenges' action CHECK (0025, widened for SEC-A).
-    path = Path(__file__).parents[3] / "database/migrations/versions/0040_stepup_sec_a_anchors.py"
+    path = Path(__file__).parents[3] / "database/migrations/versions/0037_stepup_sec_a_anchors.py"
     spec = util.spec_from_file_location("m_actions", path)
     module = util.module_from_spec(spec)
     spec.loader.exec_module(module)

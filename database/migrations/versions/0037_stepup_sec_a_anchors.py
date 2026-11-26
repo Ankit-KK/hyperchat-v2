@@ -1,8 +1,7 @@
 """SEC-A: step-up actions for soundboard eligibility and application reopen, with their database anchors.
 
-Revision ID: 0040 (PLACEHOLDER: the coordinator assigns the real number and down_revision on rebase; 0036, 0037 and
-0039 are spoken for)
-Revises: 0035
+Revision ID: 0037
+Revises: 0036 (creator pricing constraints; assigned by the coordinator 2026-11-26)
 
 The API binds both since PR #159 (app.stepup.actions.ROUTES); this migration makes them grantable and guards the
 writes themselves, as 0027 does for every other action (docs/admin-stepup.md, "S3"):
@@ -21,8 +20,8 @@ actions stay as audit history).
 
 from alembic import op
 
-revision = "0040"
-down_revision = "0035"
+revision = "0037"
+down_revision = "0036"
 branch_labels = None
 depends_on = None
 
