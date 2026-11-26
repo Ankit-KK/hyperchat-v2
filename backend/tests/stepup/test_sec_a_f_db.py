@@ -20,7 +20,7 @@ import pytest
 
 from app.auth.repository import AuthRepository
 from app.stepup.grants import StepUpError
-from tests.integration import DOMAIN, ORIGIN, db, login, make_streamer, make_user, new_browser, requires_db
+from tests.integration import DOMAIN, ORIGIN, db, fixture_db, login, make_streamer, make_user, new_browser, requires_db
 from tests.stepup.test_mfa_api import MFA, _api, _verifier, ceremony, enroll
 from tests.stepup.test_stepup_db import guards_off
 from tests.stepup.test_stepup_enforcement_db import set_enforcement
@@ -134,7 +134,7 @@ def test_active_refuses_soundboard_eligibility_and_reopen_without_a_grant(api):
     r = b.post(f"{A}/applications/{app_id}/reopen", json={"note": "again"}, headers={**h, GRANT: grant})
     assert r.status_code == 200, r.text
     assert soundboard(sid) is True and review_status(app_id) == "submitted"
-    with db() as conn:
+    with fixture_db() as conn:  # the runtime roles cannot read step-up tables
         claimed = conn.execute("SELECT array_agg(claimed_anchor ORDER BY claimed_anchor) FROM public.stepup_grants "
                                "WHERE action IN ('creator.soundboard', 'application.reopen') "
                                "AND claimed_at IS NOT NULL").fetchone()[0]
