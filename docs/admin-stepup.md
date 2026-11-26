@@ -118,12 +118,19 @@ answer carries the exact `{action, target, params}` to approve.
 | `PATCH /api/v1/admin/users/{id}` | `admin.user.change` | `user:{id}` | the account's **resulting** `{role, is_active, streamer_id}` |
 | `PUT /api/v1/admin/users/{id}/email` | `admin.user.email` | `user:{id}` | `{email}` |
 | `POST /api/v1/admin/partner-keys` | `partner_key.create` | `partner_key` | `{partner_slug}` |
+| `PUT /api/v1/admin/creators/{id}/soundboard` | `creator.soundboard` | `creator:{id}` | `{enabled}` (SEC-A; API only, see below) |
+| `POST /api/v1/admin/applications/{id}/reopen` | `application.reopen` | `application:{id}` | `{}` (the note only annotates; SEC-A; API only, see below) |
 
+- **SEC-A actions, API side only for now:** `creator.soundboard` and `application.reopen` are bound in the API and
+  consumed in the write's own transaction, like every other action, and `draft` keeps the no-grant path. They are
+  **not yet in 0025's `stepup_challenges.action` CHECK**, so the verifier cannot issue a challenge for them: with
+  enforcement `active` both routes answer `403 step_up_required` and no grant can satisfy it (fail closed). A
+  follow-up migration widens the CHECK and adds database anchors on `streamers.soundboard_enabled` and on
+  `user_signups.review_status` rejected → submitted; it must be deployed before enforcement is activated.
 - **Unbound actions:** `mfa.credential.revoke`. Passkeys are revoked by the operator only.
 - **Not step-up actions (aal2 only once enforcement is active):**
   - defensive actions: suspend, restrict, revoke grace, revoke sessions, revoke a partner key
   - reads
-  - soundboard eligibility
   - ordinary invitations (no admin role, no creator link)
 - **Not bound (cosmetic, set at creation):** a new creator's `brand_color` and `order_prefix`. A grant never
   authorizes "this action in general": its parameter hash binds the values above.
@@ -327,6 +334,10 @@ any active administrator has fewer than two active passkeys). Before it is even 
 6. A full rehearsal on DEV first: activate, perform each sensitive action from the frontend with a passkey, confirm
    a write without a grant is refused, return to `draft`.
 7. The frontend's ceremony UI exists (phase 13): without it no administrator can produce a grant.
+8. The SEC-A migration (`creator.soundboard`, `application.reopen` in the action CHECK, plus their anchors) is
+   deployed; without it soundboard eligibility and application reopen are refused once `active`.
+9. A missing `stepup_enforcement` row (SEC-F) is treated as enforced by the database and answers
+   `503 stepup_unavailable` on every admin route in the API: restore the row, never delete it.
 
 ## Post-S3 closure: admin assurance everywhere, admin session limits, audited rollback (migration 0028)
 

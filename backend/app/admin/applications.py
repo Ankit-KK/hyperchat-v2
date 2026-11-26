@@ -142,7 +142,7 @@ class ApplicationRepository:
             return None
         return await self._run(work)
 
-    async def reopen(self, signup_id: str, actor_id: str, note: str | None):
+    async def reopen(self, signup_id: str, actor_id: str, note: str | None, grant: Grant | None = None):
         async def work(cur):
             app = await self._locked(cur, signup_id)
             if app["review_status"] != "rejected":
@@ -151,7 +151,7 @@ class ApplicationRepository:
                               "reviewed_by = %s, reviewed_at = now() WHERE id = %s", (actor_id, signup_id))
             await self._event(cur, signup_id, "reopen", actor_id, note=note)
             return None
-        return await self._run(work)
+        return await self._run(work, grant)
 
     async def note(self, signup_id: str, actor_id: str, note: str):
         async def work(cur):
@@ -294,9 +294,10 @@ class ApplicationService:
         self._audit(admin, "reject", ip)
         return await self.get(signup_id)
 
-    async def reopen(self, admin: User, signup_id: str, note: str | None, ip: str | None) -> dict:
+    async def reopen(self, admin: User, signup_id: str, note: str | None, ip: str | None,
+                     grant: Grant | None = None) -> dict:
         signup_id = self._id(signup_id)
-        self._check((await self.repo.reopen(signup_id, admin.id, _text(note, "note", 2000, False)))[0])
+        self._check((await self.repo.reopen(signup_id, admin.id, _text(note, "note", 2000, False), grant))[0])
         self._audit(admin, "reopen", ip)
         return await self.get(signup_id)
 

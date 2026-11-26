@@ -45,6 +45,8 @@ ROUTES = {
     ("PATCH", "/api/v1/admin/users/{user_id}"): "admin.user.change",
     ("PUT", "/api/v1/admin/users/{user_id}/email"): "admin.user.email",
     ("POST", "/api/v1/admin/partner-keys"): "partner_key.create",
+    ("PUT", "/api/v1/admin/creators/{streamer_id}/soundboard"): "creator.soundboard",
+    ("POST", "/api/v1/admin/applications/{signup_id}/reopen"): "application.reopen",
 }
 UNBOUND = {"mfa.credential.revoke": "passkeys are revoked by the operator only (S1); no API route revokes one yet"}
 
