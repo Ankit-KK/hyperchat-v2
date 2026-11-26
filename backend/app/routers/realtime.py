@@ -56,7 +56,7 @@ async def pusher_auth(request: Request):
     has_session = bool(request.cookies.get(request.app.state.settings.session_cookie_name))
     if token and has_session:
         raise SecurityError(400, "Use one credential", "two_credentials")
-    slug, suffix = svc.parse(socket_id, channel)
+    slug, suffix, tag = svc.parse(socket_id, channel)
     if token:
         if not is_obs_origin_allowed(request.headers.get("origin"), request.app.state.settings.overlay_tier,
                                      own_origin(request.headers.get("host"))):  # Phase 10: the API-served player
@@ -64,7 +64,7 @@ async def pusher_auth(request: Request):
         result = await validate_obs_token(svc.obs_tokens, token)
         if not result.ok:
             raise SecurityError(401, "Invalid or missing OBS token", result.error or "invalid_token")
-        body = await svc.authorize_obs(token, result.token_info, socket_id, channel, slug, suffix)
+        body = await svc.authorize_obs(token, result.token_info, socket_id, channel, slug, suffix, tag)
     else:
         current = await optional_user(request)
         if current is None:
@@ -72,7 +72,8 @@ async def pusher_auth(request: Request):
         enforce_csrf(request, auth_service(request), current.session,
                      admin=current.user.role == "admin")  # AuthError 403 (bad_origin / bad_csrf)
         body = await svc.authorize_session(current.user, socket_id, channel, slug, suffix,
-                                           assure_admin=lambda: require_admin_assurance(request, current.session))
+                                           assure_admin=lambda: require_admin_assurance(request, current.session),
+                                           tag=tag)
     return JSONResponse(body, headers=NO_STORE)
 
 

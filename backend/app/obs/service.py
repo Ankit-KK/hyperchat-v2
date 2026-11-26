@@ -15,7 +15,7 @@ from app.dashboard.moderation import actor_label
 from app.obs.queue import AudioQueue, ClaimResult, NotReplayable
 from app.obs.tokens import TokenRepository, obs_urls
 from app.realtime.auth import AUTH_ENDPOINT
-from app.realtime.channels import channel_name
+from app.realtime.channels import OBS_SUFFIXES, channel_name, obs_channel_name, token_tag
 from app.realtime.outbox import OVERLAY_SETTINGS
 from app.realtime.payloads import RealtimeRepository, now_playing
 from app.realtime.pusher import PusherApps
@@ -104,9 +104,10 @@ class ObsService:
         streamer = await self.realtime.streamer_by_slug(caller.info.streamer_slug)
         app = self.apps.resolve(streamer["pusher_group"]) if streamer and self.realtime_enabled else None
         if app is not None:
-            slug = caller.info.streamer_slug
+            slug, tag = caller.info.streamer_slug, token_tag(sha256_hex(caller.token))
+            channels = {suffix: obs_channel_name(slug, suffix, tag) for suffix in OBS_SUFFIXES}  # this token's own (NV-4)
             realtime = {"key": app.key, "cluster": app.cluster, "auth_endpoint": AUTH_ENDPOINT,
-                        "audio_channel": f"private-{slug}-audio"}
+                        "audio_channel": channels["audio"], "channels": channels}
         return {"streamer": {"slug": caller.info.streamer_slug, "name": caller.info.streamer_name},
                 "realtime": realtime, "claim_endpoint": "/api/v1/obs/audio/claim", "poll_seconds": POLL_SECONDS,
                 "silence_url": f"{self.public_base}/{SILENCE_KEY}" if self.public_base else None}

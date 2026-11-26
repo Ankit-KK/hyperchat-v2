@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
@@ -26,6 +27,7 @@ from app.core.config import PUSHER_GROUPS, Settings
 from app.jobs.retry import Permanent, Retryable
 
 MAX_DATA_BYTES = 10_000  # Pusher's limit for one event's data
+MAX_CHANNELS = 100  # Pusher's limit of channels per event
 TIMEOUT = httpx.Timeout(5.0)
 
 
@@ -81,11 +83,12 @@ def signed_query(app: PusherApp, method: str, path: str, body: bytes, timestamp:
     return params
 
 
-def event_body(channel: str, event: str, data: dict) -> bytes:
+def event_body(channel: str | Sequence[str], event: str, data: dict) -> bytes:
     encoded = json.dumps(data, separators=(",", ":"), ensure_ascii=False, default=str)
     if len(encoded.encode()) > MAX_DATA_BYTES:
         raise Permanent("payload_too_large")
-    return json.dumps({"name": event, "channels": [channel], "data": encoded}, separators=(",", ":")).encode()
+    channels = [channel] if isinstance(channel, str) else list(channel)
+    return json.dumps({"name": event, "channels": channels, "data": encoded}, separators=(",", ":")).encode()
 
 
 def _retry_after(response: httpx.Response) -> float | None:
@@ -101,7 +104,7 @@ class PusherClient:
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None, clock=time.time) -> None:
         self._transport, self._clock = transport, clock
 
-    async def publish(self, app: PusherApp, channel: str, event: str, data: dict) -> None:
+    async def publish(self, app: PusherApp, channel: str | Sequence[str], event: str, data: dict) -> None:
         body = event_body(channel, event, data)
         path = f"/apps/{app.app_id}/events"
         query = signed_query(app, "POST", path, body, int(self._clock()))

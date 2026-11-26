@@ -29,7 +29,7 @@ from app.jobs.retry import Backoff, Permanent, Retryable, reason_code
 from app.jobs.runner import worker_id
 from app.realtime.outbox import Event, OutboxQueue
 from app.realtime.payloads import Renderer, Skip
-from app.realtime.pusher import PusherApps, PusherClient
+from app.realtime.pusher import MAX_CHANNELS, PusherApps, PusherClient
 
 log = logging.getLogger("hyperchat.realtime")
 
@@ -96,8 +96,10 @@ class OutboxPublisher:
             if app is None:
                 await self._finish(event, "skipped", "pusher_not_configured", started)
                 return
-            await self.limiter.wait()
-            await self.client.publish(app, rendered.channel, rendered.event, rendered.data)
+            channels = rendered.channels or (rendered.channel,)
+            for i in range(0, len(channels), MAX_CHANNELS):  # Pusher takes at most 100 channels per event
+                await self.limiter.wait()
+                await self.client.publish(app, channels[i:i + MAX_CHANNELS], rendered.event, rendered.data)
         except asyncio.CancelledError:
             await asyncio.shield(self._release(event))
             raise

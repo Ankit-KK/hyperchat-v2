@@ -51,6 +51,10 @@ Before the switch (frontend, phase 13):
 - [ ] The new frontend serves `/{slug}/obs-alerts`, `/{slug}/goal-overlay`, `/{slug}/media-audio-player` and
       `/{slug}/audio-player` for **every** creator, reads `?token=` and `dpr` / `ss` / `scale` exactly as legacy did, and
       sends the token to the API in `x-obs-token`.
+- [ ] Every overlay page subscribes only to the channel names `GET /api/v1/obs/session` returns
+      (`realtime.channels`): overlay channels are per OBS token since NV-4 (`private-{slug}-{suffix}-t{tag}`,
+      `docs/realtime.md`). A page that builds `private-{slug}-alerts` itself is refused. The legacy shapes in this
+      file's tables are base names.
 - [ ] Route aliases: `/chiaa/*` serves creator `chiaa_gaming`; `/chiaa_gaming/*` keeps working.
 - [ ] Frontend tests open each route shape with a migrated (legacy-format) token against DEV and receive the overlay
       config and a Pusher subscription.

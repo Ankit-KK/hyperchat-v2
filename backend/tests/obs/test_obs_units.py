@@ -27,6 +27,7 @@ SLUG = "ankit"
 VOICE = f"{BASE}/voice-messages/{SLUG}_1800000000000_{'a' * 32}.webm"
 TTS = f"{BASE}/tts-audio/{SID}/{DID}.mp3"
 SILENCE = f"{BASE}/system/silence.mp3"
+TOKEN_HASH = "ab" * 32  # one active OBS token of the creator (NV-4 per-token channels)
 
 
 def row(**kw):
@@ -159,6 +160,9 @@ class Repo:
 
     async def streamer(self, sid):
         return {"slug": "ankit", "status": "active", "pusher_group": 1} if self.s else None
+
+    async def obs_token_hashes(self, sid):  # the creator's active OBS tokens (NV-4)
+        return getattr(self, "hashes", [TOKEN_HASH])
 
     async def donation(self, did, sid):
         return self.d

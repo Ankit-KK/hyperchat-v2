@@ -104,8 +104,17 @@ Exactly one credential:
 
 | Credential | Channels | Checks |
 |---|---|---|
-| OBS token (`x-obs-token`, or `?token=` for the OBS browser source) | `alerts`, `audio`, `settings`, `leaderboard` of the token's own creator | Origin absent or allowlisted; token hash active, unrevoked, unexpired; channel exactly in the token's scope (`obs_tokens.pusher_channel_scope`, else the default scope); never `dashboard`, whatever a stored scope says |
+| OBS token (`x-obs-token`, or `?token=` for the OBS browser source) | `alerts`, `audio`, `settings`, `leaderboard` of the token's own creator, **under this token's own names** `private-{slug}-{suffix}-t{tag}` (see below) | Origin absent or allowlisted; the tag is this token's; token hash active, unrevoked, unexpired; channel exactly in the token's scope (`obs_tokens.pusher_channel_scope`, else the default scope); never `dashboard`, whatever a stored scope says |
 | Session cookie | `dashboard` | Origin allowlisted + CSRF token (`x-csrf-token`); owner, linked account or admin (`app.authz`); unclaimed creators admin-only; inactive users refused |
+
+**Per-token overlay channels (security audit NV-4, 2026-11-26).** Pusher signs a subscription once and has no way to
+drop it, so an overlay that stays connected would keep receiving after its token is revoked. Overlay channels are
+therefore per token: `{tag}` is `token_tag(sha256(token))` (16 hex, `app.realtime.channels`), each overlay event is
+published to the channels of the creator's **active** tokens only (one Pusher request carries up to 100 channels),
+and an event with no active token is `skipped` (`no_active_obs_token`). A revoke (or expiry) takes effect at the
+next event, also for connections that are already open. Clients take their names from `GET /api/v1/obs/session`
+(`realtime.channels`, and `realtime.audio_channel` as before); the untagged names are refused for OBS tokens and
+never published. `dashboard` and the public `{slug}-goal` are unchanged. The tables in this file keep the base names.
 
 Requests are refused when they carry both or neither credential, or have a malformed `socket_id` (`\d+.\d+`).
 `presence-`, `private-encrypted-`, public and unknown channels are refused too. Channel names are parsed with

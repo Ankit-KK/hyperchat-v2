@@ -31,7 +31,9 @@ from app.dashboard.repository import DashboardRepository
 from app.jobs.queue import JobQueue
 from app.maintenance import cleanup
 from app.payments.repository import PaymentRepository, WebhookEvent
+from app.obs.tokens import TokenRepository
 from app.realtime import outbox
+from app.realtime.channels import token_tag
 from app.realtime.outbox import OutboxQueue
 from app.realtime.payloads import Renderer, RealtimeRepository
 from app.realtime.publisher import OutboxPublisher
@@ -348,6 +350,7 @@ def publisher(handler, *, enabled=True, apps=None):
 
 def test_publisher_end_to_end(only):
     sid = make_streamer("authtest-p9-e2e")
+    token = obs_token(sid)  # overlay events go to the channels of active tokens (NV-4)
     update_streamer(sid, status="active", goal_is_active=True, goal_activated_at=datetime(2026, 1, 1, tzinfo=UTC),
                     goal_target_amount=Decimal("1000"), goal_name="Mic")
     did = make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
@@ -363,7 +366,7 @@ def test_publisher_end_to_end(only):
         run(p.run_once())
     assert [(c, n) for c, n, _ in sent] == [("private-authtest-p9-e2e-dashboard", "donation-updated"),
                                             ("authtest-p9-e2e-goal", "goal-progress"),
-                                            ("private-authtest-p9-e2e-leaderboard", "leaderboard-updated")]
+                                            (own("private-authtest-p9-e2e-leaderboard", token), "leaderboard-updated")]
     dashboard, goal, board = (d for _, _, d in sent)
     assert dashboard["donation"]["id"] == did and dashboard["donation"]["message"] == MESSAGE
     assert dashboard["action"] == "approve" and goal["progress_inr"] == 100.0 and goal["target_amount_inr"] == 1000.0
@@ -374,6 +377,7 @@ def test_publisher_end_to_end(only):
 
 def test_publisher_transient_failure_then_success(only):
     sid = make_streamer("authtest-p9-retry")
+    obs_token(sid)
     emit_rows(sid, "settings-updated")
     responses = [httpx.Response(503), httpx.Response(200)]
     p = publisher(lambda request: responses.pop(0))
@@ -389,6 +393,7 @@ def test_publisher_transient_failure_then_success(only):
 
 def test_publisher_permanent_failure_and_disabled(only):
     sid = make_streamer("authtest-p9-perm")
+    obs_token(sid)
     emit_rows(sid, "settings-updated")
     run(publisher(lambda request: httpx.Response(401)).run_once())
     with db() as conn:
@@ -404,6 +409,60 @@ def test_publisher_permanent_failure_and_disabled(only):
         assert conn.execute("SELECT status, last_error FROM public.realtime_outbox WHERE streamer_id = %s "
                             "ORDER BY id DESC LIMIT 1", (sid,)).fetchone() == ("skipped", "pusher_not_configured")
     assert calls == []
+
+
+# ── NV-4: a revoked OBS token's channels get no further events ─────────────
+
+def token_id(token: str) -> str:
+    with db() as conn:
+        return str(conn.execute("SELECT id FROM public.obs_tokens WHERE token_hash = %s", (sha256_hex(token),)).fetchone()[0])
+
+
+def test_a_revoked_token_gets_no_further_overlay_events_and_a_new_token_does(only):
+    """Pusher can never drop a subscription it signed, so revoking works by not publishing to the token's channels:
+    an overlay still connected with the revoked token receives nothing from the next event on."""
+    sid = make_streamer("authtest-p9-revoke")
+    base = "private-authtest-p9-revoke-settings"
+    old, keep = obs_token(sid), obs_token(sid)
+    sent = []
+
+    def handler(request):
+        sent.append(sorted(json.loads(request.content)["channels"]))
+        return httpx.Response(200, json={})
+    p = publisher(handler)
+    emit_rows(sid, "settings-updated")
+    run(p.run_once())
+    assert sent == [sorted([own(base, old), own(base, keep)])]  # one Pusher request, one channel per active token
+    assert run(TokenRepository(factory()).revoke(sid, token_id(old)))["state"] == "revoked"  # the dashboard's revoke
+    emit_rows(sid, "settings-updated")
+    run(p.run_once())
+    assert sent[-1] == [own(base, keep)]  # the revoked token's channel is no longer published to
+    new = obs_token(sid)
+    emit_rows(sid, "settings-updated")
+    run(p.run_once())
+    assert sent[-1] == sorted([own(base, keep), own(base, new)])  # a new token is served at once
+    for t in (keep, new):
+        run(TokenRepository(factory()).revoke(sid, token_id(t)))
+    emit_rows(sid, "settings-updated")
+    run(p.run_once())
+    assert len(sent) == 3 and [r[4] for r in outbox_rows(sid)][-1] == "skipped"  # no active token: nothing sent
+    with db() as conn:
+        assert conn.execute("SELECT last_error FROM public.realtime_outbox WHERE streamer_id = %s ORDER BY id DESC "
+                            "LIMIT 1", (sid,)).fetchone() == ("no_active_obs_token",)
+
+
+def test_dashboard_and_goal_channels_are_not_per_token(only):
+    sid = make_streamer("authtest-p9-shared")
+    update_streamer(sid, status="active", goal_is_active=True, goal_activated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    goal_target_amount=Decimal("1000"), goal_name="Mic")
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content)["channels"])
+        return httpx.Response(200, json={})
+    emit_rows(sid, "goal-progress")
+    run(publisher(handler).run_once())
+    assert sent == [["authtest-p9-shared-goal"]]  # no OBS token needed, the same public name as before
 
 
 # ── channel authorization (the real app) ────────────────────────────────────
@@ -454,6 +513,11 @@ def obs_token(sid, **cols) -> str:
                      (sid, sha256_hex(token), values["is_active"], values["expires_at"], values["revoked_at"],
                       values["pusher_channel_scope"]))
     return token
+
+
+def own(channel: str, token: str) -> str:
+    """The per-token name of an overlay channel (NV-4): what GET /obs/session hands this token."""
+    return f"{channel}-t{token_tag(sha256_hex(token))}"
 
 
 def auth(client, channel, headers=None, socket_id="1234.5678", **kw):
@@ -519,14 +583,18 @@ def test_obs_token_overlay_channels(rt):
     token = obs_token(sid)
     hdr = {"x-obs-token": token}
     for suffix in ("alerts", "audio", "settings", "leaderboard"):
-        channel = f"private-authtest-p9-obs-{suffix}"
+        channel = own(f"private-authtest-p9-obs-{suffix}", token)
         r = auth(rt, channel, hdr)
         assert r.status_code == 200 and r.json()["auth"] == expected("1234.5678", channel)
-    assert auth(rt, "private-authtest-p9-obs-alerts", params={"token": token}).status_code == 200  # OBS query form
+        assert auth(rt, f"private-authtest-p9-obs-{suffix}", hdr).status_code == 403  # the untagged name (NV-4)
+    assert auth(rt, own("private-authtest-p9-obs-alerts", token), params={"token": token}).status_code == 200
+    second = obs_token(sid)  # the same creator's other token: its channels are not this token's
+    assert auth(rt, own("private-authtest-p9-obs-alerts", second), hdr).status_code == 403
     assert auth(rt, "private-authtest-p9-obs-dashboard", hdr).status_code == 403  # never the dashboard
     other = make_streamer("authtest-p9-obs2")
-    assert auth(rt, "private-authtest-p9-obs2-alerts", hdr).status_code == 403  # another creator
-    assert auth(rt, "private-authtest-p9-obs-alerts", {**hdr, "origin": "https://evil.example"}).status_code == 403
+    assert auth(rt, own("private-authtest-p9-obs2-alerts", token), hdr).status_code == 403  # another creator
+    assert auth(rt, own("private-authtest-p9-obs-alerts", token),
+                {**hdr, "origin": "https://evil.example"}).status_code == 403
     assert other
 
 
@@ -534,15 +602,16 @@ def test_obs_token_scopes_and_states(rt):
     sid = make_streamer("authtest-p9-scope")
     other = make_streamer("authtest-p9-scope2")
     narrow = obs_token(sid, pusher_channel_scope=["private-authtest-p9-scope-alerts"])
-    assert auth(rt, "private-authtest-p9-scope-alerts", {"x-obs-token": narrow}).status_code == 200
-    assert auth(rt, "private-authtest-p9-scope-settings", {"x-obs-token": narrow}).status_code == 403
+    assert auth(rt, own("private-authtest-p9-scope-alerts", narrow), {"x-obs-token": narrow}).status_code == 200
+    assert auth(rt, own("private-authtest-p9-scope-settings", narrow), {"x-obs-token": narrow}).status_code == 403
     wide = obs_token(sid, pusher_channel_scope=["private-authtest-p9-scope-dashboard",
                                                 "private-authtest-p9-scope2-alerts"])
     assert auth(rt, "private-authtest-p9-scope-dashboard", {"x-obs-token": wide}).status_code == 403
-    assert auth(rt, "private-authtest-p9-scope2-alerts", {"x-obs-token": wide}).status_code == 403
+    assert auth(rt, own("private-authtest-p9-scope2-alerts", wide), {"x-obs-token": wide}).status_code == 403
     for state in ({"revoked_at": datetime.now(UTC)}, {"is_active": False},
                   {"expires_at": datetime.now(UTC) - timedelta(minutes=1)}):
-        assert auth(rt, "private-authtest-p9-scope-alerts", {"x-obs-token": obs_token(sid, **state)}).status_code == 401
+        t = obs_token(sid, **state)
+        assert auth(rt, own("private-authtest-p9-scope-alerts", t), {"x-obs-token": t}).status_code == 401
     assert auth(rt, "private-authtest-p9-scope-alerts", {"x-obs-token": "authtest-unknown"}).status_code == 401
     assert other
 
@@ -566,12 +635,13 @@ def test_malformed_requests(rt):
 def test_rate_limits(rt):
     sid = make_streamer("authtest-p9-rate")
     token = obs_token(sid)
-    statuses = [auth(rt, "private-authtest-p9-rate-alerts", {"x-obs-token": token}).status_code for _ in range(32)]
+    statuses = [auth(rt, own("private-authtest-p9-rate-alerts", token), {"x-obs-token": token}).status_code
+                for _ in range(32)]
     assert statuses[:30] == [200] * 30 and statuses[30:] == [429, 429]  # 30/min per credential
     with db() as conn:
         conn.execute("DELETE FROM public.rate_limits WHERE endpoint = 'realtime:auth:credential'")
-    statuses = [auth(rt, "private-authtest-p9-rate-alerts", {"x-obs-token": obs_token(sid)}).status_code
-                for _ in range(30)]
+    statuses = [auth(rt, own("private-authtest-p9-rate-alerts", t), {"x-obs-token": t}).status_code
+                for t in (obs_token(sid) for _ in range(30))]
     assert 429 in statuses  # 60/min per IP across tokens
 
 
@@ -595,12 +665,32 @@ def test_no_secrets_or_tokens_in_logs(rt):
     sid, h = session(rt, "authtest-p9-log", "log" + DOMAIN)
     token = obs_token(sid)
     auth(rt, "private-authtest-p9-log-dashboard", h)
-    auth(rt, "private-authtest-p9-log-alerts", {"x-obs-token": token})
+    auth(rt, own("private-authtest-p9-log-alerts", token), {"x-obs-token": token})  # 400: the session cookie is also sent
     auth(rt, "private-authtest-p9-log-dashboard", {"x-obs-token": token})
-    auth(rt, "private-authtest-p9-log-alerts", params={"token": token})
+    auth(rt, own("private-authtest-p9-log-alerts", token), params={"token": token})
     text = "\n".join(rt.capture.records)
-    for value in (SECRET, token, h["x-csrf-token"], expected("1234.5678", "private-authtest-p9-log-alerts")):
+    for value in (SECRET, token, h["x-csrf-token"], expected("1234.5678", own("private-authtest-p9-log-alerts", token))):
         assert value not in text
+
+
+def test_session_hands_out_the_tokens_own_channels_and_revoke_ends_them(rt):
+    """NV-4: GET /obs/session names this token's channels; another token's or the untagged names are refused, and
+    after the revoke the token can neither subscribe again nor read its session."""
+    sid = make_streamer("authtest-p9-sess")
+    token, other = obs_token(sid), obs_token(sid)
+    s = rt.get("/api/v1/obs/session", headers={"x-obs-token": token})
+    assert s.status_code == 200, s.text
+    channels = s.json()["realtime"]["channels"]
+    assert channels == {sfx: own(f"private-authtest-p9-sess-{sfx}", token) for sfx in ("alerts", "audio", "settings",
+                                                                                       "leaderboard")}
+    assert s.json()["realtime"]["audio_channel"] == channels["audio"]
+    for channel in channels.values():
+        assert auth(rt, channel, {"x-obs-token": token}).status_code == 200
+        assert auth(rt, channel, {"x-obs-token": other}).status_code == 403  # the other token's names differ
+    assert run(TokenRepository(factory()).revoke(sid, token_id(token)))["state"] == "revoked"
+    assert auth(rt, channels["alerts"], {"x-obs-token": token}).status_code == 401
+    assert rt.get("/api/v1/obs/session", headers={"x-obs-token": token}).status_code == 401
+    assert auth(rt, own("private-authtest-p9-sess-alerts", other), {"x-obs-token": other}).status_code == 200
 
 
 def test_disabled_by_default(app):
