@@ -792,6 +792,34 @@
         "title": "CreatorStatusChange",
         "type": "object"
       },
+      "DashboardRealtime": {
+        "properties": {
+          "auth_endpoint": {
+            "title": "Auth Endpoint",
+            "type": "string"
+          },
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "cluster": {
+            "title": "Cluster",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "cluster",
+          "auth_endpoint",
+          "channel"
+        ],
+        "title": "DashboardRealtime",
+        "type": "object"
+      },
       "DashboardSettings": {
         "additionalProperties": false,
         "properties": {
@@ -7356,6 +7384,49 @@
         "summary": "Revoke Obs Token",
         "tags": [
           "dashboard"
+        ]
+      }
+    },
+    "/api/v1/dashboard/streamers/{streamer}/realtime": {
+      "get": {
+        "description": "The Pusher config and this session's own dashboard channel. Losing access (logout, revoked or expired session,\nremoved link, owner transfer, deactivation, lost admin role or assurance) stops delivery to it at the next event.",
+        "operationId": "dashboard_realtime_api_v1_dashboard_streamers__streamer__realtime_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "streamer",
+            "required": true,
+            "schema": {
+              "title": "Streamer",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardRealtime"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dashboard Realtime",
+        "tags": [
+          "realtime"
         ]
       }
     },

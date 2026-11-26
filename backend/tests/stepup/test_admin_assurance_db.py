@@ -31,7 +31,7 @@ from tests.integration import (
     requires_db,
     target,
 )
-from tests.realtime.test_realtime_db import APP, SECRET
+from tests.realtime.test_realtime_db import APP, SECRET, dash
 from tests.stepup.test_mfa_api import MFA, _api, _verifier, ceremony, enroll
 from tests.stepup.test_stepup_db import REFUSED, guards_off
 from tests.stepup.test_stepup_enforcement_db import set_enforcement
@@ -69,7 +69,8 @@ def browser(api, email: str):
 
 
 def channel(api, b, headers, slug: str):
-    return b.post(PUSHER, data={"socket_id": "1234.5678", "channel_name": f"private-{slug}-dashboard"}, headers=headers)
+    """This browser's own dashboard channel (per session since NV-4b)."""
+    return b.post(PUSHER, data={"socket_id": "1234.5678", "channel_name": dash(b.cookies, slug)}, headers=headers)
 
 
 def reason(r) -> tuple[int, str | None]:

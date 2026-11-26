@@ -274,6 +274,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard.dashboard_router)
     app.include_router(transcriptions.router)
     app.include_router(realtime.router)
+    app.include_router(realtime.dashboard_router)
     app.include_router(obs.obs_router)
     app.include_router(obs.dashboard_router)
     app.include_router(obs.player_router)

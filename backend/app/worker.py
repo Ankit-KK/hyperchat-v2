@@ -104,7 +104,9 @@ def build_notifier(settings: Settings, connection_factory) -> AlertNotifier:
 def build_publisher(settings: Settings, connection_factory) -> OutboxPublisher:
     silence_url = f"{settings.r2_public_base}/{SILENCE_KEY}" if settings.r2_public_base else None  # Phase 10
     return OutboxPublisher(OutboxQueue(connection_factory),
-                           Renderer(RealtimeRepository(connection_factory), silence_url=silence_url),
+                           Renderer(RealtimeRepository(connection_factory), silence_url=silence_url,
+                                    admin_session_hours=(settings.admin_session_idle_hours,
+                                                         settings.admin_session_absolute_hours)),
                            PusherClient(), PusherApps.from_settings(settings), enabled=settings.realtime_enabled,
                            rate=settings.realtime_publish_rate)
 
