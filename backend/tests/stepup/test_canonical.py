@@ -81,11 +81,10 @@ def test_unknown_actions_and_malformed_targets_are_refused(action, target):
 
 def test_every_action_has_a_purpose_known_to_the_database():
     from importlib import util
-    spec = util.spec_from_file_location("m0025", Path(__file__).parents[3] / "database/migrations/versions/0025_stepup_core.py")
+    # The latest migration that sets stepup_challenges' action CHECK (0025, widened for SEC-A).
+    path = Path(__file__).parents[3] / "database/migrations/versions/0037_stepup_sec_a_anchors.py"
+    spec = util.spec_from_file_location("m_actions", path)
     module = util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # SEC-A: bound in the API, not yet allowed by 0025's CHECK (no grant can be issued, so 'active' refuses their
-    # routes). The follow-up migration widens the CHECK and deletes this set.
-    pending_database = {"creator.soundboard", "application.reopen"}
-    assert set(module.ACTIONS) == set(canonical.ACTIONS) - pending_database
+    assert set(module.ACTIONS) == set(canonical.ACTIONS)  # 0037 widened the CHECK for the SEC-A actions
     assert set(canonical.ACTIONS.values()) == {"session", "register", "action"}

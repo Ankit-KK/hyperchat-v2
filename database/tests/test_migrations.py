@@ -189,6 +189,9 @@ def _accounts18() -> dict:
                                  "WHERE streamer_slug = ANY(%s)", (list(MIG18),)).fetchall())
 
 
+HEAD = sorted(p.name[:4] for p in (DATABASE / "migrations" / "versions").glob("[0-9]*_*.py"))[-1]
+
+
 def _version() -> str:
     with _owner() as conn:
         return conn.execute("SELECT version_num FROM public.alembic_version").fetchone()[0]
@@ -1885,7 +1888,7 @@ def test_pay15_6b_packet_sql_on_a_fresh_0029_to_0035_upgrade(monkeypatch):
         with _owner() as conn:
             _clean_6b(conn)
         command.upgrade(cfg, "head")
-    assert _version() == "0036"
+    assert _version() == HEAD
 
 
 # ── 0036: PAY-14 creator pricing limits (runtime roles only; backend/tests/dashboard/test_pricing_settings.py proves
@@ -1944,4 +1947,69 @@ def test_0036_pricing_limits_round_trip_keep_legacy_rows_and_never_restrict_the_
         with _owner() as conn:
             conn.execute("DELETE FROM public.streamers WHERE streamer_slug = 'migtest36'")  # cascades tiers
         command.upgrade(cfg, "head")
-    assert _version() == "0036"
+    assert _version() == HEAD
+
+
+
+
+PAYMENT_DEFINER_FUNCTIONS = ("donation_accounting_apply", "donation_accounting_core", "donations_credit_writer",
+                             "payment_accounting_apply_evaluation", "payment_accounting_keep",
+                             "payment_accounting_lock_state", "payment_accounting_open_run",
+                             "payment_accounting_reconcile", "payment_accounting_revert", "payment_accounting_set_state",
+                             "payment_evidence_fp")
+NV3_FUNCTIONS = ("stepup_guard_user_signups", "stepup_guard_streamer_insert")
+
+
+def _functions_0037() -> dict:
+    """{name: (md5 of the body, proconfig)} of the NV-3 guards and of the PAY-15-pinned DEFINER functions, and the
+    user_signups / streamers triggers."""
+    with _owner() as conn:
+        rows = conn.execute("SELECT p.proname, md5(p.prosrc), coalesce(p.proconfig, '{}')::text[] FROM pg_proc p "
+                            "WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY(%s)",
+                            (list(PAYMENT_DEFINER_FUNCTIONS + NV3_FUNCTIONS),)).fetchall()
+        triggers = conn.execute("SELECT c.relname, t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+                                "WHERE NOT t.tgisinternal AND c.relnamespace = 'public'::regnamespace "
+                                "AND c.relname IN ('user_signups', 'streamers')").fetchall()
+    return {"functions": {n: (h, tuple(c)) for n, h, c in rows}, "triggers": sorted(triggers)}
+
+
+def _data_0037() -> list:
+    """Every user_signups row and every streamer's updated_at, as the owner sees them: 0037 must never change data."""
+    with _owner() as conn:
+        return [conn.execute("SELECT * FROM public.user_signups ORDER BY id").fetchall(),
+                conn.execute("SELECT id, updated_at FROM public.streamers ORDER BY id").fetchall()]
+
+
+def test_0037_round_trip_changes_only_its_guards_and_triggers_never_data_or_payment_functions(monkeypatch):
+    """0037 (SEC-A + NV-3): the upgrade re-creates the two 0027 guards with the applicant's address and adds the two
+    SEC-A triggers; it leaves every PAY-15-pinned SECURITY DEFINER payment function exactly as it was (body and
+    proconfig); the downgrade to 0036 restores exactly the 0036 catalog of those objects; no row is read or written."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0036")
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest37@authtest.invalid'")
+            conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES "
+                         "('M37', 'migtest37@authtest.invalid', '+91 90000 00037')")
+        at_0036, data = _functions_0037(), _data_0037()
+        assert set(at_0036["functions"]) == set(PAYMENT_DEFINER_FUNCTIONS + NV3_FUNCTIONS)
+        command.upgrade(cfg, "0037")
+        assert _version() == "0037" and _data_0037() == data
+        at_0037 = _functions_0037()
+        for name in PAYMENT_DEFINER_FUNCTIONS:  # no payment object: the verifier's no_payment_delta holds
+            assert at_0037["functions"][name] == at_0036["functions"][name], name
+        for name in NV3_FUNCTIONS:
+            assert at_0037["functions"][name][0] != at_0036["functions"][name][0], name  # re-created with the email
+            assert at_0037["functions"][name][1] == at_0036["functions"][name][1], name
+        added = set(at_0037["triggers"]) - set(at_0036["triggers"])
+        assert added == {("streamers", "aad_stepup_guard_soundboard"), ("user_signups", "aad_stepup_guard_reopen")}
+        assert set(at_0036["triggers"]) <= set(at_0037["triggers"])
+        command.downgrade(cfg, "0036")  # restores exactly the 0036 objects, keeps every row
+        assert _version() == "0036" and _functions_0037() == at_0036 and _data_0037() == data
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest37@authtest.invalid'")
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD

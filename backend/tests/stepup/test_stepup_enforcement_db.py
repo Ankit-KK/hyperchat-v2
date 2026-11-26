@@ -361,7 +361,8 @@ def test_a_transfer_unlinks_only_the_previous_owner_once(mode):
 
 def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(mode):
     active = mode
-    params = {"slug": "authtest-s3-approved", "name": "Approved", "razorpay_account": "primary"}
+    params = {"slug": "authtest-s3-approved", "name": "Approved", "razorpay_account": "primary",
+              "email": ("s3-approve" + DOMAIN).lower()}  # NV-3 (0037): the applicant's address is bound too
     app = signup("s3-approve")
     g, args = approved(active,"s3-approve", "application.approve", f"application:{app}", params)
     old = make_streamer("authtest-s3-old-creator", name="Old")
@@ -369,7 +370,7 @@ def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(mode):
         slug, name, account = conn.execute("SELECT streamer_slug, streamer_name, razorpay_account FROM public.streamers "
                                            "WHERE id = %s", (old,)).fetchone()
     _, adopt = approved(active, "s3-adopt", "application.approve", f"application:{app}",
-                        {"slug": slug, "name": name, "razorpay_account": account})
+                        {"slug": slug, "name": name, "razorpay_account": account, "email": params["email"]})
     with refused_tx("hyperchat_app") as conn:  # an approval never adopts an existing creator, even one it names
         assert conn.execute(CONSUME, adopt).fetchone()[0] == "ok"
         conn.execute("UPDATE public.user_signups SET review_status = 'approved', streamer_id = %s WHERE id = %s",
@@ -399,6 +400,67 @@ def test_an_approval_claims_its_grant_and_records_the_creator_it_creates(mode):
         assert conn.execute(CONSUME, args2).fetchone()[0] == "ok"
         conn.execute(invite, ("S3-Approve" + DOMAIN, cid, key_hash(), app))
     assert grant_row(g2["grant_id"]) == (True, "user_invites.insert")
+
+def test_an_approval_binds_the_applicants_address(mode):
+    """NV-3 (migration 0037): application.approve hashes the applicant's lower-cased address too, so a grant over
+    the old three keys, or over an address the row no longer has, authorizes nothing; and no API role can change a
+    submitted application's address (the schema owner can)."""
+    active = mode
+    app = signup("S3-NV3")  # mixed case: the binding is lower(email)
+    params = {"slug": "authtest-s3-nv3", "name": "NV3", "razorpay_account": "primary"}
+    _, three_keys = approved(active, "s3-nv3-old", "application.approve", f"application:{app}", params)
+    approve = "UPDATE public.user_signups SET review_status = 'approved', streamer_id = %s WHERE id = %s"
+    with refused_tx("hyperchat_app") as conn:  # the pre-0037 parameter set
+        assert conn.execute(CONSUME, three_keys).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], app))
+    bound = {**params, "email": ("S3-NV3" + DOMAIN).lower()}
+    g, args = approved(active, "s3-nv3-new", "application.approve", f"application:{app}", bound)
+    with fixture_db() as conn:  # the address changes after the administrator signed (as the owner: no guard)
+        conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("s3-nv3-swapped" + DOMAIN, app))
+    with refused_tx("hyperchat_app") as conn:
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], app))
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("S3-NV3" + DOMAIN, app))
+    with db() as conn, conn.transaction():  # the exact grant: approval and its creator_created effect both claim it
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], app))
+    assert grant_row(g["grant_id"]) == (True, "user_signups.review_status")
+    other = signup("s3-nv3-freeze")
+    for role in ("hyperchat_app", "hyperchat_worker"):  # never from an API role, approved or not
+        with refused_tx(role) as conn:
+            conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("attacker" + DOMAIN, other))
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.user_signups SET email = %s WHERE id = %s", ("s3-nv3-fixed" + DOMAIN, other))
+
+
+def test_deleting_and_reinserting_an_application_cannot_redirect_a_signed_approval(mode):
+    """NV-3 with DELETE (hyperchat_app keeps DELETE and INSERT on user_signups): the approval anchor targets
+    application:<id> and hashes the row's address, so a submitted application deleted and re-inserted under another
+    address is refused whether it reuses the id (the address differs) or not (another target), and a re-inserted
+    row starts unreviewed (0027's insert guard). What delete + re-insert CAN still do: replace an application before
+    any administrator looks at it; the administrator then sees and signs the new address."""
+    active = mode
+    victim = signup("s3-nv3-victim")
+    params = {"slug": "authtest-s3-nv3-del", "name": "Del", "razorpay_account": "primary",
+              "email": ("s3-nv3-victim" + DOMAIN).lower()}
+    _, args = approved(active, "s3-nv3-del", "application.approve", f"application:{victim}", params)
+    approve = "UPDATE public.user_signups SET review_status = 'approved', streamer_id = %s WHERE id = %s"
+    with db() as conn:  # the runtime role swaps the row, keeping its id
+        conn.execute("DELETE FROM public.user_signups WHERE id = %s", (victim,))
+        conn.execute("INSERT INTO public.user_signups (id, name, email, mobile_number) VALUES (%s, 'S', %s, "
+                     "'+91 90000 00009')", (victim, "s3-nv3-attacker" + DOMAIN))
+    with refused_tx("hyperchat_app") as conn:  # same id, another address: the signed hash does not match
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], victim))
+    fresh = signup("s3-nv3-attacker2")  # a new id: the grant names application:<victim>, never this one
+    with refused_tx("hyperchat_app") as conn:
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(approve, (conn.execute(NEW_CREATOR, (params["slug"], params["name"])).fetchone()[0], fresh))
+    with refused_tx("hyperchat_app") as conn:  # and a re-insert can never arrive already approved
+        conn.execute("INSERT INTO public.user_signups (name, email, mobile_number, review_status) VALUES "
+                     "('S', %s, '+91 90000 00009', 'approved')", ("s3-nv3-preapproved" + DOMAIN,))
+
 
 
 def test_invite_acceptance_stays_internal_but_cannot_be_forged(mode):
@@ -532,7 +594,7 @@ def test_no_api_role_can_call_the_guards_and_every_guard_pins_its_search_path():
                                     'stepup_guard_effects', 'stepup_guard_assurance', 'stepup_guard_events',
                                     'stepup_guard_enforcement')
         """).fetchall()
-        assert len(rows) == 10
+        assert len(rows) == 12  # 0027's ten, and 0037's stepup_guard_soundboard and stepup_guard_reopen (SEC-A)
         for fn, definer, config, owner in rows:
             assert owner == "hyperchat_owner" and any(c.startswith("search_path=pg_catalog, public") for c in config), fn
             for role in (*API_ROLES, "hyperchat_readonly", "public"):
@@ -540,3 +602,5 @@ def test_no_api_role_can_call_the_guards_and_every_guard_pins_its_search_path():
                     (role, fn)
         assert conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'aac_stepup_guard_%' "
                             "AND tgenabled = 'O'").fetchone()[0] == 6
+        assert conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'aad_stepup_guard_%' "
+                            "AND tgenabled = 'O'").fetchone()[0] == 2  # 0037 (SEC-A)

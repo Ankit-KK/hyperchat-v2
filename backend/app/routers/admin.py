@@ -218,7 +218,8 @@ async def approve_application(signup_id: str, body: ApplicationApprove, request:
     """Approve and create the creator, PENDING (never active), in one transaction; a repeat approval is 409.
     razorpay_account may be omitted: it defaults to "primary" (Q1, reverses D12 here; it must still be configured)."""
     svc = application_service(request)
-    grant = stepup.bind(f"application:{uid(signup_id) or signup_id}", _creator_params(svc.admin, body))
+    params = await svc.approval_params(signup_id, _creator_params(svc.admin, body))  # NV-3: + the applicant's email
+    grant = stepup.bind(f"application:{uid(signup_id) or signup_id}", params)
     return await svc.approve(current.user, signup_id, body.model_dump(), client_ip(request), grant)
 
 
