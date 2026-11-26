@@ -405,8 +405,8 @@ remote command follows these rules (OPS-2, safeguards S1, S3 and S4):
 - **The nginx drift check runs locally:** `bash deploy/tools/nginx_drift_check.sh` prints `match`, `drift` or
   `unrecorded` for each file under `deploy/nginx/` against the recorded deployed fingerprints in
   `deploy/tools/nginx_fingerprints.txt`. `drift` is expected where the repository moved past the deployed version
-  (production's F1/F1-R today). Running it on the host, and its `--nginx-test` flag (`nginx -t` of the installed
-  configuration, as root), need separate approval.
+  (since 2026-11-26 every recorded file matches). Running it on the host, and its `--nginx-test` flag
+  (`nginx -t` of the installed configuration, as root), need separate approval.
 
 ## Rules
 - Firewall (UFW): SSH (rate-limited), 80 and 443 only. PostgreSQL listens on localhost / Unix socket only.

@@ -1,16 +1,17 @@
 # Recorded DEPLOYED nginx fingerprints (OPS-2 S4), read by nginx_drift_check.sh.
 # Format: <sha256 prefix, at least 8 hex | unrecorded> <path under deploy/nginx/> <source>
-# Source of the three prefixes: docs/operations/incident-2026-10-28-nginx-config.md, "Recovery" table
-# (the versions restored on 2026-10-29). Never fill a prefix from the repository's current files: it would always
-# match. Update a line only from a deploy record of what was installed on the server.
+# Sources: docs/operations/incident-2026-10-28-nginx-config.md ("Recovery" table, restored 2026-10-29) and
+# docs/operations/nginx-f1-production-install-2026-11-26.md (installed 2026-11-26). Never fill a prefix from the
+# repository's current files: it would always match. Update a line only from a deploy record of what was
+# installed on the server.
 b7a4736e   00-catchall.conf                  f592286 (only version), incident recovery table
 83309724   api.quicktestspace.site.conf      f15c5a8 (DEV), install record 2026-10-12, incident recovery table
-3958d882   api.hyperchat.space.conf          6565d09 (production, before F1/F1-R), incident recovery table
-# The four snippets: deployed hashes exist only in the server-side restore package manifest (7aaafd81).
-unrecorded snippets/hyperchat-public-limit-zone.conf        restore package manifest only
-unrecorded snippets/hyperchat-public-limit.conf             restore package manifest only
-unrecorded snippets/hyperchat-prod-public-limit-zone.conf   restore package manifest only
-unrecorded snippets/hyperchat-prod-public-limit.conf        restore package manifest only
+b14edf78   api.hyperchat.space.conf          a76df1d (production, F1/F1-R), install record 2026-11-26
+# The four snippets: from the 2026-11-26 install record (printed after the change on the shared host).
+f9618548   snippets/hyperchat-public-limit-zone.conf        install record 2026-11-26
+73ee342b   snippets/hyperchat-public-limit.conf             install record 2026-11-26
+2158db82   snippets/hyperchat-prod-public-limit-zone.conf   install record 2026-11-26
+8ae65880   snippets/hyperchat-prod-public-limit.conf        install record 2026-11-26
 # The port-80 bootstrap vhost is installed under the production site name only during first-certificate setup;
 # the incident record has no hash for it.
 unrecorded api.hyperchat.space.acme.conf                    not in the incident record
