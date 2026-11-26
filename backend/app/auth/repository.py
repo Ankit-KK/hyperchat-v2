@@ -8,7 +8,17 @@ from datetime import datetime
 from psycopg.rows import dict_row
 
 from app.auth.tokens import sha256_hex
-from app.stepup.grants import Grant, consume
+from app.security.audit import security_event
+from app.stepup.grants import Grant, StepUpError, consume
+
+
+def _enforcement_state(state: str | None) -> str:
+    """SEC-F: no stepup_enforcement row means a broken install. The database treats it as enforced (0027); the API
+    refuses every step-up-dependent request with a clean 503 instead of a 500 or, worse, skipping the aal2 check."""
+    if state is None:
+        security_event("stepup_enforcement_missing", status=503)
+        raise StepUpError(503, "Passkey verification is unavailable: try again shortly", "stepup_unavailable")
+    return state
 
 
 @dataclass(frozen=True)
@@ -371,13 +381,13 @@ class AuthRepository:
     # ── step-up (migration 0025; read-only for this role) ─────────────────────────────────────────────────────
     async def stepup_enforcement(self) -> str:
         row = await self._one("SELECT state FROM public.stepup_enforcement", ())
-        return row["state"]
+        return _enforcement_state(row["state"] if row else None)
 
     async def stepup_session(self, session_id: str) -> tuple[str, int]:
         """(enforcement state, the session's assurance level: 2 only while its passkey ceremony still holds)."""
         row = await self._one("SELECT (SELECT state FROM public.stepup_enforcement) AS state, "
                               "public.stepup_session_aal(%s) AS aal", (session_id,))
-        return row["state"], row["aal"]
+        return _enforcement_state(row["state"]), row["aal"]
 
     async def hit_rate_limit(self, key: str, bucket: str, limit: int, window_seconds: int) -> bool:
         """Count one request; True while within the limit."""

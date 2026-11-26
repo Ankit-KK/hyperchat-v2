@@ -46,6 +46,10 @@ ACTIONS = {
     "admin.user.email": "action",
     "partner_key.create": "action",
     "mfa.credential.revoke": "action",
+    # SEC-A: not yet in 0025's stepup_challenges CHECK, so no grant can be issued for them until the follow-up
+    # migration; with enforcement 'active' their routes are refused (fail closed), in 'draft' they work as before.
+    "creator.soundboard": "action",
+    "application.reopen": "action",
 }
 _KEY = re.compile(r"^[a-z0-9_]{1,32}$")
 _TARGET = re.compile(r"^[A-Za-z0-9._:@+\-]{1,200}$")

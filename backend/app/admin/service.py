@@ -187,11 +187,12 @@ class AdminService:
         return {"creator": {**row, "created_at": iso(row["created_at"])},
                 "donation_block": await self.repo.donation_block(streamer_id)}
 
-    async def set_soundboard_eligibility(self, admin: User, streamer_id: str, enabled: bool) -> dict:
+    async def set_soundboard_eligibility(self, admin: User, streamer_id: str, enabled: bool,
+                                         grant: Grant | None = None) -> dict:
         """Grant / revoke Custom Soundboard eligibility (D3). Idempotent. Never accepts terms for the owner and never
         deletes acceptance history: usable access also needs the owner's acceptance of the current version."""
         streamer_id = _uuid_or_404(streamer_id, "Creator")
-        previous = await self.repo.set_soundboard_eligibility(streamer_id, enabled)
+        previous = await self.repo.set_soundboard_eligibility(streamer_id, enabled, grant)
         if previous is None:
             raise AuthError(404, "Creator not found", "creator_not_found")
         changed = previous != enabled

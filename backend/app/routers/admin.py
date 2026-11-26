@@ -230,9 +230,11 @@ async def reject_application(signup_id: str, body: ApplicationReject, request: R
 
 @router.post("/applications/{signup_id}/reopen")
 async def reopen_application(signup_id: str, body: ApplicationNote, request: Request,
-                             current: CurrentUser = Depends(require_admin)) -> dict:
+                             current: CurrentUser = Depends(require_admin),
+                             stepup: StepUp = Depends(step_up("application.reopen"))) -> dict:
     """rejected -> submitted, with an optional note."""
-    return await application_service(request).reopen(current.user, signup_id, body.note, client_ip(request))
+    grant = stepup.bind(f"application:{uid(signup_id) or signup_id}", {})  # the note only annotates: not bound
+    return await application_service(request).reopen(current.user, signup_id, body.note, client_ip(request), grant)
 
 
 @router.post("/applications/{signup_id}/notes")
@@ -256,9 +258,11 @@ async def invite_application(signup_id: str, request: Request, current: CurrentU
 
 @router.put("/creators/{streamer_id}/soundboard")
 async def set_creator_soundboard(streamer_id: str, body: SoundboardEligibility, request: Request,
-                                 current: CurrentUser = Depends(require_admin)) -> dict:
+                                 current: CurrentUser = Depends(require_admin),
+                                 stepup: StepUp = Depends(step_up("creator.soundboard"))) -> dict:
     """Custom Soundboard eligibility only (D3); the owner must still accept the current terms."""
-    return await admin_service(request).set_soundboard_eligibility(current.user, streamer_id, body.enabled)
+    grant = stepup.bind(f"creator:{uid(streamer_id) or streamer_id}", {"enabled": body.enabled})
+    return await admin_service(request).set_soundboard_eligibility(current.user, streamer_id, body.enabled, grant)
 
 
 @router.get("/payments/health")

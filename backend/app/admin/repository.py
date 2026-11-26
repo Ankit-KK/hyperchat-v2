@@ -270,19 +270,25 @@ class AdminRepository:
             await cur.execute(f"SELECT {_CREATOR_COLS} FROM public.streamers WHERE id = %s", (streamer_id,))
             return "ok", await cur.fetchone()
 
-    async def set_soundboard_eligibility(self, streamer_id: str, enabled: bool) -> bool | None:
+    async def set_soundboard_eligibility(self, streamer_id: str, enabled: bool,
+                                         grant: Grant | None = None) -> bool | None:
         """streamers.soundboard_enabled (D3 eligibility only: terms acceptances are never created or removed here).
-        Returns the previous value, or None for an unknown creator."""
-        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT soundboard_enabled FROM public.streamers WHERE id = %s FOR UPDATE",
-                              (streamer_id,))
-            row = await cur.fetchone()
-            if row is None:
-                return None
-            if row["soundboard_enabled"] != enabled:
-                await cur.execute("UPDATE public.streamers SET soundboard_enabled = %s WHERE id = %s",
-                                  (enabled, streamer_id))
-            return row["soundboard_enabled"]
+        Returns the previous value, or None for an unknown creator. A step-up grant (SEC-A) is consumed first, in the
+        same transaction; an unknown creator rolls the consumption back, so the grant is not spent."""
+        try:
+            async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+                await consume(cur, grant)
+                await cur.execute("SELECT soundboard_enabled FROM public.streamers WHERE id = %s FOR UPDATE",
+                                  (streamer_id,))
+                row = await cur.fetchone()
+                if row is None:
+                    raise UnknownStreamerError
+                if row["soundboard_enabled"] != enabled:
+                    await cur.execute("UPDATE public.streamers SET soundboard_enabled = %s WHERE id = %s",
+                                      (enabled, streamer_id))
+                return row["soundboard_enabled"]
+        except UnknownStreamerError:
+            return None
 
     # ── users ──────────────────────────────────────────────────────────────
     async def list_users(self, *, query: str | None, role: str | None, active: bool | None,
