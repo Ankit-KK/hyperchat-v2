@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: { default: "HyperChat", template: "%s | HyperChat" },
-  description: "Interactive donations and livestream alerts for creators.",
+  description: "Live viewer interactions and stream alerts for creators.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

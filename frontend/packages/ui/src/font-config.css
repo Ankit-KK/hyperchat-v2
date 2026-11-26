@@ -1,0 +1,10 @@
+/* Change only the src path to switch the display font in both apps (the website's font-config.css pattern).
+   The file is the website's FastelarDemoRegular-lx4oV.ttf (hyperchat-frontend 8080e5b0b089), used under the
+   owner-accepted licence risk R5 (frontend/README.md). Keep the family alias unchanged; headings use it. */
+@font-face {
+  font-family: "HyperChat Display";
+  src: url("./fonts/FastelarDemoRegular-lx4oV.ttf");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
