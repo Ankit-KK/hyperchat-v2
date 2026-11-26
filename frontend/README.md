@@ -63,12 +63,13 @@ frontend/
 
 Only `*.env.example` files are committed. Copy one to `.env.local` in the same app for a local run.
 
-| App        | Variable                   | Meaning                                                                                                                                                  |
-| ---------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| web, admin | `NEXT_PUBLIC_API_BASE_URL` | API base URL, inlined at build time. Default and every non-production value: `https://api.quicktestspace.site`                                           |
-| web        | `MARKETING_ORIGIN`         | the marketing website's deployment, an https origin, read at build time. Required when `VERCEL_ENV=production`; unset elsewhere: `http://localhost:5174` |
-| web        | `WEB_HOST_MAP`             | optional `host=zone,...` (zones `public`, `auth`, `dashboard`, `overlay`); unset uses the built-in map below                                             |
-| admin      | `ADMIN_HOSTS`              | optional comma-separated hosts the admin app answers on; unset uses the built-in list below                                                              |
+| App        | Variable                   | Meaning                                                                                                                                                                 |
+| ---------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| web, admin | `NEXT_PUBLIC_API_BASE_URL` | API base URL, inlined at build time. Default and every non-production value: `https://api.quicktestspace.site`                                                          |
+| web        | `MARKETING_ORIGIN`         | the marketing website's deployment, an https origin, read at build time. Required when `VERCEL_ENV=production`; unset elsewhere: `http://localhost:5174`                |
+| web        | `HYPERCHAT_MEDIA_BASE_URL` | the R2 public base URL (https). The share card (opengraph-image) fetches a profile picture only from under it; unset: no picture. Required when `VERCEL_ENV=production` |
+| web        | `WEB_HOST_MAP`             | optional `host=zone,...` (zones `public`, `auth`, `dashboard`, `overlay`); unset uses the built-in map below                                                            |
+| admin      | `ADMIN_HOSTS`              | optional comma-separated hosts the admin app answers on; unset uses the built-in list below                                                                             |
 
 ## Hosts
 

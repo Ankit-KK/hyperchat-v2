@@ -10,6 +10,12 @@ if (
 ) {
   throw new Error(`NEXT_PUBLIC_API_BASE_URL names ${PRODUCTION_API} outside the production environment`);
 }
+// Security audit 2026-11-26: the production deployment needs its API (no DEV default) and media base (share card).
+if (process.env.VERCEL_ENV === "production") {
+  for (const name of ["NEXT_PUBLIC_API_BASE_URL", "HYPERCHAT_MEDIA_BASE_URL"]) {
+    if (!process.env[name]) throw new Error(`${name} is required in the production deployment`);
+  }
+}
 
 // Build time: the marketing website's deployment that serves the apex allow-list (lib/marketing.ts).
 const MARKETING_ORIGIN = marketingOrigin(process.env.MARKETING_ORIGIN, process.env.VERCEL_ENV);

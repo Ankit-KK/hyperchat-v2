@@ -1,5 +1,5 @@
 import { ImageResponse } from "next/og";
-import { accentColor, imageSrc, loadCreator } from "./creator";
+import { accentColor, loadCreator, ogImageSrc } from "./creator";
 
 export const alt = "Support this creator on HyperChat";
 export const size = { width: 1200, height: 630 };
@@ -10,8 +10,8 @@ export default async function Image({ params }: { params: Promise<{ slug: string
   const creator = await loadCreator((await params).slug);
   const color = accentColor(creator.brand_color);
   const accent = color.startsWith("#") ? color : "#b8702f"; // next/og has no CSS variables
-  // next/og fetches the picture itself, with its own SSRF guard (no private or local addresses).
-  const src = imageSrc(creator.brand_logo_url);
+  // next/og fetches the picture itself: only from the platform media base (ogImageSrc).
+  const src = ogImageSrc(creator.brand_logo_url);
   return new ImageResponse(
     <div
       style={{

@@ -116,6 +116,12 @@ def rows(slug: str) -> list[dict]:
         return [dict(zip(names, r)) for r in cur.fetchall()]
 
 
+def stored(slug: str, slot_id: str) -> dict:
+    """The keys a slot serves: sealed copies, never the upload ticket's keys (NV-7)."""
+    row = next(r for r in rows(slug) if r["id"] == slot_id)
+    return {"audio_key": row["audio_key"], "image_key": row["image_key"]}
+
+
 def custom_row(slug: str, *, order=None, visible=False, audio_key=None, audio_url=None, image_key=None,
                image_url=None, swappable=None) -> str:
     with db() as conn:
@@ -378,14 +384,34 @@ def test_create_custom_sound(sb):
     r = sb.post(f"{S}/authtest-sb-create/soundboard/slots", headers=h, json={"display_name": " Horn ", **keys})
     assert r.status_code == 201 and set(r.json()) == {"slot_id"}
     slot = next(s for s in board(sb, "authtest-sb-create")["hidden"] if s["id"] == r.json()["slot_id"])
+    served = stored("authtest-sb-create", r.json()["slot_id"])
     assert slot | {"id": None} == {
         "id": None, "source": "custom", "is_visible": False, "order_index": None, "is_locked": False,
         "swappable_index": None, "last_swapped_at": None, "display_name": "Horn",
-        "audio_url": f"{BASE}/{keys['audio_key']}", "audio_duration_s": 3.0, "image_url": f"{BASE}/{keys['image_key']}",
-        "image_type": "png", "default_order_index": None}
+        "audio_url": f"{BASE}/{served['audio_key']}", "audio_duration_s": 3.0,
+        "image_url": f"{BASE}/{served['image_key']}", "image_type": "png", "default_order_index": None}
+    # NV-7: the slot serves sealed copies; the ticket objects are gone, so reusing a ticket finds nothing
+    assert all(served[k] != keys[k] and keys[k] not in sb.store.objects for k in keys)
     again = sb.post(f"{S}/authtest-sb-create/soundboard/slots", headers=h, json={"display_name": "Dup", **keys})
-    assert (again.status_code, again.json()) == (422, {"error": "This upload was already used"})
-    assert keys["audio_key"] in sb.store.objects and keys["image_key"] in sb.store.objects  # in use: never deleted
+    assert (again.status_code, again.json()) == (422, {"error": "Uploaded file not found"})
+    dup = sb.post(f"{S}/authtest-sb-create/soundboard/slots", headers=h, json={"display_name": "Dup", **served})
+    assert (dup.status_code, dup.json()) == (422, {"error": "This upload was already used"})
+    assert all(k in sb.store.objects for k in served.values())  # in use: never deleted
+
+
+def test_a_confirmed_sound_cannot_be_overwritten_through_its_upload_url(sb):
+    """NV-7: the presigned PUT stays valid for its TTL after confirmation; replaying it changes nothing served."""
+    slug = "authtest-sb-seal"
+    _, h = creator(sb, slug)
+    keys = pair(sb, h, slug, seconds=2.0)
+    slot = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "Horn", **keys}).json()["slot_id"]
+    served = stored(slug, slot)
+    before = {k: sb.store.objects[v].data for k, v in served.items()}
+    ticket = sb.store.presigned[keys["audio_key"]]
+    unchecked = b"\x00" * ticket.content_length  # same size and type, so the signature still matches
+    assert sb.store.client_put(keys["audio_key"], unchecked, ticket.content_type) == 200
+    assert {k: sb.store.objects[v].data for k, v in served.items()} == before
+    assert stored(slug, slot) == served and keys["audio_key"] not in served.values()
 
 
 # ── confirmation of uploaded objects ───────────────────────────────────────────
@@ -473,6 +499,7 @@ def test_swapping_an_existing_custom_sound_replaces_its_files(sb):
     board(sb, slug)
     first = pair(sb, h, slug)
     slot = sb.put(f"{S}/{slug}/soundboard/swappable/1", headers=h, json={"display_name": "One", **first}).json()["slot_id"]
+    first = stored(slug, slot)
     with db() as conn:
         conn.execute("UPDATE public.soundboard_swap_log SET swapped_at = now() - interval '25 hours' "
                      "WHERE streamer_slug = %s", (slug,))
@@ -480,7 +507,7 @@ def test_swapping_an_existing_custom_sound_replaces_its_files(sb):
     r = sb.put(f"{S}/{slug}/soundboard/swappable/1", headers=h, json={"display_name": "Two", **second})
     assert r.status_code == 200 and r.json()["slot_id"] == slot and r.json()["swaps_used"] == 2
     assert first["audio_key"] not in sb.store.objects and first["image_key"] not in sb.store.objects
-    assert second["audio_key"] in sb.store.objects
+    assert stored(slug, slot)["audio_key"] in sb.store.objects
     mine = next(s for s in board(sb, slug)["active"] if s["id"] == slot)
     assert mine["display_name"] == "Two" and mine["audio_duration_s"] == pytest.approx(5.0, abs=0.03)  # 26 ms frames
 
@@ -538,12 +565,15 @@ def test_replace_audio_and_image(sb):
     plat = board(sb, slug)["active"][1]["id"]
     keys = pair(sb, h, slug)
     slot = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "C", **keys}).json()["slot_id"]
+    keys = stored(slug, slot)
     new_audio = upload(sb, h, slug, "audio", m.mp3(6))
     r = sb.patch(f"{S}/{slug}/soundboard/slots/{slot}/audio", headers=h, json={"audio_key": new_audio})
     assert (r.status_code, r.json()) == (200, {"result": "replaced"})
+    new_audio = stored(slug, slot)["audio_key"]
     assert keys["audio_key"] not in sb.store.objects and new_audio in sb.store.objects
     new_image = upload(sb, h, slug, "image", GIF, ct="image/gif")
     assert sb.patch(f"{S}/{slug}/soundboard/slots/{slot}/image", headers=h, json={"image_key": new_image}).status_code == 200
+    new_image = stored(slug, slot)["image_key"]
     custom = next(s for s in board(sb, slug)["hidden"] if s["id"] == slot)
     assert (custom["audio_url"], custom["image_type"]) == (f"{BASE}/{new_audio}", "gif")
     assert custom["audio_duration_s"] == pytest.approx(6.0, abs=0.03)
@@ -551,7 +581,9 @@ def test_replace_audio_and_image(sb):
     # an unlocked platform sound gets an override; its platform hypersound is never deleted
     override = upload(sb, h, slug, "audio", m.mp3(1))
     assert sb.patch(f"{S}/{slug}/soundboard/slots/{plat}/audio", headers=h, json={"audio_key": override}).status_code == 200
-    assert next(s for s in board(sb, slug)["active"] if s["id"] == plat)["audio_url"] == f"{BASE}/{override}"
+    url = next(s for s in board(sb, slug)["active"] if s["id"] == plat)["audio_url"]
+    assert url.startswith(f"{BASE}/soundboards/{slug}/") and url != f"{BASE}/{override}"  # a sealed copy (NV-7)
+    assert url.removeprefix(f"{BASE}/") in sb.store.objects and override not in sb.store.objects
     in_use = sb.patch(f"{S}/{slug}/soundboard/slots/{plat}/image", headers=h, json={"image_key": new_image})
     assert (in_use.status_code, in_use.json()) == (422, {"error": "This upload was already used"})
     assert new_image in sb.store.objects
@@ -582,6 +614,8 @@ def test_delete_custom_sound_and_its_files(sb):
     plat = board(sb, slug)["active"][0]["id"]
     keys = pair(sb, h, slug)
     slot = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "C", **keys}).json()["slot_id"]
+    keys = stored(slug, slot)
+    sb.store.deleted.clear()  # the ticket objects were dropped when they were sealed (NV-7)
     r = sb.delete(f"{S}/{slug}/soundboard/slots/{slot}", headers=h)
     assert (r.status_code, r.json()) == (200, {"result": "removed"})
     assert slot not in {r["id"] for r in rows(slug)}
@@ -693,24 +727,29 @@ def test_concurrent_swaps_of_one_position_are_serialized(sb):
 
 
 def test_losing_a_race_for_an_upload_never_deletes_the_winners_files(sb):
-    """Two requests confirm the same keys: the loser passes the pre-check (simulated) and then meets the
-    in-transaction check; its failure cleanup must not delete files the winner's slot now uses."""
+    """A request confirms keys the winner's slot started using after its pre-check ran (simulated). NV-7: the
+    loser seals copies of its own, and dropping the keys it confirmed must re-check use, so the winner's files
+    stay."""
     slug = "authtest-sb-keyrace"
     _, h = creator(sb, slug)
     keys = pair(sb, h, slug)
-    assert sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "Win", **keys}).status_code == 201
+    win = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "Win", **keys})
+    assert win.status_code == 201
+    keys = stored(slug, win.json()["slot_id"])
+    sb.store.deleted.clear()
     repo = sb.app_state.soundboard.repo
-    real, calls = repo.keys_in_use, {"n": 0}
+    real, seen = repo.keys_in_use, set()
 
-    async def precheck_misses(k):  # the two confirm pre-checks ran before the winner committed
-        calls["n"] += 1
-        return False if calls["n"] <= 2 else await real(k)
+    async def precheck_misses(k):  # each key's confirm pre-check ran before the winner committed
+        first = tuple(k) not in seen
+        seen.add(tuple(k))
+        return False if first else await real(k)
     repo.keys_in_use = precheck_misses
     try:
         r = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "Lose", **keys})
     finally:
         del repo.keys_in_use
-    assert (r.status_code, r.json()) == (422, {"error": "This upload was already used"})
+    assert r.status_code == 201 and not set(stored(slug, r.json()["slot_id"]).values()) & set(keys.values())
     assert sb.store.deleted == [] and all(k in sb.store.objects for k in keys.values())
 
 

@@ -18,6 +18,7 @@ CHECK_NAMES = {
     "integration": "Database + integration tests (PostgreSQL 17)",
     "postgres15": "PostgreSQL 15 compatibility (migrations + permissions)",
     "frontend": "Frontend (lint, typecheck, tests, build, guards)",
+    "dependency-audit": "Dependency audit (pip-audit + pnpm audit)",
 }
 
 
@@ -45,6 +46,8 @@ def test_check_names_are_stable_and_every_suite_still_runs():
         assert WORKFLOW["jobs"][job]["env"]["HYPERCHAT_TEST_VERIFY_ADMIN"] == \
             "host=localhost port=5432 user=postgres dbname=postgres"
     assert "nginx_ratelimit_check.sh" in str(WORKFLOW["jobs"]["deploy-config"]["steps"])
+    audit = str(WORKFLOW["jobs"]["dependency-audit"]["steps"])  # security audit 2026-11-26
+    assert "pip-audit --no-deps --disable-pip" in audit and "pnpm audit --audit-level high" in audit
 
 
 def test_the_integration_job_fails_when_database_tests_are_skipped():  # audit T-8

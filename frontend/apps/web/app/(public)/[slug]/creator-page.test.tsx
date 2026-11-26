@@ -16,7 +16,7 @@ vi.mock("../../../lib/api", () => ({
 
 const { default: CreatorPage, generateMetadata } = await import("./page");
 const { CreatorView } = await import("./creator-view");
-const { accentColor, imageSrc } = await import("./creator");
+const { accentColor, imageSrc, ogImageSrc } = await import("./creator");
 
 const creator: Creator = {
   slug: "tsukii",
@@ -190,6 +190,25 @@ describe("helpers", () => {
     ]) {
       expect(imageSrc(bad)).toBeNull();
     }
+  });
+
+  it("lets the share card fetch only pictures under the media base", () => {
+    const base = "https://media.example";
+    expect(ogImageSrc(`${base}/creator-assets/u/profile/a.webp`, base)).toBe(
+      `${base}/creator-assets/u/profile/a.webp`,
+    );
+    expect(ogImageSrc(`${base}/x.webp`, `${base}/`)).toBe(`${base}/x.webp`);
+    for (const bad of [
+      "https://other.example/x.webp",
+      "https://media.example.evil.test/x.webp",
+      "https://media.example@evil.test/x.webp",
+      "http://media.example/x.webp",
+      null,
+    ]) {
+      expect(ogImageSrc(bad, base)).toBeNull();
+    }
+    expect(ogImageSrc(`${base}/x.webp`, undefined)).toBeNull(); // unset: no fetch at all
+    expect(ogImageSrc(`${base}/x.webp`, "http://media.example")).toBeNull();
   });
 
   it("uses the creator colour only when it is a hex colour near the palette, else copper", () => {

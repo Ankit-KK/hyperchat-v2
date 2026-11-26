@@ -21,3 +21,18 @@ def mp3(seconds: float, kbps: int = 128, *, id3: bool = False) -> bytes:
 def vbr_trick(seconds: float) -> bytes:
     """One 320 kbps frame, then 32 kbps frames: mutagen alone measures ~10x too short."""
     return frame(320) + frame(32) * round(seconds / FRAME_SECONDS)
+
+
+def synchsafe(n: int) -> bytes:
+    return bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])
+
+
+def id3_frame(name: bytes, body: bytes, *, flags: int = 0, version: int = 4) -> bytes:
+    """One ID3v2.3/2.4 frame (v2.4 sizes are synchsafe, v2.3 sizes plain)."""
+    size = synchsafe(len(body)) if version == 4 else len(body).to_bytes(4, "big")
+    return name + size + flags.to_bytes(2, "big") + body
+
+
+def id3_tag(frames: bytes, *, version: int = 4, flags: int = 0, padding: int = 16) -> bytes:
+    body = frames + b"\x00" * padding
+    return b"ID3" + bytes([version, 0, flags]) + synchsafe(len(body)) + body

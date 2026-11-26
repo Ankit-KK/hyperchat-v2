@@ -262,11 +262,25 @@ class SoundboardService:
             if info.duration_s > rules.AUDIO_MAX_SECONDS + rules.AUDIO_DURATION_TOLERANCE_S:
                 await self._discard(slug, [key])
                 raise ApiError(422, f"Sound is longer than {rules.AUDIO_MAX_SECONDS:g} seconds", "soundboard_too_long")
-            return Confirmed(key, store.public_url(key), duration_s=round(min(info.duration_s, 999.99), 2))
+            sealed = await self._seal(slug, key, ext, data)
+            return Confirmed(sealed, store.public_url(sealed), duration_s=round(min(info.duration_s, 999.99), 2))
         if looks_like_video(data) or sniff_image(data) != rules.STORED_TYPE[ext]:
             await self._discard(slug, [key])
             raise ApiError(422, "Image content does not match its type", "soundboard_image_mismatch")
-        return Confirmed(key, store.public_url(key), image_type=ext)
+        sealed = await self._seal(slug, key, ext, data)
+        return Confirmed(sealed, store.public_url(sealed), image_type=ext)
+
+    async def _seal(self, slug: str, key: str, ext: str, data: bytes) -> str:
+        """Security audit 2026-11-26 NV-7: an upload ticket's PUT URL stays valid for its whole TTL, so the creator
+        could overwrite a confirmed object with bytes that were never checked. Store exactly the validated bytes
+        under a fresh key that no PUT URL was ever issued for, then drop the ticket's object."""
+        sealed = rules.new_key(slug, ext)
+        try:
+            await self._store().put_object(sealed, data, content_type=rules.STORED_TYPE[ext])
+        except StorageError:
+            raise ApiError(502, STORAGE_FAILED, "storage_failed") from None
+        await self._discard(slug, [key])
+        return sealed
 
     async def _confirm_pair(self, access: StreamerAccess, body: SoundRequest) -> dict:
         audio = await self._confirm(access, body.audio_key, "audio")  # .mp3 keys only, so never the image key
