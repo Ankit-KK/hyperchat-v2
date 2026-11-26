@@ -92,8 +92,10 @@ stops the loop.
   and `accept_invite`). It refuses (nothing written) unless the application is `approved`, its creator is unclaimed and
   no account has its address. It takes the address and the creator from the locked application, never from the
   caller, and caps the expiry at 7 days. Automatic calls (actor NULL) are also refused while an earlier invitation is
-  unrevoked and unaccepted (open, or expired after delivery: Q4's "no automatic resend after the expiry"), after any
-  manual invitation (`not_due`), and after 5 automatic ones (`attempts_exhausted`, Q4). Manual calls name an active
+  unrevoked and unaccepted (open, or expired after delivery), when an earlier automatic attempt has no
+  `auto:failed:` note (Q4's "no automatic resend after the expiry", which therefore holds even after the 30-day
+  cleanup deleted the expired row: the events are append-only), after any manual invitation (`not_due`), and after 5
+  automatic ones (`attempts_exhausted`, Q4). Manual calls name an active
   administrator. A transaction that consumed a step-up grant is refused (`grant_presented`): one grant, one action.
 - **The guard** needs no grant only when `session_user` is `hyperchat_lifecycle`, the row's token hash is the one the
   function announced for this transaction (`hyperchat.onboarding_invite`), the address is exactly the approved

@@ -17,8 +17,9 @@ the automatic invitation (app.onboarding.auto_invite) has no administrator at al
     never from the caller, caps the expiry at 7 days, revokes the open links, inserts the invitation, points the
     application at it and writes the 'invite' event (note 'auto' when automatic). Automatic calls (actor NULL) are
     also refused while an earlier invitation of the application is still unrevoked and unaccepted (open, or expired
-    after delivery: Q4, no automatic resend after the expiry), after a manual invitation, and after 5 automatic ones
-    (Q4). A manual call names an active administrator (consistency; the role is the authority). A transaction that
+    after delivery), when an earlier automatic attempt has no recorded failure (Q4: a delivered link is never followed
+    automatically, even after the cleanup deleted its row; application_events is append-only), after a manual
+    invitation, and after 5 automatic ones (Q4). A manual call names an active administrator (consistency; the role is the authority). A transaction that
     consumed a step-up grant is refused (one grant, one action): the granted path stays ApplicationRepository._issue.
   * stepup_guard_user_invites, re-created from 0027's text with exactly one change (rendered and substituted below,
     asserted to match once): an application invitation needs no grant when, and only when, session_user is
@@ -88,7 +89,14 @@ def upgrade() -> None:
                     EXISTS (SELECT 1 FROM public.user_invites WHERE signup_id = a.id AND accepted_at IS NULL
                               AND revoked_at IS NULL)  -- open, or expired after delivery (Q4)
                     OR EXISTS (SELECT 1 FROM public.application_events WHERE signup_id = a.id AND action = 'invite'
-                                 AND note IS DISTINCT FROM 'auto')) THEN  -- an administrator took over
+                                 AND note IS DISTINCT FROM 'auto')  -- an administrator took over
+                    -- every earlier automatic attempt must have FAILED (its link revoked by the worker): a delivered
+                    -- one is never followed automatically, even after the cleanup deleted its expired row (Q4).
+                    -- application_events is append-only, so this count outlives the invitation rows.
+                    OR (SELECT count(*) FROM public.application_events WHERE signup_id = a.id AND action = 'invite'
+                        AND note = 'auto')
+                       <> (SELECT count(*) FROM public.application_events WHERE signup_id = a.id AND action = 'note'
+                           AND actor_user_id IS NULL AND starts_with(note, 'auto:failed:'))) THEN
                 o_result := 'not_due'; RETURN;
             END IF;
             IF p_automatic AND (SELECT count(*) FROM public.application_events WHERE signup_id = a.id
@@ -134,11 +142,12 @@ GUARD = "stepup_guard_user_invites"
 _ANCHOR = ("                PERFORM public.stepup_authorize('application.invite', 'application:' || NEW.signup_id, "
            "'{}'::jsonb,\n                                                'user_invites.insert');")
 _EXCEPTION = """\
-                IF NOT (session_user = 'hyperchat_lifecycle'  -- 0038: onboarding_issue_invite's own insert
-                        AND NEW.token_hash = current_setting('hyperchat.onboarding_invite', true)
-                        AND NEW.email::text = (SELECT a.email FROM public.user_signups a WHERE a.id = NEW.signup_id)
-                        AND NOT EXISTS (SELECT 1 FROM public.stepup_grants
-                                        WHERE consumed_txid = pg_current_xact_id_if_assigned())) THEN
+                IF (session_user = 'hyperchat_lifecycle'  -- 0038: onboarding_issue_invite's own insert
+                    AND NEW.token_hash = current_setting('hyperchat.onboarding_invite', true)
+                    AND NEW.email::text = (SELECT a.email FROM public.user_signups a WHERE a.id = NEW.signup_id)
+                    AND NOT EXISTS (SELECT 1 FROM public.stepup_grants
+                                    WHERE consumed_txid = pg_current_xact_id_if_assigned())) IS NOT TRUE THEN
+                    -- (IS NOT TRUE: an unset announcement is NULL, and NULL never opens the exception)
                     PERFORM public.stepup_authorize('application.invite', 'application:' || NEW.signup_id, '{}'::jsonb,
                                                     'user_invites.insert');
                 END IF;"""

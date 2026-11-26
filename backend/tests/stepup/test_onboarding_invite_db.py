@@ -100,24 +100,35 @@ def test_refusals_change_nothing(mode):
     assert invites(existing) == []
 
 
-def test_automatic_invitations_follow_q4(mode):
-    """No second automatic link while one is unrevoked and unaccepted (open, or expired after delivery: no automatic
-    resend after the 7-day expiry); a failed send revokes it, and then a retry may follow; 5 attempts at most."""
-    sid, _ = application("s3-inv-q4")
-    assert issue(sid)["o_result"] == "ok"
-    assert issue(sid)["o_result"] == "not_due"  # open
-    with fixture_db() as conn:
-        conn.execute("UPDATE public.user_invites SET expires_at = now() - interval '1 minute' WHERE signup_id = %s",
-                     (sid,))
-    assert issue(sid)["o_result"] == "not_due"  # delivered and expired: the administrator resends (Q4)
-    for _ in range(4):
-        with fixture_db() as conn:  # the send failed: the worker revoked the link (app.onboarding.auto_invite)
-            conn.execute("UPDATE public.user_invites SET revoked_at = now() WHERE signup_id = %s "
-                         "AND revoked_at IS NULL", (sid,))
-        assert issue(sid)["o_result"] == "ok"
-    with fixture_db() as conn:
+def failed_send(sid: str) -> None:
+    """What the worker does after a failed email (ApplicationRepository.auto_outcome): revoke the link, note it."""
+    with db() as conn, conn.transaction():
         conn.execute("UPDATE public.user_invites SET revoked_at = now() WHERE signup_id = %s AND revoked_at IS NULL",
                      (sid,))
+        conn.execute("INSERT INTO public.application_events (signup_id, action, note) VALUES "
+                     "(%s, 'note', 'auto:failed:transient')", (sid,))
+
+
+def test_automatic_invitations_follow_q4(mode):
+    """No second automatic link after a delivered one: not while it is open, not after its 7-day expiry, not even
+    after the cleanup deleted its row (the append-only events still show it was not a failure). After a failed send
+    (link revoked, failure noted) a retry may follow; 5 automatic attempts at most."""
+    delivered, _ = application("s3-inv-q4-delivered")
+    assert issue(delivered)["o_result"] == "ok"
+    assert issue(delivered)["o_result"] == "not_due"  # open
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.user_invites SET expires_at = now() - interval '1 minute' WHERE signup_id = %s",
+                     (delivered,))
+    assert issue(delivered)["o_result"] == "not_due"  # delivered and expired: the administrator resends (Q4)
+    with fixture_db() as conn:  # the maintenance cleanup deletes it after 30 days
+        conn.execute("DELETE FROM public.user_invites WHERE signup_id = %s", (delivered,))
+    assert issue(delivered)["o_result"] == "not_due" and invites(delivered) == []
+    sid, _ = application("s3-inv-q4")
+    assert issue(sid)["o_result"] == "ok"
+    for _ in range(4):
+        failed_send(sid)
+        assert issue(sid)["o_result"] == "ok"
+    failed_send(sid)
     assert issue(sid)["o_result"] == "attempts_exhausted"
     assert [e[2] for e in events(sid)].count("auto") == 5
 
