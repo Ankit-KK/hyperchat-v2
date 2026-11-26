@@ -81,3 +81,13 @@ def test_roles_have_no_superpowers():
               AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
         """).fetchall()
     assert rows == []
+
+
+def test_worker_can_read_the_active_obs_tokens_it_publishes_to():
+    """NV-4: the realtime publisher (worker process) reads the creator's valid OBS token hashes to name the per-token
+    overlay channels: the query of app.realtime.payloads.RealtimeRepository.obs_token_hashes."""
+    with _conn("hyperchat_worker") as conn:
+        conn.execute("SELECT token_hash FROM public.obs_tokens WHERE streamer_id = %s AND is_active IS TRUE "
+                     "AND (revoked_at IS NULL OR revoked_at > now()) AND (expires_at IS NULL OR expires_at > now()) "
+                     "ORDER BY token_hash", ("00000000-0000-4000-8000-000000000000",))
+        conn.rollback()

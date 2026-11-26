@@ -9,6 +9,7 @@ import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1123,27 +1124,73 @@ def test_od35v_the_pristine_0035_catalog_is_clean_at_head_0035_and_each_head_rej
     assert as_0035.count("missing") == 2 and "trigger_binding:missing" in as_0035 and as_0035.count("body_drift") == 4
 
 
-def test_od35v_heads_and_pins_follow_the_migration_text():
-    """The 0035 pins are md5 of the rendered prosrc of migration 0035 (as the 0034 ones are of 0034)."""
+VERSIONS_DIR = Path(__file__).resolve().parents[3] / "database" / "migrations" / "versions"
+
+
+class _RecordingOp:
+    """alembic.op for reading a migration's text: execute() records the SQL, every other operation is ignored."""
+
+    def __init__(self):
+        self.statements: list[str] = []
+
+    def execute(self, sql):
+        self.statements.append(str(sql))
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def _migration_objects(path) -> tuple[dict, set]:
+    """({function name: md5 of its rendered prosrc}, {(relation, trigger)}) that a migration's upgrade() creates."""
     import hashlib
     import importlib.util
-    import pathlib
     import re
-    import types
-    versions = pathlib.Path(__file__).resolve().parents[3] / "database" / "migrations" / "versions"
-    spec = importlib.util.spec_from_file_location("_m0035", versions / "0035_payment_accounting_hardening.py")
+    spec = importlib.util.spec_from_file_location("_m" + path.name[:4], path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    statements: list[str] = []
-    module.op = types.SimpleNamespace(execute=statements.append)
+    module.op = op = _RecordingOp()
     module.upgrade()
-    bodies = {}
-    for s in statements:
+    bodies, triggers = {}, set()
+    for s in op.statements:
         m, b = re.search(r"CREATE (?:OR REPLACE )?FUNCTION public\.(\w+)\(", s), re.search(r"\$\$(.*)\$\$", s, re.S)
         if m and b:
             bodies[m.group(1)] = hashlib.md5(b.group(1).encode()).hexdigest()
-    assert bodies == verify.HEAD_DELTAS["0035"]["pins"]
-    assert verify.EXPECTED_HEADS == ("0034", "0035")
+        made = re.findall(r"CREATE (?:OR REPLACE )?(?:CONSTRAINT )?TRIGGER (\w+)\b.*?\bON (?:public\.)?(\w+)", s, re.S)
+        triggers |= {(rel, name) for name, rel in made}
+    return bodies, triggers
+
+
+def test_every_migration_from_0034_is_a_registered_head_in_order():
+    """The head registry: a migration PR that adds a revision must register it in verify.HEAD_DELTAS in the same PR
+    (its I10 delta, or no_payment_delta(why)), or this fails. The newest registered head is the repository's head."""
+    files = sorted(p.name[:4] for p in VERSIONS_DIR.glob("[0-9]*_*.py"))
+    assert list(verify.EXPECTED_HEADS) == [v for v in files if v >= verify.EXPECTED_HEAD]
+    for head, delta in verify.HEAD_DELTAS.items():
+        empty = not (delta["functions"] or delta["pins"] or delta["triggers"])
+        assert delta["why"] and (head == verify.EXPECTED_HEAD or empty == delta["why"].startswith(
+            "no payment-object delta: ")), head
+
+
+@pytest.mark.parametrize("head", [h for h in verify.EXPECTED_HEADS if h > verify.EXPECTED_HEAD])
+def test_each_head_registers_exactly_the_verified_objects_its_migration_text_creates(head):
+    """Every pinned function a later migration creates or replaces carries its md5 pin, every new function it
+    registers exists in its text, and every trigger it creates on a TRIGGER_RELS relation is registered: so a
+    no_payment_delta marker cannot hide a payment-object change. Objects outside I10's scope are ignored."""
+    (path,) = VERSIONS_DIR.glob(f"{head}_*.py")
+    bodies, triggers = _migration_objects(path)
+    delta = verify.HEAD_DELTAS[head]
+    pinned = set(verify.FN_NAMES_ALL)
+    assert {n: md5 for n, md5 in bodies.items() if n in pinned} == delta["pins"], head
+    assert set(delta["functions"]) <= set(bodies) and set(delta["functions"]) <= set(delta["pins"]), head
+    assert {t for t in triggers if t[0] in verify.TRIGGER_RELS} == set(delta["triggers"]), head
+
+
+def test_head_expectations_are_cumulative(monkeypatch):
+    """A later head keeps every earlier head's objects (a registry entry adds to them, never replaces them)."""
+    monkeypatch.setitem(verify.HEAD_DELTAS, "9999", verify.no_payment_delta("test-only head"))
+    assert verify.head_expectations("9999") == verify.head_expectations("0035") != verify.head_expectations("0034")
+    with pytest.raises(KeyError):
+        verify.head_expectations("0000")
 
 
 def test_i10_fails_closed_while_the_baseline_is_unverified(monkeypatch):

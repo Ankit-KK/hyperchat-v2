@@ -3,8 +3,8 @@
 OBS browser sources authenticate with a long random token (x-obs-token header, ?token= or
 body.obs_token). Only its SHA-256 is stored (obs_tokens.token_hash). OBS browser sources (CEF)
 send no Origin header, so "no Origin" is accepted; an Origin that is present must be one of the
-configured browser origins (Settings.browser_origins) or the API's own origin (the Phase 10 OBS player
-page is served by the API itself, so its requests are same-origin).
+overlay tier (Settings.overlay_tier; unset, the configured browser origins) or the API's own origin
+(the Phase 10 OBS player page is served by the API itself, so its requests are same-origin).
 """
 
 from collections.abc import Mapping

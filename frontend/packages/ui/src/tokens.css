@@ -1,25 +1,38 @@
 /*
- * HyperChat design tokens: THE ONE FILE TO REPLACE when the owner's week-1 palette and type decision lands.
- * Everything else (the Tailwind preset in preset.css, every component) reads only these variables, so changing
- * this file re-themes both apps. Keep the variable names; change the values. The colours are neutral placeholders
- * chosen for WCAG AA contrast (foreground on background, primary-foreground on primary, destructive on background).
+ * HyperChat design tokens: the website's palette (owner decision R4, 2026-11-26), mapped as the marketing site
+ * maps it (github.com/Ankit-KK/hyperchat-frontend src/styles.css lines 4-27 at 8080e5b0b089): background charcoal,
+ * foreground ivory, primary copper with charcoal text, border stone, ring copper, muted text #b6ac9f.
+ * preset.css and every component read only these variables; keep the names, change the values.
+ *
+ * WCAG contrast on the background (charcoal #221f1c); tokens.test.ts recomputes every figure from this file:
+ *   foreground ivory           14.07:1  AA text
+ *   muted-foreground #b6ac9f    7.33:1  AA text
+ *   accent sand                10.25:1  AA text
+ *   destructive #e5735f         5.43:1  AA text; charcoal text on it 5.43:1; on the muted surface 4.71:1
+ *   primary copper              4.21:1  AA for large text and UI parts (3:1) only, NOT for body-size text.
+ *     The primary button (charcoal text on copper) is 4.21:1 too: the website's own mapping, kept as decided.
+ *   border stone                4.45:1  UI parts (3:1)
  */
 :root {
   /* Colour */
-  --hc-color-background: #ffffff;
-  --hc-color-foreground: #111827;
-  --hc-color-muted: #f3f4f6;
-  --hc-color-muted-foreground: #4b5563;
-  --hc-color-border: #d1d5db;
-  --hc-color-ring: #2563eb;
-  --hc-color-primary: #111827;
-  --hc-color-primary-foreground: #ffffff;
-  --hc-color-destructive: #b91c1c;
-  --hc-color-destructive-foreground: #ffffff;
-  --hc-color-overlay: rgb(17 24 39 / 0.6);
+  --hc-color-background: #221f1c;
+  --hc-color-foreground: #f3ede2;
+  /* Not from the website (it has no muted surface): charcoal lifted for hover and info panels. */
+  --hc-color-muted: #2e2a26;
+  --hc-color-muted-foreground: #b6ac9f;
+  --hc-color-border: #8c847b;
+  --hc-color-ring: #b8702f;
+  --hc-color-primary: #b8702f;
+  --hc-color-primary-foreground: #221f1c;
+  --hc-color-accent: #d7cbb9;
+  /* Not from the website: a warm terracotta red chosen to sit beside copper and pass AA (above). */
+  --hc-color-destructive: #e5735f;
+  --hc-color-destructive-foreground: #221f1c;
+  --hc-color-overlay: rgb(34 31 28 / 0.75);
 
-  /* Type */
-  --hc-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Type: Inter for body and controls, the display alias (font-config.css) for headings */
+  --hc-font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --hc-font-display: "HyperChat Display", Georgia, serif;
   --hc-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --hc-text-xs: 0.75rem;
   --hc-text-sm: 0.875rem;

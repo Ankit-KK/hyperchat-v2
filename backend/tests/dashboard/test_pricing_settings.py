@@ -1,11 +1,17 @@
 """PAY-14 creator pricing (D-M3b): the validation matrix (pure, no database) and the settings PATCH / public pricing /
-public pricing behaviour against a scratch database."""
+migration 0036 behaviour against a scratch database."""
 
+import asyncio
+
+import psycopg
 import pytest
 
+from app.cli import connection_factory
+from app.core.config import Settings
 from app.core.errors import ApiError
 from app.dashboard import models
 from app.dashboard import validation as v
+from app.dashboard.repository import DashboardRepository
 from tests.integration import (
     DOMAIN,
     ORIGIN,
@@ -217,3 +223,77 @@ def test_linked_account_may_set_prices_strangers_and_anonymous_may_not(app):
     r = linked.patch(url, json=body, headers=csrf_headers(login(linked, "linked" + DOMAIN)))
     assert r.status_code == 200 and r.json()["changed"] == ["message_min_amount"]
     assert _cols(sid)[0] == 500
+
+
+# ── migration 0036: the same bounds in the database, for the runtime roles only (scratch database) ───────────────
+REFUSED_BY_0036 = [
+    "UPDATE public.streamers SET min_text_amount_inr = 39.99 WHERE id = %s",
+    "UPDATE public.streamers SET min_text_amount_inr = 10000.01 WHERE id = %s",
+    "UPDATE public.streamers SET min_voice_amount_inr = 149 WHERE id = %s",
+    "UPDATE public.streamers SET min_voice_amount_inr = 10001 WHERE id = %s",
+    "UPDATE public.streamers SET media_min_amount = 99.99 WHERE id = %s",
+    "UPDATE public.streamers SET media_min_amount = 10001 WHERE id = %s",
+    """UPDATE public.streamers SET message_char_tiers = '[{"min_amount": 0, "max_chars": 49}]' WHERE id = %s""",
+    """UPDATE public.streamers SET message_char_tiers = '[{"min_amount": 0, "max_chars": 501}]' WHERE id = %s""",
+    """UPDATE public.streamers SET message_char_tiers = '[{"min_amount": 10001, "max_chars": 50}]' WHERE id = %s""",
+    """UPDATE public.streamers SET message_char_tiers = '[{"min_amount": "0", "max_chars": 50}]' WHERE id = %s""",
+    """UPDATE public.streamers SET message_char_tiers = '{"min_amount": 0}' WHERE id = %s""",
+    "UPDATE public.streamers SET message_char_tiers = (SELECT jsonb_agg(jsonb_build_object('min_amount', n, "
+    "'max_chars', 50 + n)) FROM generate_series(1, 6) n) WHERE id = %s",
+    "INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) VALUES (%s, 0, 4)",
+    "INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) VALUES (%s, 0, 31)",
+    "INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) VALUES (%s, 10001, 5)",
+    "INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) VALUES (%s, -1, 5)",
+]
+
+
+@requires_db
+@pytest.mark.parametrize("sql", REFUSED_BY_0036)
+def test_database_refuses_out_of_range_values_from_the_runtime_role(env, sql):
+    sid = make_streamer("authtest-db14")
+    with db() as conn, pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(sql, (sid,))
+
+
+@requires_db
+def test_database_accepts_the_boundaries_and_judges_only_changed_values(env):
+    sid = make_streamer("authtest-db14b")
+    with db() as conn:  # every boundary the API accepts is accepted by the database too
+        conn.execute("UPDATE public.streamers SET min_text_amount_inr = 40, min_voice_amount_inr = 150, "
+                     "media_min_amount = 100, message_char_tiers = '[{\"min_amount\": 0, \"max_chars\": 50}, "
+                     "{\"min_amount\": 10000, \"max_chars\": 500}]' WHERE id = %s", (sid,))
+        conn.execute("UPDATE public.streamers SET min_text_amount_inr = 10000, min_voice_amount_inr = 10000, "
+                     "media_min_amount = 10000, message_char_tiers = NULL WHERE id = %s", (sid,))
+        conn.execute("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) "
+                     "SELECT %s, n, 4 + n FROM generate_series(1, 5) n", (sid,))  # 5 active tiers: 5-9 s
+        with pytest.raises(psycopg.errors.CheckViolation):  # a sixth active one is refused
+            conn.execute("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds) "
+                         "VALUES (%s, 10000, 30)", (sid,))
+        conn.execute("INSERT INTO public.streamer_voice_tiers (streamer_id, min_amount_inr, max_duration_seconds, "
+                     "is_active) VALUES (%s, 500, 90, false)", (sid,))  # inactive: never served, not judged ...
+        with pytest.raises(psycopg.errors.CheckViolation):  # ... until it is activated
+            conn.execute("UPDATE public.streamer_voice_tiers SET is_active = true WHERE streamer_id = %s "
+                         "AND min_amount_inr = 500", (sid,))
+    with fixture_db() as conn:  # a legacy creator below today's floors and limits (written by the owner) ...
+        conn.execute("UPDATE public.streamers SET min_text_amount_inr = 10, min_voice_amount_inr = 50, "
+                     "media_min_amount = 20000, message_char_tiers = '[{\"min_amount\": 0, \"max_chars\": 900}]' "
+                     "WHERE id = %s", (sid,))
+    with db() as conn:  # ... is never blocked by the runtime role on an unrelated change or an unchanged value
+        conn.execute("UPDATE public.streamers SET brand_color = '#000000', media_min_amount = media_min_amount, "
+                     "message_char_tiers = message_char_tiers WHERE id = %s", (sid,))
+        with pytest.raises(psycopg.errors.CheckViolation):  # a new value is held to the floor
+            conn.execute("UPDATE public.streamers SET min_voice_amount_inr = 60 WHERE id = %s", (sid,))
+
+
+@requires_db
+def test_a_failed_write_rolls_back_every_part_of_the_patch(env):
+    """The repository below the app rules: migration 0036 refuses a sixth tier, and the minimum written in the same
+    transaction is rolled back with it."""
+    sid = make_streamer("authtest-atomic14", user_id=make_user("owner" + DOMAIN))
+    repo = DashboardRepository(connection_factory(Settings()))
+    asyncio.run(repo.update_settings(sid, {"voice_tiers": _voice((0, 5), (10, 10))}))
+    before = _cols(sid)
+    six = _voice((0, 5), (1, 6), (2, 7), (3, 8), (4, 9), (5, 10))
+    with pytest.raises(psycopg.errors.CheckViolation):
+        asyncio.run(repo.update_settings(sid, {"media_min_amount": 500, "voice_tiers": six}))
+    assert _cols(sid) == before and _tiers(sid) == [(0, 5, True), (10, 10, True)]

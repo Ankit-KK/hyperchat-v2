@@ -27,6 +27,8 @@ SLUG = "ankit"
 VOICE = f"{BASE}/voice-messages/{SLUG}_1800000000000_{'a' * 32}.webm"
 TTS = f"{BASE}/tts-audio/{SID}/{DID}.mp3"
 SILENCE = f"{BASE}/system/silence.mp3"
+TOKEN_HASH = "ab" * 32  # one active OBS token of the creator (NV-4 per-token channels)
+SESSION_ID = "11111111-1111-4111-8111-111111111111"  # one session with dashboard access (NV-4b)
 
 
 def row(**kw):
@@ -159,6 +161,13 @@ class Repo:
 
     async def streamer(self, sid):
         return {"slug": "ankit", "status": "active", "pusher_group": 1} if self.s else None
+
+    async def dashboard_session_ids(self, sid, idle_hours, absolute_hours):  # sessions with access now (NV-4b)
+        self.session_query = (sid, idle_hours, absolute_hours)
+        return getattr(self, "sessions", [SESSION_ID])
+
+    async def obs_token_hashes(self, sid):  # the creator's active OBS tokens (NV-4)
+        return getattr(self, "hashes", [TOKEN_HASH])
 
     async def donation(self, did, sid):
         return self.d

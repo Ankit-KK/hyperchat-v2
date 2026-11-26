@@ -33,7 +33,16 @@ def client_ip(request: Request) -> str | None:
 async def optional_user(request: Request) -> CurrentUser | None:
     svc = auth_service(request)
     resolved = await svc.resolve(request.cookies.get(svc.settings.session_cookie_name))
-    return CurrentUser(user=resolved[1], session=resolved[0]) if resolved else None
+    if not resolved:
+        return None
+    session, user = resolved
+    if user.role == "admin" and svc.settings.admin_tier_enforced:
+        origin = request.headers.get("origin")
+        if origin and origin not in svc.settings.admin_tier:
+            # G1: an administrator's session answers only to the admin host, on every route; any other page sees
+            # "not signed in", so it cannot even learn that an administrator is signed in (PDP v2.0 review §3.2).
+            return None
+    return CurrentUser(user=user, session=session)
 
 
 async def require_user(request: Request) -> CurrentUser:
@@ -41,7 +50,7 @@ async def require_user(request: Request) -> CurrentUser:
     if current is None:
         raise AuthError(401, "Not signed in", "no_session")
     if request.method in UNSAFE_METHODS:
-        enforce_csrf(request, auth_service(request), current.session)
+        enforce_csrf(request, auth_service(request), current.session, admin=current.user.role == "admin")
     return current
 
 
@@ -69,9 +78,11 @@ async def require_admin(request: Request) -> CurrentUser:
     return current
 
 
-def enforce_csrf(request: Request, svc: AuthService, session: Session) -> None:
-    """Cookie-authenticated state changes need an allowlisted Origin AND the session's CSRF token."""
-    if not svc.origin_allowed(request.headers.get("origin")):
+def enforce_csrf(request: Request, svc: AuthService, session: Session, *, admin: bool) -> None:
+    """Cookie-authenticated state changes need an Origin of the caller's tier (an administrator's: the admin tier;
+    everyone else's: the session tier) AND the session's CSRF token."""
+    origin = request.headers.get("origin")
+    if not origin or origin not in (svc.settings.admin_tier if admin else svc.settings.session_tier):
         raise AuthError(403, "Request origin not allowed", "bad_origin")
     presented = request.headers.get("x-csrf-token") or ""
     if not presented or not constant_time_equal(presented, svc.csrf_token(session)):

@@ -1209,6 +1209,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dashboard/streamers/{streamer}/realtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Dashboard Realtime
+         * @description The Pusher config and this session's own dashboard channel. Losing access (logout, revoked or expired session,
+         *     removed link, owner transfer, deactivation, lost admin role or assurance) stops delivery to it at the next event.
+         */
+        get: operations["dashboard_realtime_api_v1_dashboard_streamers__streamer__realtime_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/dashboard/streamers/{streamer}/settings": {
         parameters: {
             query?: never;
@@ -1741,6 +1762,26 @@ export interface paths {
         put?: never;
         /** Create Signup */
         post: operations["create_signup_api_v1_public_signups_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/streamers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Creators
+         * @description E10 (G5): active creators only, ordered by slug; card fields only.
+         */
+        get: operations["creators_api_v1_public_streamers_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2382,6 +2423,17 @@ export interface components {
             /** Reason */
             reason?: string | null;
         };
+        /** DashboardRealtime */
+        DashboardRealtime: {
+            /** Auth Endpoint */
+            auth_endpoint: string;
+            /** Channel */
+            channel: string;
+            /** Cluster */
+            cluster: string;
+            /** Key */
+            key: string;
+        };
         /** DashboardSettings */
         DashboardSettings: {
             /** Alert Box Scale */
@@ -2772,6 +2824,28 @@ export interface components {
             /** Phones */
             phones: string[];
         };
+        /** PublicCreator */
+        PublicCreator: {
+            /** Background Url */
+            background_url: string | null;
+            /** Brand Color */
+            brand_color: string | null;
+            /** Brand Logo Url */
+            brand_logo_url: string | null;
+            /** Name */
+            name: string;
+            /** Slug */
+            slug: string;
+        };
+        /** PublicCreatorPage */
+        PublicCreatorPage: {
+            /** Creators */
+            creators: components["schemas"]["PublicCreator"][];
+            /** Has More */
+            has_more: boolean;
+            /** Next Cursor */
+            next_cursor: string | null;
+        };
         /** PublicStreamer */
         PublicStreamer: {
             /** Background Url */
@@ -2792,6 +2866,22 @@ export interface components {
             soundboard_enabled: boolean;
             /** Tts Enabled */
             tts_enabled: boolean;
+        };
+        /**
+         * PublicUser
+         * @description app.auth.service.public_user: the signed-in account as every frontend sees it.
+         */
+        PublicUser: {
+            /** Email */
+            email: string;
+            /** Id */
+            id: string;
+            /** Role */
+            role: string;
+            /** Streamer Id */
+            streamer_id: string | null;
+            /** Username */
+            username: string | null;
         };
         /** QueueItem */
         QueueItem: {
@@ -2938,6 +3028,15 @@ export interface components {
             last_sync: string;
             /** Streamers Live */
             streamers_live: number;
+        };
+        /**
+         * SignedIn
+         * @description The session bootstrap: who is signed in, plus the CSRF token to send with every write.
+         */
+        SignedIn: {
+            /** Csrf Token */
+            csrf_token: string;
+            user: components["schemas"]["PublicUser"];
         };
         /** SignupRequest */
         SignupRequest: {
@@ -4609,9 +4708,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SignedIn"];
                 };
             };
             /** @description Validation Error */
@@ -4644,9 +4741,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SignedIn"];
                 };
             };
             /** @description Validation Error */
@@ -5008,9 +5103,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SignedIn"];
                 };
             };
         };
@@ -5559,6 +5652,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dashboard_realtime_api_v1_dashboard_streamers__streamer__realtime_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                streamer: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardRealtime"];
                 };
             };
             /** @description Validation Error */
@@ -6454,6 +6578,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    creators_api_v1_public_streamers_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+                q?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicCreatorPage"];
                 };
             };
             /** @description Validation Error */

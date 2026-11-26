@@ -91,6 +91,31 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         run: pnpm build
 
+  dependency-audit:
+    # Security audit 2026-11-26. Known advisories against every pinned dependency, on every PR and main commit.
+    # Blocking, by severity where the data has one: pnpm fails on high or critical (moderate and low are printed),
+    # pip-audit on any known vulnerability (PyPI/OSV advisories carry no severity it can filter on). No resolver
+    # runs (--no-deps over exact pins, no pip), so a result changes only when an advisory is published, never
+    # because of this diff; then fix the pin, or add --ignore-vuln <id> here with the reason.
+    name: Dependency audit (pip-audit + pnpm audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Python (backend/requirements*.txt)
+        run: |
+          pip install --quiet pip-audit==2.9.0
+          pip-audit --no-deps --disable-pip --progress-spinner off -r backend/requirements.txt -r backend/requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Node (frontend/pnpm-lock.yaml; reads the lockfile, installs nothing)
+        working-directory: frontend
+        run: corepack enable && pnpm audit --audit-level high
+
   deploy-config:
     name: Deployment configuration (nginx syntax + rate limits)
     runs-on: ubuntu-24.04

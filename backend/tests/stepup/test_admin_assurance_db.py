@@ -31,7 +31,10 @@ from tests.integration import (
     requires_db,
     target,
 )
-from tests.realtime.test_realtime_db import APP, SECRET
+from app.realtime.channels import dashboard_channel_name, session_tag
+from app.realtime.payloads import RealtimeRepository
+from tests.jobs.test_jobs_db import factory, run
+from tests.realtime.test_realtime_db import APP, SECRET, dash, session_id_of
 from tests.stepup.test_mfa_api import MFA, _api, _verifier, ceremony, enroll
 from tests.stepup.test_stepup_db import REFUSED, guards_off
 from tests.stepup.test_stepup_enforcement_db import set_enforcement
@@ -69,7 +72,8 @@ def browser(api, email: str):
 
 
 def channel(api, b, headers, slug: str):
-    return b.post(PUSHER, data={"socket_id": "1234.5678", "channel_name": f"private-{slug}-dashboard"}, headers=headers)
+    """This browser's own dashboard channel (per session since NV-4b)."""
+    return b.post(PUSHER, data={"socket_id": "1234.5678", "channel_name": dash(b.cookies, slug)}, headers=headers)
 
 
 def reason(r) -> tuple[int, str | None]:
@@ -143,12 +147,14 @@ def test_the_realtime_service_never_signs_for_an_admin_without_an_assurance_chec
     admin_id = make_user("a1-rt-admin" + DOMAIN, role="admin")
     svc, users = api.app_state.realtime, api.app_state.auth.repo
     admin_user, owner_user = (api.portal.call(users.user_by_id, uid) for uid in (admin_id, owner))
+    sess = "33333333-3333-4333-8333-333333333333"  # the session's own channel (NV-4b), so assurance decides
+    named = {"tag": "s" + session_tag(sess), "session_id": sess}
     with pytest.raises(SecurityError) as refused:
-        api.portal.call(svc.authorize_session, admin_user, "1.2", "private-authtest-a1-rt-dashboard", "authtest-a1-rt",
-                        "dashboard")
+        api.portal.call(lambda: svc.authorize_session(admin_user, "1.2", dashboard_channel_name("authtest-a1-rt", sess),
+                                                      "authtest-a1-rt", "dashboard", **named))
     assert (refused.value.status, refused.value.reason) == (403, "assurance_unchecked")
-    assert "auth" in api.portal.call(svc.authorize_session, owner_user, "1.2", "private-authtest-a1-rt-dashboard",
-                                     "authtest-a1-rt", "dashboard")
+    assert "auth" in api.portal.call(lambda: svc.authorize_session(
+        owner_user, "1.2", dashboard_channel_name("authtest-a1-rt", sess), "authtest-a1-rt", "dashboard", **named))
 
 
 def test_an_unclaimed_creator_is_admin_only_and_still_needs_assurance(api):
@@ -172,13 +178,15 @@ def test_in_draft_an_admin_keeps_creator_access_without_a_passkey(api):
 
 
 def test_assurance_that_expired_ends_creator_access_although_the_session_lives_on(api):
-    make_streamer("authtest-a1-expiry", user_id=make_user("a1-exp-owner" + DOMAIN))
+    creator = make_streamer("authtest-a1-expiry", user_id=make_user("a1-exp-owner" + DOMAIN))
     make_user("a1-exp-admin" + DOMAIN, role="admin")
     admin, h = browser(api, "a1-exp-admin" + DOMAIN)
     auth = enroll(api, admin, h, "a1-exp-admin" + DOMAIN)
     ceremony(admin, h, auth, "session.aal2", "session", {})
     set_enforcement("active")
     assert admin.get(f"{DASH}/authtest-a1-expiry/settings").status_code == 200
+    receiving = lambda: run(RealtimeRepository(factory()).dashboard_session_ids(creator, 2, 12))  # noqa: E731
+    assert session_id_of(admin.cookies) in receiving()  # NV-4b: an aal2 admin session is published to
     with fixture_db() as conn:  # assurance never outlives its session (verifier clamp); here it simply runs out
         row = conn.execute("SELECT a.expires_at <= s.absolute_expires_at FROM public.session_assurance a "
                            "JOIN public.sessions s ON s.id = a.session_id JOIN public.users u ON u.id = a.user_id "
@@ -191,6 +199,7 @@ def test_assurance_that_expired_ends_creator_access_although_the_session_lives_o
     assert admin.get(f"{MFA}/status").json()["aal"] == 1  # still signed in ...
     assert reason(admin.get(f"{DASH}/authtest-a1-expiry/settings")) == (403, "mfa_required")  # ... without the access
     assert reason(channel(api, admin, h, "authtest-a1-expiry")) == (403, "mfa_required")
+    assert session_id_of(admin.cookies) not in receiving()  # ... and no longer once its assurance ran out
 
 
 # ── A4 ──────────────────────────────────────────────────────────────────────────

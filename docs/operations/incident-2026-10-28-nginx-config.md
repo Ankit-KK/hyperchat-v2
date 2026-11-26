@@ -74,6 +74,8 @@ The restored versions are the historically deployed ones, chosen from deploy rec
 ## State after the incident
 - **The DEV site, catch-all and snippets** equal `main`.
 - **The production site** is the `6565d09` version. F1/F1-R (no query strings or referrers in the production logs; OBS tokens kept out of the error log) is still **not deployed to production** and needs its own approval.
+  *Update 2026-11-26:* F1/F1-R was installed on production (`b14edf78`); see
+  [nginx-f1-production-install-2026-11-26.md](nginx-f1-production-install-2026-11-26.md).
 
 ## Safeguards (OPS-2; owner-approved as review-only repo tooling on 2026-10-29)
 | # | Safeguard | State |

@@ -4,6 +4,10 @@ A new Next.js application built from scratch against the FastAPI API. No code fr
 frontend is copied here; the legacy app is only a reference for features and behaviour. The architecture is the
 accepted PDP v2.0 Phase 1 review (decided 2026-11-25); this workspace is its Phase 2 foundation.
 
+The marketing website is a separate repository, [hyperchat-frontend](https://github.com/Ankit-KK/hyperchat-frontend)
+(Vite, its own Vercel deployment), and stays that way (owner decision R1, 2026-11-26). The two share the apex host:
+see [Sharing the apex with the marketing website](#sharing-the-apex-with-the-marketing-website).
+
 ## Two rules that never change
 
 - **No Supabase.** The frontend talks only to the HyperChat API: no Supabase client, no direct database access.
@@ -59,25 +63,29 @@ frontend/
 
 Only `*.env.example` files are committed. Copy one to `.env.local` in the same app for a local run.
 
-| App        | Variable                   | Meaning                                                                                                        |
-| ---------- | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| web, admin | `NEXT_PUBLIC_API_BASE_URL` | API base URL, inlined at build time. Default and every non-production value: `https://api.quicktestspace.site` |
-| web        | `WEB_HOST_MAP`             | optional `host=zone,...` (zones `public`, `auth`, `dashboard`, `overlay`); unset uses the built-in map below   |
-| admin      | `ADMIN_HOSTS`              | optional comma-separated hosts the admin app answers on; unset uses the built-in list below                    |
+| App        | Variable                   | Meaning                                                                                                                                                                 |
+| ---------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| web, admin | `NEXT_PUBLIC_API_BASE_URL` | API base URL, inlined at build time. Default and every non-production value: `https://api.quicktestspace.site`                                                          |
+| web        | `MARKETING_ORIGIN`         | the marketing website's deployment, an https origin, read at build time. Required when `VERCEL_ENV=production`; unset elsewhere: `http://localhost:5174`                |
+| web        | `HYPERCHAT_MEDIA_BASE_URL` | the R2 public base URL (https). The share card (opengraph-image) fetches a profile picture only from under it; unset: no picture. Required when `VERCEL_ENV=production` |
+| web        | `WEB_HOST_MAP`             | optional `host=zone,...` (zones `public`, `auth`, `dashboard`, `overlay`); unset uses the built-in map below                                                            |
+| admin      | `ADMIN_HOSTS`              | optional comma-separated hosts the admin app answers on; unset uses the built-in list below                                                                             |
 
 ## Hosts
 
-| Production                  | Development                                 | App     | Zone                                        |
-| --------------------------- | ------------------------------------------- | ------- | ------------------------------------------- |
-| `hyperchat.space`           | `quicktestspace.site` (also `www.`, `app.`) | web     | public: landing and `/{slug}` creator pages |
-| `auth.hyperchat.space`      | `auth.quicktestspace.site`                  | web     | auth                                        |
-| `dashboard.hyperchat.space` | `dashboard.quicktestspace.site`             | web     | dashboard                                   |
-| `overlay.hyperchat.space`   | `overlay.quicktestspace.site`               | web     | overlay (OBS browser sources)               |
-| `admin.hyperchat.space`     | `admin.quicktestspace.site`                 | admin   | admin                                       |
-| `api.` (production)         | `api.quicktestspace.site`                   | FastAPI | not a frontend                              |
+| Production                  | Development                         | App     | Zone                                                                                  |
+| --------------------------- | ----------------------------------- | ------- | ------------------------------------------------------------------------------------- |
+| `hyperchat.space`           | `quicktestspace.site` (also `app.`) | web     | public: `/{slug}` creator pages; the marketing allow-list is forwarded to the website |
+| `www.hyperchat.space`       | `www.quicktestspace.site`           | web     | none: 308 to the apex, path and query kept                                            |
+| `auth.hyperchat.space`      | `auth.quicktestspace.site`          | web     | auth                                                                                  |
+| `dashboard.hyperchat.space` | `dashboard.quicktestspace.site`     | web     | dashboard                                                                             |
+| `overlay.hyperchat.space`   | `overlay.quicktestspace.site`       | web     | overlay (OBS browser sources)                                                         |
+| `admin.hyperchat.space`     | `admin.quicktestspace.site`         | admin   | admin                                                                                 |
+| `api.` (production)         | `api.quicktestspace.site`           | FastAPI | not a frontend                                                                        |
 
 How `apps/web/proxy.ts` routes (Next.js 16 renamed `middleware.ts` to `proxy.ts`):
 
+- A `www.` host is redirected permanently (308) to its https apex before anything else (owner decision R3).
 - The `Host` header picks the zone. Unknown hosts, Vercel preview URLs included, get the public site, sent with
   `X-Robots-Tag: noindex`.
 - The auth, dashboard and overlay zones are rewritten to the internal segments `/auth`, `/dashboard` and `/obs`.
@@ -112,6 +120,69 @@ Other principles: realtime goes through Pusher with private channels authorized 
 to Cloudflare R2 with short-lived grants from the API. Payments use Razorpay Checkout, with orders created and
 verified by the API. There is no contact form (retired, D5). The public layout shows the contact name, email,
 phones and Discord invite from `GET /api/v1/public/config` and hides whatever is empty.
+
+## Route map (apps/web)
+
+| Host (zone)   | Path                          | Served by                                                                             | Indexed                 |
+| ------------- | ----------------------------- | ------------------------------------------------------------------------------------- | ----------------------- |
+| apex (public) | marketing allow-list, `/`     | the marketing website, through the rewrites below                                     | the website's own rules |
+| apex (public) | `/{slug}`                     | `app/(public)/[slug]/page.tsx`: the creator page                                      | yes, active creators    |
+| apex (public) | `/{slug}/opengraph-image`     | `opengraph-image.tsx`: 1200x630 PNG from name, colour and profile picture (`next/og`) | image                   |
+| apex (public) | unknown or inactive `/{slug}` | `[slug]/not-found.tsx`, status 404                                                    | no (noindex)            |
+| apex (public) | `/{slug}` with the API down   | `[slug]/error.tsx`, status 500 ("temporarily unavailable")                            | no (noindex)            |
+| `www.`        | any                           | 308 to the apex                                                                       | no                      |
+| `auth.`       | any                           | `app/(auth)/auth/*`                                                                   | no                      |
+| `dashboard.`  | any                           | `app/(dashboard)/dashboard/*`                                                         | no                      |
+| `overlay.`    | any                           | `app/(overlay)/obs/*`                                                                 | no                      |
+
+The creator page is server-rendered from `GET /api/v1/public/streamers/{slug}`, `/pricing` and `/goal` with the 60 s
+revalidate in `lib/api.ts`. The page still renders per request (the root layout's `force-dynamic`, for the CSP
+nonce), but those fetches stay cached: Next.js only turns `force-dynamic` into no-store for a fetch with no cache
+setting of its own. Checked 2026-11-26 with `next start` against a stub API that counts calls, starting from an
+empty fetch cache. Four views of one creator page and its Open Graph image made one call each to `/public/config`,
+the creator, `/pricing` and `/goal`. After 61 s, two more views made one more call to each. Every view got a
+fresh nonce. Only successful answers are cached. The API
+alone decides which creators exist: it answers 404 for unknown and non-active ones. Pricing and goal are optional;
+if either call fails the page renders without that section. Images load only from absolute https URLs. A legacy
+`/assets/...` path (now the website's bundle folder) or a missing image gets a placeholder.
+
+The creator's colour (`brand_color`) is decoration only (rings, the goal bar, the Open Graph image border), never
+text, and it must stay on the warm palette: `accentColor` in `[slug]/creator.ts` keeps near-greys (chroma under
+15%) and colours within 45° of hue of copper (hue 28°, so 343° to 73°: crimson and reds, oranges, ambers, browns,
+yellows), and uses copper for anything else (pink, purple, blue, teal, green, chartreuse) or a malformed value. "Send an interaction" is disabled until checkout (Phase 7). Metadata is the PDP §16 template with "interactions" in the
+description, canonical `https://hyperchat.space/{slug}`, Open Graph and Twitter card, and the website's Organization
+JSON-LD (Streamheart Private Limited).
+
+An App Router page cannot choose its status code, so "API unreachable" is answered with 500 rather than 503 (owner
+decision 2026-11-26). Checked with `next start`: the server HTML is Next.js's error shell with
+`<meta name="robots" content="noindex">` and only an error digest (no message, stack or API host); the browser then
+renders `[slug]/error.tsx` ("temporarily unavailable", a retry button). That text appears only after hydration, so
+a client without JavaScript gets a blank 500 page.
+
+## Sharing the apex with the marketing website
+
+The `web` app owns `hyperchat.space` (addendum §2.1 mechanism A2, owner decision R2). `apps/web/lib/marketing.ts`
+holds a fixed allow-list, and `next.config.ts` forwards it with external `beforeFiles` rewrites to
+`MARKETING_ORIGIN`. Everything else is this app, and other single-segment paths are creator pages.
+
+| Forwarded               | Paths                                                                                                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| pages                   | `/`, `/features`, `/creators`, `/company`, `/whats-new`, `/demo-signup`, `/viewer-terms`, `/support`, `/privacy-policy`, `/terms-and-conditions`, `/cancellation-refunds` |
+| the website's redirects | `/feature-showcase`, `/about`, `/contact`, `/shipping`                                                                                                                    |
+| files                   | `/favicon.svg`, `/third-party-notices.txt`, `/robots.txt`, `/sitemap.xml`, `/404.html`                                                                                    |
+| folders, with contents  | `/legal-archive`, `/creators`, `/images`, `/intro`, `/licenses`, `/mascot`, `/partners`, `/sculpture`, `/social`, `/assets`                                               |
+
+- Only the public zone forwards. On `auth.`, `dashboard.` and `overlay.` the proxy rewrites first, so `/features`
+  there is that zone's own 404. Matching is case-insensitive, as Next.js applies the rewrites.
+- The proxy sends no nonce CSP for forwarded paths: the website has an inline boot script and sets its own headers.
+  Under `next start` the website's response headers pass through and the proxy's are dropped (checked 2026-11-26,
+  not yet on Vercel), so the website's own `noindex` covers preview hosts.
+- `/robots.txt` and `/sitemap.xml` are the website's for now, so the sitemap lists marketing pages only. Creator
+  pages join it when the public creator list endpoint lands (Phase 4).
+- The creator page answers 404 for any allow-listed name without asking the API. The backend reserves the same
+  names in `RESERVED_SLUGS` (addendum §2.1 rule 1); a new marketing route needs that reservation first.
+- For a local run, start the website's dev server on port 5174, or set `MARKETING_ORIGIN` to a deployment.
+  Without either, forwarded paths fail and creator pages still work.
 
 ## Running locally against the DEV API
 
@@ -152,17 +223,28 @@ declares response models.
 
 ## Changing the look
 
-`packages/ui/src/tokens.css` is the single file to replace with the owner's palette and type decision. It holds
-the colour, type scale, spacing and radius variables. `packages/ui/src/preset.css` maps those variables onto
+`packages/ui/src/tokens.css` holds the website's palette (ivory, charcoal, copper, stone, sand; owner decision R4)
+with each contrast ratio, which `tokens.test.ts` recomputes. Copper on charcoal is 4.21:1, so copper is for large
+text, buttons and the focus ring, not body text. The file also holds the type scale, spacing and radius variables. `packages/ui/src/preset.css` maps those variables onto
 Tailwind's theme, and the components use only Tailwind classes built from them. Keep the variable names and
 change the values.
+
+Fonts are self-hosted, so the CSP keeps `font-src 'self'`. Body text and controls use Inter Variable
+(`@fontsource-variable/inter`, SIL OFL). Headings use the `HyperChat Display` alias declared in
+`packages/ui/src/font-config.css`, whose `src` line is the one-line switch, as on the website.
+
+**Display font licence (owner-accepted risk).** The display face is the website's `FastelarDemoRegular-lx4oV.ttf`,
+copied unchanged (sha256 `c63702f1...effe0b`) from hyperchat-frontend `8080e5b`. No licence or provenance file
+exists for it, and its name says "demo". The owner chose it for both repositories on 2026-11-26 (decision R5) and
+accepted that risk. A written commercial web licence is still recommended before public launch (addendum §4.3). A
+licensed replacement is a change to the `src` line in `font-config.css`.
 
 ## What later phases add
 
 | Phase                     | Adds                                                                                                                                        |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | 3 Subdomains              | auth screens (login, Google, invites, registration, reset), the dashboard session flow, DNS for the dev hosts, backend origin tiers (G1-G4) |
-| 4 Creator pages           | the full `/{slug}` page, metadata and Open Graph images, discovery, sitemap, legacy OBS URL redirects                                       |
+| 4 Creator pages           | discovery, a sitemap with creator pages, legacy OBS URL redirects (the `/{slug}` page, metadata and Open Graph image exist)                 |
 | 5 Onboarding              | invite acceptance, onboarding checklist, KYC, profile and background uploads with crop                                                      |
 | 6 Dashboard               | donations, moderation, settings and pricing, soundboard, OBS tokens, live updates                                                           |
 | 7 Donations and OBS       | donation form, Razorpay Checkout, alerts and goal overlays                                                                                  |

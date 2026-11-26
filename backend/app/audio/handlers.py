@@ -171,7 +171,7 @@ class DonationAudioHandler:
             if limited:
                 return await self._silence(did, limited)
         content = plan.prompt if plan.prompt is not None else self._spoken_message(d, plan)
-        blocked = await self._moderate(d, plan.kind if plan.kind in COMMANDS else "tts", content)
+        blocked = await self._moderate(d, plan.kind if plan.kind in COMMANDS else "tts", content, plan)
         if blocked:
             return await self._silence(did, blocked)
         audio = await call()
@@ -231,8 +231,9 @@ class DonationAudioHandler:
             return "command_rate_limited"
         return "command_in_flight" if in_flight else None
 
-    async def _moderate(self, d: dict, source: str, content: str | None) -> str | None:
-        """None when allowed, else the silent reason. Fails closed: no key or any error blocks."""
+    async def _moderate(self, d: dict, source: str, content: str | None, plan: Plan | None = None) -> str | None:
+        """None when allowed, else the silent reason. Fails closed: no key or any error blocks. Speech must pass
+        on the stored strings and again on the exact spoken name and message."""
         name = tts_text.decode_html_entities(d["donor_name"] or "")
         streamer = d["streamer_name"] or d["streamer_slug"]
         try:
@@ -241,6 +242,10 @@ class DonationAudioHandler:
                 decision = Decision(False, "HIGH_RISK", "probing", "probe_limit")
             else:
                 decision = moderate_for_tts(name, content, streamer)
+                if decision.allowed and plan is not None and plan.kind == "speech":
+                    spoken_name, spoken_msg = tts_text.spoken_parts(
+                        d["donor_name"], d["message"], is_media=plan.is_media, language_boost=d["tts_language_boost"])
+                    decision = moderate_for_tts(spoken_name, spoken_msg or None, streamer)
             if decision.allowed:
                 return None
             if decision.invalid:

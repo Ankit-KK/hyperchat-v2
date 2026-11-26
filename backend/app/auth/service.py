@@ -115,7 +115,8 @@ class AuthService:
         return self.settings.auth_secret.get_secret_value()
 
     def origin_allowed(self, origin: str | None) -> bool:
-        return bool(origin) and origin in self.settings.browser_origins
+        """Pre-session checks (login, invite acceptance): the auth/dashboard hosts and the admin host's own login."""
+        return bool(origin) and origin in self.settings.session_tier | self.settings.admin_tier
 
     def csrf_token(self, session: Session) -> str:
         return csrf_token_for(self.secret, session.id)
@@ -227,7 +228,7 @@ class AuthService:
                     token = new_hex_token(32)
                     await self.repo.create_reset_token(user.id, sha256_hex(token),
                                                        self.settings.reset_token_ttl_minutes)
-                    url = f"{self.settings.frontend_url.rstrip('/')}/reset-password?token={token}"
+                    url = f"{self.settings.auth_link_url}/reset-password?token={token}"
                     await self.sender.send(render("reset-password", user.email, url))
                 security_event("password_reset_requested", level=20, user_id=user.id, client_ip=ip)
             except Exception as exc:  # noqa: BLE001 - background work: log and stop, never propagate
@@ -284,7 +285,7 @@ class AuthService:
         token = new_hex_token(32)
         row = await self.repo.create_invite(email, role, streamer_id, sha256_hex(token), admin.id,
                                             self.settings.invite_ttl_days, grant)
-        url = f"{self.settings.frontend_url.rstrip('/')}/invite?token={token}"
+        url = f"{self.settings.auth_link_url}/invite?token={token}"
         try:
             await self.sender.send(render("invite", email, url))
         except Exception as exc:  # noqa: BLE001 - any provider failure: the class only, never the address or link
@@ -321,6 +322,9 @@ class AuthService:
     async def accept_invite(self, token: str, password: str, username: str | None, ip: str | None,
                             user_agent: str | None) -> tuple[User, IssuedSession]:
         self._check_new_password(password)
+        # Security audit 2026-11-26 NV-2 (F9 pattern): bound per-IP work before Argon2, as reset_password does.
+        if not await self.repo.hit_rate_limit(f"ip:{ip}", "auth:invite-accept", 20, 3600):
+            raise AuthError(429, TOO_MANY, "ip_rate_limited")
         password_hash = await _hash(password)  # Argon2 before any row lock
         session_token, csrf, row = self._new_session(None, ip, user_agent)
         try:

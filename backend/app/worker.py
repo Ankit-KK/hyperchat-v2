@@ -66,7 +66,7 @@ def build_handlers(settings: Settings, connection_factory, store) -> dict:
     handlers["moderator_notify"] = ModeratorNotifyHandler(
         BotRepository(connection_factory), telegram=telegram, discord=discord,
         enabled=settings.bots_enabled and (telegram is not None or discord is not None),
-        recipients=settings.bot_recipients, frontend_url=settings.frontend_url,
+        recipients=settings.bot_recipients, frontend_url=settings.dashboard_link_url,
         public_base=settings.r2_public_base if store is not None else None, creators=settings.bot_creators)
     if store is not None:  # donation audio needs R2 (generated audio and the silence object)
         handlers["donation_audio"] = DonationAudioHandler(
@@ -84,7 +84,7 @@ def build_auto_inviter(settings: Settings, connection_factory) -> AutoInviter | 
         return None
     return AutoInviter(ApplicationRepository(connection_factory), sender_from_settings(settings),
                        Alerts(connection_factory),
-                       frontend_url=settings.frontend_url, ttl_days=settings.invite_ttl_days,
+                       frontend_url=settings.auth_link_url, ttl_days=settings.invite_ttl_days,
                        poll_seconds=settings.auto_invite_poll_seconds)
 
 
@@ -104,7 +104,9 @@ def build_notifier(settings: Settings, connection_factory) -> AlertNotifier:
 def build_publisher(settings: Settings, connection_factory) -> OutboxPublisher:
     silence_url = f"{settings.r2_public_base}/{SILENCE_KEY}" if settings.r2_public_base else None  # Phase 10
     return OutboxPublisher(OutboxQueue(connection_factory),
-                           Renderer(RealtimeRepository(connection_factory), silence_url=silence_url),
+                           Renderer(RealtimeRepository(connection_factory), silence_url=silence_url,
+                                    admin_session_hours=(settings.admin_session_idle_hours,
+                                                         settings.admin_session_absolute_hours)),
                            PusherClient(), PusherApps.from_settings(settings), enabled=settings.realtime_enabled,
                            rate=settings.realtime_publish_rate)
 

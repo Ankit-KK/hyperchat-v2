@@ -1,6 +1,7 @@
 """Read-only SQL for the public API (runs as hyperchat_app). Every query is bounded and indexed:
 
   creator by slug      streamers_streamer_slug_key (unique)                     1 row
+  creator list         streamers_streamer_slug_key, keyset on slug              <= 201 rows
   voice tiers          streamer_voice_tiers_streamer_idx / platform (3 rows)    few rows
   soundboard           streamer_soundboard_slug_visible_order_idx (<=45) + platform (<=44)
   goal progress        donations_streamer_created_idx (streamer_id, created_at)  creator's rows since activation
@@ -24,6 +25,8 @@ _PUBLIC_STREAMER_COLS = f"""id::text AS id, streamer_slug, streamer_name, brand_
     message_char_tiers"""
 
 APPROVED = ("approved", "auto_approved")
+VISIBLE = "status = 'active'"  # D3: the one rule for which creators are public (single lookup and the list)
+_LIST_COLS = "streamer_slug AS slug, streamer_name AS name, brand_logo_url, background_url, brand_color"
 
 
 class PublicRepository:
@@ -38,8 +41,22 @@ class PublicRepository:
     async def active_streamer(self, slug: str) -> dict | None:
         """Only `active` creators are public (D3). The id stays server-side, never in a response."""
         rows = await self._all(f"SELECT {_PUBLIC_STREAMER_COLS} FROM public.streamers "
-                               "WHERE streamer_slug = %s AND status = 'active'", (slug,))
+                               f"WHERE streamer_slug = %s AND {VISIBLE}", (slug,))
         return rows[0] if rows else None
+
+    async def active_streamers(self, limit: int, after: str | None, q: str | None) -> list[dict]:
+        """Active creators ordered by slug, after the keyset position `after`; `q` (lowercase) is a literal prefix of
+        the slug or the lowercased name (starts_with, so '_' and '%' are not wildcards). Fetch limit + 1 to see more."""
+        where, params = [VISIBLE], []
+        if after is not None:
+            where.append("streamer_slug > %s")
+            params.append(after)
+        if q is not None:
+            where.append("(starts_with(streamer_slug, %s) OR starts_with(lower(streamer_name), %s))")
+            params += [q, q]
+        params.append(limit)
+        return await self._all(f"SELECT {_LIST_COLS} FROM public.streamers WHERE {' AND '.join(where)} "
+                               "ORDER BY streamer_slug LIMIT %s", tuple(params))
 
     async def donation_block(self, streamer_id: str) -> str | None:
         """public.creator_donation_block: None when the creator may accept a NEW donation, else the reason code. The
@@ -86,8 +103,8 @@ class PublicRepository:
         return rows[0]
 
     async def showcase_metrics(self) -> dict:
-        rows = await self._all("""
-            SELECT (SELECT count(*) FROM public.streamers WHERE status = 'active') AS streamers_live,
+        rows = await self._all(f"""
+            SELECT (SELECT count(*) FROM public.streamers WHERE {VISIBLE}) AS streamers_live,
                    (SELECT count(*) FROM public.donations
                     WHERE payment_status = 'success' AND moderation_status IN ('approved', 'auto_approved')
                       AND created_at > now() - interval '24 hours') AS alerts_last_24h

@@ -792,6 +792,34 @@
         "title": "CreatorStatusChange",
         "type": "object"
       },
+      "DashboardRealtime": {
+        "properties": {
+          "auth_endpoint": {
+            "title": "Auth Endpoint",
+            "type": "string"
+          },
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "cluster": {
+            "title": "Cluster",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "cluster",
+          "auth_endpoint",
+          "channel"
+        ],
+        "title": "DashboardRealtime",
+        "type": "object"
+      },
       "DashboardSettings": {
         "additionalProperties": false,
         "properties": {
@@ -2085,6 +2113,95 @@
         "title": "PublicContact",
         "type": "object"
       },
+      "PublicCreator": {
+        "additionalProperties": false,
+        "properties": {
+          "background_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Background Url"
+          },
+          "brand_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Color"
+          },
+          "brand_logo_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Logo Url"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "brand_logo_url",
+          "background_url",
+          "brand_color"
+        ],
+        "title": "PublicCreator",
+        "type": "object"
+      },
+      "PublicCreatorPage": {
+        "additionalProperties": false,
+        "properties": {
+          "creators": {
+            "items": {
+              "$ref": "#/components/schemas/PublicCreator"
+            },
+            "title": "Creators",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "creators",
+          "next_cursor",
+          "has_more"
+        ],
+        "title": "PublicCreatorPage",
+        "type": "object"
+      },
       "PublicStreamer": {
         "additionalProperties": false,
         "properties": {
@@ -2165,6 +2282,54 @@
           "soundboard_enabled"
         ],
         "title": "PublicStreamer",
+        "type": "object"
+      },
+      "PublicUser": {
+        "description": "app.auth.service.public_user: the signed-in account as every frontend sees it.",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "streamer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Streamer Id"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "username",
+          "role",
+          "streamer_id"
+        ],
+        "title": "PublicUser",
         "type": "object"
       },
       "QueueItem": {
@@ -2779,6 +2944,24 @@
           "last_sync"
         ],
         "title": "ShowcaseMetrics",
+        "type": "object"
+      },
+      "SignedIn": {
+        "description": "The session bootstrap: who is signed in, plus the CSRF token to send with every write.",
+        "properties": {
+          "csrf_token": {
+            "title": "Csrf Token",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/PublicUser"
+          }
+        },
+        "required": [
+          "user",
+          "csrf_token"
+        ],
+        "title": "SignedIn",
         "type": "object"
       },
       "SignupRequest": {
@@ -5823,9 +6006,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Accept Invite Api V1 Auth Invites Accept Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SignedIn"
                 }
               }
             },
@@ -5866,9 +6047,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Login Api V1 Auth Login Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SignedIn"
                 }
               }
             },
@@ -6299,9 +6478,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Session Api V1 Auth Session Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SignedIn"
                 }
               }
             },
@@ -7207,6 +7384,49 @@
         "summary": "Revoke Obs Token",
         "tags": [
           "dashboard"
+        ]
+      }
+    },
+    "/api/v1/dashboard/streamers/{streamer}/realtime": {
+      "get": {
+        "description": "The Pusher config and this session's own dashboard channel. Losing access (logout, revoked or expired session,\nremoved link, owner transfer, deactivation, lost admin role or assurance) stops delivery to it at the next event.",
+        "operationId": "dashboard_realtime_api_v1_dashboard_streamers__streamer__realtime_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "streamer",
+            "required": true,
+            "schema": {
+              "title": "Streamer",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardRealtime"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dashboard Realtime",
+        "tags": [
+          "realtime"
         ]
       }
     },
@@ -8358,6 +8578,86 @@
           }
         },
         "summary": "Create Signup",
+        "tags": [
+          "public"
+        ]
+      }
+    },
+    "/api/v1/public/streamers": {
+      "get": {
+        "description": "E10 (G5): active creators only, ordered by slug; card fields only.",
+        "operationId": "creators_api_v1_public_streamers_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicCreatorPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Creators",
         "tags": [
           "public"
         ]

@@ -230,7 +230,7 @@ def vdb(verify_db) -> DB:
 
 
 MAX_SECONDS = 600  # test budget only (owner item 8: the production budget is pending)
-HEAD = "0035"  # the migration head CI tests at (OD-35-V: the verifier accepts 0034 and 0035)
+HEAD = verify.EXPECTED_HEADS[-1]  # the head CI tests at: the newest registered head (the registry test pins it)
 
 
 def found(report, invariant=None, cls=None, problem=None) -> list[dict]:
@@ -343,7 +343,7 @@ def test_verify_refuses_a_connection_with_an_open_transaction_or_a_bad_scope(vdb
 
 def test_6a2_refuses_a_head_other_than_0034(vdb):
     with vdb.owner() as c:
-        c.execute("UPDATE public.alembic_version SET version_num = '0036'")
+        c.execute("UPDATE public.alembic_version SET version_num = '9999'")  # no such revision
     report = vdb.verify()
     assert report["status"] == "refused" and "0034" in report["reason"]
 

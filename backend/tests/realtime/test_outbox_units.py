@@ -16,6 +16,7 @@ import pytest
 
 from app.realtime import outbox
 from app.realtime.outbox import Event
+from app.realtime.channels import dashboard_channel_name
 from app.realtime.payloads import SIZE_LIMIT, Renderer, Skip
 from app.realtime.publisher import OutboxPublisher, RateLimiter
 from app.realtime.pusher import PusherApp, PusherApps, PusherClient
@@ -23,6 +24,8 @@ from app.realtime.pusher import PusherApp, PusherApps, PusherClient
 SID, DID = str(uuid.uuid4()), str(uuid.uuid4())
 SECRET = "test-only-pusher-secret-42"
 APP = PusherApp(1, "123", "key123", SECRET, "ap2")
+TOKEN_HASH = "ab" * 32  # one active OBS token of the creator (NV-4 per-token channels)
+SESSION_ID = "11111111-1111-4111-8111-111111111111"  # one session with dashboard access (NV-4b)
 DONOR, MESSAGE = "Ravi Donor", "a very private donor message 9q"
 
 
@@ -137,6 +140,13 @@ class FakeRepo:
 
     async def streamer(self, sid):
         return self.s
+
+    async def dashboard_session_ids(self, sid, idle_hours, absolute_hours):  # sessions with access now (NV-4b)
+        self.session_query = (sid, idle_hours, absolute_hours)
+        return getattr(self, "sessions", [SESSION_ID])
+
+    async def obs_token_hashes(self, sid):  # the creator's active OBS tokens (NV-4)
+        return getattr(self, "hashes", [TOKEN_HASH])
 
     async def donation(self, did, sid):
         return self.d
@@ -472,3 +482,47 @@ def test_rate_limiter_spaces_sends():
             await limiter.wait()
     asyncio.run(go())
     assert slept == [0.1, 0.1]
+
+
+# ── NV-4: overlay events go to the channels of the creator's active OBS tokens only ──
+
+def test_overlay_events_fan_out_to_each_active_token_and_none_when_there_is_no_token():
+    from app.realtime.channels import token_tag
+    hashes = ["aa" * 32, "bb" * 32]
+    repo = FakeRepo(streamer=streamer_row(), donation=donation_row())
+    repo.hashes = hashes
+    r = asyncio.run(Renderer(repo).render(make_event("settings-updated", subject_id=None)))
+    assert r.channel == "private-ankit-settings"  # the untagged base name is never what is published
+    assert r.channels == tuple(f"private-ankit-settings-t{token_tag(h)}" for h in hashes)
+    repo.hashes = []
+    assert asyncio.run(Renderer(repo).render(make_event("settings-updated", subject_id=None))) == \
+        Skip("no_active_obs_token")
+    dashboard = asyncio.run(Renderer(repo).render(make_event("donation-updated", facts={"action": "approve"})))
+    assert dashboard.channels == (dashboard_channel_name("ankit", SESSION_ID),)  # per session, not per token
+
+
+def test_publisher_sends_at_most_100_channels_per_request():
+    from app.realtime.payloads import Rendered
+    channels = tuple(f"private-ankit-settings-t{i:016x}" for i in range(150))
+    q = FakeQueue([make_event("settings-updated", subject_id=None)])
+    p, calls = publisher(q, renderer=FakeRenderer(Rendered("private-ankit-settings", "settings-updated", {"v": 1},
+                                                           1, channels)))
+    assert asyncio.run(p.run_once()) == 1 and q.finished == [("settings-updated", "published", None)]
+    sent = [json.loads(c.content)["channels"] for c in calls]
+    assert [len(s) for s in sent] == [100, 50] and sum(sent, []) == list(channels)
+
+
+# ── NV-4b: dashboard events go to the sessions with access right now ──
+
+def test_dashboard_events_fan_out_to_each_session_with_access_and_none_without():
+    repo = FakeRepo(streamer=streamer_row(), donation=donation_row())
+    repo.sessions = ["22222222-2222-4222-8222-222222222222", SESSION_ID]
+    event = make_event("donation-updated", facts={"action": "approve"})
+    r = asyncio.run(Renderer(repo, admin_session_hours=(3, 9)).render(event))
+    assert r.channel == "private-ankit-dashboard"  # the untagged base name is never what is published
+    assert r.channels == tuple(dashboard_channel_name("ankit", sid) for sid in repo.sessions)
+    assert len(set(r.channels)) == 2 and repo.session_query[1:] == (3, 9)  # the configured admin limits are used
+    repo.sessions = []
+    assert asyncio.run(Renderer(repo).render(event)) == Skip("no_dashboard_session")
+    goal = asyncio.run(Renderer(repo).render(make_event("goal-progress", subject_id=None)))
+    assert goal.channels == ("ankit-goal",)  # public, unchanged

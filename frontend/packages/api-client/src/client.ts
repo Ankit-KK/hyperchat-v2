@@ -29,12 +29,8 @@ export type ApiError =
 
 export type ApiResult<T> = { ok: true; status: number; data: T } | { ok: false; error: ApiError };
 
-/**
- * `GET /auth/session` and `POST /auth/login` return untyped dicts in the OpenAPI document (the routers declare
- * `-> dict`), so their shape is written here by hand from backend/app/routers/auth.py. Replace with the generated
- * types once the backend declares response models.
- */
-export type SignedIn = { user: Record<string, unknown>; csrf_token: string };
+/** What `GET /auth/session`, `POST /auth/login` and `POST /auth/invites/accept` return (generated from the API). */
+export type SignedIn = Schemas["SignedIn"];
 
 export type ClientOptions = {
   baseUrl: string;

@@ -11,8 +11,9 @@ from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.jobs.retry import Permanent, Retryable
-from app.realtime.channels import channel_name, parse_private, valid_socket_id
+from app.realtime.channels import channel_name, obs_channel_name, parse_private, token_tag, valid_socket_id
 from app.realtime.pusher import MAX_DATA_BYTES, PusherApp, PusherApps, PusherClient, channel_auth, event_body, signed_query
+from app.security.crypto import sha256_hex
 
 # Pusher's worked examples (https://pusher.com/docs/channels/library_auth_reference/): public test values.
 DOC_APP = PusherApp(1, "3", "278d425bdf160c739803", "7ad3773142a6692b25b8", "mt1")
@@ -23,15 +24,32 @@ APP = PusherApp(1, "123456", "testkey0123", SECRET, "ap2")
 # ── channels ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("name, parsed", [
-    ("private-ankit-dashboard", ("ankit", "dashboard")),
-    ("private-ankit-alerts", ("ankit", "alerts")),
-    ("private-chiaa_gaming-leaderboard", ("chiaa_gaming", "leaderboard")),
-    ("private-a-b-c-settings", ("a-b-c", "settings")),
-    ("private-foo-alerts-dashboard", ("foo-alerts", "dashboard")),  # suffix anchored at the end
-    ("private-ankit-audio", ("ankit", "audio")),
+    ("private-ankit-dashboard", ("ankit", "dashboard", None)),
+    ("private-ankit-alerts", ("ankit", "alerts", None)),  # parsed; the authorizer refuses it for OBS tokens (NV-4)
+    ("private-chiaa_gaming-leaderboard", ("chiaa_gaming", "leaderboard", None)),
+    ("private-a-b-c-settings", ("a-b-c", "settings", None)),
+    ("private-foo-alerts-dashboard", ("foo-alerts", "dashboard", None)),  # suffix anchored at the end
+    ("private-ankit-audio-t0123456789abcdef", ("ankit", "audio", "t0123456789abcdef")),
+    ("private-ankit-dashboard-s0123456789abcdef", ("ankit", "dashboard", "s0123456789abcdef")),
+    ("private-foo-alerts-t0123456789abcdef-audio", ("foo-alerts-t0123456789abcdef", "audio", None)),  # a slug, not a tag
 ])
 def test_private_channels_parse(name, parsed):
     assert parse_private(name) == parsed
+
+
+@pytest.mark.parametrize("name", ["private-ankit-audio-t0123456789abcde", "private-ankit-audio-t0123456789ABCDEF",
+                                  "private-ankit-audio-0123456789abcdef", "private-ankit-audio-t0123456789abcdef0"])
+def test_malformed_tags_are_refused(name):
+    assert parse_private(name) is None
+
+
+def test_token_tags_are_per_token_and_never_the_token():
+    a, b = sha256_hex("obs_" + "a" * 64), sha256_hex("obs_" + "b" * 64)
+    assert token_tag(a) != token_tag(b) and len(token_tag(a)) == 16 and token_tag(a) not in a
+    assert obs_channel_name("ankit", "alerts", token_tag(a)) == f"private-ankit-alerts-t{token_tag(a)}"
+    assert parse_private(obs_channel_name("ankit", "alerts", token_tag(a))) == ("ankit", "alerts", "t" + token_tag(a))
+    with pytest.raises(ValueError):
+        obs_channel_name("ankit", "dashboard", token_tag(a))
 
 
 @pytest.mark.parametrize("name", [

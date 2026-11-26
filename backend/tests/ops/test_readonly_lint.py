@@ -115,11 +115,16 @@ def test_the_drift_check_classifies_every_nginx_file():
             assert "repo differs from recorded deployed" in line
 
 
-def test_fingerprints_hold_only_the_three_recorded_deployed_prefixes():
+def test_fingerprints_hold_only_recorded_deployed_prefixes():
     rows = [line.split()[:2] for line in (REPO / "deploy/tools/nginx_fingerprints.txt").read_text().splitlines()
             if line.strip() and not line.startswith("#")]
     recorded = {path: value for value, path in rows if value != "unrecorded"}
     assert recorded == {"00-catchall.conf": "b7a4736e", "api.quicktestspace.site.conf": "83309724",
-                        "api.hyperchat.space.conf": "3958d882"}
-    record = (REPO / "docs/operations/incident-2026-10-28-nginx-config.md").read_text(encoding="utf-8")
-    assert all(f"`{prefix}`" in record for prefix in recorded.values())
+                        "api.hyperchat.space.conf": "b14edf78",
+                        "snippets/hyperchat-public-limit-zone.conf": "f9618548",
+                        "snippets/hyperchat-public-limit.conf": "73ee342b",
+                        "snippets/hyperchat-prod-public-limit-zone.conf": "2158db82",
+                        "snippets/hyperchat-prod-public-limit.conf": "8ae65880"}
+    record = "".join((REPO / "docs/operations" / name).read_text(encoding="utf-8") for name in
+                     ("incident-2026-10-28-nginx-config.md", "nginx-f1-production-install-2026-11-26.md"))
+    assert all(f"`{prefix}" in record for prefix in recorded.values())  # the install record lists full hashes

@@ -34,8 +34,7 @@ from app.payments import accounting, figures
 from app.public.pricing import EXCHANGE_RATES_TO_INR
 
 VERIFIER_VERSION = "6a-2.9"
-EXPECTED_HEAD = "0034"
-EXPECTED_HEADS = ("0034", "0035")  # OD-35-V: 0035 adds only the F-7 / F-11 objects of HEAD_DELTAS below
+EXPECTED_HEAD = "0034"  # the base the I10 pins below describe; EXPECTED_HEADS is derived from HEAD_DELTAS
 MIN_SERVER = 150000
 READONLY_ROLE = "hyperchat_readonly"
 
@@ -1193,12 +1192,28 @@ FN_ACL_BASELINE = {
     "set_updated_at": frozenset(DONATION_WRITERS),                    # 0007 GRANT ... TO RUNTIME
     "donations_require_eligible_creator": frozenset({"PUBLIC"}),      # 0020: the global default PUBLIC EXECUTE
 }
-# OD-35-V (owner 2026-11-22): the objects migration 0035 adds or replaces, derived from its text (md5 of the rendered
-# prosrc, as the 0034 pins above). Every 0034 value above stays as reconciled at A5a; at head 0034 nothing changes.
+# The head registry: every migration from 0034 on, in revision order, with the I10 objects it adds or replaces
+# (OD-35-V for 0035: derived from its text, md5 of the rendered prosrc, as the 0034 pins above). A head's
+# expectations are 0034's plus EVERY delta up to and including it (head_expectations).
+# Scope (what I10 sees): functions by the pinned names only (FN_EXPECT and the deltas' "functions"), and triggers on
+# TRIGGER_RELS only (the accounting tables, the evidence tables and donations). Triggers and functions on any other
+# relation (streamers, streamer_voice_tiers, user_invites, jobs, kyc_*, stepup_*, the onboarding tables) are neither
+# verified nor flagged. A migration that leaves that scope alone registers no_payment_delta(why); one that creates or
+# replaces a pinned function, or creates a trigger on a TRIGGER_RELS table, must register it here, or I10 reports
+# missing / body_drift / unexpected_trigger (fail closed). test_verify_rev7_units checks every migration file
+# against this registry from its text, so a no_payment_delta marker cannot hide such a change.
 _SCOPE_ARGS = "p_scope jsonb, p_created timestamp with time zone, p_command text, p_donation uuid"
+
+
+def no_payment_delta(why: str) -> dict:
+    """A registered head that adds or replaces nothing I10 verifies (why: the migration and why it is out of scope)."""
+    return {"functions": {}, "pins": {}, "triggers": {}, "why": "no payment-object delta: " + why}
+
+
 HEAD_DELTAS = {
-    "0034": {"functions": {}, "pins": {}, "triggers": {}},
+    "0034": {"functions": {}, "pins": {}, "triggers": {}, "why": "the base: every value above"},
     "0035": {
+        "why": "OD-35-V: the F-7 ack guard and the F-11 scope check, and the four run-bound owner functions",
         "functions": {"payment_accounting_ack_guard": _fn("", "trigger", "plpgsql", _SP),
                       "payment_accounting_scope_covers": _fn(_SCOPE_ARGS, "boolean", "plpgsql", _SP, volatile="s")},
         "pins": {"payment_accounting_ack_guard": "68d17111c7148d8235b990dc8cfad4fc",
@@ -1210,15 +1225,25 @@ HEAD_DELTAS = {
         "triggers": {("donation_accounting_evaluations", "donation_accounting_evaluations_ack_guard"):
                      ("payment_accounting_ack_guard", "BEFORE", "ROW", frozenset({"INSERT", "UPDATE"}))},
     },
+    "0036": no_payment_delta("PAY-14 creator pricing limits: runtime-role triggers on streamers and "
+                             "streamer_voice_tiers (not TRIGGER_RELS), no pinned function"),
 }
-assert set(HEAD_DELTAS) == set(EXPECTED_HEADS)
+EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
+assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD
+assert all(d.get("why") and set(d) == {"functions", "pins", "triggers", "why"} for d in HEAD_DELTAS.values())
 FN_NAMES_ALL = tuple(sorted(set(FN_EXPECT).union(*(d["functions"] for d in HEAD_DELTAS.values()))))
 
 
 def head_expectations(head: str) -> tuple[dict, dict, dict]:
-    """(FN_EXPECT, FUNCTION_PINS, TRIGGER_PINS) of a database head: 0034's, plus that head's deltas."""
-    d = HEAD_DELTAS[head]
-    return ({**FN_EXPECT, **d["functions"]}, {**FUNCTION_PINS, **d["pins"]}, {**TRIGGER_PINS, **d["triggers"]})
+    """(FN_EXPECT, FUNCTION_PINS, TRIGGER_PINS) of a database head: 0034's, plus every delta up to and including it."""
+    fns, pins, triggers = dict(FN_EXPECT), dict(FUNCTION_PINS), dict(TRIGGER_PINS)
+    for h, d in HEAD_DELTAS.items():
+        fns |= d["functions"]
+        pins |= d["pins"]
+        triggers |= d["triggers"]
+        if h == head:
+            return fns, pins, triggers
+    raise KeyError(head)
 
 
 # ── §6A baseline values (OD-5, owner 2026-11-17): the 0034 values reconciled A = B = C on PG 15.20 / 17.12 (A5a-R2) ──
@@ -2711,7 +2736,7 @@ def _guard(first: dict):
         raise Refused("PostgreSQL 15 or later required")
     if first["head"] not in EXPECTED_HEADS:
         raise Refused(f"database head {first['head']!r}, expected one of {', '.join(EXPECTED_HEADS)} (6a-2 verifies "
-                      "0034 data, on a 0034 or 0035 schema)")
+                      "0034 data, on a registered head's schema)")
 
 
 def scope_args(creator: str | None, donation: str | None) -> tuple[str, str | None]:

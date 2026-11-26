@@ -113,6 +113,18 @@ class Settings(BaseSettings):
     # Extra browser origins trusted for credentialed CORS and the Origin check, besides the frontend's
     # own origin: comma-separated exact origins, e.g. "http://localhost:5173" for local development.
     allowed_origins: str = ""
+    # PDP v2.0 G1 origin tiers (docs/admin-auth-boundary.md "Origin tiers"): comma-separated exact origins, validated
+    # like HYPERCHAT_ALLOWED_ORIGINS. Unset (empty), each tier is browser_origins, i.e. exactly today's flat trust.
+    admin_origins: str = ""  # /api/v1/admin/*, /api/v1/auth/mfa/* and every request carrying an admin session
+    session_origins: str = ""  # auth. and dashboard.: credentialed CORS, login and the CSRF Origin check
+    donor_origins: str = ""  # public site: donor POST Origin checks; CORS without credentials
+    overlay_origins: str = ""  # overlay.: OBS-token requests (besides the API's own origin); CORS without credentials
+    # PDP v2.0 G2: where each kind of link points. Unset (empty), each is HYPERCHAT_FRONTEND_URL.
+    public_url: str = ""  # public pages (no backend-built link uses it yet)
+    auth_url: str = ""  # invite and password-reset links, the Google sign-in failure page
+    dashboard_url: str = ""  # Google sign-in success, the KYC return URL, bot dashboard links
+    # PDP v2.0 G3: absolute origins the Google sign-in ?redirect= may name. Unset, only the dashboard URL's origin.
+    google_redirect_origins: str = ""
     # D5: contact details the frontend shows (GET /api/v1/public/config). Intentionally PUBLIC; unset = null / [].
     # Checked at startup: a malformed value refuses to start rather than being shown.
     public_contact_name: str = ""
@@ -554,11 +566,13 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_browser_origins(self) -> "Settings":
         try:
-            origins = self.browser_origins
+            origins = (self.browser_origins | self.admin_tier | self.session_tier | self.donor_tier
+                       | self.overlay_tier | self.google_redirect_tier
+                       | {_url_origin(u) for u in (self.public_link_url, self.auth_link_url, self.dashboard_link_url)})
         except OriginError as exc:
             raise ValueError(str(exc)) from None
         if self.app_env == "production":
-            dev = [o for o in origins if is_development_origin(o)]
+            dev = sorted(o for o in origins if is_development_origin(o))
             if dev:
                 raise ValueError(f"Refusing to start: development origins in production: {dev}")
             if self.session_cookie_samesite == "none":
@@ -568,8 +582,51 @@ class Settings(BaseSettings):
     @property
     def browser_origins(self) -> frozenset[str]:
         """Every origin trusted for credentialed browser requests (frontend + HYPERCHAT_ALLOWED_ORIGINS)."""
-        front = urlsplit(self.frontend_url)
-        return frozenset((normalize_origin(f"{front.scheme}://{front.netloc}"), *parse_origins(self.allowed_origins)))
+        return frozenset((_url_origin(self.frontend_url), *parse_origins(self.allowed_origins)))
+
+    def _tier(self, value: str) -> frozenset[str]:
+        # An explicitly set tier is exactly its list: never widened by the frontend origin.
+        return frozenset(parse_origins(value)) if value.strip() else self.browser_origins
+
+    @property
+    def admin_tier(self) -> frozenset[str]:
+        return self._tier(self.admin_origins)
+
+    @property
+    def admin_tier_enforced(self) -> bool:
+        """Only an explicit HYPERCHAT_ADMIN_ORIGINS turns on the read-side rule (an admin session answers only to an
+        admin-tier Origin), so a deploy without it behaves exactly as before the tiers existed."""
+        return bool(self.admin_origins.strip())
+
+    @property
+    def session_tier(self) -> frozenset[str]:
+        return self._tier(self.session_origins)
+
+    @property
+    def donor_tier(self) -> frozenset[str]:
+        return self._tier(self.donor_origins)
+
+    @property
+    def overlay_tier(self) -> frozenset[str]:
+        return self._tier(self.overlay_origins)
+
+    @property
+    def public_link_url(self) -> str:
+        return (self.public_url.strip() or self.frontend_url).rstrip("/")
+
+    @property
+    def auth_link_url(self) -> str:
+        return (self.auth_url.strip() or self.frontend_url).rstrip("/")
+
+    @property
+    def dashboard_link_url(self) -> str:
+        return (self.dashboard_url.strip() or self.frontend_url).rstrip("/")
+
+    @property
+    def google_redirect_tier(self) -> frozenset[str]:
+        if self.google_redirect_origins.strip():
+            return frozenset(parse_origins(self.google_redirect_origins))
+        return frozenset({_url_origin(self.dashboard_link_url)})
 
     @property
     def release(self) -> str:
@@ -595,6 +652,11 @@ class Settings(BaseSettings):
         if password is not None:
             params["password"] = password.get_secret_value()
         return make_conninfo(**params)
+
+
+def _url_origin(url: str) -> str:
+    parts = urlsplit(url.strip())
+    return normalize_origin(f"{parts.scheme}://{parts.netloc}")
 
 
 @lru_cache

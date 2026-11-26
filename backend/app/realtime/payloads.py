@@ -29,7 +29,7 @@ from psycopg.rows import dict_row
 
 from app.payments import figures
 from app.public.models import goal_active, goal_view
-from app.realtime.channels import channel_name
+from app.realtime.channels import OBS_SUFFIXES, channel_name, dashboard_channel_name, obs_channel_name, token_tag
 from app.realtime.outbox import OVERLAY_SETTINGS, Event
 
 VERSION = 1
@@ -41,10 +41,11 @@ _DONATION_FIELDS = ("id", "name", "amount", "currency", "message", "message_visi
 
 @dataclass(frozen=True)
 class Rendered:
-    channel: str  # full Pusher channel name
+    channel: str  # the untagged channel name (logging, tests); what is published is `channels`
     event: str
     data: dict
     pusher_group: int | None
+    channels: tuple[str, ...] = ()  # the Pusher channels to publish to; empty means (channel,)
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,41 @@ class RealtimeRepository:
             FROM public.streamers WHERE id = %s
         """, (streamer_id,))
 
+    async def obs_token_hashes(self, streamer_id: str) -> list[str]:
+        """The hashes of the creator's OBS tokens that are valid now: the same rule as PostgresObsTokenStore.validate
+        (active, not revoked, not expired), so a revoked token's channels stop receiving at the next event (NV-4)."""
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT token_hash FROM public.obs_tokens WHERE streamer_id = %s AND is_active IS TRUE "
+                              "AND (revoked_at IS NULL OR revoked_at > now()) AND (expires_at IS NULL OR expires_at > now()) "
+                              "ORDER BY token_hash", (streamer_id,))
+            return [row[0] for row in await cur.fetchall()]
+
+    async def dashboard_session_ids(self, streamer_id: str, admin_idle_hours: int, admin_absolute_hours: int
+                                    ) -> list[str]:
+        """The sessions that may read this creator's dashboard channel right now (NV-4b), by the same rules as a
+        request: the session is valid (AuthRepository.active_session: not revoked, within its idle and absolute
+        expiry, and an administrator's within the admin limits), its user is active, and the user has access
+        (app.authz.access.access_via: an administrator; else the owner or the linked account of a claimed creator).
+        An administrator's session also needs passkey assurance while enforcement is not 'draft'
+        (require_admin_assurance; a missing enforcement row counts as enforced). Runs as hyperchat_app (the worker's
+        role, D6), which may execute stepup_session_aal."""
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("""
+                SELECT s.id::text FROM public.sessions s
+                JOIN public.users u ON u.id = s.user_id
+                JOIN public.streamers st ON st.id = %(sid)s
+                WHERE s.revoked_at IS NULL AND s.idle_expires_at > now() AND s.absolute_expires_at > now()
+                  AND u.is_active
+                  AND CASE WHEN u.role = 'admin' THEN
+                        s.created_at > now() - make_interval(hours => %(aa)s)
+                        AND s.last_seen_at > now() - make_interval(hours => %(ai)s)
+                        AND ((SELECT state FROM public.stepup_enforcement) = 'draft'
+                             OR public.stepup_session_aal(s.id) >= 2)
+                      ELSE st.user_id IS NOT NULL AND (st.user_id = u.id OR u.streamer_id = st.id) END
+                ORDER BY s.id
+            """, {"sid": streamer_id, "ai": admin_idle_hours, "aa": admin_absolute_hours})
+            return [row[0] for row in await cur.fetchall()]
+
     async def streamer_by_slug(self, slug: str) -> dict | None:
         return await self._one("SELECT id::text AS id, streamer_slug AS slug, streamer_name AS name, "
                                "user_id::text AS user_id, pusher_group, status FROM public.streamers "
@@ -130,8 +166,11 @@ class RealtimeRepository:
 
 
 class Renderer:
-    def __init__(self, repo: RealtimeRepository, silence_url: str | None = None) -> None:
-        self.repo, self.silence_url = repo, silence_url
+    def __init__(self, repo: RealtimeRepository, silence_url: str | None = None,
+                 admin_session_hours: tuple[int, int] = (2, 12)) -> None:
+        """admin_session_hours: (idle, absolute) limits of an administrator's session, as Settings
+        admin_session_idle_hours / admin_session_absolute_hours (their defaults here)."""
+        self.repo, self.silence_url, self.admin_session_hours = repo, silence_url, admin_session_hours
 
     async def render(self, event: Event) -> Rendered | Skip:
         s = await self.repo.streamer(event.streamer_id)
@@ -158,7 +197,20 @@ class Renderer:
             return data
         if len(json.dumps(data, default=str).encode()) > SIZE_LIMIT:
             data = {**base, **({"donation_id": event.subject_id} if event.subject_id else {}), "truncated": True}
-        return Rendered(channel_name(s["slug"], event.channel), event.event, data, s["pusher_group"])
+        base = channel_name(s["slug"], event.channel)
+        if event.channel == "dashboard":  # read now: losing access counts from the next event (NV-4b)
+            sessions = await self.repo.dashboard_session_ids(event.streamer_id, *self.admin_session_hours)
+            if not sessions:
+                return Skip("no_dashboard_session")
+            return Rendered(base, event.event, data, s["pusher_group"],
+                            tuple(dashboard_channel_name(s["slug"], sid) for sid in sessions))
+        if event.channel not in OBS_SUFFIXES:
+            return Rendered(base, event.event, data, s["pusher_group"], (base,))
+        hashes = await self.repo.obs_token_hashes(event.streamer_id)  # read now: a revoke counts from the next event
+        if not hashes:
+            return Skip("no_active_obs_token")
+        return Rendered(base, event.event, data, s["pusher_group"],
+                        tuple(obs_channel_name(s["slug"], event.channel, token_tag(h)) for h in hashes))
 
     async def _donation(self, event: Event, base: dict) -> dict | Skip:
         if event.subject_id is None:
