@@ -2,7 +2,8 @@
 
 One facts query per request, in one READ ONLY transaction on the API's own role (hyperchat_app), and one pure
 evaluator shared by GET /api/v1/me/onboarding and GET /api/v1/admin/onboarding. Nothing here writes or activates:
-activation stays the admin's (POST /api/v1/admin/creators/{id}/activate) until Stage 5 Phase B (migration 0040).
+activation stays the admin's (POST /api/v1/admin/creators/{id}/activate)
+until Stage 5 Phase B (a later migration, on hold with the KYC provider choice).
 
 Every condition is evaluated against the creator's CURRENT OWNER (streamers.user_id), never the viewer, so the owner,
 a linked account and an admin see the same rows. KYC is the owner's (app.kyc.service). The Razorpay account check
