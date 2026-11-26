@@ -125,7 +125,7 @@ stops the loop.
 
 A read-only view of how far each creator is from activation, computed from existing data. Phase A adds no migration,
 table, role, grant or job kind, and changes no lifecycle path. **Activation stays manual** (`POST
-/api/v1/admin/creators/{id}/activate`) until Stage 5 Phase B (a later migration, behind an operator switch; on hold with the KYC provider choice). Code:
+/api/v1/admin/creators/{id}/activate`) until Stage 5 Phase B (migration 0041, behind an operator switch, default off). Code:
 `backend/app/onboarding/checklist.py`, shared by both routes. Each request uses one connection and one `READ ONLY`
 transaction on the API's own role (`hyperchat_app`); it calls `kyc_activation_block` once per creator, which that role
 may already execute (migration 0023).
@@ -162,7 +162,7 @@ linked account (full owner power) and an admin therefore see the same rows. Stat
 | `invitation_accepted` | an invitation of that application was accepted (accepted invitations are never purged) | the latest invitation's state, or `no_invitation` |
 | `ownership_confirmed` | the user who accepted it is the current owner, and that account is active | `no_owner`, `owner_not_invitee` (an owner linked by an admin), `owner_inactive` |
 | `kyc_approved` | the owner's Didit KYC is approved for this server's Didit environment (`user_kyc_approved`) | `no_owner`, `owner_kyc_required` |
-| `pan_policy` | never in Phase A: state `policy_pending` until Stage 3 records KYC document evidence (on hold: the KYC provider is being re-decided). PAN-only applies to automatic activation only (owner decision Q6) | `pan_evidence_not_recorded` |
+| `pan_policy` | never in Phase A: state `policy_pending` until Stage 3 (migration 0040) records PAN evidence. PAN-only applies to automatic activation only (owner decision Q6) | `pan_evidence_not_recorded` |
 | `profile_picture` | `brand_logo_url` is an https URL under the `creator-assets/` prefix: state `set`, detail `validation_not_recorded` (informational until Phase B records validation) | `legacy_path` for an `/assets/...` path or any other value; `null` when empty |
 | `background` | the same rule on `background_url` | the same codes |
 | `no_restriction` | no `kyc_restrictions` row with `lifted_at IS NULL` | `open_restriction` (state `blocked`) |
