@@ -135,16 +135,25 @@ phones and Discord invite from `GET /api/v1/public/config` and hides whatever is
 | `overlay.`    | any                           | `app/(overlay)/obs/*`                                                                 | no                      |
 
 The creator page is server-rendered from `GET /api/v1/public/streamers/{slug}`, `/pricing` and `/goal` with the 60 s
-revalidate in `lib/api.ts`. The API alone decides which creators exist: it answers 404 for unknown and non-active
-ones. Pricing and goal are optional; if either call fails the page renders without that section. Images load only
-from absolute https URLs. A legacy `/assets/...` path (now the website's bundle folder) or a missing image gets a
-placeholder. The creator's colour is used for decoration only (rings, the goal bar), never for text. "Send an
-interaction" is disabled until checkout (Phase 7). Metadata is the PDP §16 template with "interactions" in the
+revalidate in `lib/api.ts`. The page still renders per request (the root layout's `force-dynamic`, for the CSP
+nonce), but those fetches stay cached: Next.js only turns `force-dynamic` into no-store for a fetch with no cache
+setting of its own. Checked 2026-11-26 with `next start` against a stub API: three views of one creator page made
+one call each to `/public/config`, the creator, `/pricing` and `/goal`; only successful answers are cached. The API
+alone decides which creators exist: it answers 404 for unknown and non-active ones. Pricing and goal are optional;
+if either call fails the page renders without that section. Images load only from absolute https URLs. A legacy
+`/assets/...` path (now the website's bundle folder) or a missing image gets a placeholder.
+
+The creator's colour (`brand_color`) is decoration only (rings, the goal bar, the Open Graph image border), never
+text, and it must stay on the warm palette: `accentColor` in `[slug]/creator.ts` keeps near-greys (chroma under
+15%) and colours within 45° of hue of copper (reds, oranges, ambers, browns), and uses copper for anything else
+(purple, blue, green) or a malformed value. "Send an interaction" is disabled until checkout (Phase 7). Metadata is the PDP §16 template with "interactions" in the
 description, canonical `https://hyperchat.space/{slug}`, Open Graph and Twitter card, and the website's Organization
 JSON-LD (Streamheart Private Limited).
 
-An App Router page cannot choose its status code, so "API unreachable" is answered with 500 rather than 503. It
-carries `noindex` and a retry button.
+An App Router page cannot choose its status code, so "API unreachable" is answered with 500 rather than 503 (owner
+decision 2026-11-26). Checked with `next start`: the server HTML is Next.js's error shell with
+`<meta name="robots" content="noindex">` and only an error digest (no message, stack or API host); the browser then
+renders `[slug]/error.tsx` ("temporarily unavailable", a retry button).
 
 ## Sharing the apex with the marketing website
 

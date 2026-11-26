@@ -192,8 +192,12 @@ describe("helpers", () => {
     }
   });
 
-  it("uses the creator colour only when it is a hex colour, else copper", () => {
-    expect(accentColor("#ABC")).toBe("#ABC");
+  it("uses the creator colour only when it is a hex colour near the palette, else copper", () => {
+    expect(accentColor("#ABC")).toBe("#ABC"); // a near-grey
+    for (const warm of ["#B8702F", "#d94f30", "#e0a030", "#8b4513"]) expect(accentColor(warm)).toBe(warm);
+    for (const far of ["#8b5cf6", "#7c3aed", "#2563eb", "#4fb3a9", "#22c55e", "#f0f"]) {
+      expect(accentColor(far)).toBe("var(--hc-color-primary)");
+    }
     expect(accentColor("red; background:url(x)")).toBe("var(--hc-color-primary)");
     expect(accentColor(null)).toBe("var(--hc-color-primary)");
   });

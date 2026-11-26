@@ -48,9 +48,25 @@ export function imageSrc(url: string | null | undefined): string | null {
   return url && /^https:\/\/[^/]/i.test(url) ? url : null;
 }
 
-/** The creator's colour for decorative accents only (rings, bars), never text; copper when unset or malformed. */
+const COPPER_HUE = 28; // #B8702F, the palette's copper
+
+/**
+ * The creator's colour for decorative accents only (rings, bars), never text. Copper when unset or malformed, and
+ * when it is a strong colour more than 45° of hue from copper (purple, blue, green), so pages stay on the warm
+ * palette. Near-greys (chroma under 15%) and warm reds, oranges and ambers are kept as the creator chose them.
+ */
 export function accentColor(color: string | null | undefined): string {
-  return color && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(color) ? color : "var(--hc-color-primary)";
+  const copper = "var(--hc-color-primary)";
+  if (!color || !/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(color)) return copper;
+  const hex = color.length === 4 ? color.replace(/[0-9a-f]/gi, "$&$&") : color;
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
+  const max = Math.max(r, g, b);
+  const chroma = max - Math.min(r, g, b);
+  if (chroma < 0.15) return color;
+  const hue =
+    60 * (max === r ? ((g - b) / chroma + 6) % 6 : max === g ? (b - r) / chroma + 2 : (r - g) / chroma + 4);
+  const distance = Math.min(Math.abs(hue - COPPER_HUE), 360 - Math.abs(hue - COPPER_HUE));
+  return distance <= 45 ? color : copper;
 }
 
 export function formatAmount(amount: number, currency: string): string {

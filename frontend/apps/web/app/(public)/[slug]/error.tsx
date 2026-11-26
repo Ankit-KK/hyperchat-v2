@@ -2,7 +2,8 @@
 
 /**
  * The API could not be reached (CreatorUnavailable) or rendering failed. Next.js answers these with 500, not 503:
- * an App Router page cannot choose its status code. Never indexed (the meta tag is hoisted into <head>).
+ * an App Router page cannot choose its status code. Never indexed: the server HTML is Next.js's noindex error
+ * shell, and this boundary renders in the browser (the meta tag below covers client-side navigation).
  */
 export default function CreatorUnavailablePage({ reset }: { error: Error; reset: () => void }) {
   return (
