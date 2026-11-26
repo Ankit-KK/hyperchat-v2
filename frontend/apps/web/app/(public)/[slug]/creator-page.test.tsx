@@ -194,8 +194,11 @@ describe("helpers", () => {
 
   it("uses the creator colour only when it is a hex colour near the palette, else copper", () => {
     expect(accentColor("#ABC")).toBe("#ABC"); // a near-grey
-    for (const warm of ["#B8702F", "#d94f30", "#e0a030", "#8b4513"]) expect(accentColor(warm)).toBe(warm);
-    for (const far of ["#8b5cf6", "#7c3aed", "#2563eb", "#4fb3a9", "#22c55e", "#f0f"]) {
+    for (const warm of ["#B8702F", "#d94f30", "#e0a030", "#8b4513", "#ffff00", "#dc143c"]) {
+      expect(accentColor(warm)).toBe(warm); // hues 28, 11, 38, 25, 60 (yellow) and 348 (crimson)
+    }
+    // purple, violet, blue, teal, green, magenta; chartreuse (79°) and hot pink (336°) are just outside the window
+    for (const far of ["#8b5cf6", "#7c3aed", "#2563eb", "#4fb3a9", "#22c55e", "#f0f", "#b0ff00", "#ff0066"]) {
       expect(accentColor(far)).toBe("var(--hc-color-primary)");
     }
     expect(accentColor("red; background:url(x)")).toBe("var(--hc-color-primary)");
