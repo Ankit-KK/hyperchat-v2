@@ -722,8 +722,13 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
                 "donation_credit_events",
                 # 0034 (accounting state, its audit, runs, evaluation metadata, the API's state lock)
                 "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs",
-                "donation_accounting_evaluations", "payment_accounting_lock_state()")
+                "donation_accounting_evaluations", "payment_accounting_lock_state()",
+                # 0038 (onboarding invite exception): its function's EXECUTE for hyperchat_lifecycle, which the
+                # downgrade below 0038 drops with the function; test_0038 pins that grant
+                "onboarding_issue_invite(uuid,text,integer,uuid,boolean)")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
+    assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in \
+        _api_role_privileges()  # the exclusion names a real head privilege (not a typo that hides nothing)
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
