@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "e2e"))
 import smoke_policy as sp  # noqa: E402
+from app.payments import verify  # noqa: E402
 from tests.integration import db, fixture_db, requires_db  # noqa: E402
 
 GOOD_STATUS = {"enforcement": "draft", "aal": 1, "mfa_required": False, "verifier": "not_configured",
@@ -22,7 +23,8 @@ GOOD_STATUS = {"enforcement": "draft", "aal": 1, "mfa_required": False, "verifie
 def test_every_merged_revision_is_a_known_head_and_0028_is_accepted():
     versions = sorted(p.name.split("_", 1)[0] for p in
                       (Path(__file__).resolve().parents[2] / "database/migrations/versions").glob("[0-9]*_*.py"))
-    assert versions[-1] == "0035" and sp.KNOWN_HEADS[-1] == versions[-1]  # a new migration must be added here
+    # a new migration must be added to KNOWN_HEADS and to the verifier's head registry (no literal head here)
+    assert sp.KNOWN_HEADS[-1] == versions[-1] == verify.EXPECTED_HEADS[-1]
     assert sp.head_check("0028", None)[0] and sp.head_check("0028", "0028")[0]  # DEV today
     assert sp.head_check("0029", None)[0] and sp.head_check("0029", "0029")[0]
     assert sp.head_check("0030", None)[0] and sp.head_check("0030", "0030")[0]
