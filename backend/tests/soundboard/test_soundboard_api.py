@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from app.soundboard import rules
 from app.storage.memory import InMemoryObjectStore, StoredObject
 from tests.integration import (
     ORIGIN,
@@ -412,6 +413,27 @@ def test_a_confirmed_sound_cannot_be_overwritten_through_its_upload_url(sb):
     assert sb.store.client_put(keys["audio_key"], unchecked, ticket.content_type) == 200
     assert {k: sb.store.objects[v].data for k, v in served.items()} == before
     assert stored(slug, slot) == served and keys["audio_key"] not in served.values()
+
+
+def test_replaying_a_ticket_and_confirming_again_is_rate_limited(sb, monkeypatch):
+    """NV-7: a replayed PUT recreates the ticket's object, which can then be confirmed again into a new sealed copy
+    and slot; confirmations share one per-user bucket, so one ticket no longer means unbounded slots."""
+    monkeypatch.setattr(rules, "CONFIRM_RATE", ("soundboard:confirm", 4, 600))
+    slug = "authtest-sb-replay"
+    _, h = creator(sb, slug)
+    audio, image = m.mp3(2.0), PNG
+    keys = {"audio_key": upload(sb, h, slug, "audio", audio), "image_key": upload(sb, h, slug, "image", image)}
+    first = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "A", **keys})
+    assert first.status_code == 201
+    for key, data in ((keys["audio_key"], audio), (keys["image_key"], image)):  # replay within the TTL
+        assert sb.store.client_put(key, data, sb.store.presigned[key].content_type) == 200
+    second = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "B", **keys})
+    assert second.status_code == 201  # 4 confirmations: the bucket is now spent
+    for key, data in ((keys["audio_key"], audio), (keys["image_key"], image)):
+        assert sb.store.client_put(key, data, sb.store.presigned[key].content_type) == 200
+    third = sb.post(f"{S}/{slug}/soundboard/slots", headers=h, json={"display_name": "C", **keys})
+    assert (third.status_code, third.json()) == (429, {"error": "Too many uploads. Please try again later."})
+    assert sum(r["source"] == "custom" for r in rows(slug)) == 2
 
 
 # ── confirmation of uploaded objects ───────────────────────────────────────────

@@ -236,6 +236,10 @@ class SoundboardService:
         key = rules.owned_key(slug, key, kind)  # this creator's prefix, right kind, server key shape (422)
         if await self.repo.keys_in_use([key]):
             raise _errors(KeyInUse())
+        bucket, max_hits, window = rules.CONFIRM_RATE  # NV-7: each confirmation may seal a new copy
+        if not await self.limiter.hit_rate_limit(f"user:{access.current.user.id}", bucket, max_hits, window):
+            self._event("soundboard_rejected", access, "confirm_rate_limited", logging.WARNING)
+            raise ApiError(429, "Too many uploads. Please try again later.", "soundboard_rate_limited")
         ext = rules.key_ext(key)
         limit = rules.MAX_BYTES[kind]
         try:
