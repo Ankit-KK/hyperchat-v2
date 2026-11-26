@@ -403,7 +403,18 @@ def test_with_the_database_enforcing_every_route_works_with_the_grant_it_asks_fo
         approved("post", "/api/v1/auth/invites", {"email": " MFA-S3-E2E-Inv@AuthTest.invalid", "role": "admin"})
         approved("post", "/api/v1/auth/invites", {"email": "mfa-s3-e2e-staff" + DOMAIN, "streamer_id": cid.upper()})
         approved("post", f"/api/v1/admin/applications/{app}/approve", {**creator, "slug": "authtest-mfa-s3-app"})
-        approved("post", f"/api/v1/admin/applications/{app.upper()}/invite")
+        # Q3 + migration 0038: the application invitation needs no grant even under 'active' (onboarding_issue_invite
+        # on hyperchat_lifecycle); a presented grant for exactly it is still consumed and claimed by 0027's anchor.
+        r = b.post(f"/api/v1/admin/applications/{app.upper()}/invite", headers=headers)
+        assert r.status_code == 200, r.text
+        with fixture_db() as conn:
+            conn.execute("DELETE FROM public.stepup_rate_limits WHERE key LIKE %s", (f"%{admin_id}%",))
+        grant = ceremony(b, headers, auth, "application.invite", f"application:{app}", {})["grant_id"]
+        r = b.post(f"/api/v1/admin/applications/{app.upper()}/invite", headers={**headers, "x-step-up-grant": grant})
+        assert r.status_code == 200 and r.json()["replaced_invites"] == 1, r.text
+        with fixture_db() as conn:
+            assert conn.execute("SELECT claimed_anchor FROM public.stepup_grants WHERE id = %s",
+                                (grant,)).fetchone()[0] == "user_invites.insert"
         r = b.post("/api/v1/auth/invites", headers=headers, json={"email": "mfa-s3-e2e-plain" + DOMAIN, "role": "user"})
         assert r.status_code == 201  # an ordinary invitation carries no authority: no step-up
     finally:
