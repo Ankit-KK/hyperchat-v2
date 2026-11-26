@@ -1,13 +1,27 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { API_ORIGIN } from "./lib/api";
 import { securityHeaders } from "./lib/headers";
-import { DEFAULT_HOST_MAP, normalizeHost, parseHostMap, routeFor, zoneFor } from "./lib/hosts";
+import { DEFAULT_HOST_MAP, normalizeHost, parseHostMap, routeFor, wwwRedirect, zoneFor } from "./lib/hosts";
+import { isMarketingPath } from "./lib/marketing";
 
 // Next.js 16 renamed middleware.ts to proxy.ts (same behaviour; it runs on the Node.js runtime).
 const HOSTS = parseHostMap(process.env.WEB_HOST_MAP || DEFAULT_HOST_MAP);
 
 export function proxy(request: NextRequest) {
-  const zone = zoneFor(request.headers.get("host"), HOSTS);
+  const host = request.headers.get("host");
+  const www = wwwRedirect(host, request.nextUrl);
+  if (www) return NextResponse.redirect(www, 308);
+
+  const zone = zoneFor(host, HOSTS);
+  const known = !!host && HOSTS.has(normalizeHost(host));
+  // The marketing allow-list is forwarded to the website (next.config.ts rewrites), which sets its own headers:
+  // a nonce CSP would block its inline boot script. Only the unmapped-host noindex is set, and `next start` drops
+  // even that on an external rewrite (checked 2026-11-26), so the website's own noindex covers preview hosts.
+  if (zone === "public" && isMarketingPath(request.nextUrl.pathname)) {
+    const response = NextResponse.next();
+    if (!known) response.headers.set("X-Robots-Tag", "noindex");
+    return response;
+  }
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const headers = securityHeaders(zone, {
     nonce,
@@ -16,8 +30,7 @@ export function proxy(request: NextRequest) {
     https: request.nextUrl.protocol === "https:",
   });
   // An unmapped host (a *.vercel.app URL, a stray DNS name) serves the public site but must never be indexed.
-  const host = request.headers.get("host");
-  if (!host || !HOSTS.has(normalizeHost(host))) headers["X-Robots-Tag"] = "noindex";
+  if (!known) headers["X-Robots-Tag"] = "noindex";
 
   const route = routeFor(zone, request.nextUrl.pathname);
   let response: NextResponse;

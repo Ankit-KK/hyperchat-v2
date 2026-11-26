@@ -15,13 +15,11 @@ export const ZONE_SEGMENT: Record<Exclude<Zone, "public">, string> = {
 /** Used when WEB_HOST_MAP is unset: the dev hosts (review §9.3), the production hosts, and *.localhost for local runs. */
 export const DEFAULT_HOST_MAP = [
   "quicktestspace.site=public",
-  "www.quicktestspace.site=public",
   "app.quicktestspace.site=public",
   "auth.quicktestspace.site=auth",
   "dashboard.quicktestspace.site=dashboard",
   "overlay.quicktestspace.site=overlay",
   "hyperchat.space=public",
-  "www.hyperchat.space=public",
   "auth.hyperchat.space=auth",
   "dashboard.hyperchat.space=dashboard",
   "overlay.hyperchat.space=overlay",
@@ -30,6 +28,18 @@ export const DEFAULT_HOST_MAP = [
   "dashboard.localhost=dashboard",
   "overlay.localhost=overlay",
 ].join(",");
+
+/** www hosts are not served: they redirect permanently to their apex, the canonical host (owner decision R3). */
+export const WWW_REDIRECTS = new Map([
+  ["www.hyperchat.space", "hyperchat.space"],
+  ["www.quicktestspace.site", "quicktestspace.site"],
+]);
+
+/** The https apex URL a www request redirects to (path and query kept), or null for any other host. */
+export function wwwRedirect(host: string | null, url: URL): string | null {
+  const apex = host && WWW_REDIRECTS.get(normalizeHost(host));
+  return apex ? `https://${apex}${url.pathname}${url.search}` : null;
+}
 
 const ZONES = new Set<Zone>(["public", "auth", "dashboard", "overlay"]);
 const INTERNAL = new RegExp(`^/(${Object.values(ZONE_SEGMENT).join("|")})(/|$)`, "i");

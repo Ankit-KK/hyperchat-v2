@@ -4,6 +4,10 @@ A new Next.js application built from scratch against the FastAPI API. No code fr
 frontend is copied here; the legacy app is only a reference for features and behaviour. The architecture is the
 accepted PDP v2.0 Phase 1 review (decided 2026-11-25); this workspace is its Phase 2 foundation.
 
+The marketing website is a separate repository, [hyperchat-frontend](https://github.com/Ankit-KK/hyperchat-frontend)
+(Vite, its own Vercel deployment), and stays that way (owner decision R1, 2026-11-26). The two share the apex host:
+see [Sharing the apex with the marketing website](#sharing-the-apex-with-the-marketing-website).
+
 ## Two rules that never change
 
 - **No Supabase.** The frontend talks only to the HyperChat API: no Supabase client, no direct database access.
@@ -59,25 +63,28 @@ frontend/
 
 Only `*.env.example` files are committed. Copy one to `.env.local` in the same app for a local run.
 
-| App        | Variable                   | Meaning                                                                                                        |
-| ---------- | -------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| web, admin | `NEXT_PUBLIC_API_BASE_URL` | API base URL, inlined at build time. Default and every non-production value: `https://api.quicktestspace.site` |
-| web        | `WEB_HOST_MAP`             | optional `host=zone,...` (zones `public`, `auth`, `dashboard`, `overlay`); unset uses the built-in map below   |
-| admin      | `ADMIN_HOSTS`              | optional comma-separated hosts the admin app answers on; unset uses the built-in list below                    |
+| App        | Variable                   | Meaning                                                                                                                                                  |
+| ---------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| web, admin | `NEXT_PUBLIC_API_BASE_URL` | API base URL, inlined at build time. Default and every non-production value: `https://api.quicktestspace.site`                                           |
+| web        | `MARKETING_ORIGIN`         | the marketing website's deployment, an https origin, read at build time. Required when `VERCEL_ENV=production`; unset elsewhere: `http://localhost:5174` |
+| web        | `WEB_HOST_MAP`             | optional `host=zone,...` (zones `public`, `auth`, `dashboard`, `overlay`); unset uses the built-in map below                                             |
+| admin      | `ADMIN_HOSTS`              | optional comma-separated hosts the admin app answers on; unset uses the built-in list below                                                              |
 
 ## Hosts
 
-| Production                  | Development                                 | App     | Zone                                        |
-| --------------------------- | ------------------------------------------- | ------- | ------------------------------------------- |
-| `hyperchat.space`           | `quicktestspace.site` (also `www.`, `app.`) | web     | public: landing and `/{slug}` creator pages |
-| `auth.hyperchat.space`      | `auth.quicktestspace.site`                  | web     | auth                                        |
-| `dashboard.hyperchat.space` | `dashboard.quicktestspace.site`             | web     | dashboard                                   |
-| `overlay.hyperchat.space`   | `overlay.quicktestspace.site`               | web     | overlay (OBS browser sources)               |
-| `admin.hyperchat.space`     | `admin.quicktestspace.site`                 | admin   | admin                                       |
-| `api.` (production)         | `api.quicktestspace.site`                   | FastAPI | not a frontend                              |
+| Production                  | Development                         | App     | Zone                                                                                  |
+| --------------------------- | ----------------------------------- | ------- | ------------------------------------------------------------------------------------- |
+| `hyperchat.space`           | `quicktestspace.site` (also `app.`) | web     | public: `/{slug}` creator pages; the marketing allow-list is forwarded to the website |
+| `www.hyperchat.space`       | `www.quicktestspace.site`           | web     | none: 308 to the apex, path and query kept                                            |
+| `auth.hyperchat.space`      | `auth.quicktestspace.site`          | web     | auth                                                                                  |
+| `dashboard.hyperchat.space` | `dashboard.quicktestspace.site`     | web     | dashboard                                                                             |
+| `overlay.hyperchat.space`   | `overlay.quicktestspace.site`       | web     | overlay (OBS browser sources)                                                         |
+| `admin.hyperchat.space`     | `admin.quicktestspace.site`         | admin   | admin                                                                                 |
+| `api.` (production)         | `api.quicktestspace.site`           | FastAPI | not a frontend                                                                        |
 
 How `apps/web/proxy.ts` routes (Next.js 16 renamed `middleware.ts` to `proxy.ts`):
 
+- A `www.` host is redirected permanently (308) to its https apex before anything else (owner decision R3).
 - The `Host` header picks the zone. Unknown hosts, Vercel preview URLs included, get the public site, sent with
   `X-Robots-Tag: noindex`.
 - The auth, dashboard and overlay zones are rewritten to the internal segments `/auth`, `/dashboard` and `/obs`.
@@ -112,6 +119,31 @@ Other principles: realtime goes through Pusher with private channels authorized 
 to Cloudflare R2 with short-lived grants from the API. Payments use Razorpay Checkout, with orders created and
 verified by the API. There is no contact form (retired, D5). The public layout shows the contact name, email,
 phones and Discord invite from `GET /api/v1/public/config` and hides whatever is empty.
+
+## Sharing the apex with the marketing website
+
+The `web` app owns `hyperchat.space` (addendum §2.1 mechanism A2, owner decision R2). `apps/web/lib/marketing.ts`
+holds a fixed allow-list, and `next.config.ts` forwards it with external `beforeFiles` rewrites to
+`MARKETING_ORIGIN`. Everything else is this app, and other single-segment paths are creator pages.
+
+| Forwarded               | Paths                                                                                                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| pages                   | `/`, `/features`, `/creators`, `/company`, `/whats-new`, `/demo-signup`, `/viewer-terms`, `/support`, `/privacy-policy`, `/terms-and-conditions`, `/cancellation-refunds` |
+| the website's redirects | `/feature-showcase`, `/about`, `/contact`, `/shipping`                                                                                                                    |
+| files                   | `/favicon.svg`, `/third-party-notices.txt`, `/robots.txt`, `/sitemap.xml`, `/404.html`                                                                                    |
+| folders, with contents  | `/legal-archive`, `/creators`, `/images`, `/intro`, `/licenses`, `/mascot`, `/partners`, `/sculpture`, `/social`, `/assets`                                               |
+
+- Only the public zone forwards. On `auth.`, `dashboard.` and `overlay.` the proxy rewrites first, so `/features`
+  there is that zone's own 404. Matching is case-insensitive, as Next.js applies the rewrites.
+- The proxy sends no nonce CSP for forwarded paths: the website has an inline boot script and sets its own headers.
+  Under `next start` the website's response headers pass through and the proxy's are dropped (checked 2026-11-26,
+  not yet on Vercel), so the website's own `noindex` covers preview hosts.
+- `/robots.txt` and `/sitemap.xml` are the website's for now, so the sitemap lists marketing pages only. Creator
+  pages join it when the public creator list endpoint lands (Phase 4).
+- The creator page answers 404 for any allow-listed name without asking the API. The backend reserves the same
+  names in `RESERVED_SLUGS` (addendum §2.1 rule 1); a new marketing route needs that reservation first.
+- For a local run, start the website's dev server on port 5174, or set `MARKETING_ORIGIN` to a deployment.
+  Without either, forwarded paths fail and creator pages still work.
 
 ## Running locally against the DEV API
 
@@ -152,10 +184,21 @@ declares response models.
 
 ## Changing the look
 
-`packages/ui/src/tokens.css` is the single file to replace with the owner's palette and type decision. It holds
-the colour, type scale, spacing and radius variables. `packages/ui/src/preset.css` maps those variables onto
+`packages/ui/src/tokens.css` holds the website's palette (ivory, charcoal, copper, stone, sand; owner decision R4)
+with each contrast ratio, which `tokens.test.ts` recomputes. Copper on charcoal is 4.21:1, so copper is for large
+text, buttons and the focus ring, not body text. The file also holds the type scale, spacing and radius variables. `packages/ui/src/preset.css` maps those variables onto
 Tailwind's theme, and the components use only Tailwind classes built from them. Keep the variable names and
 change the values.
+
+Fonts are self-hosted, so the CSP keeps `font-src 'self'`. Body text and controls use Inter Variable
+(`@fontsource-variable/inter`, SIL OFL). Headings use the `HyperChat Display` alias declared in
+`packages/ui/src/font-config.css`, whose `src` line is the one-line switch, as on the website.
+
+**Display font licence (owner-accepted risk).** The display face is the website's `FastelarDemoRegular-lx4oV.ttf`,
+copied unchanged (sha256 `c63702f1...effe0b`) from hyperchat-frontend `8080e5b`. No licence or provenance file
+exists for it, and its name says "demo". The owner chose it for both repositories on 2026-11-26 (decision R5) and
+accepted that risk. A written commercial web licence is still recommended before public launch (addendum §4.3). A
+licensed replacement is a change to the `src` line in `font-config.css`.
 
 ## What later phases add
 

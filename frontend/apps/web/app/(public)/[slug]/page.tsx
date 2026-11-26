@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { serverApi } from "../../../lib/api";
+import { isMarketingName } from "../../../lib/marketing";
 
 // The API's slug rule (backend/app/authz/access.py): anything else cannot be a creator, so the API is not asked.
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -10,7 +11,8 @@ type Props = { params: Promise<{ slug: string }> };
 
 /** One API call per request, shared by generateMetadata and the page. The API serves only active creators. */
 const loadCreator = cache(async (slug: string) => {
-  if (!SLUG.test(slug)) notFound();
+  // A marketing name is forwarded to the website before it gets here; never treat one as a creator either way.
+  if (!SLUG.test(slug) || isMarketingName(slug)) notFound();
   const result = await serverApi().get("/api/v1/public/streamers/{slug}", { params: { slug } });
   if (result.ok) return result.data;
   if (result.error.kind === "http" && result.error.status === 404) notFound();
