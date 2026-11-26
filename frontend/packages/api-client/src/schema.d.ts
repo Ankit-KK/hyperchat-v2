@@ -1747,6 +1747,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/public/streamers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Creators
+         * @description E10 (G5): active creators only, ordered by slug; card fields only.
+         */
+        get: operations["creators_api_v1_public_streamers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/public/streamers/{slug}": {
         parameters: {
             query?: never;
@@ -2771,6 +2791,28 @@ export interface components {
             name: string | null;
             /** Phones */
             phones: string[];
+        };
+        /** PublicCreator */
+        PublicCreator: {
+            /** Background Url */
+            background_url: string | null;
+            /** Brand Color */
+            brand_color: string | null;
+            /** Brand Logo Url */
+            brand_logo_url: string | null;
+            /** Name */
+            name: string;
+            /** Slug */
+            slug: string;
+        };
+        /** PublicCreatorPage */
+        PublicCreatorPage: {
+            /** Creators */
+            creators: components["schemas"]["PublicCreator"][];
+            /** Has More */
+            has_more: boolean;
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /** PublicStreamer */
         PublicStreamer: {
@@ -6454,6 +6496,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    creators_api_v1_public_streamers_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+                q?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicCreatorPage"];
                 };
             };
             /** @description Validation Error */
