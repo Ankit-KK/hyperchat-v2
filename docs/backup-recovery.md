@@ -124,7 +124,7 @@ sudo PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -m app.backup.restore_check --
   - `missing`: the database has KYC history but no usable witness was given.
 - **`live_operation_approved`:** always `false`. The tool never approves resuming live operation, never acknowledges
   a restore and never installs or replaces a witness. `live_operation_blockers` lists what remains, e.g.
-  `kyc_witness_inconsistent`, `external_reconciliation_required`, `owner_approval_required`.
+  `kyc_witness_inconsistent`, `sessions_revoke_required`, `external_reconciliation_required`, `owner_approval_required`.
 
 **Exit codes:** 0 structurally valid with the witness consistent / not applicable; 3 structurally valid but the
 witness inconsistent, missing or not checked; 1 not structurally valid, or the check failed.
@@ -244,7 +244,10 @@ Production's off-site unit runs from `/opt/hyperchat-backup-tools/current`, not 
   - Didit decisions (`docs/kyc-rollout.md`: a lost decline can revive an approval until Didit sends a new result);
   - Pusher, Telegram or Discord messages already delivered;
   - sent emails;
-  - credentials in `api.env` / `stepup.env`.
+  - credentials in `api.env` / `stepup.env`;
+  - revocations made after the set: sessions come back as they were (every runbook below ends them all before the
+    services start); admin role or deactivation changes, passkey, OBS-token and partner-key revocations after the set
+    must be re-applied by hand.
 - **Backups contain personal data** (users, donations, KYC metadata) and the stored hashes of secrets. Access to sets, off-site objects and the GPG private key is as sensitive as the database.
 
 ## Runbooks
@@ -265,6 +268,11 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
    - `witness select` over the live file and every copy.
    - Keep the newest; never replace the live file with an older one.
 5. **Reconcile external state:** Razorpay payments after the set's time, KYC changes (above).
+   - **Sessions [APPROVAL]:** before any service starts, end every restored session:
+     `sudo -u postgres psql -X -p <cluster port> -d <restored database> -c "UPDATE public.sessions SET revoked_at = now() WHERE revoked_at IS NULL"`.
+     The set's session rows are as they were at its time, so a session revoked after it (logout, password reset,
+     admin revoke, deactivation) is live again otherwise. Rotating `HYPERCHAT_AUTH_SECRET` does **not** end sessions:
+     sessions are found by the hash of their token, and the secret only signs CSRF tokens and the OAuth state.
 6. **Start the services [APPROVAL]:** verifier first, then API, worker, cleanup.
 7. **Check:** `/health`, `check_isolation.sh`, the KYC admin view `witness.problem`, a test donation path (DEV first).
 
@@ -285,7 +293,13 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
    - `witness select` over every surviving copy, from all off-site sets of this environment.
    - Install the newest as `/var/lib/hyperchat-kyc/<env>.witness`, owned by the service user, mode 0600, then `chattr +a`.
    - It will normally match the restored set or be newer. Then follow the KYC table above.
-7. **Credentials [APPROVAL]:** re-create `api.env` and `stepup.env` from the owner's records. Generate a new `HYPERCHAT_AUTH_SECRET` (all sessions end).
+7. **Credentials [APPROVAL]:** re-create `api.env` and `stepup.env` from the owner's records. Generate a new `HYPERCHAT_AUTH_SECRET`
+   (this ends in-flight Google sign-ins and the CSRF tokens clients hold, not sessions).
+   - **Sessions [APPROVAL]:** before any service starts, end every restored session:
+     `sudo -u postgres psql -X -p <cluster port> -d <restored database> -c "UPDATE public.sessions SET revoked_at = now() WHERE revoked_at IS NULL"`.
+     The set's session rows are as they were at its time, so a session revoked after it (logout, password reset,
+     admin revoke, deactivation) is live again otherwise. Rotating `HYPERCHAT_AUTH_SECRET` does **not** end sessions:
+     sessions are found by the hash of their token, and the secret only signs CSRF tokens and the OAuth state.
 8. **DNS:** TLS (certbot), DNS to the new IP.
 9. **Services [APPROVAL]:** verifier socket, API, worker, cleanup and backup timers.
 10. **Checks:** `check_isolation.sh`, smoke tests (`deploy/README.md`).
@@ -306,7 +320,7 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
 3. If a migration completed but the release must go back:
    - code rollback first;
    - `alembic downgrade` only by explicit decision (several downgrades refuse once data depends on them, e.g. 0023 after enforcement left draft);
-   - otherwise restore the pre-deploy set **[APPROVAL]** and handle the witness and reconciliation as above.
+   - otherwise restore the pre-deploy set **[APPROVAL]** and handle the witness, the sessions step and reconciliation as above.
 
 ### KYC witness mismatch
 `kyc_enforcement_witness_mismatch` (critical) or `witness.problem` in the admin view:

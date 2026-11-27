@@ -235,7 +235,8 @@ def test_a_real_set_restores_at_the_head_with_its_security_invariants(real_set, 
     assert code == 0 and out["structurally_valid"] and out["backup_valid"] and out["restore_valid"], out
     assert out["kyc_witness"] == "consistent" and "ok" not in out
     assert out["live_operation_approved"] is False  # never approved by this tool
-    assert out["live_operation_blockers"] == ["external_reconciliation_required", "owner_approval_required"]
+    assert out["live_operation_blockers"] == ["sessions_revoke_required", "external_reconciliation_required",
+                                              "owner_approval_required"]
     inv = out["invariants"]
     assert inv["alembic_version"] == restore_check.expected_head() and inv["alembic_matches_manifest"]
     assert inv["objects_not_owned_by_hyperchat_owner"] == 0 and inv["public_table_privileges"] == 0
@@ -319,3 +320,12 @@ def test_a_scratch_cluster_restores_and_is_removed(real_set):
     assert code == 0 and out["structurally_valid"] and out["target"] == {"mode": "scratch"}, out
     assert {p.name for p in Path(os.environ.get("TMPDIR", "/tmp")).glob("hc-restorecheck-*")} == before
     assert load(tmp / "backups", base)  # the set itself is untouched
+
+
+def test_restore_runbooks_end_every_session_instead_of_relying_on_the_secret():
+    # Security audit run-4: sessions are found by the hash of their token, so a new HYPERCHAT_AUTH_SECRET ends none;
+    # every whole-database restore must revoke the restored sessions before the services start.
+    text = (Path(__file__).resolve().parents[3] / "docs" / "backup-recovery.md").read_text(encoding="utf-8")
+    assert "(all sessions end)" not in text
+    assert text.count("UPDATE public.sessions SET revoked_at = now() WHERE revoked_at IS NULL") == 2  # corruption, VPS
+    assert "the sessions step" in text  # the failed-migration restore points to it
