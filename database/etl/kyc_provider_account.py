@@ -107,11 +107,14 @@ def run(conn, args) -> int:
         secret = _secret(args.secret_stdin)
         if secret is None:
             return 2
-        conn.execute("INSERT INTO public.kyc_provider_accounts (account_id, environment, workflow_id, application_id, "
-                     "webhook_secret, enabled, monthly_cap, sort_order) SELECT %s, environment, %s, %s, %s, %s, %s, %s "
-                     "FROM public.kyc_provider_config",
-                     (args.account, args.workflow_id, args.application_id, secret, not args.disabled,
-                      args.monthly_cap, args.order))
+        if conn.execute("INSERT INTO public.kyc_provider_accounts (account_id, environment, workflow_id, "
+                        "application_id, webhook_secret, enabled, monthly_cap, sort_order) SELECT %s, environment, %s, "
+                        "%s, %s, %s, %s, %s FROM public.kyc_provider_config",
+                        (args.account, args.workflow_id, args.application_id, secret, not args.disabled,
+                         args.monthly_cap, args.order)).rowcount != 1:
+            print("Refused: configure the primary first (etl.kyc_provider_config with --application-id).",
+                  file=sys.stderr)
+            return 2
     elif cmd == "update":
         sets, params = [], {"account": args.account}
         for column, value in (("workflow_id", args.workflow_id), ("application_id", args.application_id),

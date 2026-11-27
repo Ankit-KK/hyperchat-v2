@@ -27,8 +27,8 @@ Functions:
     'account_disabled', 'account_at_cap'): never re-routed, so Didit's per-account duplicate checks keep seeing the
     user. No usable account: 'no_account_available'.
   * kyc_create_session(user, session, workflow, version, environment, account) stores a session only for the account
-    the user is pinned to, with that account's workflow; the 0022 five-argument form remains as the 'primary' call
-    (the previous release keeps working). Early webhooks apply only when the receipt's account is the session's.
+    kyc_assign_account pinned the user to, with that account's workflow (a user without a pin is refused); the 0022
+    five-argument form remains for the previous release: it pins an unpinned user to 'primary'. Early webhooks apply only when the receipt's account is the session's.
   * kyc_receive_webhook routes by the signed body's application_id (an extra account's, else the primary), verifies
     with that account's secret, and never applies a receipt to a session of another account.
   * kyc_effective: the CURRENT session is the user's newest session of a not-revoked account in that account's
@@ -300,6 +300,7 @@ def upgrade() -> None:
         LANGUAGE plpgsql __DEFINER__ AS $$
         DECLARE env text; a record;
         BEGIN
+            __READ_COMMITTED__
             SELECT environment INTO env FROM public.kyc_provider_config;
             IF NOT FOUND THEN
                 o_result := 'not_configured'; RETURN;
@@ -350,8 +351,8 @@ def upgrade() -> None:
             THEN
                 RETURN 'wrong_configuration';
             END IF;
-            IF public.kyc_user_pin(p_user_id, p_account) IS DISTINCT FROM p_account THEN
-                RETURN 'wrong_account';  -- a user's sessions all live on their pinned account
+            IF public.kyc_user_pin(p_user_id, NULL) IS DISTINCT FROM p_account THEN
+                RETURN 'wrong_account';  -- only kyc_assign_account pins; sessions live on the pinned account only
             END IF;
             """ + lock.format("p_session_id") + """
             INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, workflow_version,
@@ -388,7 +389,9 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION public.kyc_create_session(p_user_id uuid, p_session_id uuid, p_workflow_id uuid,
                                                              p_workflow_version integer, p_environment text)
         RETURNS text LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-            -- 0022's form, kept for the previous release: the primary account
+            -- 0022's form, kept for the previous release (which knows one account): a user without a pin is pinned
+            -- to the primary; one pinned elsewhere is refused ('wrong_account')
+            SELECT public.kyc_user_pin(p_user_id, 'primary');
             SELECT public.kyc_create_session(p_user_id, p_session_id, p_workflow_id, p_workflow_version,
                                              p_environment, 'primary')
         $$

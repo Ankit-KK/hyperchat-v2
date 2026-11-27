@@ -17,7 +17,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from etl import kyc_provider_config
+from etl import kyc_provider_account, kyc_provider_config
 
 DSN = os.environ.get("HYPERCHAT_TEST_MIGRATION_DSN", "")
 pytestmark = pytest.mark.skipif(not DSN, reason="HYPERCHAT_TEST_MIGRATION_DSN not set")
@@ -2199,12 +2199,25 @@ def test_0040_round_trip_keeps_the_primary_and_refuses_to_drop_another_account(m
             assert conn.execute("SELECT has_function_privilege('hyperchat_app', 'public.kyc_create_session(uuid, uuid, "
                                 "uuid, integer, text)', 'EXECUTE')").fetchone()[0]  # the previous release's call
             conn.execute("INSERT INTO public.kyc_provider_config (environment, workflow_id, application_id, "
-                         "webhook_secret) VALUES ('sandbox', %s, gen_random_uuid(), 'whsec_migtest_0123456789')",
-                         (WF40,))
-            conn.execute("INSERT INTO public.kyc_provider_accounts (account_id, environment, workflow_id, "
-                         "application_id, webhook_secret) VALUES ('migtest-b', 'sandbox', %s, gen_random_uuid(), "
-                         "'whsec_migtest_b_0123456789')", (WF40,))
+                         "webhook_secret) VALUES ('sandbox', %s, gen_random_uuid(), 'whsec_migtest_0123456789') "
+                         "ON CONFLICT (singleton) DO UPDATE SET environment = EXCLUDED.environment, "
+                         "workflow_id = EXCLUDED.workflow_id, application_id = EXCLUDED.application_id", (WF40,))
             added = True
+        # The operator's tool: an account is added with its secret from stdin (never argv), then disabled, audited.
+        monkeypatch.setattr("sys.stdin", io.StringIO("whsec_migtest_b_0123456789\nwhsec_migtest_p_0123456789\n"))
+        assert kyc_provider_account.main(["--operator", "migtest", "add", "--account", "migtest-b", "--application-id",
+                                          "5e5e5e5e-0000-4000-8000-000000000040", "--workflow-id", WF40,
+                                          "--secret-stdin"]) == 0
+        assert kyc_provider_account.main(["--operator", "migtest", "add", "--account", "primary", "--application-id",
+                                          "5e5e5e5e-0000-4000-8000-000000000041", "--workflow-id", WF40,
+                                          "--secret-stdin"]) == 2  # the primary is not an extra account
+        assert kyc_provider_account.main(["--operator", "migtest", "disable", "--account", "migtest-b"]) == 0
+        with _owner() as conn:
+            assert conn.execute("SELECT webhook_secret, enabled FROM public.kyc_provider_accounts "
+                                "WHERE account_id = 'migtest-b'").fetchone() == ("whsec_migtest_b_0123456789", False)
+            assert conn.execute("SELECT action, operator, detail::text NOT LIKE '%%whsec%%' FROM "
+                                "public.kyc_account_events ORDER BY created_at").fetchall() == [
+                ("account_added", "migtest", True), ("account_changed", "migtest", True)]
         with pytest.raises(Exception, match="downgrade of 0040 stopped"):
             command.downgrade(cfg, "0039")
         assert _version() == "0040"

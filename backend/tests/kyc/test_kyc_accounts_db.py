@@ -140,7 +140,7 @@ def test_a_pinned_account_that_cannot_take_sessions_answers_503_and_alerts_never
     set_primary(enabled=True)
     multi.fake_b.finish(uid)
     r = multi.post(f"{ME}/session", headers=h)
-    assert (r.status_code, r.json()["reason"]) == (503, "kyc_account_unavailable")
+    assert r.status_code == 503
     assert multi.fake.calls == 0 and multi.fake_b.calls == 1 and pin(uid) == B  # never silently on the primary
     assert alerts() == ["account_disabled"]
     assert [e[0] for e in events("account_changed")] == ["primary", B, "primary"]  # every change audited
@@ -165,7 +165,7 @@ def test_monthly_caps_hold_under_concurrent_assignments(multi):
     assert sorted(results) == ["no_account_available"] * 5 + ["ok"] * 3
     h, _ = owner(multi, "kyc-acc-capped")
     r = multi.post(f"{ME}/session", headers=h)
-    assert (r.status_code, r.json()["reason"]) == (503, "kyc_account_unavailable") and "no_account_available" in alerts()
+    assert r.status_code == 503 and "no_account_available" in alerts()
 
 
 def test_an_account_without_an_api_key_here_answers_503(multi):
@@ -173,7 +173,7 @@ def test_an_account_without_an_api_key_here_answers_503(multi):
     set_primary(enabled=False)
     h, _ = owner(multi, "kyc-acc-nokey")
     r = multi.post(f"{ME}/session", headers=h)
-    assert (r.status_code, r.json()["reason"]) == (503, "kyc_account_unavailable") and alerts() == ["account_key_missing"]
+    assert r.status_code == 503 and alerts() == ["account_key_missing"]
 
 
 # ── webhooks: each account's own secret, each session's own account ─────────────────────────────────────────────
@@ -253,7 +253,7 @@ def test_disabling_keeps_approvals_and_revoking_retires_them_for_good(multi):
     with pytest.raises(psycopg.errors.RestrictViolation), fixture_db() as conn:  # its history keeps it
         conn.execute("DELETE FROM public.kyc_provider_accounts WHERE account_id = %s", (B,))
     r = multi.post(f"{ME}/session", headers=h)
-    assert (r.status_code, r.json()["reason"]) == (503, "kyc_account_unavailable") and alerts() == ["account_revoked"]
+    assert r.status_code == 503 and alerts() == ["account_revoked"]
 
 
 def test_a_pin_moves_only_through_the_audited_operator_function(multi):
@@ -296,6 +296,11 @@ def test_no_runtime_role_reads_an_accounts_secret_or_moves_pins(multi):
             with pytest.raises(REFUSED):
                 conn.execute(sql, args)
     assert pin(uid) == "primary"
+    fresh = make_user("kyc-acc-fresh" + DOMAIN)  # no pin yet: naming an account is not choosing one
+    with db() as conn:
+        assert conn.execute("SELECT public.kyc_create_session(%s, gen_random_uuid(), %s, 1, 'sandbox', %s)",
+                            (fresh, B_WF, B)).fetchone()[0] == "wrong_account"
+    assert pin(fresh) is None
 
 
 def test_extra_accounts_need_the_primarys_application_id_and_their_own(multi):

@@ -250,6 +250,7 @@ def test_provider_failure_and_a_lost_local_write_recover_without_duplicates(kyc)
 def test_concurrent_starts_store_one_session(kyc, env):
     _, uid = owner(kyc, "kyc-conc")
     repo = KycRepository(kyc.app_state.kyc.repo._conn)
+    assert asyncio.run(repo.assign_account(uid))[0] == "ok"  # migration 0040: the account is assigned first
 
     async def both():
         created = CreatedSession(str(uuid.uuid4()), "https://verify.didit.me/s/x", "Not Started", 1)
@@ -705,6 +706,7 @@ def test_a_webhook_racing_its_uncommitted_session_is_applied(kyc):
 def test_a_session_racing_its_uncommitted_early_webhook_applies_it(kyc, env):
     _, uid = owner(kyc, "kyc-race-w")
     sid, result = str(uuid.uuid4()), {}
+    assert asyncio.run(kyc.app_state.kyc.repo.assign_account(uid))[0] == "ok"  # migration 0040
 
     def store():
         from app.cli import connection_factory

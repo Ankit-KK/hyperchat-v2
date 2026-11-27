@@ -177,6 +177,8 @@ echo, or one line of stdin with `--secret-stdin`, never from argv.
    `active`, their donations stop.
 7. **List:** `... list` (ids, workflows, flags, this month's usage; never a secret).
 
+**API settings.** `HYPERCHAT_DIDIT_ENVIRONMENT` must always be set. Each account a user can be pinned to needs its key: `HYPERCHAT_DIDIT_API_KEY` (and `HYPERCHAT_DIDIT_WORKFLOW_ID`, equal to the database's) for the primary, `HYPERCHAT_DIDIT_EXTRA_API_KEYS` for the others. An account without a key answers 503 with `account_key_missing` to its pinned users; extra accounts work without the primary's key.
+
 **Switching to a new Didit organisation (the owner's 2026-11-27 switch).** Add the new organisation's application as
 an extra account. Then disable the old one, which is kept, not revoked, so existing approvals keep counting; new users
 then go to the new account. Do **not** overwrite the primary row with the new organisation's workflow: that starts a

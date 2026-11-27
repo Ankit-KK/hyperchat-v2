@@ -23,6 +23,7 @@ operator alert (kind kyc_account_unavailable).
 
 import asyncio
 import json
+import logging
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -33,6 +34,7 @@ from app.core.errors import ApiError
 from app.kyc.didit import CreatedSession, DiditClient, DiditError, as_uuid, canonical, check_statuses
 from app.security.audit import security_event
 
+log = logging.getLogger("hyperchat.kyc")
 RATE_START = ("kyc:session", 5, 3600)       # per user
 RATE_REFRESH = ("kyc:refresh", 30, 3600)    # per admin
 STATE = {"Not Started": "in_progress", "In Progress": "in_progress", "Resubmitted": "in_progress",
@@ -154,11 +156,14 @@ class KycService:
 
     @classmethod
     def from_settings(cls, repo: KycRepository, settings: Settings, limiter, alerts=None) -> "KycService":
-        if not settings.didit_configured:  # the primary's key, workflow and environment, as before 0040
+        if not settings.didit_environment:  # no environment: KYC is unavailable (503), as before 0040
             return cls(repo, settings, client=None, limiter=limiter, alerts=alerts)
         keys = settings.didit_api_keys()
-        primary = DiditClient(base=settings.didit_api_base, api_key=keys.pop("primary"),
-                              workflow_id=as_uuid(settings.didit_workflow_id.strip()))
+        primary = None
+        if settings.didit_configured:  # the primary's key, workflow and environment; it may be absent (disabled)
+            primary = DiditClient(base=settings.didit_api_base, api_key=keys["primary"],
+                                  workflow_id=as_uuid(settings.didit_workflow_id.strip()))
+        keys.pop("primary", None)
         others = {account: DiditClient(base=settings.didit_api_base, api_key=key) for account, key in keys.items()}
         return cls(repo, settings, client=primary, limiter=limiter, clients=others, alerts=alerts)
 
@@ -222,8 +227,9 @@ class KycService:
             try:
                 await self.alerts.record(kind="kyc_account_unavailable", source="kyc", code=code,
                                          account=account or "", user_id=user_id)
-            except Exception:  # noqa: BLE001 - alerting never fails what it reports on (app.alerts)
-                pass
+            except Exception as exc:  # noqa: BLE001 - alerting never fails what it reports on (app.alerts)
+                log.warning("alert not recorded", extra={"kind": "kyc_account_unavailable",
+                                                         "error": type(exc).__name__})
         return ApiError(503, UNAVAILABLE, "kyc_account_unavailable")
 
     async def _account(self, user_id: str, ip: str | None) -> tuple[str, str, DiditClient]:
