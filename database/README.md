@@ -176,6 +176,17 @@ their passwords. **Dry run by default.** Nothing is ever written to a file, log 
   the whole run back. Admins set their password by the admin path. The read-only report (phase 1) does not know
   this rule: its exact-match counts exceed the dry run's `eligible` by `target_admin_account` (and by the deleted /
   banned accounts), which the owner's count review must expect.
+- **Accounts excluded pending identity resolution are held (NV4-3, 2026-11-28):** the exclusion policy above keeps
+  them on hold until resolved, and V2's only hold is `is_active = false`. Every dry run counts the active ones per
+  category:
+  - `hold_target_legacy_id_not_in_source`
+  - `hold_target_email_used_by_other_source_id`
+  - `hold_id_match_email_mismatch` (case-only differences included)
+  - plus `hold_already_inactive`.
+
+  `--deactivate` turns them off with the controls below, whatever their own Supabase row says. An email corrected
+  since the plan refuses the write. Releasing a hold is an admin re-activation after the identity is resolved
+  (`docs/operations/legacy-cutover.md`, step 4); this tool never re-activates.
 - **Supabase-deleted / banned accounts are deactivated (NV3-3, 2026-11-27):** every dry run also plans
   `deactivate_banned_or_deleted` (active V2 accounts whose Supabase account, by exact legacy id, is deleted or
   currently banned) and counts `banned_or_deleted_already_inactive`. `--deactivate --expected-fingerprint <sha256>`

@@ -164,8 +164,10 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
         src.execute(f"CREATE TABLE public.{slug}_donations ({donation_cols}{extra})")
 
     # rows: users and creators
+    # plain is a linked NON-owner account of alpha (users.streamer_id set, streamers.user_id = s1), as seen once in the
+    # observed restore: reported by kind, never a failure
     for uid, email, role, sid in ((U_ADMIN, "admin" + D, "user", None), (U_S1, "s1" + D, "streamer", S_ALPHA),
-                                  (U_S2, "s2" + D, "streamer", S_BETA), (U_PLAIN, "plain" + D, "user", None),
+                                  (U_S2, "s2" + D, "streamer", S_BETA), (U_PLAIN, "plain" + D, "user", S_ALPHA),
                                   (U_ROGUE, "rogue" + D, "admin", None)):  # NV3-2: legacy role 'admin', not listed
         _insert(src, "auth_users", id=uid, email=email, username=email.split("@")[0], role=role, is_active=True,
                 failed_login_attempts=0, supabase_user_id=SUPA[uid], created_at=NOW, updated_at=NOW, streamer_id=sid)
@@ -277,7 +279,8 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
                  "loaded pending for no owner=1", "KYC at launch (enforcement active, no grace)",
                  "rows: order_lookup  -- source=3 loaded=1 skipped={'unpaid_legacy_order': 2}",
                  "admins=1 admin_emails accounts=1 demoted=1",
-                 "kyc_required=2 "):
+                 "kyc_required=2 ",
+                 "owner=2 linked_non_owner=1 dangling=0 source_links=3; owners_without_their_link=0"):
         if line not in text:  # pytest.fail keeps the whole message (an assert repr is truncated)
             pytest.fail(f"missing: {line}\nreport lines:\n" + "\n".join(
                 x for x in text.splitlines() if any(w in x for w in ("unpaid", "order_lookup", "admins="))))
@@ -376,26 +379,36 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
 
     # NV3-3: Supabase-deleted (plain) and -banned (admin) accounts are deactivated by --deactivate as the migration
     # role (an admin row and a runtime-role is_active change are both guarded for hyperchat_app); never re-activated.
+    # NV4-3: and the accounts the D1 exclusion policy keeps on hold until identity is resolved, though their own
+    # Supabase row is unflagged: s2 has no Supabase row (a hard delete; it owns creator beta), rogue's Supabase email
+    # differs from its V2 email. s1 matches exactly and stays active.
     flagged = [imp.Source(SUPA[U_PLAIN], digest("plain" + D), digest("plain" + D), None, True, True, False),
                imp.Source(SUPA[U_ADMIN], digest("admin" + D), digest("admin" + D), None, True, False, True),
-               imp.Source(SUPA[U_S1], digest("s1" + D), digest("s1" + D), gotrue, True, False, False)]
+               imp.Source(SUPA[U_S1], digest("s1" + D), digest("s1" + D), gotrue, True, False, False),
+               imp.Source(SUPA[U_ROGUE], digest("renamed" + D), digest("renamed" + D), None, True, False, False)]
     with psycopg.connect(_dsn(verify_db, "hyperchat_migrator")) as conn:
         conn.execute("SET ROLE hyperchat_owner")  # as main() does for --deactivate
         conn.commit()
         p = imp.plan(flagged, imp.read_targets(conn))
         conn.rollback()
-        assert p.counts["deactivate_banned_or_deleted"] == 2
-        assert {x.target_id for x in p.deactivations} == {U_PLAIN, U_ADMIN}
+        assert {x.target_id: x.why for x in p.deactivations} == {
+            U_PLAIN: "banned_or_deleted", U_ADMIN: "banned_or_deleted", U_S2: "target_legacy_id_not_in_source",
+            U_ROGUE: "id_match_email_mismatch"}
+        assert (p.counts["deactivate_banned_or_deleted"], p.counts["hold_target_legacy_id_not_in_source"],
+                p.counts["hold_id_match_email_mismatch"]) == (2, 1, 1)
         p.fingerprint = digest("synthetic source snapshot")
-        assert imp.deactivate(conn, p) == 2
+        assert imp.deactivate(conn, p) == 4
         again = imp.plan(flagged, imp.read_targets(conn))
         conn.rollback()
-        assert (again.counts["deactivate_banned_or_deleted"], again.counts["banned_or_deleted_already_inactive"]) \
-            == (0, 2)
+        assert again.deactivations == [] and (again.counts["banned_or_deleted_already_inactive"],
+                                              again.counts["hold_already_inactive"]) == (2, 2)
     with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as c:
         c.execute("SET ROLE hyperchat_owner")
-        assert dict(c.execute("SELECT id::text, is_active FROM public.users WHERE id IN (%s, %s, %s)",
-                              (U_PLAIN, U_ADMIN, U_S1)).fetchall()) == {U_PLAIN: False, U_ADMIN: False, U_S1: True}
+        assert dict(c.execute("SELECT id::text, is_active FROM public.users WHERE id IN (%s, %s, %s, %s, %s)",
+                              (U_PLAIN, U_ADMIN, U_S1, U_S2, U_ROGUE)).fetchall()) == {
+            U_PLAIN: False, U_ADMIN: False, U_S1: True, U_S2: False, U_ROGUE: False}
+        # a held owner's creator takes no donations under the launch KYC rule (no active owner)
+        assert c.execute("SELECT public.kyc_donation_decision(%s, 'active')", (S_BETA,)).fetchone()[0] == "no_owner"
 
     # The live credit writer on migrated data: reject the partly credited newest 'Short' donation (credit 20 of 80)
     # as the runtime role; its exact credit leaves the donor total (120 -> 100), nothing floors, the verifier agrees.
