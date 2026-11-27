@@ -621,7 +621,8 @@ def test_no_api_role_can_call_the_guards_and_every_guard_pins_its_search_path():
                                     'stepup_guard_effects', 'stepup_guard_assurance', 'stepup_guard_events',
                                     'stepup_guard_enforcement')
         """).fetchall()
-        assert len(rows) == 12  # 0027's ten, and 0037's stepup_guard_soundboard and stepup_guard_reopen (SEC-A)
+        assert len(rows) == 13  # 0027's ten, 0037's stepup_guard_soundboard and stepup_guard_reopen (SEC-A), and
+        #                         0044's stepup_guard_streamer_insert_columns (audit run-4)
         for fn, definer, config, owner in rows:
             assert owner == "hyperchat_owner" and any(c.startswith("search_path=pg_catalog, public") for c in config), fn
             for role in (*API_ROLES, "hyperchat_readonly", "public"):
@@ -630,4 +631,4 @@ def test_no_api_role_can_call_the_guards_and_every_guard_pins_its_search_path():
         assert conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'aac_stepup_guard_%' "
                             "AND tgenabled = 'O'").fetchone()[0] == 6
         assert conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'aad_stepup_guard_%' "
-                            "AND tgenabled = 'O'").fetchone()[0] == 2  # 0037 (SEC-A)
+                            "AND tgenabled = 'O'").fetchone()[0] == 3  # 0037 (SEC-A) and 0044 (audit run-4)
