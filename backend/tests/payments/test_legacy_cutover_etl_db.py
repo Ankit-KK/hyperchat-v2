@@ -306,6 +306,7 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
         assert c.execute("SELECT count(*) FROM public.kyc_grace_grants").fetchone()[0] == 0
         assert c.execute("SELECT count(*) FROM public.api_keys").fetchone()[0] == 0
         assert c.execute("SELECT count(*) FROM public.partner_api_keys").fetchone()[0] == 0
+        assert c.execute("SELECT count(*) FROM public.creator_image_uploads").fetchone()[0] == 0  # 0039: no record
         assert c.execute("SELECT state FROM public.kyc_enforcement").fetchone()[0] == "draft"
 
     # 0036 with every trigger back on: the pricing rule binds the runtime roles only. A legacy value below today's

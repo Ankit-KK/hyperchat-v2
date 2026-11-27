@@ -11,7 +11,8 @@ moderators, users and their links). Not migrated, counted in the report:
 * platform / streamer soundboard slots and the swap log: their files are not carried over.
 * donation media, voice messages and donor links (etl.mapping.DONATION_CLEARED_COLUMNS): loaded as NULL.
 * api_keys and partner_api_keys: reset; new keys are issued in V2.
-An active creator without an owner loads 'pending'.
+An active creator without an owner loads 'pending'. creator_image_uploads (0039) stays empty: legacy images are
+copied by the asset plan without an image record.
 Creator profile pictures and backgrounds are carried over (URLs kept, or rewritten with --media-base-*); the files are
 copied afterwards by docs/operations/legacy-asset-migration-plan.md.
 

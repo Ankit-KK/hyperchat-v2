@@ -127,9 +127,13 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
     check("donations: non-null counts of the kept history columns", a == b, str(dict(zip(kept, b))))
     left = one(tgt, "SELECT (SELECT count(*) FROM public.obs_tokens), (SELECT count(*) FROM "
                     "public.platform_soundboard_slots), (SELECT count(*) FROM public.streamer_soundboard_slots), "
-                    "(SELECT count(*) FROM public.api_keys), (SELECT count(*) FROM public.partner_api_keys)")
-    check("fresh start: no OBS token, soundboard slot or API key in the target", not any(left),
-          f"obs_tokens={left[0]} soundboard_slots={left[1] + left[2]} api_keys={left[3]} partner_api_keys={left[4]}")
+                    "(SELECT count(*) FROM public.api_keys), (SELECT count(*) FROM public.partner_api_keys), "
+                    "(SELECT count(*) FROM public.creator_image_uploads)")
+    # 0039: legacy logos / backgrounds are copied by the asset plan WITHOUT an image record ("validity is the row;
+    # legacy copies get no row"), so the fresh-start load leaves creator_image_uploads empty
+    check("fresh start: no OBS token, soundboard slot, API key or image record in the target", not any(left),
+          f"obs_tokens={left[0]} soundboard_slots={left[1] + left[2]} api_keys={left[3]} partner_api_keys={left[4]} "
+          f"creator_image_uploads={left[5]}")
 
     # 5. approved_by split covers every source value.
     u = _donation_union(src, "approved_by::text AS a")

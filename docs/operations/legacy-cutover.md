@@ -12,7 +12,7 @@ needs the owner's approval for that window. Owner decisions of 2026-11-27 (bindi
    over (`docs/operations/legacy-asset-migration-plan.md`). Voice messages, donation media and soundboard files are
    not.
 
-## What the ETL loads (head 0038)
+## What the ETL loads (head 0039)
 
 `database/etl/rehearsal.py` loads one read-only snapshot of the restored legacy database into a **fresh** database at
 head, in one transaction, then runs `database/etl/reconcile.py` and the PAY-15 verifier. Exit 0 only if every check
@@ -43,6 +43,7 @@ tables, so they never block the migrator):
 - Payment evidence: `payment_webhook_events`, `payment_integrity_events` (0029).
 - Step-up (0025–0028, 0037): `webauthn_credentials`, `stepup_*`, `session_assurance`. `stepup_enforcement` keeps its `draft` row.
 - KYC (0022–0023): `kyc_sessions`, `kyc_events`, `kyc_webhook_events`, `kyc_grace_grants`, `kyc_restrictions`, `kyc_enforcement_events`. `kyc_enforcement` keeps its `draft` row; `kyc_provider_config` may already be set.
+- `creator_image_uploads` (0039): legacy logos and backgrounds get no image record ("validity is the row; legacy copies get no row"); step 6 copies them without one. The reconciliation requires the table empty.
 - `creator_status_events`, `application_events` (0020–0021), `user_identities`, `user_invites`, `sessions`, `jobs`, `realtime_outbox`, `moderator_notifications`, `d1_hash_import_ledger` (written by step 4).
 - Pricing (0036): its triggers check only `hyperchat_app` / `hyperchat_worker` writes (and are paused during the load), so legacy minimums and voice tiers outside today's bounds load unchanged and are never re-judged. With every trigger
   back on, the CI test shows the owner can still write such a value and `hyperchat_app` is refused (`check_violation`).
@@ -80,7 +81,7 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
    - Restore it read-only as `hyperchat_restore_test` on the restore cluster.
    - Any legacy write after this point invalidates the snapshot.
 3. **ETL into production.**
-   - Production must be a database migrated to head (0038 or later) with nothing else in it. The load refuses
+   - Production must be a database migrated to head (0039 or later) with nothing else in it. The load refuses
      anything else and changes nothing.
    - Production today is an idle stack at 0009 whose API is running, so its tables may already hold rows (rate
      limits, visits, sessions, a bootstrap admin). First stop the production API, worker and timers. Then either:
@@ -154,13 +155,10 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
 
 ## Future migrations (onboarding Phase B, 0038–0042)
 
-The ETL targets 0038 (0038 adds a function and a changed trigger function, no table or column: nothing to load). When a Phase B migration merges, the ETL and its CI test must follow:
+The ETL targets 0039. 0038 adds a function and a changed trigger function; 0039 adds `creator_image_uploads`, which the load leaves empty (checked by the reconciliation). Neither adds a column to a loaded table. When a Phase B migration merges, the ETL and its CI test must follow:
 
 - **0038** (invite guard exception, merged 03e7c02): no ETL change (checked). Legacy users get no invite rows.
-- **0039** (creator image assets): if it adds an image table or columns, migrated creators need a decision: no rows
-  (images are registered by step 6), or rows built from `brand_logo_url` / `background_url` after the copy. A new
-  `streamers` column without a default fails the load, because the streamers copy is column for column; it must be
-  mapped in `load_users_and_streamers`.
+- **0039** (creator image records, merged aeb3ce8): `creator_image_uploads` stays empty for migrated creators; legacy images are copied without a record (step 6).
 - **0040** (multiple Didit accounts / PAN evidence): migrated owners have no KYC sessions, so nothing to import.
   Confirm that the new columns default safely for legacy creators.
 - **0041** (automatic activation) and the payout hold: decide what a `legacy` creator gets. Revisit owner decision 1.
