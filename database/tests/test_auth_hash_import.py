@@ -72,7 +72,7 @@ ELIGIBLE = ("e1", "e2", "e3", "e4")
 EXPECTED = {
     "source_accounts": 14, "target_accounts": 14, "target_with_legacy_id": 13, "target_without_legacy_id": 1,
     "eligible": 4, "eligible_email_confirmed": 3, "target_legacy_id_not_in_source": 1,
-    "target_email_used_by_other_source_id": 1, "id_match_email_mismatch": 2, "source_deleted": 1, "source_banned": 1,
+    "target_email_used_by_other_source_id": 1, "id_match_email_mismatch": 2, "source_deleted": 1, "source_banned": 1, "target_admin_account": 0,
     "target_already_has_password": 1, "source_without_password": 2, "unsupported_hash_format": 0,
     "source_ids_not_in_target": 2, "duplicate_source_ids": 0, "duplicate_target_legacy_ids": 0,
 }
@@ -103,6 +103,16 @@ def test_plan_categories_and_only_exact_matches_are_eligible():
     p = plan(_sources(), _targets())
     assert p.counts == EXPECTED and not p.blocked
     assert sorted(u.password_hash for u in p.updates) == sorted(HASHES[k] for k in ELIGIBLE)
+
+
+def test_an_admin_account_is_excluded_never_planned():
+    """Migration 0024 refuses the apply role (hyperchat_app) every write to an admin row: a planned admin would roll
+    the whole import back at cutover (admin_emails become admins in the ETL), so admins are counted and skipped."""
+    t = [x if x.legacy_id != IDS["e1"] else Target(x.id, x.legacy_id, x.email, x.email_norm, False, True)
+         for x in _targets()]
+    p = plan(_sources(), t)
+    assert p.counts["target_admin_account"] == 1 and p.counts["eligible"] == EXPECTED["eligible"] - 1
+    assert HASHES["e1"] not in {u.password_hash for u in p.updates} and not p.blocked
 
 
 def test_duplicates_and_unsupported_formats_block():

@@ -1,6 +1,5 @@
 """Pure transformation rules (unit-tested; no database access)."""
 
-import hashlib
 import re
 from urllib.parse import urlsplit
 
@@ -17,15 +16,34 @@ RAZORPAY_ACCOUNTS = {
 }
 
 
-# Media URL columns rewritten from a legacy public media base to the production one (owner decision D9: production
-# serves media from a configured custom domain, not r2.dev). V2 builds and checks media URLs from its ONE configured
-# base (checkout, OBS playback, soundboard ownership), so loaded URLs must use it. Only the scheme+host(+path)
-# prefix changes; the object key is kept byte for byte.
+# Creator image columns rewritten from a legacy public media base to the production one (owner decision D9:
+# production serves media from a configured custom domain, not r2.dev). Fresh start (owner, 2026-11-27): only each
+# creator's profile picture and background are carried over (docs/operations/legacy-asset-migration-plan.md);
+# donation media and soundboard files are not, so no other table is rewritten. Only the scheme+host(+path) prefix
+# changes; the object key is kept byte for byte.
 MEDIA_URL_COLUMNS = {
-    "donations": ("voice_message_url", "hypersound_url", "media_url", "tts_audio_url"),
     "streamers": ("brand_logo_url", "background_url"),
-    "platform_soundboard_slots": ("audio_url", "image_url"),
-    "streamer_soundboard_slots": ("audio_url", "image_url"),
+}
+
+# Fresh start: legacy donation media, voice messages and donor links are history only. These donation columns are
+# loaded as NULL, so no V2 path (OBS queue, replay, dashboard, donor status / upload) can serve, play or accept a
+# legacy URL or token. The reconciliation counts what the source held and asserts the target holds none.
+DONATION_CLEARED_COLUMNS = ("voice_message_url", "hypersound_url", "media_url", "media_type", "tts_audio_url",
+                            "status_token_hash", "upload_token_hash")
+
+# Columns the V2 schema added to straight-copied tables that legacy never had: left to their defaults (or, in
+# LEGACY_VALUES, set to the value the migration gave the rows that existed then). Explicit: any OTHER target column
+# missing in the source still fails the load. A new migration that adds a column to one of these tables must add it
+# here (test_etl_mapping pins the list against the migrations).
+V2_ONLY_COLUMNS = {
+    "banned_donors": ("unbanned_at", "unbanned_by_label", "unbanned_by_user_id"),  # 0016
+    "user_signups": ("review_status", "reviewed_by", "reviewed_at", "rejection_reason", "streamer_id",
+                     "invite_id"),  # 0021
+}
+# 0021 gave the signups that existed then 'legacy_unreviewed' and then changed the column default to 'submitted':
+# imported rows keep the legacy meaning (never offered for approval as if new).
+LEGACY_VALUES = {
+    "user_signups": {"review_status": "legacy_unreviewed"},
 }
 
 
@@ -68,11 +86,6 @@ def normalize_currency(value: str | None) -> str:
     if not CURRENCY_RE.match(code):
         raise ValueError(f"unsupported currency code: {code!r}")
     return code
-
-
-def obs_token_hash(token: str) -> str:
-    """OBS tokens are stored as SHA-256 hex; existing OBS URLs keep working by hashing the presented token."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def user_role(source_role: str | None, email: str, admin_emails: set[str]) -> str:

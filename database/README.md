@@ -9,7 +9,7 @@ The full table-by-table design, including how every legacy column was mapped, is
 ```
 alembic.ini, migrations/   Alembic environment and revisions 0001-0017 (SQL-first, op.execute)
 etl/rehearsal.py           load the legacy data (restored dump) into the new schema
-etl/mapping.py             value mapping rules (currencies, roles, slugs, OBS token hashing, ...)
+etl/mapping.py             value mapping rules (currencies, roles, slugs, fresh-start columns, ...)
 etl/reconcile.py           post-load reconciliation (counts, per-creator sums, invariants)
 etl/auth_readonly_report.py READ-ONLY count report: Supabase auth.users vs public.users (D1 phase 1)
 etl/auth_hash_import.py     Supabase bcrypt hash import into public.users, dry run by default (D1 phase 2)
@@ -55,11 +55,14 @@ tests/                     migration round trip, role privileges, ETL mapping ru
 cd database
 export HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/hyperchat_dev?host=/var/run/postgresql&port=5433"
 ../venv/bin/alembic upgrade head
-../venv/bin/python -m etl.rehearsal --source "<dsn of hyperchat_restore_test>" --target "<dsn of hyperchat_dev>" --report report.txt
+../venv/bin/python -B -m etl.rehearsal --source "<dsn of hyperchat_restore_test>" --target "<dsn of a NEW database at head, as hyperchat_migrator>" \n    --verify-dsn "<the same database as hyperchat_readonly>" --report report.txt
 ```
-The rehearsal reads the source in one read-only snapshot and never writes to it; it prints counts
-and sums only, never row data. Passwords are not migrated by the rehearsal (they are imported from
-the legacy auth system at cutover).
+The load reads the source in one read-only snapshot and never writes to it; it prints counts
+and sums only, never row data. It loads only a fresh database at head (it refuses, changing nothing, when any
+table other than the migrations' own singletons holds a row) and production only with `--production-cutover`.
+Fresh start (owner, 2026-11-27): no OBS tokens, soundboard slots or donation media are migrated. Passwords are
+imported afterwards by `etl/auth_hash_import.py`. The full mapping and the cutover runbook are in
+`docs/operations/legacy-cutover.md`.
 
 ## Tests
 Uses the backend's pinned environment (`requirements.txt` -> `../backend/requirements-dev.txt`).
@@ -142,7 +145,7 @@ data still needs explicit operator approval at the cutover, after the open detai
 
 **Creator ownership transfer (D13, `POST /api/v1/admin/creators/{id}/owner/transfer`) in the cutover:** it moves a creator to another account; it does **not** establish identity. The admin first determines the rightful owner from reliable evidence. Prefer fixing ownership in **legacy** before the ETL (`streamers.user_id` and `auth_users.streamer_id` together). In V2, transfer only **after the ETL**, and **never between `--apply` and reconciliation**. Ownership is not part of the import fingerprint, so a transfer does not invalidate a dry run (an email change does: see D11). It can resolve the creator/account side of a "V2 email used by another Supabase id" case once the review has decided who owns the creator. It does **not** solve V2 legacy ids missing in Supabase or Supabase-only accounts, and it merges no accounts. Rotate the creator's OBS tokens when the previous owner must lose the overlays.
 
-**Media URLs at cutover (D9):** production serves media from a configured custom domain (`HYPERCHAT_R2_PUBLIC_BASE_URL`), not `r2.dev`, and V2 accepts and plays only URLs on that base. Load with `--media-base-to <that base>` and one `--media-base-from <legacy base>` per legacy public host (legacy used more than one `pub-….r2.dev`): every donation media URL (`voice_message_url`, `hypersound_url`, `media_url`, `tts_audio_url`), soundboard `audio_url` / `image_url` and creator `brand_logo_url` / `background_url` that starts with a legacy base gets the new base, with the object key unchanged; NULL, URLs already on the new base and any other URL (e.g. Supabase Storage objects, which are copied separately) are left alone. The reconciliation then fails if a legacy-base URL remains. The rewrite is deterministic and idempotent. The objects themselves are not moved: the custom domain serves the same bucket. Keep the old `r2.dev` hosts readable where practical, since old links live on in chat history and screenshots; new data uses the custom domain only.
+**Media URLs at cutover (D9):** production serves media from a configured custom domain (`HYPERCHAT_R2_PUBLIC_BASE_URL`), not `r2.dev`. Fresh start (owner, 2026-11-27): only the creator `brand_logo_url` / `background_url` are carried over; donation media, voice, TTS and donor-link columns are loaded as NULL and soundboard slots are not migrated, so V2 never serves or plays a legacy donation or soundboard URL. With `--media-base-to <that base>` and one `--media-base-from <legacy base>` per legacy public host, a creator image URL that starts with a legacy base gets the new base (object key unchanged); anything else (e.g. `/assets/streamers/...` paths, copied by `docs/operations/legacy-asset-migration-plan.md`) is left alone. The reconciliation then fails if a legacy-base URL remains. The rewrite is deterministic and idempotent.
 
 **Before the maintenance window:** resolve account-specific identity conflicts under the approved exclusion policy and set the actual maintenance time. Keep the legacy mutation freeze in place until the cutover is either validated or safely aborted. The importer will not overwrite a target row that already has a password hash, so an abort after `--apply` must not be handled by casually rerunning it. Use an explicitly approved rollback/reconciliation plan first.
 
@@ -166,7 +169,13 @@ their passwords. **Dry run by default.** Nothing is ever written to a file, log 
   activation, `email_verified_at`, `password_changed_at` stay as they are). `email_confirmed_at` is only counted
   (`eligible_email_confirmed`); `confirmed_at` is never used (it can be a phone confirmation).
 - Excluded rows are counted by reason: orphaned target ids, target email belonging to another Supabase id, email
-  mismatch, deleted, banned, already has a password, no source hash, unsupported format.
+  mismatch, deleted, banned, administrator account (`target_admin_account`), already has a password, no source
+  hash, unsupported format.
+- **Administrators are never imported (2026-11-27):** the apply role is `hyperchat_app`, and migration 0024 refuses it
+  every write to an admin row (the ETL makes every `admin_emails` address an admin), so one planned admin would roll
+  the whole run back. Admins set their password by the admin path. The read-only report (phase 1) does not know
+  this rule: its exact-match counts exceed the dry run's `eligible` by `target_admin_account` (and by the deleted /
+  banned accounts), which the owner's count review must expect.
 - `--apply` refuses on any blocker: duplicate ids on either side, or **any** unsupported hash format among otherwise
   eligible rows.
 

@@ -231,8 +231,8 @@ So a won chargeback that reopens in pre-arbitration is open again, and a late `c
 - Needing attention means open or lost disputes, refunds, mismatches, conflicts, or a non-`payment` match.
 - No timer.
 
-**Cutover / rehearsal ETL:** `database/etl/rehearsal.py` refuses to load, before changing anything, when either
-evidence table holds a row.
+**Cutover / rehearsal ETL:** `database/etl/rehearsal.py` refuses to load, before changing anything, unless the target is a
+fresh database at head (no payment evidence, no other data; `docs/operations/legacy-cutover.md`).
 
 **Reversal accounting (PAY-15 stage 3, migration 0032), OFF by default.** `HYPERCHAT_PAYMENT_ACCOUNTING_ENABLED`
 defaults to `false`; since stage 6a-4 a true setting is accepted under the switch gate below. With it off, evidence

@@ -25,12 +25,12 @@ Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):
 | — | `user_invites` | new (0008): invite-only onboarding, only the token's SHA-256 stored |
 | `password_reset_tokens` | `password_reset_tokens` | FK → users; expired rows not migrated |
 | `streamers` | `streamers` | `donation_table_id` dropped; Razorpay name columns → `razorpay_key_ref` / `razorpay_secret_ref`; `user_id` FK added; `razorpay_account` (0010) derived from the two name pairs (`etl.mapping.RAZORPAY_ACCOUNTS`) |
-| `obs_tokens` | `obs_tokens` | plaintext `token` → `token_hash` (SHA-256); streamer_id NOT NULL |
+| `obs_tokens` | — | **not migrated** (fresh start, owner 2026-11-27): streamers create new tokens at launch; see `docs/operations/legacy-cutover.md` |
 | `order_lookup` | `order_lookup` | `streamer_slug`, `donation_table_id` dropped; FK → donations |
 | `moderation_actions` | `moderation_actions` | `donation_table` dropped; `donation_id` without FK (audit, orphans kept); `actor_user_id` (0009, FK `users` ON DELETE SET NULL): the web user behind a dashboard action |
 | `telegram_/discord_callback_mapping` | same | `table_name` dropped; FK → donations; only unexpired rows migrated |
 | `streamer_donator_totals` | same | `streamer_slug` → `streamer_id` FK |
-| slug-keyed soundboard tables, `api_keys` | same | FK on `streamer_slug` (ON UPDATE CASCADE) |
+| slug-keyed soundboard tables, `api_keys`, `partner_api_keys` | same (schema) | FK on `streamer_slug` (ON UPDATE CASCADE); **rows not migrated** at the fresh-start cutover (owner 2026-11-27: files not carried, keys reset) |
 | other 20 tables | same | structure copied; FKs to `users` instead of `auth_users` / `auth.users` |
 | — | `contact_submissions` | created by 0005 for the legacy contact form (whose table never existed in the legacy database); **unused** (dropping it would be a separate schema migration): the contact form is retired (D5, 2026-10-15) and no code reads or writes it |
 | `profiles`, `auth_migration_control` | — | Supabase artifacts, not migrated |
@@ -48,7 +48,8 @@ Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):
 | `payment_status` | same | pending / success / failed |
 | `moderation_status` | same | pending / approved / auto_approved / rejected |
 | `approved_by_moderator_id` / `approved_by_label` | `approved_by` | 655 UUIDs (all moderators) / 1,429 text values |
-| media/audio/token columns | same | unchanged |
+| `audio_scheduled_at` / `audio_played_at` | same | unchanged |
+| `voice_message_url`, `hypersound_url`, `media_url`, `media_type`, `tts_audio_url`, `status_token_hash`, `upload_token_hash` | — | NULL (fresh start: legacy media and donor links are never served) |
 | `legacy_source_table` | table name | provenance; removed after cutover |
 | dropped | `temp_voice_data`, `selected_gif_id`, sapphire `email/payment_id/signature/media_enabled/tts_enabled` | 0 non-null values |
 | dropped | sapphire `status` | always the column default `pending` (58/58 rows) and never written by any application code — Edge Functions, DB functions/triggers, cron jobs or frontend (investigated 2026-10-05). The real lifecycle is in `payment_status` / `moderation_status`. The reconciliation asserts the single value `pending` and fails if it changes before cutover. |

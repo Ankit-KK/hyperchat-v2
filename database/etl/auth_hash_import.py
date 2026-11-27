@@ -53,13 +53,14 @@ SOURCE_COLUMNS = {"id": {"uuid"}, "email": {"varchar", "text"}, "encrypted_passw
                   "banned_until": {"timestamptz"}}
 TARGET_TABLE = ("public", "users")
 TARGET_COLUMNS = {"id": {"uuid"}, "legacy_supabase_user_id": {"uuid"}, "email": {"citext", "varchar", "text"},
-                  "password_hash": {"text", "varchar"}}
+                  "password_hash": {"text", "varchar"}, "role": {"text"}}
 
 SOURCE_SQL = (f"SELECT id::text, {_DIGEST.format('email')}, {_DIGEST.format('lower(btrim(email))')}, "
               "nullif(encrypted_password, ''), email_confirmed_at IS NOT NULL, deleted_at IS NOT NULL, "
               "coalesce(banned_until > now(), false) FROM auth.users")
 _TARGET_SELECT = (f"SELECT id::text, legacy_supabase_user_id::text, {_DIGEST.format('email::text')}, "
-                  f"{_DIGEST.format('lower(btrim(email::text))')}, coalesce(password_hash, '') <> '' FROM public.users")
+                  f"{_DIGEST.format('lower(btrim(email::text))')}, coalesce(password_hash, '') <> '', "
+                  "role = 'admin' FROM public.users")
 
 LOCK_TIMEOUT = "5s"
 
@@ -105,8 +106,8 @@ FINGERPRINT_SQL = (
 
 # Exclusion reasons, in the order they are tested; each target row with a legacy id gets exactly one outcome.
 EXCLUSIONS = ("target_legacy_id_not_in_source", "target_email_used_by_other_source_id", "id_match_email_mismatch",
-              "source_deleted", "source_banned", "target_already_has_password", "source_without_password",
-              "unsupported_hash_format")
+              "source_deleted", "source_banned", "target_admin_account", "target_already_has_password",
+              "source_without_password", "unsupported_hash_format")
 BLOCKERS = ("duplicate_source_ids", "duplicate_target_legacy_ids", "unsupported_hash_format")
 
 
@@ -128,6 +129,9 @@ class Target:
     email: str | None
     email_norm: str | None
     has_password: bool
+    # Migration 0024 refuses every runtime-role write to an administrator row (the apply role is hyperchat_app), so
+    # one planned admin would roll the whole import back: admins are excluded and set their password via reset.
+    is_admin: bool = False
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,8 @@ def plan(source: list[Source], target: list[Target]) -> Plan:
             reason = "source_deleted"
         elif s.banned:
             reason = "source_banned"
+        elif t.is_admin:
+            reason = "target_admin_account"
         elif t.has_password:
             reason = "target_already_has_password"
         elif not s.password_hash:
@@ -286,7 +292,7 @@ def _write_all(conn: psycopg.Connection, cur: psycopg.Cursor, p: Plan, run_id: s
     now = {row[0]: Target(*row) for row in cur.fetchall()}
     for u in p.updates:
         t = now.get(u.target_id)
-        if t is None or (t.legacy_id, t.email, t.has_password) != (u.legacy_id, u.email, False):
+        if t is None or (t.legacy_id, t.email, t.has_password, t.is_admin) != (u.legacy_id, u.email, False, False):
             raise Refused("target changed since the plan; nothing was written")
     for u in p.updates:
         if _write(cur, u) != 1:
