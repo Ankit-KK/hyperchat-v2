@@ -19,6 +19,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 from app.core.config import Settings
+from app.core.errors import ApiError
 from app.kyc.enforcement import EnforcementRepository, EnforcementService
 from app.kyc.witness import KycWitness
 from app.onboarding.images import cleanup_images
@@ -142,9 +143,14 @@ async def run_cleanup(settings: Settings, connection_factory, *, dry_run: bool, 
     except Exception as exc:  # noqa: BLE001 - report the failure class only, never connection details
         print(f"cleanup failed: {type(exc).__name__}", file=sys.stderr)
         return 1
+    witness_failed = False
     if not dry_run and settings.kyc_witness_path:  # KYC PR4: witness changes committed but not yet recorded
-        await EnforcementService(EnforcementRepository(connection_factory),
-                                 KycWitness(settings.kyc_witness_path)).sync_witness(action="daily_sync")
+        try:
+            await EnforcementService(EnforcementRepository(connection_factory),
+                                     KycWitness(settings.kyc_witness_path)).sync_witness(action="daily_sync")
+        except ApiError as exc:  # recorded as a security event; the rest of the cleanup still runs, exit code 1
+            print(f"kyc witness: not written ({exc.reason})", file=sys.stderr)
+            witness_failed = True
     verb = "would delete" if dry_run else "deleted"
     print(f"cleanup ({settings.db_label}): " + ", ".join(f"{name} {verb} {n}" for name, n in counts.items()))
     if not dry_run:
@@ -152,7 +158,7 @@ async def run_cleanup(settings: Settings, connection_factory, *, dry_run: bool, 
     store = store or build_object_store(settings)
     if store is None:
         print("abandoned uploads: skipped (R2 not configured)")
-        return 0
+        return 1 if witness_failed else 0
     try:
         uploads = await abandoned_uploads(store, connection_factory, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001 - nothing was deleted; the failure class only
@@ -174,4 +180,4 @@ async def run_cleanup(settings: Settings, connection_factory, *, dry_run: bool, 
     if not dry_run:
         security_event("maintenance_creator_image_cleanup", level=20 if not images["delete_failed"] else 30,
                        count=images["deleted"], reason=f"failed={images['delete_failed']}")
-    return 1 if uploads["delete_failed"] or uploads["listing_capped"] or images["delete_failed"] else 0
+    return 1 if witness_failed or uploads["delete_failed"] or uploads["listing_capped"] or images["delete_failed"] else 0

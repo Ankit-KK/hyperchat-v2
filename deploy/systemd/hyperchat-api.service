@@ -24,6 +24,9 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
+# KYC restore witness (docs/kyc-rollout.md): the API and the daily cleanup append to /var/lib/hyperchat-kyc/<env>.witness.
+# The directory stays root 0755 and each witness file is owned by its own environment user; "-" = may be absent.
+ReadWritePaths=-/var/lib/hyperchat-kyc
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
