@@ -358,6 +358,9 @@ def test_the_kyc_return_url_uses_the_dashboard_url():
         async def assign_account(self, user_id):  # migration 0040
             return "ok", "primary", "wf"
 
+        async def has_recent_pan_ack(self, user_id):  # migration 0041
+            return True
+
     class Client:
         workflow_id = "wf"
 

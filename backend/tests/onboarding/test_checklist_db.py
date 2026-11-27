@@ -82,7 +82,7 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
     assert rows(fresh) == {
         "application_approved": ("ok", None), "invitation_accepted": ("missing", "no_invitation"),
         "ownership_confirmed": ("missing", "no_owner"), "kyc_approved": ("missing", "no_owner"),
-        "pan_policy": ("policy_pending", "pan_evidence_not_recorded"), "profile_picture": ("missing", None),
+        "pan_policy": ("missing", "kyc_not_approved"), "profile_picture": ("missing", None),
         "background": ("missing", None), "no_restriction": ("ok", None), "razorpay_account": ("ok", None),
         "lifecycle_eligible": ("blocked", "no_owner")}
     assert (fresh["status"], fresh["track"], fresh["qualifies_for_auto_activation"]) == ("pending", "standard", True)
@@ -115,8 +115,10 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
                          (cid, kind, url.split("/", 3)[3], url))
     complete = entry_of(owner.get(ME), cid)
     assert rows(complete)["profile_picture"] == ("ok", None) and rows(complete)["background"] == ("ok", None)
-    assert [r["condition"] for r in complete["conditions"] if r["blocking"]] == ["pan_policy"]
-    assert complete["ready_for_activation"] is False  # PAN stays policy_pending until Stage 3
+    assert [r["condition"] for r in complete["conditions"] if r["blocking"]] == []
+    # the approval's decision named no document: not PAN (fail closed), so activation may follow but payouts are held
+    assert rows(complete)["pan_policy"] == ("payout_hold", "non_pan_kyc")
+    assert complete["ready_for_activation"] is True
 
     app.app_state.admin.payment_accounts = frozenset()  # this server no longer configures the account
     assert rows(entry_of(owner.get(ME), cid))["razorpay_account"] == ("missing", "account_not_configured")
@@ -126,7 +128,7 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
     held = entry_of(owner.get(ME), cid)
     assert rows(held)["no_restriction"] == ("blocked", "open_restriction")
     assert rows(held)["lifecycle_eligible"] == ("blocked", "restricted")
-    assert rows(held)["pan_policy"] == ("policy_pending", "pan_evidence_not_recorded")
+    assert rows(held)["pan_policy"] == ("payout_hold", "non_pan_kyc")
     assert held["ready_for_activation"] is False
     with db() as conn:  # nothing here activates
         assert conn.execute("SELECT status FROM public.streamers WHERE id = %s", (cid,)).fetchone()[0] == "pending"

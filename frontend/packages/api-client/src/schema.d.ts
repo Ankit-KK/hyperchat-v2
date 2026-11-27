@@ -1437,6 +1437,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/kyc/pan-acknowledgement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Acknowledge Pan
+         * @description The creator confirms the PAN-only notice before KYC (migration 0041): required for a start within 60 minutes.
+         */
+        post: operations["acknowledge_pan_api_v1_me_kyc_pan_acknowledgement_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/kyc/session": {
         parameters: {
             query?: never;
@@ -6137,6 +6157,26 @@ export interface operations {
         };
     };
     my_kyc_api_v1_me_kyc_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    acknowledge_pan_api_v1_me_kyc_pan_acknowledgement_post: {
         parameters: {
             query?: never;
             header?: never;

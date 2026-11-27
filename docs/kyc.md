@@ -112,6 +112,65 @@ These checks run in order; any failure stops processing.
 
 **Answers:** 200 for anything stored (Didit doesn't retry), 401 or 403 for authentication failures (not retried), and 5xx only for real server faults (retried).
 
+## PAN evidence and the payout hold (migration 0041)
+
+Owner decisions 2026-11-27. These replace the earlier "PAN-only applies to automatic activation only" reading of
+Q6.
+
+**Before KYC**
+- The creator ticks this notice: "Only use PAN card for verification, otherwise your payout can be put on hold if
+  found using different ID".
+- `POST /api/v1/me/kyc/pan-acknowledgement` (owner only, Origin + CSRF, 20 per hour) records it in
+  `kyc_pan_acknowledgements`: who, when, the text version and the text's SHA-256.
+- `POST /api/v1/me/kyc/session` answers **409** `pan_acknowledgement_required` without an acknowledgement from the
+  last 60 minutes. The start binds the acknowledgement to its session in the same transaction as the session
+  write. A resume keeps its earlier binding; a NEW Didit session needs a fresh acknowledgement.
+- The acknowledgement is evidence if a payout is held. The API's role inserts and binds it once; nothing deletes it.
+
+**Evidence**
+- The signed decision's `id_verifications[]` items keep five labels in `check_statuses.id_documents`: `status`,
+  `document_type`, `document_subtype`, `issuing_state` and `verification_method`, each at most 64 characters.
+- Never the document number, name, birth date or images.
+- The evidence travels with the status: applied from signed webhooks only, early webhooks included, ordered by
+  provider time.
+- An admin refresh (unsigned) keeps the recorded documents and drops any it is sent.
+- `liveness_checks` may be absent; the owner's workflows have none.
+
+**The PAN rule** (`kyc_documents_pan`, fail closed). A session is PAN-verified only when every one of these holds:
+- it has at least one document;
+- **every** document is `Approved`;
+- every document was read by `verification_method = 'document'`;
+- every document matches a `kyc_document_policy` row: equal `issuing_state`, plus each non-NULL `document_type` /
+  `document_subtype` of the row.
+
+Any missing field means not PAN. The seed is one row: `IND` + `TAX_CARD_STANDARD`, India's tax card (the PAN card)
+in Didit's `document_subtype`. `document_type` is a human label ("Tax Card"), so the seed does not use it.
+
+**`kyc_pan_status(user, environment)`** answers from the current approval (`kyc_effective`): `pan_verified`,
+`non_pan` or `not_approved`.
+
+**The payout hold** (`kyc_payout_holds`, database-owned)
+- **Activation is not blocked.** A non-PAN approval still activates a creator; their payouts are held until they
+  re-verify with PAN.
+- **Opened** (reason `non_pan_kyc`, naming the approving session) when the user's current approval is not PAN.
+- **Cleared** (`pan_verified`, naming the clearing session) when a PAN-verified approval becomes current.
+- **Never cleared by losing the approval.** Only a PAN-verified approval clears it.
+- **When it is re-evaluated.** Triggers re-evaluate it on every session status, evidence or veto change, and on every
+  policy or account change (a revocation or epoch can change the current approval with no session write).
+- **Who can write it.** No runtime role. The API only reads it (`kyc_payout_hold(user)` → reason and since).
+- **Where it shows.** `GET /api/v1/me/kyc` adds `pan_status`, `payout_hold {held, reason, since}` and
+  `pan_acknowledgement {text, text_version, current}`. The admin view adds the first two. The onboarding checklist's
+  `pan_policy` row reports it and never blocks.
+- **Payouts are not built yet** (DASH-9). The hold is the contract the payout feature must honour.
+- **Existing approvals.** Holds start with signed decisions after 0041. The operator runs `SELECT
+  public.kyc_sync_payout_holds();` to open holds for approvals recorded before 0041. Those approvals carry no
+  document evidence, so they would all be held: an owner decision.
+
+**To confirm in the Didit console / sandbox (D2, D7).** The PAN card's `document_subtype` value
+(`TAX_CARD_STANDARD` from the workflow configuration) and that the key is present on every Approved webhook. Until
+it is, every approval is non-PAN, i.e. activated with payouts held. Adjust `kyc_document_policy` as the operator if
+the sandbox shows otherwise.
+
 ## Didit accounts (migration 0040)
 
 The database can hold several Didit accounts (owner requirement 2026-11-27: spread cost and free quota, and
@@ -199,7 +258,7 @@ the primary's enable, cap and revoke changes, pin moves and revocations, each wi
 - **After a finished session:** once a session ends in `Declined`, `Expired`, `Abandoned` or `Kyc Expired`, the owner can start again, and Didit issues a new session. `Resubmitted` continues the same session.
 
 ## Privacy and storage
-- **Stored:** session ids, workflow, environment, Didit status and time, and the **statuses** of the identity checks: `id_verifications`, `liveness_checks`, `face_matches`, `aml_screenings`.
+- **Stored:** session ids, workflow, environment, Didit status and time, the **statuses** of the identity checks (`id_verifications`, `liveness_checks`, `face_matches`, `aml_screenings`) and, since 0041, each document's type and subtype labels, issuing country and verification method (no number, name or image); the PAN acknowledgements and payout holds.
 - **Never stored or logged:** documents, selfies, biometrics, names, document numbers, birth dates, addresses, media URLs, the decision or the webhook body.
 - **Retention:**
   - webhook receipts: deleted after 90 days by the daily cleanup;

@@ -41,6 +41,7 @@ EXPECTED_TABLES = {
     "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs", "donation_accounting_evaluations",
     "creator_image_uploads",  # 0039
     "kyc_provider_accounts", "kyc_account_pins", "kyc_account_reservations", "kyc_account_events",  # 0040
+    "kyc_document_policy", "kyc_payout_holds", "kyc_pan_acknowledgements",  # 0041
 }
 
 
@@ -732,12 +733,16 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
                 "creator_image_uploads",
                 # 0040 (several Didit accounts): its tables' and two functions' grants; test_0040 pins them
                 "kyc_account_pins", "kyc_account_events", "kyc_account_reservations",
-                "kyc_assign_account(uuid)", "kyc_create_session(uuid,uuid,uuid,integer,text,text)")
+                "kyc_assign_account(uuid)", "kyc_create_session(uuid,uuid,uuid,integer,text,text)",
+                # 0041 (PAN evidence): its tables' and two functions' grants; test_0041 pins them
+                "kyc_document_policy", "kyc_payout_holds", "kyc_pan_acknowledgements",
+                "kyc_pan_status(uuid,text)", "kyc_payout_hold(uuid)")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     at_head = _api_role_privileges()  # each exclusion names a real head privilege (not a typo that hides nothing)
     assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in at_head
     assert ("hyperchat_app", "creator_image_uploads", "INSERT") in at_head
     assert ("hyperchat_app", "kyc_assign_account(uuid)", "EXECUTE") in at_head
+    assert ("hyperchat_app", "kyc_pan_acknowledgements", "INSERT") in at_head
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
@@ -2234,5 +2239,70 @@ def test_0040_round_trip_keeps_the_primary_and_refuses_to_drop_another_account(m
                 conn.execute("DELETE FROM public.kyc_provider_accounts WHERE account_id = 'migtest-b'")
                 conn.execute("DELETE FROM public.kyc_account_events")
                 conn.execute("DELETE FROM public.kyc_provider_config")
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+def _objects_0041() -> dict:
+    with _owner() as conn:
+        return {
+            "tables": sorted(t for t in _tables() if t.startswith("kyc_")),
+            "functions": conn.execute("SELECT p.oid::regprocedure::text, md5(p.prosrc), "
+                                      "coalesce(p.proacl, '{}')::text[] FROM pg_proc p "
+                                      "WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'kyc%' "
+                                      "ORDER BY 1").fetchall(),
+            "triggers": conn.execute("SELECT tgrelid::regclass::text, tgname FROM pg_trigger WHERE NOT tgisinternal "
+                                     "AND tgname LIKE 'kyc_payout%' ORDER BY 1, 2").fetchall(),
+            "payment": conn.execute("SELECT p.proname, md5(p.prosrc) FROM pg_proc p WHERE p.proname = ANY(%s) "
+                                    "ORDER BY 1", (list(PAYMENT_DEFINER_FUNCTIONS),)).fetchall(),
+        }
+
+
+def test_0041_round_trip_adds_the_pan_evidence_and_refuses_to_drop_an_acknowledgement(monkeypatch):
+    """0041 (PAN evidence): the policy is seeded with IND + TAX_CARD_STANDARD, the payout holds and acknowledgements
+    are not writable by the worker and holds not by the API, no PAY-15 function changes; the downgrade refuses while
+    an acknowledgement exists, then restores the exact 0040 catalog (0022's kyc_check_statuses / kyc_apply_refresh)."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0040")
+    uid = None
+    try:
+        before = _objects_0041()
+        command.upgrade(cfg, "0041")
+        after = _objects_0041()
+        assert after["payment"] == before["payment"]
+        assert set(after["tables"]) - set(before["tables"]) == {"kyc_document_policy", "kyc_payout_holds",
+                                                                "kyc_pan_acknowledgements"}
+        with _owner() as conn:
+            assert conn.execute("SELECT issuing_state, document_type, document_subtype FROM public.kyc_document_policy"
+                                ).fetchall() == [("IND", None, "TAX_CARD_STANDARD")]
+            for table, role, privilege, allowed in (
+                    ("kyc_payout_holds", "hyperchat_app", "INSERT", False), ("kyc_payout_holds", "hyperchat_app",
+                                                                             "SELECT", True),
+                    ("kyc_document_policy", "hyperchat_app", "UPDATE", False),
+                    ("kyc_pan_acknowledgements", "hyperchat_app", "INSERT", True),
+                    ("kyc_pan_acknowledgements", "hyperchat_app", "DELETE", False),
+                    ("kyc_pan_acknowledgements", "hyperchat_worker", "SELECT", False)):
+                assert conn.execute("SELECT has_table_privilege(%s, %s, %s)",
+                                    (role, "public." + table, privilege)).fetchone()[0] is allowed, (table, role)
+            uid = conn.execute("INSERT INTO public.users (email) VALUES ('migtest41@x.invalid') RETURNING id"
+                               ).fetchone()[0]
+            conn.execute("INSERT INTO public.kyc_pan_acknowledgements (user_id, text_version, text_sha256) VALUES "
+                         "(%s, 'v', repeat('a', 64))", (uid,))
+        with pytest.raises(Exception, match="downgrade of 0041 stopped"):
+            command.downgrade(cfg, "0040")
+        assert _version() == "0041"
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.kyc_pan_acknowledgements WHERE user_id = %s", (uid,))
+            conn.execute("DELETE FROM public.users WHERE id = %s", (uid,))
+            uid = None
+        command.downgrade(cfg, "0040")
+        assert _version() == "0040" and _objects_0041() == before
+    finally:
+        if uid is not None:
+            with _owner() as conn:
+                conn.execute("DELETE FROM public.kyc_pan_acknowledgements WHERE user_id = %s", (uid,))
+                conn.execute("DELETE FROM public.users WHERE id = %s", (uid,))
         command.upgrade(cfg, "head")
     assert _version() == HEAD

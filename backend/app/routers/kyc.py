@@ -3,6 +3,7 @@
 Owner (session; changes need Origin + CSRF):
   GET  /api/v1/me/kyc            the signed-in user's KYC state (never identity data)
   POST /api/v1/me/kyc/session    start or resume Didit verification -> {session_id, status, url}
+  POST /api/v1/me/kyc/pan-acknowledgement   the PAN-only notice, accepted (0041; needed before a start)
 Didit (no cookies, no CSRF: authenticated by X-Signature-V2 over the whole body + fresh signed timestamps):
   POST /api/v1/webhooks/didit
 Admin:
@@ -55,6 +56,12 @@ async def my_kyc(request: Request, current: CurrentUser = Depends(require_user))
 @me_router.post("/session")
 async def start_kyc(request: Request, current: CurrentUser = Depends(require_user)):
     return JSONResponse(await _service(request).start(current.user, client_ip(request)), headers=NO_STORE)
+
+
+@me_router.post("/pan-acknowledgement")
+async def acknowledge_pan(request: Request, current: CurrentUser = Depends(require_user)):
+    """The creator confirms the PAN-only notice before KYC (migration 0041): required for a start within 60 minutes."""
+    return JSONResponse(await _service(request).acknowledge_pan(current.user, client_ip(request)), headers=NO_STORE)
 
 
 @webhook_router.post("/didit")

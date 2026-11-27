@@ -153,6 +153,12 @@ chattr +a /var/lib/hyperchat-kyc/<env>.witness   # append-only: not even its own
 - **Not a defence against a compromised host or operator:** the schema owner can disable any trigger. The witness is a detection mechanism for restores and wrong-snapshot mistakes.
 - **Release switching:** an older application release (before PR4) still uses the database rule, because the rule lives in PostgreSQL. It lacks only the witness check. A database can't be downgraded below 0023 once enforcement left `draft` or has any history: the downgrade refuses.
 
+## PAN policy and payout holds: operator steps (migration 0041)
+
+- **Policy:** `kyc_document_policy` (as the owner role). The seed is `IND` + `TAX_CARD_STANDARD`. Any change re-evaluates every approval's payout hold at once. 0041's downgrade refuses while the policy differs from the seed.
+- **Existing approvals:** `SELECT public.kyc_sync_payout_holds();` opens holds for approvals recorded before 0041 (they carry no document evidence, so they are all non-PAN). Run it only on the owner's decision.
+- **Clearing a hold:** only a PAN-verified approval does; there is no manual clear (a payout dispute relies on it).
+
 ## Didit accounts: operator steps (migration 0040)
 
 Run from `database/` with the migration DSN. Every change is audited with `--operator`. Secrets are read without

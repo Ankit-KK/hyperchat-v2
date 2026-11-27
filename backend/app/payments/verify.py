@@ -1235,6 +1235,8 @@ HEAD_DELTAS = {
                              "TRIGGER_RELS), no pinned function"),
     "0040": no_payment_delta("several Didit accounts: kyc_* tables, triggers and functions (not TRIGGER_RELS); "
                              "creator_donation_block and the donations trigger unchanged, no pinned function"),
+    "0041": no_payment_delta("PAN evidence: kyc_* tables, triggers and functions (not TRIGGER_RELS); the donation "
+                             "rule unchanged, no pinned function"),
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD

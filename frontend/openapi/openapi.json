@@ -8107,6 +8107,26 @@
         ]
       }
     },
+    "/api/v1/me/kyc/pan-acknowledgement": {
+      "post": {
+        "description": "The creator confirms the PAN-only notice before KYC (migration 0041): required for a start within 60 minutes.",
+        "operationId": "acknowledge_pan_api_v1_me_kyc_pan_acknowledgement_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Acknowledge Pan",
+        "tags": [
+          "kyc"
+        ]
+      }
+    },
     "/api/v1/me/kyc/session": {
       "post": {
         "operationId": "start_kyc_api_v1_me_kyc_session_post",

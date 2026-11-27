@@ -18,7 +18,7 @@ from pydantic import SecretStr
 
 from app.kyc import didit
 from app.kyc.didit import CreatedSession, DiditError
-from app.kyc.service import KycRepository, KycService
+from app.kyc.service import PAN_ACK_TEXT, PAN_ACK_VERSION, KycRepository, KycService
 from tests.integration import (
     DOMAIN,
     ORIGIN,
@@ -108,7 +108,14 @@ def owner(client, name: str, slug: str | None = None) -> tuple[dict, str]:
     with db() as conn:
         uid = conn.execute("SELECT id::text FROM public.users WHERE email = %s", (name + DOMAIN,)).fetchone()[0]
     make_streamer(slug or f"authtest-{name}", user_id=uid)
+    acknowledge(client, headers)  # 0041: the PAN notice before any start
     return headers, uid
+
+
+def acknowledge(client, headers) -> dict:
+    r = client.post(f"{ME}/pan-acknowledgement", headers=headers)
+    assert r.status_code == 200, r.text
+    return r.json()
 
 
 def envelope(*, session_id, vendor, status, created_at, event_id=None, decision=None, ts=None, **extra) -> dict:
@@ -168,6 +175,7 @@ def approved(user_id: str) -> bool:
 
 
 def start(app, headers) -> dict:
+    acknowledge(app, headers)
     r = app.post(f"{ME}/session", headers=headers)
     assert r.status_code == 200, r.text
     return r.json()
@@ -178,7 +186,11 @@ def start(app, headers) -> dict:
 def test_the_owner_starts_and_resumes_one_session(kyc):
     headers, uid = owner(kyc, "kyc-own")
     assert kyc.get(ME).json() == {"approved": False, "state": "none", "provider_status": None, "updated_at": None,
-                                  "owns_creator": True, "available": True, "can_start": True}
+                                  "owns_creator": True, "available": True, "can_start": True,
+                                  "pan_status": "not_approved",
+                                  "payout_hold": {"held": False, "reason": None, "since": None},
+                                  "pan_acknowledgement": {"text": PAN_ACK_TEXT, "text_version": PAN_ACK_VERSION,
+                                                          "current": True}}
     first = start(kyc, headers)
     assert set(first) == {"session_id", "status", "url"} and first["url"].startswith("https://verify.didit.me/")
     assert start(kyc, headers)["session_id"] == first["session_id"]  # resumed, not duplicated
