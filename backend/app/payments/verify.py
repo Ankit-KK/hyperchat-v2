@@ -1150,6 +1150,7 @@ class _Unverified:
 
 UNVERIFIED = _Unverified()
 _SP, _SPC = ("search_path=pg_catalog, public",), ("search_path=pg_catalog",)
+_SPT = ("search_path=pg_catalog, public, pg_temp",)  # 0043: pg_temp last in every SECURITY DEFINER search path
 _ARGS_APPLY = "p_donation uuid, p_reversed bigint, p_hold text, p_flags text[], p_refs text[]"
 
 
@@ -1207,11 +1208,18 @@ _SCOPE_ARGS = "p_scope jsonb, p_created timestamp with time zone, p_command text
 
 def no_payment_delta(why: str) -> dict:
     """A registered head that adds or replaces nothing I10 verifies (why: the migration and why it is out of scope)."""
-    return {"functions": {}, "pins": {}, "triggers": {}, "why": "no payment-object delta: " + why}
+    return {"functions": {}, "pins": {}, "triggers": {}, "configs": {}, "why": "no payment-object delta: " + why}
+
+
+def _with_pg_temp(name: str) -> tuple:
+    """0043: the function's proconfig with search_path = pg_catalog, public, pg_temp; every other setting kept."""
+    config = FN_EXPECT[name]["proconfig"]
+    assert config[0] == _SP[0], name
+    return (*_SPT, *config[1:])
 
 
 HEAD_DELTAS = {
-    "0034": {"functions": {}, "pins": {}, "triggers": {}, "why": "the base: every value above"},
+    "0034": {"functions": {}, "pins": {}, "triggers": {}, "configs": {}, "why": "the base: every value above"},
     "0035": {
         "why": "OD-35-V: the F-7 ack guard and the F-11 scope check, and the four run-bound owner functions",
         "functions": {"payment_accounting_ack_guard": _fn("", "trigger", "plpgsql", _SP),
@@ -1224,6 +1232,7 @@ HEAD_DELTAS = {
                  "payment_accounting_revert": "0b16c1eff5dda4450c1b979277241833"},
         "triggers": {("donation_accounting_evaluations", "donation_accounting_evaluations_ack_guard"):
                      ("payment_accounting_ack_guard", "BEFORE", "ROW", frozenset({"INSERT", "UPDATE"}))},
+        "configs": {},
     },
     "0036": no_payment_delta("PAY-14 creator pricing limits: runtime-role triggers on streamers and "
                              "streamer_voice_tiers (not TRIGGER_RELS), no pinned function"),
@@ -1240,10 +1249,18 @@ HEAD_DELTAS = {
     "0042": no_payment_delta("automatic activation: onboarding_* tables and functions, the streamers step-up guard "
                              "(not TRIGGER_RELS); kyc_change_creator_status and the donation rule unchanged, no "
                              "pinned function"),
+    "0043": {
+        "why": "security audit 2026-11-26: pg_temp last in the search_path of the 11 SECURITY DEFINER payment "
+               "functions (ALTER FUNCTION: proconfig only, bodies and pins unchanged)",
+        "functions": {}, "pins": {}, "triggers": {},
+        "configs": {name: _with_pg_temp(name) for name in DEFINER_FUNCTIONS},
+    },
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD
-assert all(d.get("why") and set(d) == {"functions", "pins", "triggers", "why"} for d in HEAD_DELTAS.values())
+assert all(d.get("why") and set(d) == {"functions", "pins", "triggers", "configs", "why"}
+           for d in HEAD_DELTAS.values())
+assert all(set(d["configs"]) <= set(FN_EXPECT) for d in HEAD_DELTAS.values())  # a config change of a known function
 FN_NAMES_ALL = tuple(sorted(set(FN_EXPECT).union(*(d["functions"] for d in HEAD_DELTAS.values()))))
 
 
@@ -1254,6 +1271,8 @@ def head_expectations(head: str) -> tuple[dict, dict, dict]:
         fns |= d["functions"]
         pins |= d["pins"]
         triggers |= d["triggers"]
+        for name, config in d["configs"].items():  # proconfig-only changes (ALTER FUNCTION ... SET)
+            fns[name] = {**fns[name], "proconfig": config}
         if h == head:
             return fns, pins, triggers
     raise KeyError(head)
