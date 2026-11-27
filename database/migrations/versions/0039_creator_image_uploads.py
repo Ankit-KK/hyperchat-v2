@@ -78,10 +78,10 @@ def upgrade() -> None:
                    OR NEW.created_at <> now() THEN
                     RAISE EXCEPTION 'a creator image starts ready or failed, now' {REFUSE};
                 END IF;
-                IF EXISTS (SELECT 1 FROM jsonb_array_elements(NEW.variants) v
-                           WHERE jsonb_typeof(v) <> 'object' OR jsonb_typeof(v -> 'key') <> 'string'
-                              OR (v ->> 'key') !~ ('^creator-assets/' || NEW.streamer_id::text || '/' || dir
-                                                   || '/[0-9a-f]{{64}}\\.webp$')) THEN
+                IF EXISTS (SELECT 1 FROM jsonb_array_elements(NEW.variants) v  -- IS NOT TRUE: a missing key refuses
+                           WHERE (jsonb_typeof(v) = 'object' AND jsonb_typeof(v -> 'key') = 'string'
+                                  AND (v ->> 'key') ~ ('^creator-assets/' || NEW.streamer_id::text || '/' || dir
+                                                       || '/[0-9a-f]{{64}}\\.webp$')) IS NOT TRUE) THEN
                     RAISE EXCEPTION 'a creator image names only its own creator''s pipeline keys' {REFUSE};
                 END IF;
                 RETURN NEW;
