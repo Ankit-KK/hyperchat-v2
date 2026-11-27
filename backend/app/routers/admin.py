@@ -170,7 +170,8 @@ async def _status(action: str, streamer_id: str, body: CreatorStatusChange, requ
 async def activate_creator(streamer_id: str, body: CreatorStatusChange, request: Request,
                            current: CurrentUser = Depends(require_admin),
                            stepup: StepUp = Depends(step_up("creator.activate"))) -> dict:
-    """pending -> active. Never automatic: approval, invites and KYC alone do not activate a creator."""
+    """pending -> active, by hand (step-up creator.activate). Automatic activation (migration 0042) is the worker's
+    alone, only while the operator switch is on and every onboarding condition holds (docs/onboarding.md)."""
     return await _status("activate", streamer_id, body, request, current, stepup)
 
 

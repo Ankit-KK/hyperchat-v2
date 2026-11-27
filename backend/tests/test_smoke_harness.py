@@ -539,6 +539,8 @@ BLOCKING_KEYS = {
     ("kyc_enforcement_events", "streamer_id"): None,
     # 0039: the suite never uploads creator images (and its cleanup also runs on heads without the table)
     ("creator_image_uploads", "streamer_id"): None,
+    # 0042: the suite never activates automatically (the operator switch stays off on DEV)
+    ("onboarding_activations", "streamer_id"): None,
 }
 
 
@@ -556,7 +558,8 @@ def test_every_key_that_blocks_deleting_a_creator_is_known_and_cleaned_first(str
     for table in filter(None, BLOCKING_KEYS.values()):
         assert -1 < src.index(f"DELETE FROM public.{table}") < creators, table
     suite = SUITE.read_text(encoding="utf-8")
-    for table in ("kyc_grace_grants", "kyc_restrictions", "kyc_enforcement_events", "creator_image_uploads"):
+    for table in ("kyc_grace_grants", "kyc_restrictions", "kyc_enforcement_events", "creator_image_uploads",
+                  "onboarding_activations", "onboarding_auto_activate"):
         assert table not in suite
     assert "/images/" not in suite  # no image upload, so no creator_image_uploads row blocks the creator delete
     assert "/restrict" not in suite and "/grace" not in suite

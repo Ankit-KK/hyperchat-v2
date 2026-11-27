@@ -115,10 +115,11 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
                          (cid, kind, url.split("/", 3)[3], url))
     complete = entry_of(owner.get(ME), cid)
     assert rows(complete)["profile_picture"] == ("ok", None) and rows(complete)["background"] == ("ok", None)
-    assert [r["condition"] for r in complete["conditions"] if r["blocking"]] == []
-    # recorded without a signed decision's documents (as before 0041): not PAN, no hold opened automatically
+    # recorded without a signed decision's documents (as before 0041): not PAN, no hold opened automatically, so
+    # automatic activation refuses it (migration 0042: pan_evidence_missing) and only that row blocks
+    assert [r["condition"] for r in complete["conditions"] if r["blocking"]] == ["pan_policy"]
     assert rows(complete)["pan_policy"] == ("missing", "pan_evidence_not_recorded")
-    assert complete["ready_for_activation"] is True
+    assert complete["ready_for_activation"] is False
 
     app.app_state.admin.payment_accounts = frozenset()  # this server no longer configures the account
     assert rows(entry_of(owner.get(ME), cid))["razorpay_account"] == ("missing", "account_not_configured")

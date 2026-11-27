@@ -67,7 +67,8 @@ EVIDENCE_TABLES = ("payment_webhook_events", "payment_integrity_events", "donati
 # audit rows that adding or configuring them writes): allowed in a fresh target.
 SEEDED_TABLES = ("alembic_version", "kyc_enforcement", "stepup_enforcement", "payment_accounting_state",
                  "kyc_provider_config", "kyc_provider_accounts", "kyc_account_events",
-                 "kyc_document_policy")  # 0041: the PAN policy row the migration seeds
+                 "kyc_document_policy",  # 0041: the PAN policy row the migration seeds
+                 "onboarding_settings", "onboarding_settings_events")  # 0042: the switch row and its changes
 
 DONATION_COLUMNS = (
     "id", "streamer_id", "order_id", "payment_provider", "provider_order_id", "donor_name", "amount", "currency",

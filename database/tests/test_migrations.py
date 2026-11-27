@@ -42,6 +42,7 @@ EXPECTED_TABLES = {
     "creator_image_uploads",  # 0039
     "kyc_provider_accounts", "kyc_account_pins", "kyc_account_reservations", "kyc_account_events",  # 0040
     "kyc_document_policy", "kyc_payout_holds", "kyc_pan_acknowledgements",  # 0041
+    "onboarding_settings", "onboarding_settings_events", "onboarding_activations",  # 0042
 }
 
 
@@ -736,7 +737,12 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
                 "kyc_assign_account(uuid)", "kyc_create_session(uuid,uuid,uuid,integer,text,text)",
                 # 0041 (PAN evidence): its tables' and three functions' grants; test_0041 pins them
                 "kyc_document_policy", "kyc_payout_holds", "kyc_pan_acknowledgements",
-                "kyc_pan_status(uuid,text)", "kyc_payout_hold(uuid)", "kyc_clear_payout_hold(uuid,uuid,text)")
+                "kyc_pan_status(uuid,text)", "kyc_payout_hold(uuid)", "kyc_clear_payout_hold(uuid,uuid,text)",
+                # 0042 (automatic activation): its tables' grants (app and readonly SELECT), the rule's two
+                # functions (hyperchat_app) and the transition (hyperchat_lifecycle); test_0042 pins them
+                "onboarding_settings", "onboarding_settings_events", "onboarding_activations",
+                "onboarding_activation_block(uuid)", "onboarding_pan_covered(uuid)",
+                "onboarding_auto_activate(uuid,text)")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     at_head = _api_role_privileges()  # each exclusion names a real head privilege (not a typo that hides nothing)
     assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in at_head
@@ -744,6 +750,12 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
     assert ("hyperchat_app", "kyc_assign_account(uuid)", "EXECUTE") in at_head
     assert ("hyperchat_app", "kyc_pan_acknowledgements", "INSERT") in at_head
     assert ("hyperchat_app", "kyc_clear_payout_hold(uuid,uuid,text)", "EXECUTE") in at_head
+    assert ("hyperchat_app", "onboarding_settings", "SELECT") in at_head
+    assert ("hyperchat_readonly", "onboarding_settings_events", "SELECT") in at_head
+    assert ("hyperchat_app", "onboarding_activations", "SELECT") in at_head
+    assert ("hyperchat_app", "onboarding_activation_block(uuid)", "EXECUTE") in at_head
+    assert ("hyperchat_app", "onboarding_pan_covered(uuid)", "EXECUTE") in at_head
+    assert ("hyperchat_lifecycle", "onboarding_auto_activate(uuid,text)", "EXECUTE") in at_head
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
@@ -2305,5 +2317,82 @@ def test_0041_round_trip_adds_the_pan_evidence_and_refuses_to_drop_an_acknowledg
             with _owner() as conn:
                 conn.execute("DELETE FROM public.kyc_pan_acknowledgements WHERE user_id = %s", (uid,))
                 conn.execute("DELETE FROM public.users WHERE id = %s", (uid,))
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+def _objects_0042() -> dict:
+    with _owner() as conn:
+        return {
+            "tables": sorted(t for t in _tables() if t.startswith("onboarding_")),
+            "functions": conn.execute("SELECT p.oid::regprocedure::text, md5(p.prosrc), "
+                                      "coalesce(p.proacl, '{}')::text[], coalesce(p.proconfig, '{}')::text[] "
+                                      "FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace "
+                                      "AND (p.proname LIKE 'onboarding%%' OR p.proname LIKE 'stepup_guard%%') "
+                                      "ORDER BY 1").fetchall(),
+            "triggers": conn.execute("SELECT tgrelid::regclass::text, tgname FROM pg_trigger WHERE NOT tgisinternal "
+                                     "ORDER BY 1, 2").fetchall(),
+            "payment": conn.execute("SELECT p.proname, md5(p.prosrc) FROM pg_proc p WHERE p.proname = ANY(%s) "
+                                    "ORDER BY 1", (list(PAYMENT_DEFINER_FUNCTIONS),)).fetchall(),
+            "streamers": conn.execute("SELECT id, status, updated_at FROM public.streamers ORDER BY id").fetchall(),
+        }
+
+
+def test_0042_round_trip_adds_automatic_activation_switched_off_and_refuses_to_drop_its_audit(monkeypatch):
+    """0042 (automatic activation): the switch starts off; the transition is EXECUTE for hyperchat_lifecycle only,
+    the rule for hyperchat_app; no runtime role writes the new tables; only stepup_guard_streamers' body changes and no
+    PAY-15 function; the downgrade refuses while the switch is on or any switch change exists, then restores the exact
+    0041 catalog (0027's guard) without touching a creator."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0041")
+    try:
+        before = _objects_0042()
+        command.upgrade(cfg, "0042")
+        after = _objects_0042()
+        assert after["payment"] == before["payment"] and after["streamers"] == before["streamers"]
+        assert after["tables"] == ["onboarding_activations", "onboarding_settings", "onboarding_settings_events"]
+        assert set(after["triggers"]) - set(before["triggers"]) == {("onboarding_settings", "onboarding_settings_audit")}
+        guards_before = {f[0]: f for f in before["functions"] if f[0].startswith("stepup_guard")}
+        guards_after = {f[0]: f for f in after["functions"] if f[0].startswith("stepup_guard")}
+        changed = {name for name in guards_after if guards_after[name] != guards_before[name]}
+        assert changed == {"stepup_guard_streamers()"}
+        new_guard, old_guard = guards_after["stepup_guard_streamers()"], guards_before["stepup_guard_streamers()"]
+        assert new_guard[1] != old_guard[1] and new_guard[2:] == old_guard[2:]  # body only: same ACL and config
+        acl = {f[0]: {e.split("=", 1)[0] for e in f[2]} for f in after["functions"]}
+        assert acl["onboarding_auto_activate(uuid,text)"] == {"hyperchat_owner", "hyperchat_lifecycle"}
+        assert acl["onboarding_activation_block(uuid)"] == {"hyperchat_owner", "hyperchat_app"}
+        assert acl["onboarding_pan_covered(uuid)"] == {"hyperchat_owner", "hyperchat_app"}
+        assert acl["onboarding_set_auto_activation(boolean,text,text)"] == {"hyperchat_owner"}
+        assert acl["onboarding_settings_audit()"] == {"hyperchat_owner"}
+        with _owner() as conn:
+            assert conn.execute("SELECT auto_activation, changed_at FROM public.onboarding_settings").fetchall() == [
+                (False, None)]
+            for table in ("onboarding_settings", "onboarding_settings_events", "onboarding_activations"):
+                for role in ("hyperchat_app", "hyperchat_worker", "hyperchat_auth", "hyperchat_lifecycle",
+                             "hyperchat_stepup"):
+                    for privilege in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+                        assert not conn.execute("SELECT has_table_privilege(%s, %s, %s)",
+                                                (role, "public." + table, privilege)).fetchone()[0], (table, role)
+            assert conn.execute("SELECT public.onboarding_set_auto_activation(true, 'migtest42', 'T-42')"
+                                ).fetchone()[0] == "on"
+        with pytest.raises(Exception, match="downgrade of 0042 stopped"):
+            command.downgrade(cfg, "0041")
+        assert _version() == "0042"
+        with _owner() as conn:
+            conn.execute("SELECT public.onboarding_set_auto_activation(false, 'migtest42', 'T-42')")
+        with pytest.raises(Exception, match="downgrade of 0042 stopped"):  # its audit is never dropped
+            command.downgrade(cfg, "0041")
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.onboarding_settings_events WHERE changed_by = 'migtest42'")
+        command.downgrade(cfg, "0041")
+        assert _version() == "0041" and _objects_0042() == before
+    finally:
+        if _version() == "0042":
+            with _owner() as conn:
+                conn.execute("UPDATE public.onboarding_settings SET auto_activation = false, changed_by = 'migtest42', "
+                             "approval_reference = 'T-42'")
+                conn.execute("DELETE FROM public.onboarding_settings_events WHERE changed_by = 'migtest42'")
         command.upgrade(cfg, "head")
     assert _version() == HEAD
