@@ -233,8 +233,10 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
                     donator_name_lower=name.lower(), total_amount=total, donation_count=count)
     _insert(src, "order_lookup", razorpay_order_id="order_ETL0001", order_id="etl-order-1",
             donation_id=first["alpha"], streamer_slug="alpha")
-    _insert(src, "order_lookup", razorpay_order_id="order_ETL0006", order_id="etl-order-6",  # NV3-1: unpaid order
-            donation_id=_u(1006), streamer_slug="alpha")
+    # NV3-1 (real at scale: 2,970 such legacy rows): a pending (#6) and a failed (#5) order with an order id AND a lookup
+    for k in (5, 6):
+        _insert(src, "order_lookup", razorpay_order_id=f"order_ETL{k:04d}", order_id=f"etl-order-{k}",
+                donation_id=_u(1000 + k), streamer_slug="alpha")
     _insert(src, "moderation_actions", streamer_id=S_ALPHA, moderator_id=MOD, donation_id=first["alpha"],
             action_type="approve", action_source="telegram")
     for table in ("telegram_callback_mapping", "discord_callback_mapping"):
@@ -272,7 +274,7 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
                  "rows: user_signups  -- source=1 loaded=1", "rows: telegram_callback_mapping  -- source=2 loaded=1",
                  "rows: api_keys  -- source=1 loaded=0", "rows: partner_api_keys  -- source=1 loaded=0",
                  "loaded pending for no owner=1", "KYC at launch (enforcement active, no grace)",
-                 "rows: order_lookup  -- source=2 loaded=1 skipped={'unpaid_legacy_order': 1}",
+                 "rows: order_lookup  -- source=3 loaded=1 skipped={'unpaid_legacy_order': 2}",
                  "source unpaid={'failed': 1, 'pending': 2}; loaded failed=3 non-terminal=0 with_order_id=0 lookups=0",
                  "admins=1 admin_emails accounts=1 demoted=1",
                  "kyc_required=2 "):
