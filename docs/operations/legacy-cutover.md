@@ -146,6 +146,11 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
    the switch makes a rollback a separately approved plan.
 8. **Streamers create new OBS tokens** in the V2 dashboard and re-add their browser sources (alert, leaderboard, goal).
    No legacy overlay URL works.
+9. **Retire the ETL source (after the rollback window, separately approved):**
+   - Drop `hyperchat_restore_test` on `15/restoretest`.
+   - In the same step, drop the Supabase roles `anon`, `authenticated` and `service_role` (security audit S9, 2026-11-27).
+   - They exist only for this restore: they hold nothing in `hyperchat_dev` or `postgres`, and every grant, default privilege and RLS policy naming them is in `hyperchat_restore_test`. They are NOLOGIN, have no members and own nothing.
+   - Never drop them while the source may still be restored: the legacy dump's `pg_restore` re-grants to them.
 
 ### After the cutover: money captured on legacy orders
 
