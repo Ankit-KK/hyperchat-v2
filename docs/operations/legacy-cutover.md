@@ -20,15 +20,15 @@ passes.
 
 | Target | Source | Disposition |
 |---|---|---|
-| `users` | `auth_users` (+ `admin_emails` → `role = 'admin'`) | copied; `password_hash` NULL (step 4) |
+| `users` | `auth_users` (+ `admin_emails` → `role = 'admin'`) | copied; `password_hash` NULL (step 4). **`admin` only from `admin_emails`** (NV3-2): a legacy `role = 'admin'` outside that list loads as `user`; the reconciliation counts the demotions and requires the V2 admins to equal the `admin_emails` accounts. Supabase-deleted / banned accounts are deactivated in step 4 (NV3-3) |
 | `streamers` | `streamers` | copied; `razorpay_account` from the key-name pair; `kyc_track = 'legacy'`, `kyc_baseline_owner_id = user_id` (0020); an **active creator without an owner loads `pending`** (owner 2026-11-27); logo / background URLs kept, or rewritten with `--media-base-*` |
 | `streamers_moderators`, `streamer_payment_health`, `payout_accounts`, `platform_voice_tiers`, `streamer_voice_tiers`, `soundboard_tnc_acceptances`, `terms_acceptances`, `partner_signups`, `tts_moderation_audit`, `rate_limits`, `system_alerts`, `visits`, `reviews`, `user_queries` | same names | copied column for column |
 | `banned_donors` | same | copied; 0016's `unbanned_*` columns defaulted (NULL) |
 | `user_signups` | same | copied; 0021's review columns defaulted, `review_status = 'legacy_unreviewed'` (what 0021 gave existing rows; the default is now `submitted`) |
-| `donations` | 133 × `<slug>_donations` | copied (amounts, statuses, moderation, messages, audio timestamps, `is_hyperemote`, `legacy_source_table`); **`voice_message_url`, `hypersound_url`, `media_url`, `media_type`, `tts_audio_url`, `status_token_hash`, `upload_token_hash` loaded as NULL**; `payment_account`, `provider_payment_id` NULL (legacy recorded none) |
+| `donations` | 133 × `<slug>_donations` | copied (amounts, statuses, moderation, messages, audio timestamps, `is_hyperemote`, `legacy_source_table`); **`voice_message_url`, `hypersound_url`, `media_url`, `media_type`, `tts_audio_url`, `status_token_hash`, `upload_token_hash` loaded as NULL**; `payment_account`, `provider_payment_id` NULL (legacy recorded none). **Every unpaid legacy row (`pending` or `failed`) loads as terminal `failed` with `provider_order_id` NULL and no `order_lookup` row** (NV3-1): no late capture can complete a legacy order outside the creator / KYC rule and PAY-15; the reconciliation counts them and requires none open. The Razorpay webhook also refuses any imported order (`unknown_order`, nothing applied) |
 | `donations.creditable_inr` / `credited_inr`, `donation_credit_events` (0031) | — | set by `public.donations_credit_backfill()` in the load transaction (see below) |
 | `streamer_donator_totals` | same (`streamer_slug` → `streamer_id`) | copied **verbatim** |
-| `order_lookup`, `moderation_actions` | same | copied (orphans: lookup dropped, moderation kept as audit) |
+| `order_lookup`, `moderation_actions` | same | copied (orphans: lookup dropped, moderation kept as audit); lookups of unpaid legacy orders are dropped (NV3-1) |
 | `telegram_` / `discord_callback_mapping` | same | unexpired rows only; 0014's `recipient_id` / `moderator_id` defaulted (NULL) |
 | `request_nonces` | same | unexpired rows only |
 | `obs_tokens` | `obs_tokens` | **not migrated** (counted) |
@@ -105,10 +105,24 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
    are excluded (`target_admin_account`): migration 0024 refuses the apply role (`hyperchat_app`) every write to an
    admin row, so one admin in the plan would roll the whole run back. Admins set their password by the admin path
    (owner decision below).
+   - **Deactivate the Supabase-deleted and -banned accounts (NV3-3).** Those flags live only in Supabase `auth.users`
+     (`deleted_at`, `banned_until`), not in the public dump, so the load keeps those V2 accounts active. The same
+     importer, against the same frozen source, plans them in every dry run (`deactivate_banned_or_deleted`,
+     `banned_or_deleted_already_inactive`; matched by the exact legacy id). Then, with the reviewed fingerprint:
+     ```
+     python -B -m etl.auth_hash_import --deactivate --expected-fingerprint <the reviewed source_fingerprint>
+     ```
+     It runs as `hyperchat_migrator` (owner role): 0024 refuses runtime roles every admin-row write, and 0027 makes
+     a runtime-role `is_active` change need a step-up grant. It types-confirms, locks and re-verifies the source,
+     writes in one transaction, only ever sets `is_active = false` and never re-activates. Re-run the dry run
+     afterwards: `deactivate_banned_or_deleted` must be 0.
+   - **Grants:** none new. The Supabase read role already holds `SELECT (id, email, encrypted_password,
+     email_confirmed_at, deleted_at, banned_until) ON auth.users` (D1, `database/README.md`), which covers both flags.
+     The target role is the existing `hyperchat_migrator`.
 5. **Reconcile and verify.**
    - Keep the step 3 report; it reconciles the load against the snapshot.
    - After step 4, re-run the importer's dry run: it must show 0 eligible and the applied rows as
-     `target_already_has_password`.
+     `target_already_has_password`, and 0 `deactivate_banned_or_deleted`.
    - Run `python -B -m app.payments.operator verify` as `hyperchat_readonly`. It must report clean, or only I10
      `baseline_unverified` before Phase 2B.
    - Sign in with a migrated account.

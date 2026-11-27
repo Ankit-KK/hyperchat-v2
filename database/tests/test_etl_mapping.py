@@ -45,6 +45,10 @@ def test_user_role_folds_admin_emails_case_insensitively():
     assert user_role("user", "Admin@Example.Invalid", admins) == "admin"
     assert user_role("streamer", "s@example.invalid", admins) == "streamer"
     assert user_role(None, "u@example.invalid", admins) == "user"
+    # NV3-2: admin_emails is the only source of 'admin'; a legacy role 'admin' elsewhere is a normal user
+    assert user_role("admin", "removed@example.invalid", admins) == "user"
+    assert user_role("admin", "ADMIN@example.invalid", admins) == "admin"
+    assert user_role("streamer", "admin@example.invalid", admins) == "admin"
 
 
 @pytest.mark.parametrize("key, secret, expected", [

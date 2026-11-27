@@ -5,6 +5,8 @@ export file, nothing logged or printed), for accounts that match on BOTH auth.us
 the exact top-level email, whose source hash is a bcrypt hash the V2 verifier accepts and whose target hash is still
 empty. It never matches by email alone, never creates or deletes accounts, and changes no other column: roles,
 creator ownership, activation and email verification stay as they are (email_confirmed_at is only counted).
+The one other write is the separate --deactivate mode (NV3-3): it sets is_active = false, and never true, for V2
+accounts whose Supabase account (same legacy id) is deleted or currently banned, with the same controls.
 
 Without --apply it only reads (READ ONLY transactions on both sides) and prints aggregate counts. --apply also needs a
 typed confirmation, refuses on any blocker (duplicate mappings, unsupported hash formats), re-checks every planned row
@@ -53,14 +55,15 @@ SOURCE_COLUMNS = {"id": {"uuid"}, "email": {"varchar", "text"}, "encrypted_passw
                   "banned_until": {"timestamptz"}}
 TARGET_TABLE = ("public", "users")
 TARGET_COLUMNS = {"id": {"uuid"}, "legacy_supabase_user_id": {"uuid"}, "email": {"citext", "varchar", "text"},
-                  "password_hash": {"text", "varchar"}, "role": {"text"}}
+                  "password_hash": {"text", "varchar"}, "role": {"text"},
+                  "is_active": {"bool"}}
 
 SOURCE_SQL = (f"SELECT id::text, {_DIGEST.format('email')}, {_DIGEST.format('lower(btrim(email))')}, "
               "nullif(encrypted_password, ''), email_confirmed_at IS NOT NULL, deleted_at IS NOT NULL, "
               "coalesce(banned_until > now(), false) FROM auth.users")
 _TARGET_SELECT = (f"SELECT id::text, legacy_supabase_user_id::text, {_DIGEST.format('email::text')}, "
                   f"{_DIGEST.format('lower(btrim(email::text))')}, coalesce(password_hash, '') <> '', "
-                  "role = 'admin' FROM public.users")
+                  "role = 'admin', is_active FROM public.users")
 
 LOCK_TIMEOUT = "5s"
 
@@ -132,6 +135,14 @@ class Target:
     # Migration 0024 refuses every runtime-role write to an administrator row (the apply role is hyperchat_app), so
     # one planned admin would roll the whole import back: admins are excluded and set their password via reset.
     is_admin: bool = False
+    is_active: bool = True
+
+
+@dataclass(frozen=True)
+class Deactivation:
+    """NV3-3: an active V2 account whose Supabase account (same legacy id) is deleted or currently banned."""
+    target_id: str
+    legacy_id: str
 
 
 @dataclass(frozen=True)
@@ -148,6 +159,7 @@ class Plan:
     updates: list[Update] = field(repr=False)
     fingerprint: str = ""  # of the source snapshot the updates were read from (read_plan)
     freeze_problem: str | None = "not checked"  # None = the freeze is active on the source
+    deactivations: list[Deactivation] = field(default_factory=list)
 
     @property
     def blocked(self) -> list[str]:
@@ -202,7 +214,15 @@ def plan(source: list[Source], target: list[Target]) -> Plan:
     }
     if counts["eligible"] + sum(counts[e] for e in EXCLUSIONS) != counts["target_with_legacy_id"]:
         raise Refused("internal error: the plan's counts do not add up; nothing was written")
-    return Plan(counts, updates)
+    # NV3-3: Supabase keeps deleted / banned in auth.users only (not in the public dump), so the ETL loads those
+    # accounts active. Matched by the exact legacy id (whatever the email): --deactivate turns them off, never on.
+    deactivations = [Deactivation(t.id, t.legacy_id) for t in target if t.legacy_id and t.is_active
+                     and (s := by_id.get(t.legacy_id)) is not None and (s.deleted or s.banned)]
+    counts["deactivate_banned_or_deleted"] = len(deactivations)
+    counts["banned_or_deleted_already_inactive"] = sum(
+        1 for t in target if t.legacy_id and not t.is_active and (s := by_id.get(t.legacy_id)) is not None
+        and (s.deleted or s.banned))
+    return Plan(counts, updates, deactivations=deactivations)
 
 
 def read_sources(conn: psycopg.Connection) -> list[Source]:
@@ -406,6 +426,10 @@ def lock_source(src: psycopg.Connection, expected_fingerprint: str, p: Plan) -> 
         s = current.get(u.legacy_id)
         if s is None or s.email != u.email or s.deleted or s.banned or s.password_hash != u.password_hash:
             raise Refused("a planned hash no longer matches the locked source; nothing was written")
+    for x in p.deactivations:
+        s = current.get(x.legacy_id)
+        if s is None or not (s.deleted or s.banned):
+            raise Refused("a planned deactivation no longer matches the locked source; nothing was written")
 
 
 def source_lock_held(src: psycopg.Connection) -> bool:
@@ -445,6 +469,55 @@ def apply_under_source_lock(src: psycopg.Connection, tgt: psycopg.Connection, p:
         release_source(src)
 
 
+def deactivate(conn: psycopg.Connection, p: Plan, before_commit=None) -> int:
+    """NV3-3: set is_active = false for every planned account in ONE transaction, each row locked and re-checked
+    (same legacy id, still active), each write conditional on is_active; never sets it true. Runs as the migration
+    role (hyperchat_migrator, SET ROLE hyperchat_owner): an administrator row is refused to every runtime role (0024)
+    and a runtime-role is_active change needs a step-up grant (0027). Same commit handling as apply()."""
+    duplicates = [b for b in ("duplicate_source_ids", "duplicate_target_legacy_ids") if p.counts.get(b)]
+    if duplicates:  # an ambiguous legacy id never decides which account is turned off
+        raise Refused(f"blocked by {', '.join(duplicates)}; nothing was written")
+    if len(p.fingerprint) != 64 or not all(ch in "0123456789abcdef" for ch in p.fingerprint):
+        raise Refused("the plan has no source fingerprint (read it with read_plan); nothing was written")
+    committing = False
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
+            cur.execute(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")
+            cur.execute("SET LOCAL ROLE hyperchat_owner")
+            ids = [x.target_id for x in p.deactivations]
+            cur.execute(f"{_TARGET_SELECT} WHERE id = ANY(%s::uuid[]) ORDER BY id FOR UPDATE", (ids,))
+            now = {row[0]: Target(*row) for row in cur.fetchall()}
+            for x in p.deactivations:
+                t = now.get(x.target_id)
+                if t is None or (t.legacy_id, t.is_active) != (x.legacy_id, True):
+                    raise Refused("target changed since the plan; nothing was written")
+            for x in p.deactivations:
+                cur.execute("UPDATE public.users SET is_active = false WHERE id = %s AND legacy_supabase_user_id = %s "
+                            "AND is_active", (x.target_id, x.legacy_id))
+                if cur.rowcount != 1:
+                    raise Refused("target changed while writing; nothing was written")
+            if before_commit:
+                before_commit()
+            committing = True
+    except BaseException as exc:
+        if committing and not _rollback_confirmed(conn, exc):
+            raise CommitOutcomeUnknown("deactivate") from exc
+        raise
+    return len(p.deactivations)
+
+
+def deactivate_under_source_lock(src: psycopg.Connection, tgt: psycopg.Connection, p: Plan,
+                                 expected_fingerprint: str) -> tuple[int, bool]:
+    """deactivate() while the source is locked and verified, as apply_under_source_lock does for hashes."""
+    try:
+        lock_source(src, expected_fingerprint, p)
+        n = deactivate(tgt, p, before_commit=lambda: require_source_lock(src))
+        return n, source_lock_held(src)
+    finally:
+        release_source(src)
+
+
 def check_apply_guard(p: Plan, expected_fingerprint: str | None) -> None:
     """--apply only for the exact source set that was reviewed, and only while the freeze holds it still."""
     if not expected_fingerprint:
@@ -468,7 +541,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m etl.auth_hash_import",
         description="Import Supabase bcrypt password hashes into HyperChat V2 for accounts matching on legacy id AND "
                     "email. DRY RUN unless --apply. Connection details are prompted for.")
-    ap.add_argument("--apply", action="store_true", help="write the hashes (after a typed confirmation)")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="write the hashes (after a typed confirmation)")
+    mode.add_argument("--deactivate", action="store_true",
+                      help="NV3-3: deactivate the V2 accounts whose Supabase account is deleted or banned (migration "
+                           "role, after a typed confirmation); never re-activates")
     ap.add_argument("--allow-dev-target", action="store_true",
                     help="permit --apply into hyperchat_dev (real hashes stay out of DEV without separate approval)")
     ap.add_argument("--accept-writable-source-role", action="store_true",
@@ -476,27 +553,51 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--expected-fingerprint", type=_fingerprint_arg, metavar="SHA256",
                     help="with --apply: the source_fingerprint printed by the reviewed dry run (required)")
     args = ap.parse_args(argv)
+    write = args.apply or args.deactivate
     print("APPLY: hashes will be written after confirmation." if args.apply
+          else "DEACTIVATE: banned / deleted accounts will be deactivated after confirmation." if args.deactivate
           else "DRY RUN: nothing will be written.", file=sys.stderr)
     p = None
     try:
-        if args.apply and not args.expected_fingerprint:
-            raise Refused("--apply needs --expected-fingerprint (the source_fingerprint of the reviewed dry run)")
+        if write and not args.expected_fingerprint:
+            raise Refused("--apply / --deactivate need --expected-fingerprint (the reviewed dry run's "
+                          "source_fingerprint)")
         source = source_params()
-        target = target_params(role="hyperchat_app" if args.apply else "hyperchat_readonly",
-                               dbname=None if args.apply else "hyperchat_dev")
-        if args.apply and target["dbname"] == "hyperchat_dev" and not args.allow_dev_target:
-            raise Refused("--apply into hyperchat_dev needs --allow-dev-target (and the owner's explicit approval)")
+        target = target_params(role="hyperchat_app" if args.apply else "hyperchat_migrator" if args.deactivate
+                               else "hyperchat_readonly", dbname=None if write else "hyperchat_dev")
+        if write and target["dbname"] == "hyperchat_dev" and not args.allow_dev_target:
+            raise Refused("--apply / --deactivate into hyperchat_dev need --allow-dev-target (and the owner's "
+                          "explicit approval)")
         with connect_source(source) as src:
             with psycopg.connect(**target, application_name="hyperchat-auth-hash-import", connect_timeout=15) as tgt:
-                tgt.read_only = not args.apply
+                tgt.read_only = not write
+                if args.deactivate:  # the migrator (NOINHERIT) reads and writes users only as the owner
+                    tgt.execute("SET ROLE hyperchat_owner")
+                    tgt.commit()  # session-level: the plan's rollbacks keep it
                 p = read_plan(src, tgt, args.accept_writable_source_role)
                 print(render(p.counts, "PLAN (aggregate counts only)"))
                 print(f"source_fingerprint  {p.fingerprint}")
                 print("source_freeze       " + ("active" if p.freeze_problem is None
                                                 else f"NOT ACTIVE: {p.freeze_problem}"))
-                if not args.apply:
+                if not write:
                     print("dry run: nothing was written", file=sys.stderr)
+                    return 0
+                if args.deactivate:
+                    check_apply_guard(p, args.expected_fingerprint)
+                    if not p.deactivations:
+                        print("nothing to deactivate", file=sys.stderr)
+                        return 0
+                    phrase = f"DEACTIVATE {len(p.deactivations)} ACCOUNTS IN {target['dbname']}"
+                    if input(f'Type exactly "{phrase}" to write, anything else cancels: ').strip() != phrase:
+                        print("cancelled: nothing was written", file=sys.stderr)
+                        return 3
+                    n, lock_held = deactivate_under_source_lock(src, tgt, p, args.expected_fingerprint)
+                    print(render({"deactivated": n}, "DEACTIVATED (one transaction, committed)"))
+                    if not lock_held:
+                        print("ALERT: the deactivation committed, but the source lock could not be shown to have "
+                              "been held through the commit; run a fresh dry run and compare source_fingerprint "
+                              "with the reviewed value before continuing.", file=sys.stderr)
+                        return 4
                     return 0
                 if p.blocked:
                     raise Refused(f"blocked by {', '.join(p.blocked)}; nothing was written")

@@ -8,6 +8,7 @@ import psycopg
 from psycopg import sql
 
 VERIFY_SECONDS = 600  # the verifier's run budget (it requires one; no production default exists)
+_PAID = "CASE WHEN payment_status = 'success' THEN 'success' ELSE 'failed' END"  # NV3-1: unpaid rows load 'failed'
 
 
 def _all(conn: psycopg.Connection, query: str, params: tuple | None = None) -> list[tuple]:
@@ -94,15 +95,16 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
     check("donations: per-creator count/sum(amount)/sum(amount_inr)", s_creator == t_creator,
           f"{len(s_creator)} creators compared, "
           f"{sum(1 for k in s_creator.keys() | t_creator.keys() if s_creator.get(k) != t_creator.get(k))} mismatched")
-    s_pay = dict((r[0], r[1:]) for r in _all(src, f"SELECT payment_status, count(*), sum(amount_inr) "
+    # NV3-1: every unpaid legacy row (pending / failed) loads as terminal 'failed'
+    s_pay = dict((r[0], r[1:]) for r in _all(src, f"SELECT {_PAID}, count(*), sum(amount_inr) "
                                                   f"FROM ({union}) d GROUP BY 1"))
     t_pay = dict((r[0], r[1:]) for r in _all(tgt, "SELECT payment_status, count(*), sum(amount_inr) "
                                                   "FROM public.donations GROUP BY 1"))
-    check("donations: count/sum(amount_inr) per payment status", s_pay == t_pay,
+    check("donations: count/sum(amount_inr) per payment status (unpaid legacy rows loaded 'failed')", s_pay == t_pay,
           ", ".join(f"{k}={v[0]}/{v[1]}" for k, v in sorted(t_pay.items())))
 
     # 3. Value distributions (media_type is cleared: section 4).
-    for col_src, col_tgt in (("payment_status", "payment_status"), ("moderation_status", "moderation_status"),
+    for col_src, col_tgt in ((_PAID, "payment_status"), ("moderation_status", "moderation_status"),
                              ("currency::text", "currency"), ("is_hyperemote", "is_hyperemote"),
                              ("message_visible", "message_visible"), ("mod_notified", "mod_notified")):
         u = _donation_union(src, f"{col_src} AS v")
@@ -134,6 +136,25 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
     check("fresh start: no OBS token, soundboard slot, API key or image record in the target", not any(left),
           f"obs_tokens={left[0]} soundboard_slots={left[1] + left[2]} api_keys={left[3]} partner_api_keys={left[4]} "
           f"creator_image_uploads={left[5]}")
+
+    # NV3-1: no unpaid legacy order can be completed in V2: none is non-terminal, none keeps a provider order id,
+    # none has an order_lookup row.
+    u = _donation_union(src, "payment_status")
+    src_unpaid = dict(_all(src, f"SELECT payment_status, count(*) FROM ({u}) d WHERE payment_status <> 'success' "
+                                f"GROUP BY 1 ORDER BY 1"))
+    open_rows, with_order, lookups, failed = one(tgt, """
+        SELECT count(*) FILTER (WHERE payment_status NOT IN ('success', 'failed')),
+               count(*) FILTER (WHERE payment_status <> 'success' AND provider_order_id IS NOT NULL),
+               (SELECT count(*) FROM public.order_lookup o JOIN public.donations x ON x.id = o.donation_id
+                WHERE x.payment_status <> 'success'),
+               count(*) FILTER (WHERE payment_status = 'failed')
+        FROM public.donations WHERE legacy_source_table IS NOT NULL""")
+    loaded_unpaid = stats.get("donations", {}).get("unpaid_loaded_failed", {})
+    check("donations: no unpaid legacy order can be completed (terminal 'failed', no order id, no lookup)",
+          open_rows == 0 and with_order == 0 and lookups == 0 and loaded_unpaid == src_unpaid
+          and failed == sum(src_unpaid.values()),
+          f"source unpaid={src_unpaid}; loaded failed={failed}; non-terminal={open_rows} with_order_id={with_order} "
+          f"lookups={lookups}")
 
     # 5. approved_by split covers every source value.
     u = _donation_union(src, "approved_by::text AS a")
@@ -212,7 +233,16 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
     pw = one(tgt, "SELECT count(*) FILTER (WHERE password_hash IS NOT NULL) FROM public.users")[0]
     check("users: no password hashes migrated (cutover import)", pw == 0, f"with_password={pw}")
     roles = dict(_all(tgt, "SELECT role, count(*) FROM public.users GROUP BY 1"))
-    check("users: role distribution (admin_emails folded in)", True, str(roles))
+    # NV3-2: the V2 admins are exactly the accounts admin_emails lists; any other legacy role 'admin' is demoted
+    listed = {r[0] for r in _all(src, "SELECT u.id::text FROM public.auth_users u WHERE lower(u.email) IN "
+                                      "(SELECT lower(email) FROM public.admin_emails)")}
+    admins = {r[0] for r in _all(tgt, "SELECT id::text FROM public.users WHERE role = 'admin'")}
+    should_demote = one(src, "SELECT count(*) FROM public.auth_users WHERE role = 'admin' AND lower(email) NOT IN "
+                             "(SELECT lower(email) FROM public.admin_emails)")[0]
+    demoted = stats.get("users", {}).get("legacy_admin_role_demoted")
+    check("users: admins are exactly the admin_emails accounts (legacy role 'admin' elsewhere demoted)",
+          admins == listed and demoted == should_demote,
+          f"admins={len(admins)} admin_emails accounts={len(listed)} demoted={demoted}; roles={roles}")
     kyc = dict(_all(tgt, "SELECT kyc_track || '/' || status || '/' || CASE WHEN user_id IS NULL THEN 'no_owner' "
                          "WHEN user_id = kyc_baseline_owner_id THEN 'baseline_owner' ELSE 'other' END, count(*) "
                          "FROM public.streamers GROUP BY 1"))

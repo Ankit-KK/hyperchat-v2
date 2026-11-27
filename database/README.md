@@ -176,6 +176,16 @@ their passwords. **Dry run by default.** Nothing is ever written to a file, log 
   the whole run back. Admins set their password by the admin path. The read-only report (phase 1) does not know
   this rule: its exact-match counts exceed the dry run's `eligible` by `target_admin_account` (and by the deleted /
   banned accounts), which the owner's count review must expect.
+- **Supabase-deleted / banned accounts are deactivated (NV3-3, 2026-11-27):** every dry run also plans
+  `deactivate_banned_or_deleted` (active V2 accounts whose Supabase account, by exact legacy id, is deleted or
+  currently banned) and counts `banned_or_deleted_already_inactive`. `--deactivate --expected-fingerprint <sha256>`
+  (mutually exclusive with `--apply`) writes them with the same controls as `--apply`: reviewed fingerprint, active
+  freeze, typed confirmation (`DEACTIVATE <n> ACCOUNTS IN <db>`), the source SHARE lock held through the target commit,
+  one transaction, each row locked, re-checked and updated only while `is_active`. It only ever sets `is_active =
+  false` and refuses on duplicate ids. It runs as `hyperchat_migrator` (`SET ROLE hyperchat_owner`), because 0024
+  refuses every runtime role an admin-row write and 0027 makes a runtime-role `is_active` change need a step-up grant.
+  No new grant: the source role's column grant above already includes `deleted_at` and `banned_until`. There is no
+  ledger for it (the 0017 ledger records hashes); the set is re-derivable from the frozen source by the dry run.
 - `--apply` refuses on any blocker: duplicate ids on either side, or **any** unsupported hash format among otherwise
   eligible rows.
 

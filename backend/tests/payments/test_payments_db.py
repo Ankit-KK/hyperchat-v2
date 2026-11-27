@@ -8,6 +8,7 @@ real concurrency (webhook vs confirm, duplicate deliveries) and log safety."""
 
 import asyncio
 import hashlib
+import secrets
 
 import httpx
 import psycopg
@@ -332,6 +333,32 @@ def test_unknown_order_answers_200_and_is_recorded(client):
     assert (r.status_code, r.json()) == (200, {"status": "unknown_order"})
     assert events("authtest-unk-") == [("authtest-unk-1", "payment.captured", "primary", "unknown_order",
                                         "order_TESTnotours", "pay_TESTx", False)]
+
+
+def test_a_webhook_never_completes_or_fails_an_imported_legacy_order(client):
+    """NV3-1 (defence in depth behind the ETL): a signed, provider-confirmed capture or failure for an imported
+    (legacy_source_table) order is recorded as unknown_order and changes nothing: no credit, no alert, no job."""
+    sid = make_streamer("authtest-pay-legacy")
+    did = make_donation(sid, 100, payment="pending", moderation="pending", name="Legacy")
+    order = "order_TESTlegacy" + secrets.token_hex(3)
+    with fixture_db() as conn:
+        conn.execute("UPDATE public.donations SET legacy_source_table = 'authtest_donations', provider_order_id = %s "
+                     "WHERE id = %s", (order, did))
+        conn.execute("INSERT INTO public.order_lookup (razorpay_order_id, order_id, donation_id) SELECT %s, order_id, "
+                     "id FROM public.donations WHERE id = %s", (order, did))
+    payment = client.fake.captured(order, 10000)
+    before = creator_state(sid)
+    for n, event in enumerate(("payment.captured", "payment.failed")):
+        raw = webhook_body(event, order, payment.id, 10000, "INR", "captured" if n == 0 else "failed")
+        r = client.post(W, content=raw, headers={"x-razorpay-signature": sign(secret(client, "PRIMARY_WEBHOOK_SECRET"),
+                                                                              raw),
+                                                 "x-razorpay-event-id": f"authtest-legacy-{n}"})
+        assert (r.status_code, r.json()) == (200, {"status": "unknown_order"})
+    assert creator_state(sid) == before and totals(sid) == []
+    assert [e[3:] for e in events("authtest-legacy-")] == [("unknown_order", order, payment.id, True)] * 2
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.jobs WHERE payload->>'donation_id' = %s",
+                            (did,)).fetchone()[0] == 0
 
 
 def test_bad_signature_changes_nothing(client):

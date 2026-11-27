@@ -75,6 +75,7 @@ EXPECTED = {
     "target_email_used_by_other_source_id": 1, "id_match_email_mismatch": 2, "source_deleted": 1, "source_banned": 1, "target_admin_account": 0,
     "target_already_has_password": 1, "source_without_password": 2, "unsupported_hash_format": 0,
     "source_ids_not_in_target": 2, "duplicate_source_ids": 0, "duplicate_target_legacy_ids": 0,
+    "deactivate_banned_or_deleted": 2, "banned_or_deleted_already_inactive": 0,
 }
 
 
@@ -103,6 +104,23 @@ def test_plan_categories_and_only_exact_matches_are_eligible():
     p = plan(_sources(), _targets())
     assert p.counts == EXPECTED and not p.blocked
     assert sorted(u.password_hash for u in p.updates) == sorted(HASHES[k] for k in ELIGIBLE)
+
+
+def test_banned_or_deleted_supabase_accounts_are_planned_for_deactivation_never_reactivation():
+    """NV3-3: the deleted (d1) and currently banned (b1) Supabase accounts' V2 rows are planned for deactivation by
+    exact legacy id; an expired ban (e4) is not; an account already inactive is only counted; nothing is re-activated."""
+    p = plan(_sources(), _targets())
+    wanted = {str(uuid.uuid5(uuid.NAMESPACE_DNS, k)) for k in ("d1", "b1")}
+    assert {x.target_id for x in p.deactivations} == wanted
+    assert {x.legacy_id for x in p.deactivations} == {IDS["d1"], IDS["b1"]}
+    inactive = [x if x.legacy_id != IDS["d1"] else Target(x.id, x.legacy_id, x.email, x.email_norm, x.has_password,
+                                                         False, False) for x in _targets()]
+    p = plan(_sources(), inactive)
+    assert (p.counts["deactivate_banned_or_deleted"], p.counts["banned_or_deleted_already_inactive"]) == (1, 1)
+    p.fingerprint = "0" * 64
+    p.counts["duplicate_target_legacy_ids"] = 1
+    with pytest.raises(Refused, match="duplicate_target_legacy_ids"):
+        imp.deactivate(None, p)
 
 
 def test_an_admin_account_is_excluded_never_planned():
@@ -192,7 +210,9 @@ def test_the_select_reads_no_metadata_and_the_update_touches_one_column():
     assert "raw_user_meta_data" not in imp.SOURCE_SQL and "confirmed_at IS" not in imp.SOURCE_SQL.replace(
         "email_confirmed_at IS", "")
     src = Path(imp.__file__).read_text(encoding="utf-8")
-    assert src.count("UPDATE public.users SET") == 1 and "SET password_hash = %s WHERE" in src
+    # two writes only: the hash (one column) and the NV3-3 deactivation, which can only ever set is_active false
+    assert src.count("UPDATE public.users SET") == 2 and "SET password_hash = %s WHERE" in src
+    assert src.count("SET is_active = false WHERE") == 1 and "is_active = true" not in src
     # the only insert: one import-ledger row per imported account, in the same transaction (migration 0017)
     assert src.count("INSERT ") == 1 and "INSERT INTO public.d1_hash_import_ledger (run_id, user_id, hash_sha256" in src
     for word in ("DELETE ", "TRUNCATE ", "ALTER ", "CREATE ", "DROP ", "COPY ", "open(", "json", "csv",
