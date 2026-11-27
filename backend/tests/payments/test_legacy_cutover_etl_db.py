@@ -278,8 +278,9 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
                  "source unpaid={'failed': 1, 'pending': 2}; loaded failed=3 non-terminal=0 with_order_id=0 lookups=0",
                  "admins=1 admin_emails accounts=1 demoted=1",
                  "kyc_required=2 "):
-        assert line in text, (line, [x for x in text.splitlines() if x.split("  -- ")[0][7:] in line
-                                     or any(w in x for w in ("unpaid", "order_lookup", "admins="))])
+        if line not in text:  # pytest.fail keeps the whole message (an assert repr is truncated)
+            pytest.fail(f"missing: {line}\nreport lines:\n" + "\n".join(
+                x for x in text.splitlines() if any(w in x for w in ("unpaid", "order_lookup", "admins="))))
 
     with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as c:
         c.execute("SET ROLE hyperchat_owner")
