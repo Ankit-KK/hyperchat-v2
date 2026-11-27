@@ -4,6 +4,7 @@ Every value comes from environment variables prefixed with ``HYPERCHAT_`` (on th
 ``/etc/hyperchat/api.env``, loaded by systemd). Nothing secret is stored in the repository.
 """
 
+import json
 import re
 import unicodedata
 import uuid
@@ -44,6 +45,24 @@ MAX_CONTACT_PHONES = 5
 
 def _secret_value(value: SecretStr | None) -> str:
     return value.get_secret_value().strip() if value is not None else ""
+
+
+DIDIT_ACCOUNT_ID = re.compile(r"^[a-z][a-z0-9-]{1,31}$")  # migration 0040's account ids
+
+
+def _didit_extra_keys(value: SecretStr | None) -> dict[str, str]:
+    raw = _secret_value(value)
+    if not raw:
+        return {}
+    try:
+        keys = json.loads(raw)
+    except ValueError:
+        raise ValueError("Refusing to start: HYPERCHAT_DIDIT_EXTRA_API_KEYS must be a JSON object") from None
+    if not isinstance(keys, dict) or not all(
+            isinstance(k, str) and DIDIT_ACCOUNT_ID.match(k) and k != "primary" and isinstance(v, str) and v.strip()
+            for k, v in keys.items()):
+        raise ValueError("Refusing to start: HYPERCHAT_DIDIT_EXTRA_API_KEYS maps account ids (not 'primary') to keys")
+    return {k: v.strip() for k, v in keys.items()}
 
 
 def _uuid(value: str | None) -> str | None:
@@ -208,6 +227,10 @@ class Settings(BaseSettings):
     didit_workflow_id: str | None = None   # not secret; must equal the workflow in kyc_provider_config
     didit_environment: Literal["sandbox", "live"] | None = None
     didit_api_base: str = "https://verification.didit.me"
+    # Migration 0040 (several Didit accounts): the API keys of the accounts other than 'primary', a JSON object
+    # {"<account id>": "<api key>"} (ids as in public.kyc_provider_accounts). Their workflows and webhook secrets live
+    # in the database; an account without a key here answers 503 to the users pinned to it.
+    didit_extra_api_keys: SecretStr | None = None
     # KYC PR4 restore witness (app.kyc.witness): an append-only file OUTSIDE PostgreSQL holding the highest KYC
     # enforcement generation / state seen. Unset: only the untouched pre-rollout database is accepted.
     kyc_witness_path: str | None = None
@@ -215,6 +238,13 @@ class Settings(BaseSettings):
     @property
     def didit_configured(self) -> bool:
         return bool(_secret_value(self.didit_api_key) and _uuid(self.didit_workflow_id) and self.didit_environment)
+
+    def didit_api_keys(self) -> dict[str, str]:
+        """{account id: API key}: 'primary' from HYPERCHAT_DIDIT_API_KEY, the others from HYPERCHAT_DIDIT_EXTRA_API_KEYS."""
+        keys = dict(_didit_extra_keys(self.didit_extra_api_keys))
+        if _secret_value(self.didit_api_key):
+            keys["primary"] = _secret_value(self.didit_api_key)
+        return keys
 
     @model_validator(mode="after")
     def _refuse_the_wrong_didit_environment(self) -> "Settings":
@@ -225,6 +255,7 @@ class Settings(BaseSettings):
             raise ValueError("Refusing to start: HYPERCHAT_DIDIT_WORKFLOW_ID must be a UUID")
         if _https_url(self.didit_api_base, allow_path=False) != self.didit_api_base.rstrip("/"):
             raise ValueError("Refusing to start: HYPERCHAT_DIDIT_API_BASE must be an https origin")
+        _didit_extra_keys(self.didit_extra_api_keys)  # refuses a malformed value at start
         return self
 
     # ── Background jobs and audio (Phase 8: app.jobs, app.audio). Paid providers are only ever called by

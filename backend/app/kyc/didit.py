@@ -83,7 +83,10 @@ class CreatedSession:
 
 
 class DiditClient:
-    def __init__(self, *, base: str, api_key: str, workflow_id: str, timeout: float = 10.0) -> None:
+    """One Didit account's API (its key). workflow_id is the default workflow; a call may name another (migration
+    0040: the database assigns the account and its workflow)."""
+
+    def __init__(self, *, base: str, api_key: str, workflow_id: str | None = None, timeout: float = 10.0) -> None:
         self._base, self._key, self.workflow_id = base.rstrip("/"), api_key, workflow_id
         self._client = httpx.AsyncClient(timeout=timeout)
 
@@ -108,12 +111,15 @@ class DiditClient:
             raise DiditError("bad_response")
         return data
 
-    async def create_session(self, vendor_data: str, callback: str) -> CreatedSession:
-        data = await self._call("POST", "/v3/session/", json={"workflow_id": self.workflow_id,
+    async def create_session(self, vendor_data: str, callback: str, workflow_id: str | None = None) -> CreatedSession:
+        workflow = workflow_id or self.workflow_id
+        if workflow is None:
+            raise DiditError("no_workflow")
+        data = await self._call("POST", "/v3/session/", json={"workflow_id": workflow,
                                                                "vendor_data": vendor_data, "callback": callback})
         session_id, version = as_uuid(data.get("session_id")), data.get("workflow_version")
         if (session_id is None or data.get("vendor_data") != vendor_data or as_uuid(data.get("workflow_id")) !=
-                self.workflow_id or data.get("status") not in STATUSES or not hosted_url_ok(data.get("url"))):
+                workflow or data.get("status") not in STATUSES or not hosted_url_ok(data.get("url"))):
             raise DiditError("unexpected_response")
         return CreatedSession(session_id, data["url"], data["status"], version if isinstance(version, int) else None)
 

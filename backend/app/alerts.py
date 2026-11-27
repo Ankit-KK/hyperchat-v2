@@ -34,7 +34,8 @@ from psycopg.types.json import Jsonb
 from app.jobs.retry import Permanent, Retryable, reason_code
 
 log = logging.getLogger("hyperchat.alerts")
-KINDS = ("job_failed", "payment_on_hold", "invite_failed")  # invite_failed: app.onboarding.auto_invite
+KINDS = ("job_failed", "payment_on_hold", "invite_failed",  # invite_failed: app.onboarding.auto_invite
+         "kyc_account_unavailable")  # app.kyc.service: a user's pinned Didit account cannot take a session (0040)
 MAX_ATTEMPTS = 5
 HOLD_STATUSES = ("invalid_key", "missing_key")
 _COLUMNS = ("id::text AS id, source, severity, message AS code, context->>'kind' AS kind, "

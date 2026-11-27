@@ -13,10 +13,17 @@ The API's database role only reads the KYC tables; every write is a SECURITY DEF
   approve; it is dated when Didit was asked, so a slow refresh never outranks a newer webhook.
 Provider order is kept by the provider's own update time: a delayed old event never overwrites a newer one, while a
 later expiry or decline always replaces an approval.
+
+Several Didit accounts (migration 0040, docs/kyc.md "Didit accounts"): the database assigns each user's account
+(public.kyc_assign_account: a new user by rotation, everyone else the account of their first session, never re-routed)
+and its workflow; this process holds only the accounts' API keys (HYPERCHAT_DIDIT_API_KEY for 'primary',
+HYPERCHAT_DIDIT_EXTRA_API_KEYS for the others). A refused assignment or a missing key answers 503 and raises an
+operator alert (kind kyc_account_unavailable).
 """
 
 import asyncio
 import json
+import logging
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -27,6 +34,7 @@ from app.core.errors import ApiError
 from app.kyc.didit import CreatedSession, DiditClient, DiditError, as_uuid, canonical, check_statuses
 from app.security.audit import security_event
 
+log = logging.getLogger("hyperchat.kyc")
 RATE_START = ("kyc:session", 5, 3600)       # per user
 RATE_REFRESH = ("kyc:refresh", 30, 3600)    # per admin
 STATE = {"Not Started": "in_progress", "In Progress": "in_progress", "Resubmitted": "in_progress",
@@ -39,7 +47,7 @@ REFUSED = {"not_configured": (503, UNAVAILABLE, "kyc_not_configured"),
            "stale_timestamp": (401, "Stale or missing timestamp", "kyc_webhook_stale"),
            "malformed": (400, "Malformed payload", "kyc_webhook_malformed"),
            "wrong_application": (403, "Not this environment's Didit application", "kyc_webhook_wrong_application")}
-_SESSION_COLS = """session_id::text, workflow_id::text, workflow_version, environment, provider_status,
+_SESSION_COLS = """session_id::text, workflow_id::text, workflow_version, environment, account_id, provider_status,
     provider_updated_at, check_statuses, approved_at, created_at, updated_at"""
 
 
@@ -100,11 +108,20 @@ class KycRepository:
             approved, session_id = await cur.fetchone()
             return approved, session_id
 
-    async def record_session(self, user_id: str, created: CreatedSession, workflow_id: str, environment: str) -> dict:
+    async def assign_account(self, user_id: str) -> tuple[str, str | None, str | None]:
+        """(result, account id, workflow id) from public.kyc_assign_account (migration 0040)."""
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT o_result, o_account, o_workflow::text FROM public.kyc_assign_account(%s)",
+                              (user_id,))
+            return tuple(await cur.fetchone())
+
+    async def record_session(self, user_id: str, created: CreatedSession, workflow_id: str, environment: str,
+                             account: str = "primary") -> dict:
         """Store a session Didit returned (idempotent) and apply the signed webhooks that arrived before it."""
         async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT public.kyc_create_session(%s, %s, %s, %s, %s) AS r",
-                              (user_id, created.session_id, workflow_id, created.workflow_version, environment))
+            await cur.execute("SELECT public.kyc_create_session(%s, %s, %s, %s, %s, %s) AS r",
+                              (user_id, created.session_id, workflow_id, created.workflow_version, environment,
+                               account))
             result = (await cur.fetchone())["r"]
             if result != "ok":
                 raise DiditError(f"session_{result}")  # never handed out: not this user's, or not this configuration
@@ -130,16 +147,25 @@ class KycRepository:
 
 
 class KycService:
-    def __init__(self, repo: KycRepository, settings: Settings, *, client: DiditClient | None, limiter) -> None:
-        self.repo, self.settings, self.client, self.limiter = repo, settings, client, limiter
+    def __init__(self, repo: KycRepository, settings: Settings, *, client: DiditClient | None, limiter,
+                 clients: dict | None = None, alerts=None) -> None:
+        """`client` is the 'primary' account's; `clients` adds the others ({account id: client}, migration 0040)."""
+        self.repo, self.settings, self.limiter, self.alerts = repo, settings, limiter, alerts
+        self.clients = {**({"primary": client} if client is not None else {}), **(clients or {})}
+        self.client = client if client is not None else next(iter(self.clients.values()), None)
 
     @classmethod
-    def from_settings(cls, repo: KycRepository, settings: Settings, limiter) -> "KycService":
-        client = None
-        if settings.didit_configured:
-            client = DiditClient(base=settings.didit_api_base, api_key=settings.didit_api_key.get_secret_value().strip(),
-                                 workflow_id=as_uuid(settings.didit_workflow_id.strip()))
-        return cls(repo, settings, client=client, limiter=limiter)
+    def from_settings(cls, repo: KycRepository, settings: Settings, limiter, alerts=None) -> "KycService":
+        if not settings.didit_environment:  # no environment: KYC is unavailable (503), as before 0040
+            return cls(repo, settings, client=None, limiter=limiter, alerts=alerts)
+        keys = settings.didit_api_keys()
+        primary = None
+        if settings.didit_configured:  # the primary's key, workflow and environment; it may be absent (disabled)
+            primary = DiditClient(base=settings.didit_api_base, api_key=keys["primary"],
+                                  workflow_id=as_uuid(settings.didit_workflow_id.strip()))
+        keys.pop("primary", None)
+        others = {account: DiditClient(base=settings.didit_api_base, api_key=key) for account, key in keys.items()}
+        return cls(repo, settings, client=primary, limiter=limiter, clients=others, alerts=alerts)
 
     @property
     def environment(self) -> str | None:
@@ -184,14 +210,43 @@ class KycService:
         if state["state"] == "in_review":
             raise ApiError(409, "Your verification is being reviewed", "kyc_in_review")
         callback = f"{self.settings.dashboard_link_url}/kyc/return"  # never from the request
+        account, workflow, client = await self._account(user.id, ip)
         try:
-            created = await self.client.create_session(user.id, callback)
-            row = await self.repo.record_session(user.id, created, self.client.workflow_id, self.environment)
+            created = await client.create_session(user.id, callback, workflow_id=workflow)
+            row = await self.repo.record_session(user.id, created, workflow, self.environment, account)
         except DiditError as exc:
+            if exc.reason == "session_account_at_cap":  # Didit made a NEW session although only a resume fits the cap
+                raise await self._unavailable("account_at_cap", user.id, ip, account) from None
             security_event("kyc_session_failed", reason=exc.reason, user_id=user.id, client_ip=ip)
             raise ApiError(503, UNAVAILABLE, "kyc_provider_unavailable") from None
         security_event("kyc_session_started", level=20, user_id=user.id, client_ip=ip)
         return {"session_id": row["session_id"], "status": row["provider_status"], "url": created.url}
+
+    async def _unavailable(self, code: str, user_id: str, ip: str | None, account: str | None) -> ApiError:
+        """A user whose Didit account cannot take a session: 503, a security event and an operator alert."""
+        security_event("kyc_account_unavailable", reason=code, user_id=user_id, client_ip=ip)
+        if self.alerts is not None:
+            try:
+                await self.alerts.record(kind="kyc_account_unavailable", source="kyc", code=code,
+                                         account=account or "", user_id=user_id)
+            except Exception as exc:  # noqa: BLE001 - alerting never fails what it reports on (app.alerts)
+                log.warning("alert not recorded", extra={"kind": "kyc_account_unavailable",
+                                                         "error": type(exc).__name__})
+        return ApiError(503, UNAVAILABLE, "kyc_account_unavailable")
+
+    async def _account(self, user_id: str, ip: str | None) -> tuple[str, str, DiditClient]:
+        """The user's Didit account (migration 0040: assigned and pinned by the database), its workflow and client."""
+        result, account, workflow = await self.repo.assign_account(user_id)
+        if result != "ok":
+            if result == "not_configured":
+                raise ApiError(503, UNAVAILABLE, "kyc_not_configured")
+            raise await self._unavailable(result, user_id, ip, account)
+        client = self.clients.get(account)
+        if client is None:
+            raise await self._unavailable("account_key_missing", user_id, ip, account)
+        if account == "primary" and client.workflow_id and workflow != client.workflow_id:
+            raise await self._unavailable("primary_workflow_mismatch", user_id, ip, account)  # settings vs database
+        return account, workflow, client
 
     # ── webhook ───────────────────────────────────────────────────────────
     async def webhook(self, raw: bytes, signature: str | None, x_timestamp: str | None, ip: str | None) -> dict:
@@ -231,10 +286,13 @@ class KycService:
         if not sessions:
             raise ApiError(404, "This user has no verification session", "kyc_no_session")
         session_id = sessions[0]["session_id"]
+        client = self.clients.get(sessions[0].get("account_id") or "primary")  # the session's own account (0040)
+        if client is None:
+            raise ApiError(503, UNAVAILABLE, "kyc_account_unavailable")
         asked_at = await self.repo.clock()  # the refresh describes this moment, however long the call takes
         for attempt in (1, 2):
             try:
-                decision = await self.client.decision(session_id)
+                decision = await client.decision(session_id)
                 break
             except DiditError as exc:
                 if attempt == 2 or exc.reason not in ("timeout", "network"):

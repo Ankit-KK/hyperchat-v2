@@ -51,8 +51,9 @@ class FakeDidit:
         self.fail: str | None = None
         self.calls = 0
 
-    async def create_session(self, vendor_data, callback):
+    async def create_session(self, vendor_data, callback, workflow_id=None):
         self.calls += 1
+        self.last_workflow = workflow_id
         if self.fail:
             raise DiditError(self.fail)
         assert callback.endswith("/kyc/return")
@@ -249,6 +250,7 @@ def test_provider_failure_and_a_lost_local_write_recover_without_duplicates(kyc)
 def test_concurrent_starts_store_one_session(kyc, env):
     _, uid = owner(kyc, "kyc-conc")
     repo = KycRepository(kyc.app_state.kyc.repo._conn)
+    assert asyncio.run(repo.assign_account(uid))[0] == "ok"  # migration 0040: the account is assigned first
 
     async def both():
         created = CreatedSession(str(uuid.uuid4()), "https://verify.didit.me/s/x", "Not Started", 1)
@@ -633,7 +635,9 @@ def test_admin_view_refresh_never_approves_and_no_manual_approval(kyc):
     view = boss.get(f"/api/v1/admin/users/{uid}/kyc").json()
     assert view["sessions"][0]["session_id"] == sid and set(view["sessions"][0]) == {
         "session_id", "workflow_id", "workflow_version", "environment", "provider_status", "provider_updated_at",
-        "check_statuses", "approved_at", "created_at", "updated_at"}
+        "check_statuses", "approved_at", "created_at", "updated_at",
+        "account_id"}  # 0040: which Didit account the session is on (an id, no identity data)
+    assert view["sessions"][0]["account_id"] == "primary"
     kyc.fake.decisions[sid] = approved_decision(sid)
     r = boss.post(f"/api/v1/admin/users/{uid}/kyc/refresh", headers=bh)
     assert r.status_code == 200 and r.json()["refresh"] == "approval_needs_webhook"  # unsigned: never approves
@@ -704,6 +708,7 @@ def test_a_webhook_racing_its_uncommitted_session_is_applied(kyc):
 def test_a_session_racing_its_uncommitted_early_webhook_applies_it(kyc, env):
     _, uid = owner(kyc, "kyc-race-w")
     sid, result = str(uuid.uuid4()), {}
+    assert asyncio.run(kyc.app_state.kyc.repo.assign_account(uid))[0] == "ok"  # migration 0040
 
     def store():
         from app.cli import connection_factory
