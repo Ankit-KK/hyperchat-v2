@@ -124,7 +124,8 @@ sudo PYTHONDONTWRITEBYTECODE=1 ../venv/bin/python -m app.backup.restore_check --
   - `missing`: the database has KYC history but no usable witness was given.
 - **`live_operation_approved`:** always `false`. The tool never approves resuming live operation, never acknowledges
   a restore and never installs or replaces a witness. `live_operation_blockers` lists what remains, e.g.
-  `kyc_witness_inconsistent`, `sessions_revoke_required`, `external_reconciliation_required`, `owner_approval_required`.
+  `kyc_witness_inconsistent`, `sessions_revoke_required`, `authority_reapply_required`, `stepup_state_unconfirmed`
+  (or `stepup_enforcement_behind`), `external_reconciliation_required`, `owner_approval_required`.
 
 **Exit codes:** 0 structurally valid with the witness consistent / not applicable; 3 structurally valid but the
 witness inconsistent, missing or not checked; 1 not structurally valid, or the check failed.
@@ -302,13 +303,50 @@ Production's off-site unit runs from `/opt/hyperchat-backup-tools/current`, not 
   - Pusher, Telegram or Discord messages already delivered;
   - sent emails;
   - credentials in `api.env` / `stepup.env`;
-  - revocations made after the set: sessions come back as they were (every runbook below ends them all before the
-    services start); admin role or deactivation changes, passkey, OBS-token and partner-key revocations after the set
-    must be re-applied by hand.
+  - authority changes made after the set (sessions, admin roles, passwords, passkeys, OBS tokens, partner keys,
+    invites, moderators, owners, suspensions, Didit revocations, the step-up state): every runbook below ends the
+    sessions and re-applies or rotates the rest ("After every whole-database restore").
 - **Backups contain personal data** (users, donations, KYC metadata) and the stored hashes of secrets. Access to sets, off-site objects and the GPG private key is as sensitive as the database.
 
 ## Runbooks
 Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run any time.
+
+### After every whole-database restore: re-apply authority changes (mandatory)
+Owner decision 2026-11-28 (security audit run-4, NV4-2). A restore puts back every authority row as it was at the
+set's `created_at` (its manifest). The KYC witness catches only restrictions, grace and the enforcement state, plus
+creator suspensions and Didit account revocations once its history has started (migration 0045). Everything else
+below is undone silently, so **before any service starts [APPROVAL]**, for the window from the set's `created_at`
+to the loss, re-apply each change or rotate the whole class. `restore_check` keeps `authority_reapply_required` in
+`live_operation_blockers` to say so.
+
+Where the changes are recorded:
+- the API's JSON security events (`journalctl -u hyperchat[-prod]-api`);
+- the readable remains of the damaged database (corruption case);
+- Discord alerts;
+- the owner's notes.
+
+On a VPS loss the journal is gone too: use the "no complete record" column.
+
+| Undone by the restore | Re-apply from | With no complete record |
+|---|---|---|
+| Sessions | (the sessions step: every restored session is ended) | same |
+| Admin role or deactivation changes | `user_updated` events | review every `role = 'admin'` row against the owner's list; deactivate any not on it |
+| Passwords changed after the set (the old hash is back) | resets: `password_reset_completed`; a successful change logs no event | every admin: `password_hash = NULL` (they reset by email); tell users to change theirs again |
+| Passkey revocations and recoveries | the operator's records | `python -m app.stepup.operator recover` for every admin |
+| OBS-token revocations | none (no event is logged) | revoke every active OBS token; creators issue new overlay URLs |
+| Partner-key revocations | `partner_key_revoked` events | revoke every partner key and issue new ones |
+| Invite revocations | `invite_revoked` events | revoke every unaccepted invite (`accepted_at IS NULL`): they can be sent again |
+| Moderator removals | `moderator_removed` events | review each creator's moderators with the creator |
+| Owner transfers | `creator_owner_transferred` events | transfer again from the owner's records |
+| Creator suspensions | `creator_status_changed` events; witness lines once its history started | suspend again |
+| Didit account revocations | `etl.kyc_provider_account revoke` output; `witness-sync` lines | revoke again |
+| Step-up enforcement state | the newest manifest's `stepup_enforcement` of any set, local or off-site, or the owner's record | treat it as `active`: re-activate before any admin write |
+
+**Step-up state.** Run `restore_check --expect-stepup <draft|active>` with that newest record:
+- without it, `stepup_state_unconfirmed` stays a blocker;
+- `stepup_enforcement_behind` means the restored set predates activation, so admin writes would lose step-up until the state is re-activated.
+
+`restore_check` also checks that the restored state matches the set's own manifest (`stepup_matches_manifest`).
 
 ### Database corruption (server alive)
 1. **Contain:**
@@ -330,6 +368,7 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
      The set's session rows are as they were at its time, so a session revoked after it (logout, password reset,
      admin revoke, deactivation) is live again otherwise. Rotating `HYPERCHAT_AUTH_SECRET` does **not** end sessions:
      sessions are found by the hash of their token, and the secret only signs CSRF tokens and the OAuth state.
+   - **Authority [APPROVAL]:** the mandatory re-apply step ("After every whole-database restore", above).
 6. **Start the services [APPROVAL]:** verifier first, then API, worker, cleanup.
 7. **Check:** `/health`, `check_isolation.sh`, the KYC admin view `witness.problem`, a test donation path (DEV first).
 
@@ -362,6 +401,7 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
      The set's session rows are as they were at its time, so a session revoked after it (logout, password reset,
      admin revoke, deactivation) is live again otherwise. Rotating `HYPERCHAT_AUTH_SECRET` does **not** end sessions:
      sessions are found by the hash of their token, and the secret only signs CSRF tokens and the OAuth state.
+   - **Authority [APPROVAL]:** the mandatory re-apply step ("After every whole-database restore", above).
 8. **DNS:** TLS (certbot), DNS to the new IP.
 9. **Services [APPROVAL]:** verifier socket, API, worker, cleanup and backup timers.
 10. **Checks:** `check_isolation.sh`, smoke tests (`deploy/README.md`).
@@ -390,7 +430,7 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
 3. If a migration completed but the release must go back:
    - code rollback first;
    - `alembic downgrade` only by explicit decision (several downgrades refuse once data depends on them, e.g. 0023 after enforcement left draft);
-   - otherwise restore the pre-deploy set **[APPROVAL]** and handle the witness, the sessions step and reconciliation as above.
+   - otherwise restore the pre-deploy set **[APPROVAL]** and handle the witness, the sessions step, the authority step and reconciliation as above.
 
 ### KYC witness mismatch
 `kyc_enforcement_witness_mismatch` (critical) or `witness.problem` in the admin view:
