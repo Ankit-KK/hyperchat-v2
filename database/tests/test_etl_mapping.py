@@ -1,12 +1,12 @@
 import contextlib
-import hashlib
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from etl.mapping import (
     normalize_currency,
-    obs_token_hash,
     razorpay_account,
     slug_from_table,
     split_approved_by,
@@ -38,12 +38,6 @@ def test_normalize_currency(value, expected):
 def test_normalize_currency_rejects_invalid(value):
     with pytest.raises(ValueError):
         normalize_currency(value)
-
-
-def test_obs_token_hash_is_sha256_hex():
-    token = "obs_" + "ab" * 32
-    assert obs_token_hash(token) == hashlib.sha256(token.encode()).hexdigest()
-    assert len(obs_token_hash(token)) == 64
 
 
 def test_user_role_folds_admin_emails_case_insensitively():
@@ -122,22 +116,97 @@ def test_media_base(value, ok):
         assert media_base(value) == ok
 
 
-def test_loader_rewrites_only_media_url_columns_and_counts():
+def test_loader_rewrites_only_the_creator_image_columns_and_counts():
+    """Fresh start: only the creator profile picture and background are carried over and rewritten; donation and
+    soundboard media are never rewritten (donation media is cleared, soundboard slots are not migrated)."""
+    from etl.mapping import MEDIA_URL_COLUMNS
     from etl.rehearsal import DONATION_COLUMNS, Loader
+
+    assert MEDIA_URL_COLUMNS == {"streamers": ("brand_logo_url", "background_url")}
     loader = Loader(None, None, media_from=LEGACY, media_to=TARGET)
-    i = {c: DONATION_COLUMNS.index(c) for c in ("voice_message_url", "media_url", "message", "hypersound_url")}
-    row = [None] * len(DONATION_COLUMNS)
-    row[i["voice_message_url"]] = f"{LEGACY[0]}/{VOICE}"
-    row[i["message"]] = f"{LEGACY[0]}/{VOICE}"            # not a media column: never touched
-    row[i["hypersound_url"]] = "https://elsewhere.example/a.mp3"
-    out = loader.media("donations", DONATION_COLUMNS, [tuple(row)])[0]
-    assert out[i["voice_message_url"]] == f"{TARGET}/{VOICE}" and out[i["message"]] == f"{LEGACY[0]}/{VOICE}"
-    assert out[i["hypersound_url"]] == "https://elsewhere.example/a.mp3" and out[i["media_url"]] is None
-    assert dict(loader.media_rewritten) == {"donations.voice_message_url": 1}
-    assert loader.media("donations", DONATION_COLUMNS, [out])[0] == out  # idempotent
-    assert loader.media("visits", ("voice_message_url",), [(f"{LEGACY[0]}/{VOICE}",)]) == [(f"{LEGACY[0]}/{VOICE}",)]
-    plain = Loader(None, None)
-    assert plain.media("donations", DONATION_COLUMNS, [tuple(row)]) == [tuple(row)]  # no rewrite configured
+    cols = ("id", "brand_logo_url", "background_url", "streamer_name")
+    logo = f"{LEGACY[0]}/creator/logo.png"
+    row = ("x", logo, "/assets/streamers/x/bg.png", logo)
+    out = loader.media("streamers", cols, [row])[0]
+    assert out == ("x", f"{TARGET}/creator/logo.png", "/assets/streamers/x/bg.png", logo)
+    assert dict(loader.media_rewritten) == {"streamers.brand_logo_url": 1}
+    assert loader.media("streamers", cols, [out])[0] == out  # idempotent
+    voice = (f"{LEGACY[0]}/{VOICE}",) * len(DONATION_COLUMNS)
+    assert loader.media("donations", DONATION_COLUMNS, [voice]) == [voice]
+    assert Loader(None, None).media("streamers", cols, [row]) == [row]  # no rewrite configured
+
+
+def test_fresh_start_clears_donation_media_and_skips_obs_tokens_and_soundboard_slots():
+    from etl.mapping import DONATION_CLEARED_COLUMNS
+    from etl.rehearsal import DONATION_COLUMNS, LOADED_TABLES, NOT_MIGRATED, STRAIGHT_COPIES
+
+    assert set(DONATION_CLEARED_COLUMNS) == {"voice_message_url", "hypersound_url", "media_url", "media_type",
+                                             "tts_audio_url", "status_token_hash", "upload_token_hash"}
+    assert set(DONATION_CLEARED_COLUMNS) <= set(DONATION_COLUMNS)
+    skipped = {t for t, _ in NOT_MIGRATED}
+    assert {"obs_tokens", "platform_soundboard_slots", "streamer_soundboard_slots", "soundboard_swap_log"} <= skipped
+    assert not skipped & set(LOADED_TABLES) and set(STRAIGHT_COPIES) <= set(LOADED_TABLES)
+    import etl.mapping
+    assert not hasattr(etl.mapping, "obs_token_hash")
+
+
+def _upgrade_added_columns(table: str) -> set[str]:
+    """Columns that migrations 0010+ add to `table` in their upgrade() (the V2-only columns of a straight copy)."""
+    found = set()
+    for f in sorted((Path(__file__).resolve().parents[1] / "migrations" / "versions").glob("*.py")):
+        if int(f.name[:4]) < 10:  # 0001-0009 copied the legacy structure (the rehearsed baseline)
+            continue
+        up = f.read_text(encoding="utf-8").split("def downgrade")[0]
+        for m in re.finditer(r"ALTER TABLE public\.%s\b(.*?)(?=op\.execute|\Z)" % table, up, re.S):
+            found |= set(re.findall(r"ADD COLUMN (\w+)", m.group(1)))
+    return found
+
+
+def test_v2_only_columns_are_exactly_what_the_migrations_added_to_straight_copies():
+    from etl.mapping import LEGACY_VALUES, V2_ONLY_COLUMNS
+    from etl.rehearsal import STRAIGHT_COPIES
+
+    added = {t: _upgrade_added_columns(t) for t in STRAIGHT_COPIES}
+    assert {t: set(c) for t, c in V2_ONLY_COLUMNS.items()} == {t: c for t, c in added.items() if c}
+    assert LEGACY_VALUES == {"user_signups": {"review_status": "legacy_unreviewed"}}
+
+
+@pytest.mark.parametrize("source, ro, target, production, ok", [
+    ("hyperchat_restore_test", "on", "hyperchat_dev", False, True),
+    ("hyperchat_restore_test", "on", "hyperchat_cutover_rehearsal", False, True),
+    ("hyperchat_restore_test", "on", "hyperchat", True, True),
+    ("hyperchat_restore_test", "on", "hyperchat", False, False),      # production needs the flag
+    ("hyperchat_restore_test", "on", "hyperchat_dev", True, False),   # the flag loads only production
+    ("hyperchat_restore_test", "off", "hyperchat_dev", False, False),  # writable source
+    ("hyperchat_dev", "on", "hyperchat_x", False, False),              # not the legacy restore
+    ("hyperchat_restore_test", "on", "hyperchat_restore_test", False, False),
+])
+def test_database_guards(source, ro, target, production, ok):
+    from etl.rehearsal import check_databases
+
+    if ok:
+        check_databases(source, ro, target, production)
+    else:
+        with pytest.raises(SystemExit, match="refusing to run"):
+            check_databases(source, ro, target, production)
+
+
+def _finding(inv, cls, problem=None):
+    return {"invariant": inv, "class": cls, "detail": {"problem": problem} if problem else {}}
+
+
+def test_verifier_result_accepts_clean_or_exactly_the_pre_phase_2b_i10_finding():
+    from etl.reconcile import verifier_result
+
+    i10 = _finding("I10", "structural", "baseline_unverified")
+    assert verifier_result({"status": "clean", "findings": []}, False)[0]
+    assert verifier_result({"status": "violation", "findings": [i10]}, False)[0]
+    assert not verifier_result({"status": "violation", "findings": [i10]}, True)[0]  # once pinned: never accepted
+    assert not verifier_result({"status": "violation", "findings": [i10, _finding("I7", "structural")]}, False)[0]
+    assert not verifier_result({"status": "attention", "findings": [_finding("L-2", "legacy_uncertain")]}, False)[0]
+    assert not verifier_result({"status": "refused", "findings": []}, False)[0]
+    assert "I7/structural/-=1" in verifier_result({"status": "violation", "findings": [_finding("I7", "structural")]},
+                                                  False)[1]
 
 
 def test_loader_puts_every_legacy_creator_on_the_legacy_kyc_track():
