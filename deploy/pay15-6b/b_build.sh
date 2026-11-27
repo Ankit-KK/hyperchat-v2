@@ -15,7 +15,7 @@ b_build() { local old rel
   [ "$(ls "$REL_NEW/database/migrations/versions" | grep -E '^[0-9]{4}_' | sort | tail -1)" = 0035_payment_accounting_hardening.py ] \
     || { echo "STOP: the release's newest migration is not 0035"; return 1; }
   [ "$(sha256sum "$LOCK" | cut -c1-64)" = "$LOCK_SHA" ] || { echo "STOP: the dependency lock is not the pinned one"; return 1; }
-  python3.14 -m venv "$REL_NEW/venv" && "$REL_NEW/venv/bin/pip" install -q --require-hashes --no-deps -r "$LOCK" \
+  python3.14 -m venv "$REL_NEW/venv" && "$REL_NEW/venv/bin/pip" install -q --isolated --require-hashes --no-deps --only-binary :all: -r "$LOCK" \
     && "$REL_NEW/venv/bin/pip" install -q --no-index --no-deps -r "$REL_NEW/backend/requirements.txt" || { echo "STOP: venv"; return 1; }
   echo "$NEW_ID" > "$REL_NEW/backend/RELEASE" && chown -R root:hyperchat "$REL_NEW" && chmod -R g+rX,g-w,o-rwx "$REL_NEW" \
     || { echo "STOP: RELEASE / ownership"; return 1; }

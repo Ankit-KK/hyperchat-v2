@@ -30,6 +30,11 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - run: pip install -r backend/requirements-dev.txt
+      - name: Release lock installs hash-checked and wheels only (backend/requirements.lock, audit run-4 NV4-7)
+        run: |
+          python -m venv "$RUNNER_TEMP/lock-venv"
+          "$RUNNER_TEMP/lock-venv/bin/pip" install --quiet --isolated --require-hashes --no-deps --only-binary :all: -r backend/requirements.lock
+          "$RUNNER_TEMP/lock-venv/bin/pip" check
       - name: Backend
         working-directory: backend
         run: python -m pytest -q
