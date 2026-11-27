@@ -102,6 +102,7 @@ The alternative is to require a step-up second factor for lifecycle actions, ver
 ## Restore safety (and its limits)
 **Why:** a database restored from an older snapshot would silently go back on all of this: re-open revoked grace, lift restrictions, return to `draft`, re-activate a suspended creator or count a revoked Didit account's approvals again. Nothing inside that database can tell.
 - **Suspensions and account revocations (migration 0045, audit run-4):** once the witness history has started (generation above 0, or the state left `draft`), an admin suspension and an operator account `revoke` are enforcement events too (`creator_suspended`, `account_revoked`). Before that, on an untouched database, they move nothing: without a witness, any generation above 0 already stops every new donation.
+- **Production before activation:** configure production's witness path (`HYPERCHAT_KYC_WITNESS_PATH` and the empty file above) **before** `activate` or any other first enforcement change. That change starts the history; without a path every new donation then fails closed. Suspensions and account revocations made before it are not anchored: after a restore, the mandatory re-apply step of `docs/backup-recovery.md` covers them.
 
 So the API and the operator tool record the database's **generation, chain and state** in a **restore witness outside PostgreSQL**:
 - **Where:** `HYPERCHAT_KYC_WITNESS_PATH`.

@@ -531,6 +531,10 @@ def test_suspensions_and_account_revocations_enter_the_witness_once_its_history_
     quiet = standard_creator("authtest-enf-sw0", uid, status="active")
     assert status_change(enf, quiet, "suspend", "active", "before the rollout").status_code == 200
     assert state() == ("draft", 0) and events(quiet) == []  # untouched database: nothing logged, nothing to witness
+    other = standard_creator("authtest-enf-sw1", uid, status="active")
+    view = enf.admin.get(f"{A}/kyc/enforcement").json()  # ... and every other creator keeps accepting donations
+    assert view["witness"]["problem"] is None and view["new_donations_fail_closed"] is False
+    assert block(other) is None and not refused(other)
     assert grant(enf, make_streamer("authtest-enf-sw-g", user_id=owner_user("enf-sw-g"))) == 0  # history starts
     sid = standard_creator("authtest-enf-sw", uid, status="active")  # no grace to revoke
     assert status_change(enf, sid, "suspend", "active", "fraud review").status_code == 200
@@ -546,11 +550,15 @@ def test_suspensions_and_account_revocations_enter_the_witness_once_its_history_
             assert conn.execute("SELECT public.kyc_account_revoke(%s, 'ops', 'secret exposed')",
                                 (B,)).fetchone()[0] == "revoked"
         assert state()[1] == generation + 1 and events()[-1] == "account_revoked"
+        with db() as conn:
+            before = conn.execute("SELECT chain FROM public.kyc_enforcement_events WHERE generation = %s",
+                                  (generation,)).fetchone()[0]
         assert operator(enf, "witness-sync", "--operator", "ops-test", *confirm()) == 0
         assert enf.witness.seen()["generation"] == generation + 1
         with open(enf.witness.path, encoding="utf-8") as f:
             line = json.loads(f.read().splitlines()[-1])
         assert (line["last_action"], line["detail"]) == ("account_revoked", B)  # names what a restore would lose
+        assert enf.witness.problem("draft", generation, before) == "restore_suspected"  # a set from before the revoke
     finally:
         clear_accounts()
 
