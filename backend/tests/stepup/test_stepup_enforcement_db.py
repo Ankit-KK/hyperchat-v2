@@ -243,6 +243,33 @@ def test_a_grant_authorizes_exactly_its_own_write_once_in_its_own_transaction(ac
     assert grant_row(g["grant_id"]) == (True, None)
 
 
+@pytest.mark.parametrize("column, value", [("user_id", "owner"), ("soundboard_enabled", True)])
+def test_a_creator_grant_never_inserts_an_owner_or_soundboard_eligibility(mode, column, value):
+    # Security audit run-4 (0044): creator.create binds slug, name and account only. Ownership and soundboard
+    # eligibility are their own anchored actions, so an API role may never insert them with the new creator.
+    tag = f"{column[:4]}-{secrets.token_hex(3)}"  # unique per run: the test runs in both enforcement states
+    slug = f"authtest-s3-ins-{tag}"
+    params = {"slug": slug, "name": "Ins", "razorpay_account": "primary"}
+    if value == "owner":
+        value = make_user(f"s3-ins-owner-{tag}{DOMAIN}")
+    g, args = approved(mode, f"s3-ins-{tag}", "creator.create", "creator:new", params)
+    with refused_tx("hyperchat_app") as conn:  # the genuine grant, the extra column
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(f"INSERT INTO public.streamers (streamer_slug, streamer_name, razorpay_account, {column}) "
+                     "VALUES (%s, 'Ins', 'primary', %s)", (slug, value))
+    assert grant_row(g["grant_id"]) == (False, None)  # rolled back: the grant is not spent
+    with refused_tx("hyperchat_app") as conn:  # without any grant either, in every enforcement state
+        conn.execute(f"INSERT INTO public.streamers (streamer_slug, streamer_name, razorpay_account, {column}) "
+                     "VALUES (%s, 'Ins', 'primary', %s)", (slug, value))
+    with db() as conn, conn.transaction():  # the exact write the API makes still commits with that grant
+        assert conn.execute(CONSUME, args).fetchone()[0] == "ok"
+        conn.execute(NEW_CREATOR, (slug, "Ins"))
+    assert grant_row(g["grant_id"]) == (True, "streamers.insert")
+    with fixture_db() as conn:  # the operator and the legacy import (non-API login roles) are unaffected
+        assert conn.execute(f"INSERT INTO public.streamers (streamer_slug, streamer_name, {column}) "
+                            "VALUES (%s, 'Op', %s) RETURNING 1", (slug + "-op", value)).fetchone() == (1,)
+
+
 @pytest.mark.parametrize("wrong", ["action", "target", "params", "admin", "session"])
 def test_a_grant_bound_to_anything_else_authorizes_nothing(active, wrong):
     sid = make_streamer("authtest-s3-wrong-" + wrong)
@@ -594,7 +621,8 @@ def test_no_api_role_can_call_the_guards_and_every_guard_pins_its_search_path():
                                     'stepup_guard_effects', 'stepup_guard_assurance', 'stepup_guard_events',
                                     'stepup_guard_enforcement')
         """).fetchall()
-        assert len(rows) == 12  # 0027's ten, and 0037's stepup_guard_soundboard and stepup_guard_reopen (SEC-A)
+        assert len(rows) == 13  # 0027's ten, 0037's stepup_guard_soundboard and stepup_guard_reopen (SEC-A), and
+        #                         0044's stepup_guard_streamer_insert_columns (audit run-4)
         for fn, definer, config, owner in rows:
             assert owner == "hyperchat_owner" and any(c.startswith("search_path=pg_catalog, public") for c in config), fn
             for role in (*API_ROLES, "hyperchat_readonly", "public"):
@@ -603,4 +631,4 @@ def test_no_api_role_can_call_the_guards_and_every_guard_pins_its_search_path():
         assert conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'aac_stepup_guard_%' "
                             "AND tgenabled = 'O'").fetchone()[0] == 6
         assert conn.execute("SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'aad_stepup_guard_%' "
-                            "AND tgenabled = 'O'").fetchone()[0] == 2  # 0037 (SEC-A)
+                            "AND tgenabled = 'O'").fetchone()[0] == 3  # 0037 (SEC-A) and 0044 (audit run-4)

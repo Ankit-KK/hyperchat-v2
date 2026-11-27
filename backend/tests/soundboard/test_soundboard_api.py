@@ -15,6 +15,7 @@ from tests.integration import (
     accept_soundboard_terms,
     csrf_headers,
     db,
+    fixture_db,
     make_streamer,
     make_user,
     new_browser,
@@ -286,7 +287,7 @@ def test_patch_validation_and_atomicity(sb, change, status):
     platform(3)
     _, h = creator(sb, "authtest-sb-val")
     other_slug = "authtest-sb-val-other"
-    with db() as conn:
+    with fixture_db() as conn:  # setup as the operator: no API role may insert an eligible creator (0044)
         conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, soundboard_enabled) "
                      "VALUES (%s, 'Other', true)", (other_slug,))
     other = custom_row(other_slug)
