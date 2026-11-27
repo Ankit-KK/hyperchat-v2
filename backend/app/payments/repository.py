@@ -31,7 +31,8 @@ LEGACY_PROVENANCE = "d.legacy_source_table IS NOT NULL AND d.payment_account IS 
 
 _DONATION = """d.id::text AS id, d.order_id, d.provider_order_id, d.amount, d.currency::text AS currency,
     d.payment_status, d.status_token_hash, d.provider_payment_id,
-    COALESCE(d.payment_account, s.razorpay_account) AS account, s.streamer_slug"""
+    COALESCE(d.payment_account, s.razorpay_account) AS account, s.streamer_slug,
+    d.legacy_source_table IS NOT NULL AS imported"""
 
 HEALTH_MESSAGES = {  # streamer_payment_health.error_message: never a secret or a variable value
     "ok": None,

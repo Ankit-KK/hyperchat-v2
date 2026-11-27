@@ -319,6 +319,12 @@ class PaymentService:
         row = await self.repo.by_provider_order(event.provider_order_id)
         if row is None:
             return await self._record(event, "unknown_order")
+        if row.get("imported"):
+            # NV3-1: an imported legacy order is history, never completed or failed by a webhook (no creator / KYC
+            # check, no PAY-15 reversal path for it): recorded as an order V2 does not know, nothing applied
+            security_event("webhook_rejected", reason="imported_order", order_id=row["order_id"],
+                           account=signed_by[0])
+            return await self._record(event, "unknown_order", row["id"])
         if row["account"] not in signed_by:  # signed only by another account's secret: never trusted here
             security_event("webhook_rejected", reason="account_mismatch", order_id=row["order_id"],
                            account=signed_by[0])

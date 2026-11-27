@@ -207,10 +207,11 @@ class Loader:
         admins = {r[0].lower() for r in self.fetch("SELECT email FROM public.admin_emails")}
         users = self.fetch("SELECT id, email, username, role, is_active, failed_login_attempts, locked_until, "
                            "supabase_user_id, created_at, updated_at, streamer_id FROM public.auth_users")
-        rows, roles = [], Counter()
+        rows, roles, demoted = [], Counter(), 0
         for (uid, email, username, role, active, failed, locked, supa, created, updated, _sid) in users:
             r = user_role(role, email, admins)
             roles[r] += 1
+            demoted += role == "admin" and r != "admin"  # NV3-2: admin only from admin_emails
             rows.append((uid, email, None, username, r, None, active, failed, locked, supa, None, None, None,
                          created, updated))
         self.copy("users", ("id", "email", "password_hash", "username", "role", "streamer_id", "is_active",
@@ -222,6 +223,7 @@ class Loader:
         self.stats["users"]["roles"] = dict(roles)
         self.stats["users"]["admin_emails_without_account"] = unmatched_admins
         self.stats["users"]["passwords_loaded"] = 0
+        self.stats["users"]["legacy_admin_role_demoted"] = demoted
 
         tgt_cols = self.columns(self.tgt, "streamers")
         account = sql.SQL("CASE {} END").format(sql.SQL(" ").join(
@@ -269,6 +271,7 @@ class Loader:
         slugs = {r[0]: r[1] for r in self.fetch("SELECT streamer_slug, id::text FROM public.streamers")}
         split = Counter()
         cleared = Counter()
+        unpaid = Counter()  # NV3-1: legacy payment_status of the rows loaded as uncompletable 'failed'
         drop = [DONATION_COLUMNS.index(c) for c in DONATION_CLEARED_COLUMNS]
         rows: list[tuple] = []
         for table in tables:
@@ -295,6 +298,12 @@ class Loader:
                 row = [did, sid, order_id, "razorpay", rzp, name, amount, normalize_currency(cur), amount_inr,
                        msg, visible, pay, mod, appr_at, mod_id, label, hyper, voice, hs, media, mtype, tts,
                        sched, played, notified, st_hash, ut_hash, table, created, updated]
+                if pay != "success":
+                    # NV3-1: an unpaid legacy order can never be completed in V2 (a late capture would bypass the
+                    # creator / KYC rule and PAY-15): terminal 'failed', no provider order id, no order_lookup row
+                    unpaid[pay] += 1
+                    row[DONATION_COLUMNS.index("payment_status")] = "failed"
+                    row[DONATION_COLUMNS.index("provider_order_id")] = None
                 for i in drop:  # fresh start: legacy media and donor links are never loaded
                     if row[i] is not None:
                         cleared[DONATION_COLUMNS[i]] += 1
@@ -304,15 +313,18 @@ class Loader:
         self.stats["donations"]["source_tables"] = len(tables)
         self.stats["donations"]["approved_by_split"] = dict(split)
         self.stats["donations"]["cleared_non_null"] = dict(cleared)
+        self.stats["donations"]["unpaid_loaded_failed"] = dict(unpaid)
         self.donation_ids = {r[0] for r in rows}
+        self.paid_ids = {r[0] for r in rows if r[DONATION_COLUMNS.index("payment_status")] == "success"}
 
     def load_donation_references(self) -> None:
         now = datetime.now(UTC)
         ol = self.fetch("SELECT id, razorpay_order_id, order_id, donation_id, created_at FROM public.order_lookup")
-        keep = [r for r in ol if r[3] in self.donation_ids]
+        known = [r for r in ol if r[3] in self.donation_ids]
+        keep = [r for r in known if r[3] in self.paid_ids]  # NV3-1: no lookup for an unpaid legacy order
         self.note("order_lookup", len(ol), self.copy("order_lookup", ("id", "razorpay_order_id", "order_id",
                                                                       "donation_id", "created_at"), keep),
-                  orphan_donation=len(ol) - len(keep))
+                  orphan_donation=len(ol) - len(known), unpaid_legacy_order=len(known) - len(keep))
 
         ma = self.fetch("SELECT id, streamer_id, moderator_id, moderator_telegram_id, moderator_name, donation_id, "
                         "action_type, action_source, previous_status, new_status, notes, created_at "

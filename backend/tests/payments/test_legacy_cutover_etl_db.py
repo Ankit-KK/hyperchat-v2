@@ -10,6 +10,7 @@ V2-only columns (etl.mapping.V2_ONLY_COLUMNS), with types and defaults read from
 
 import hashlib
 import os
+import re
 import secrets
 import sys
 import uuid
@@ -45,8 +46,8 @@ def _u(n: int) -> str:
     return str(uuid.UUID(int=0xE7100000_0000_4000_8000_000000000000 + n))
 
 
-U_ADMIN, U_S1, U_S2, U_PLAIN = _u(1), _u(2), _u(3), _u(4)
-SUPA = {U_ADMIN: _u(101), U_S1: _u(102), U_S2: _u(103), U_PLAIN: _u(104)}
+U_ADMIN, U_S1, U_S2, U_PLAIN, U_ROGUE = _u(1), _u(2), _u(3), _u(4), _u(5)
+SUPA = {U_ADMIN: _u(101), U_S1: _u(102), U_S2: _u(103), U_PLAIN: _u(104), U_ROGUE: _u(105)}
 S_ALPHA, S_BETA, S_GAMMA, S_SAPPHIRE = _u(11), _u(12), _u(13), _u(14)
 MOD = _u(21)
 
@@ -164,7 +165,8 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
 
     # rows: users and creators
     for uid, email, role, sid in ((U_ADMIN, "admin" + D, "user", None), (U_S1, "s1" + D, "streamer", S_ALPHA),
-                                  (U_S2, "s2" + D, "streamer", S_BETA), (U_PLAIN, "plain" + D, "user", None)):
+                                  (U_S2, "s2" + D, "streamer", S_BETA), (U_PLAIN, "plain" + D, "user", None),
+                                  (U_ROGUE, "rogue" + D, "admin", None)):  # NV3-2: legacy role 'admin', not listed
         _insert(src, "auth_users", id=uid, email=email, username=email.split("@")[0], role=role, is_active=True,
                 failed_login_attempts=0, supabase_user_id=SUPA[uid], created_at=NOW, updated_at=NOW, streamer_id=sid)
     _insert(src, "admin_emails", email="ADMIN" + D)
@@ -232,6 +234,10 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
                     donator_name_lower=name.lower(), total_amount=total, donation_count=count)
     _insert(src, "order_lookup", razorpay_order_id="order_ETL0001", order_id="etl-order-1",
             donation_id=first["alpha"], streamer_slug="alpha")
+    # NV3-1 (real at scale: 2,970 such legacy rows): a pending (#6) and a failed (#5) order with an order id AND a lookup
+    for k in (5, 6):
+        _insert(src, "order_lookup", razorpay_order_id=f"order_ETL{k:04d}", order_id=f"etl-order-{k}",
+                donation_id=_u(1000 + k), streamer_slug="alpha")
     _insert(src, "moderation_actions", streamer_id=S_ALPHA, moderator_id=MOD, donation_id=first["alpha"],
             action_type="approve", action_source="telegram")
     for table in ("telegram_callback_mapping", "discord_callback_mapping"):
@@ -269,8 +275,19 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
                  "rows: user_signups  -- source=1 loaded=1", "rows: telegram_callback_mapping  -- source=2 loaded=1",
                  "rows: api_keys  -- source=1 loaded=0", "rows: partner_api_keys  -- source=1 loaded=0",
                  "loaded pending for no owner=1", "KYC at launch (enforcement active, no grace)",
+                 "rows: order_lookup  -- source=3 loaded=1 skipped={'unpaid_legacy_order': 2}",
+                 "admins=1 admin_emails accounts=1 demoted=1",
                  "kyc_required=2 "):
-        assert line in text, (line, text)
+        if line not in text:  # pytest.fail keeps the whole message (an assert repr is truncated)
+            pytest.fail(f"missing: {line}\nreport lines:\n" + "\n".join(
+                x for x in text.splitlines() if any(w in x for w in ("unpaid", "order_lookup", "admins="))))
+
+    # NV3-1: the unpaid-legacy-order check passed, with these counts (parsed, not string-matched)
+    unpaid = [x for x in text.splitlines() if "no unpaid legacy order can be completed" in x]
+    assert len(unpaid) == 1 and unpaid[0].startswith("[PASS] "), unpaid
+    counts = dict(re.findall(r"(non-terminal|with_order_id|lookups|loaded failed)=(\d+)", unpaid[0]))
+    assert counts == {"loaded failed": "3", "non-terminal": "0", "with_order_id": "0", "lookups": "0"}, unpaid
+    assert "source unpaid={'failed': 1, 'pending': 2}" in unpaid[0], unpaid
 
     with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as c:
         c.execute("SET ROLE hyperchat_owner")
@@ -291,6 +308,13 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
         assert c.execute("SELECT kyc_track, kyc_baseline_owner_id::text FROM public.streamers ORDER BY id"
                          ).fetchall() == [("legacy", U_S1), ("legacy", U_S2), ("legacy", None), ("legacy", None)]
         assert c.execute("SELECT role FROM public.users WHERE id = %s", (U_ADMIN,)).fetchone()[0] == "admin"
+        # NV3-2: a legacy role 'admin' outside admin_emails loads as a normal user
+        assert c.execute("SELECT role FROM public.users WHERE id = %s", (U_ROGUE,)).fetchone()[0] == "user"
+        # NV3-1: every unpaid legacy row is terminal 'failed' with no provider order id and no order_lookup row
+        assert c.execute("SELECT count(*), count(*) FILTER (WHERE payment_status = 'failed' AND provider_order_id "
+                         "IS NULL) FROM public.donations WHERE payment_status <> 'success'").fetchone() == (3, 3)
+        assert c.execute("SELECT count(*) FROM public.order_lookup o JOIN public.donations d ON d.id = o.donation_id "
+                         "WHERE d.payment_status <> 'success'").fetchone()[0] == 0
         # CRE-4 / CRE-7 while KYC enforcement is draft: the owned legacy creators keep accepting donations
         decisions = dict(c.execute("SELECT streamer_slug, public.creator_donation_block(id) FROM public.streamers"
                                    ).fetchall())
@@ -349,6 +373,29 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
         p.fingerprint = digest("synthetic source snapshot")
         assert imp.apply(conn, p, run_id=str(uuid.uuid4())) == 1
     _assert_verified(_verify(verify_db), "after the password import")
+
+    # NV3-3: Supabase-deleted (plain) and -banned (admin) accounts are deactivated by --deactivate as the migration
+    # role (an admin row and a runtime-role is_active change are both guarded for hyperchat_app); never re-activated.
+    flagged = [imp.Source(SUPA[U_PLAIN], digest("plain" + D), digest("plain" + D), None, True, True, False),
+               imp.Source(SUPA[U_ADMIN], digest("admin" + D), digest("admin" + D), None, True, False, True),
+               imp.Source(SUPA[U_S1], digest("s1" + D), digest("s1" + D), gotrue, True, False, False)]
+    with psycopg.connect(_dsn(verify_db, "hyperchat_migrator")) as conn:
+        conn.execute("SET ROLE hyperchat_owner")  # as main() does for --deactivate
+        conn.commit()
+        p = imp.plan(flagged, imp.read_targets(conn))
+        conn.rollback()
+        assert p.counts["deactivate_banned_or_deleted"] == 2
+        assert {x.target_id for x in p.deactivations} == {U_PLAIN, U_ADMIN}
+        p.fingerprint = digest("synthetic source snapshot")
+        assert imp.deactivate(conn, p) == 2
+        again = imp.plan(flagged, imp.read_targets(conn))
+        conn.rollback()
+        assert (again.counts["deactivate_banned_or_deleted"], again.counts["banned_or_deleted_already_inactive"]) \
+            == (0, 2)
+    with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as c:
+        c.execute("SET ROLE hyperchat_owner")
+        assert dict(c.execute("SELECT id::text, is_active FROM public.users WHERE id IN (%s, %s, %s)",
+                              (U_PLAIN, U_ADMIN, U_S1)).fetchall()) == {U_PLAIN: False, U_ADMIN: False, U_S1: True}
 
     # The live credit writer on migrated data: reject the partly credited newest 'Short' donation (credit 20 of 80)
     # as the runtime role; its exact credit leaves the donor total (120 -> 100), nothing floors, the verifier agrees.

@@ -89,9 +89,12 @@ def normalize_currency(value: str | None) -> str:
 
 
 def user_role(source_role: str | None, email: str, admin_emails: set[str]) -> str:
-    """admin_emails is folded into users.role (case-insensitive match)."""
+    """admin_emails is folded into users.role (case-insensitive match) and is the ONLY source of 'admin' (NV3-2): a
+    legacy auth_users.role 'admin' outside that list loads as a normal user."""
     if email.lower() in admin_emails:
         return "admin"
+    if source_role == "admin":
+        return "user"
     return source_role or "user"
 
 
