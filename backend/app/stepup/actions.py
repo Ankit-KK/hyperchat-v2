@@ -47,6 +47,7 @@ ROUTES = {
     ("POST", "/api/v1/admin/partner-keys"): "partner_key.create",
     ("PUT", "/api/v1/admin/creators/{streamer_id}/soundboard"): "creator.soundboard",
     ("POST", "/api/v1/admin/applications/{signup_id}/reopen"): "application.reopen",
+    ("POST", "/api/v1/admin/users/{user_id}/kyc/payout-hold/clear"): "kyc.payout_hold.clear",  # 0041
 }
 UNBOUND = {"mfa.credential.revoke": "passkeys are revoked by the operator only (S1); no API route revokes one yet"}
 

@@ -66,7 +66,8 @@ EVIDENCE_TABLES = ("payment_webhook_events", "payment_integrity_events", "donati
 # and operator configuration that may already be set (0022 kyc_provider_config; 0040 kyc_provider_accounts and the
 # audit rows that adding or configuring them writes): allowed in a fresh target.
 SEEDED_TABLES = ("alembic_version", "kyc_enforcement", "stepup_enforcement", "payment_accounting_state",
-                 "kyc_provider_config", "kyc_provider_accounts", "kyc_account_events")
+                 "kyc_provider_config", "kyc_provider_accounts", "kyc_account_events",
+                 "kyc_document_policy")  # 0041: the PAN policy row the migration seeds
 
 DONATION_COLUMNS = (
     "id", "streamer_id", "order_id", "payment_provider", "provider_order_id", "donor_name", "amount", "currency",

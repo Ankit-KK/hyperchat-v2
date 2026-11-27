@@ -1956,6 +1956,22 @@
         "title": "OwnerTransfer",
         "type": "object"
       },
+      "PayoutHoldClear": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "PayoutHoldClear",
+        "type": "object"
+      },
       "PlatformMetrics": {
         "additionalProperties": false,
         "properties": {
@@ -5735,6 +5751,57 @@
         ]
       }
     },
+    "/api/v1/admin/users/{user_id}/kyc/payout-hold/clear": {
+      "post": {
+        "description": "Lift the user's open payout hold (owner decision 2026-11-27, option C: admins resolve non-PAN holds until\nself-service PAN re-verification arrives with payouts, DASH-9). A reason is required; step-up action\nkyc.payout_hold.clear on user:<id> with {hold_id}; the database records who, when and why (migration 0041).",
+        "operationId": "admin_clear_payout_hold_api_v1_admin_users__user_id__kyc_payout_hold_clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PayoutHoldClear"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Clear Payout Hold",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/users/{user_id}/kyc/refresh": {
       "post": {
         "operationId": "admin_refresh_kyc_api_v1_admin_users__user_id__kyc_refresh_post",
@@ -8102,6 +8169,26 @@
           }
         },
         "summary": "My Kyc",
+        "tags": [
+          "kyc"
+        ]
+      }
+    },
+    "/api/v1/me/kyc/pan-acknowledgement": {
+      "post": {
+        "description": "The creator confirms the PAN-only notice before KYC (migration 0041): required for a start within 60 minutes.",
+        "operationId": "acknowledge_pan_api_v1_me_kyc_pan_acknowledgement_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Acknowledge Pan",
         "tags": [
           "kyc"
         ]

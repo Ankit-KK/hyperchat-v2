@@ -251,6 +251,8 @@ def cleanup_synthetic_rows() -> None:
             synthetic = "(SELECT id FROM public.users WHERE email::text LIKE %s)"
             owner.execute(f"DELETE FROM public.kyc_events WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
             owner.execute(f"DELETE FROM public.kyc_sessions WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
+            for table in ("kyc_payout_holds", "kyc_pan_acknowledgements"):  # 0041: RESTRICT on the user
+                owner.execute(f"DELETE FROM public.{table} WHERE user_id IN {synthetic}", ("%" + DOMAIN,))
             owner.execute("DELETE FROM public.kyc_webhook_events WHERE event_id LIKE %s", (SLUG_PREFIX + "%",))
         with fixture_db() as owner:  # synthetic admins are not deletable by the runtime role (migration 0024)
             owner.execute("DELETE FROM public.stepup_rate_limits WHERE key IN (SELECT 'user:' || id FROM public.users "

@@ -662,6 +662,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/users/{user_id}/kyc/payout-hold/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Clear Payout Hold
+         * @description Lift the user's open payout hold (owner decision 2026-11-27, option C: admins resolve non-PAN holds until
+         *     self-service PAN re-verification arrives with payouts, DASH-9). A reason is required; step-up action
+         *     kyc.payout_hold.clear on user:<id> with {hold_id}; the database records who, when and why (migration 0041).
+         */
+        post: operations["admin_clear_payout_hold_api_v1_admin_users__user_id__kyc_payout_hold_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/users/{user_id}/kyc/refresh": {
         parameters: {
             query?: never;
@@ -1431,6 +1453,26 @@ export interface paths {
         get: operations["my_kyc_api_v1_me_kyc_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/kyc/pan-acknowledgement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Acknowledge Pan
+         * @description The creator confirms the PAN-only notice before KYC (migration 0041): required for a start within 60 minutes.
+         */
+        post: operations["acknowledge_pan_api_v1_me_kyc_pan_acknowledgement_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2779,6 +2821,11 @@ export interface components {
             expected_owner_id: string;
             /** User Id */
             user_id: string;
+        };
+        /** PayoutHoldClear */
+        PayoutHoldClear: {
+            /** Reason */
+            reason: string;
         };
         /** PlatformMetrics */
         PlatformMetrics: {
@@ -4527,6 +4574,41 @@ export interface operations {
             };
         };
     };
+    admin_clear_payout_hold_api_v1_admin_users__user_id__kyc_payout_hold_clear_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PayoutHoldClear"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     admin_refresh_kyc_api_v1_admin_users__user_id__kyc_refresh_post: {
         parameters: {
             query?: never;
@@ -6137,6 +6219,26 @@ export interface operations {
         };
     };
     my_kyc_api_v1_me_kyc_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    acknowledge_pan_api_v1_me_kyc_pan_acknowledgement_post: {
         parameters: {
             query?: never;
             header?: never;

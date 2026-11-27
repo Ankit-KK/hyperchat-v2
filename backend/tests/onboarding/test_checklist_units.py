@@ -44,7 +44,7 @@ def test_a_fresh_approval_is_missing_everything_a_person_has_not_done_yet():
         "invitation_accepted": ("missing", "no_invitation", True),
         "ownership_confirmed": ("missing", "no_owner", True),
         "kyc_approved": ("missing", "no_owner", True),
-        "pan_policy": ("policy_pending", "pan_evidence_not_recorded", True),
+        "pan_policy": ("missing", "kyc_not_approved", False),  # 0041: informs, never blocks
         "profile_picture": ("missing", None, True),
         "background": ("missing", None, True),
         "no_restriction": ("ok", None, False),
@@ -53,10 +53,16 @@ def test_a_fresh_approval_is_missing_everything_a_person_has_not_done_yet():
     assert entry["qualifies_for_auto_activation"] is True and entry["ready_for_activation"] is False
 
 
-def test_pan_alone_keeps_a_complete_creator_from_being_ready():
-    entry = evaluate(done(), ACCOUNTS)
-    assert [c for c, (_, _, blocking) in rows(entry).items() if blocking] == ["pan_policy"]
-    assert entry["ready_for_activation"] is False  # never true before Stage 3 (migration 0038)
+@pytest.mark.parametrize(("pan_status", "held", "row"), [
+    ("pan_verified", False, ("ok", None, False)),
+    ("non_pan", True, ("payout_hold", "non_pan_kyc", False)),  # owner 2026-11-27: activated, payouts held
+    ("non_pan", False, ("missing", "pan_evidence_not_recorded", False)),  # approved before 0041, no hold yet
+    ("not_approved", False, ("missing", "kyc_not_approved", False)), (None, False, ("missing", "kyc_not_approved", False))])
+def test_pan_never_blocks_activation_it_only_reports_the_payout_hold(pan_status, held, row):
+    entry = evaluate(done(pan_status=pan_status, payout_held=held), ACCOUNTS)
+    assert rows(entry)["pan_policy"] == row
+    assert not [c for c, (_, _, blocking) in rows(entry).items() if blocking]
+    assert entry["ready_for_activation"] is True
 
 
 @pytest.mark.parametrize(("change", "condition", "expected"), [
@@ -107,7 +113,8 @@ def test_only_the_pointer_of_a_ready_upload_row_is_valid(value, ready, expected)
 
 def test_blocked_by_matches_only_a_blocking_row():
     entry = evaluate(done(), ACCOUNTS)
-    assert checklist.blocked_by(entry, "pan_policy") and not checklist.blocked_by(entry, "kyc_approved")
+    assert not checklist.blocked_by(entry, "pan_policy") and not checklist.blocked_by(entry, "kyc_approved")
+    assert checklist.blocked_by(evaluate(done(kyc_approved=False), ACCOUNTS), "kyc_approved")
 
 
 def test_the_facts_query_only_reads():

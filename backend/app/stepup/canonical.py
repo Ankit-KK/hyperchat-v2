@@ -49,6 +49,8 @@ ACTIONS = {
     # SEC-A (migration 0037 adds them to the action CHECK and anchors their writes)
     "creator.soundboard": "action",
     "application.reopen": "action",
+    # migration 0041: an administrator lifts a payout hold (owner decision 2026-11-27, option C)
+    "kyc.payout_hold.clear": "action",
 }
 _KEY = re.compile(r"^[a-z0-9_]{1,32}$")
 _TARGET = re.compile(r"^[A-Za-z0-9._:@+\-]{1,200}$")

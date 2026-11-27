@@ -62,10 +62,12 @@ HYPERCHAT_MIGRATION_DSN=... python -m etl.kyc_provider_config --environment sand
 ## API
 | Endpoint | Who | What |
 |---|---|---|
-| `GET /api/v1/me/kyc` | signed-in user | `{approved, state, provider_status, updated_at, owns_creator, available, can_start}`. `state` is one of `none`, `in_progress`, `in_review`, `approved`, `declined`, `expired`, `not_completed`, `reverification_required` (the newest session is `Approved` but the approval rule doesn't accept it). `approved` is always `public.user_kyc_approved`. |
+| `GET /api/v1/me/kyc` | signed-in user | `{approved, state, provider_status, updated_at, owns_creator, available, can_start, pan_status, payout_hold {held, reason, since}, pan_acknowledgement {text, text_version, current}}` (the last three since 0041). `state` is one of `none`, `in_progress`, `in_review`, `approved`, `declined`, `expired`, `not_completed`, `reverification_required` (the newest session is `Approved` but the approval rule doesn't accept it). `approved` is always `public.user_kyc_approved`. |
 | `POST /api/v1/me/kyc/session` | the **owner** of at least one creator, including legacy ones (Origin + CSRF; 5 per hour) | Starts or resumes the session and returns `{session_id, status, url}`. `url` must be an https `*.didit.me` link. A linked moderator or a user without a creator gets 403; an already-verified user or one in review gets 409; a provider problem gets 503. |
+| `POST /api/v1/me/kyc/pan-acknowledgement` | the **owner** of a creator (Origin + CSRF; 20 per hour) | Records the PAN-only notice (migration 0041): `{acknowledged_at, text_version, text, valid_minutes}`. A start needs one from the last 60 minutes, else 409 `pan_acknowledgement_required` |
 | `POST /api/v1/webhooks/didit` | Didit | See "Webhooks" below |
 | `GET /api/v1/admin/users/{id}/kyc` | admin | Sessions (status, workflow, environment, dates, check statuses) and the audit; no identity data |
+| `POST /api/v1/admin/users/{id}/kyc/payout-hold/clear` | admin (CSRF; step-up `kyc.payout_hold.clear`) | Lifts the user's open payout hold with a required `reason` (migration 0041); answers the admin view; 409 when none is open |
 | `POST /api/v1/admin/users/{id}/kyc/refresh` | admin (CSRF; 30 per hour) | Reconciles the newest session with Didit's decision endpoint (two attempts at most, no polling). Answers the admin view plus `refresh`: `applied`, `unchanged`, `stale`, or `approval_needs_webhook`. **It never approves** (the response isn't signed). |
 
 **There is no endpoint that marks a user approved.**
@@ -112,11 +114,79 @@ These checks run in order; any failure stops processing.
 
 **Answers:** 200 for anything stored (Didit doesn't retry), 401 or 403 for authentication failures (not retried), and 5xx only for real server faults (retried).
 
+## PAN evidence and the payout hold (migration 0041)
+
+Owner decisions 2026-11-27. These replace the earlier "PAN-only applies to automatic activation only" reading of
+Q6.
+
+**Before KYC**
+- The creator ticks this notice: "Only use PAN card for verification, otherwise your payout can be put on hold if
+  found using different ID".
+- `POST /api/v1/me/kyc/pan-acknowledgement` (owner only, Origin + CSRF, 20 per hour) records it in
+  `kyc_pan_acknowledgements`: who, when, the text version and the text's SHA-256.
+- `POST /api/v1/me/kyc/session` answers **409** `pan_acknowledgement_required` without an acknowledgement from the
+  last 60 minutes. The start binds the acknowledgement to its session in the same transaction as the session
+  write. A resume keeps its earlier binding; a NEW Didit session needs a fresh acknowledgement.
+- The acknowledgement is evidence if a payout is held. The API's role inserts and binds it once; nothing deletes it.
+
+**Evidence**
+- The signed decision's `id_verifications[]` items keep five labels in `check_statuses.id_documents`: `status`,
+  `document_type`, `document_subtype`, `issuing_state` and `verification_method`, each at most 64 characters.
+- Never the document number, name, birth date or images.
+- The evidence travels with the status: applied from signed webhooks only, early webhooks included, ordered by
+  provider time.
+- An admin refresh (unsigned) keeps the recorded documents and drops any it is sent.
+- `liveness_checks` may be absent; the owner's workflows have none.
+
+**The PAN rule** (`kyc_documents_pan`, fail closed). A session is PAN-verified only when every one of these holds:
+- it has at least one document;
+- **every** document is `Approved`;
+- every document was read by `verification_method = 'document'`;
+- every document matches a `kyc_document_policy` row: equal `issuing_state`, plus each non-NULL `document_type` /
+  `document_subtype` of the row.
+
+Any missing field means not PAN. The seed is one row: `IND` + `TAX_CARD_STANDARD`, India's tax card (the PAN card)
+in Didit's `document_subtype`. `document_type` is a human label ("Tax Card"), so the seed does not use it.
+
+**`kyc_pan_status(user, environment)`** answers from the current approval (`kyc_effective`): `pan_verified`,
+`non_pan` or `not_approved`.
+
+**The payout hold** (`kyc_payout_holds`, database-owned)
+- **Activation is not blocked.** A non-PAN approval still activates a creator; their payouts are held until they
+  re-verify with PAN.
+- **Opened** (reason `non_pan_kyc`, naming the approving session) when the user's current approval is not PAN.
+- **Cleared** (`pan_verified`, naming the clearing session) when a PAN-verified approval becomes current.
+- **Never cleared by losing the approval.** Only a PAN-verified approval clears it.
+- **When it is re-evaluated.** Triggers re-evaluate it on every session status, evidence or veto change, and on every
+  policy or account change (a revocation or epoch can change the current approval with no session write).
+- **Who can write it.** No runtime role. The API only reads it (`kyc_payout_hold(user)` → reason and since).
+- **Where it shows.** `GET /api/v1/me/kyc` adds `pan_status`, `payout_hold {held, reason, since}` and
+  `pan_acknowledgement {text, text_version, current}`. The admin view adds the first two. The onboarding checklist's
+  `pan_policy` row reports it and never blocks.
+- **Payouts are not built yet** (DASH-9). The hold is the contract the payout feature must honour.
+- **Existing approvals.** Holds start with signed decisions after 0041. The operator runs `SELECT
+  public.kyc_sync_payout_holds();` to open holds for approvals recorded before 0041. Those approvals carry no
+  document evidence, so they would all be held: an owner decision.
+
+**Lifting a hold: an administrator, for now** (owner decision 2026-11-27, option C: "Admin resolves for now").
+- **The route.** `POST /api/v1/admin/users/{id}/kyc/payout-hold/clear` with `{reason}` (1-500 characters).
+- **Step-up.** It is the action `kyc.payout_hold.clear` on `user:<id>` with `{hold_id}`. 0041 adds it to the action CHECK, and the database claims the grant at its own write. In `draft` the usual no-grant path applies.
+- **The database decides.** `kyc_clear_payout_hold` checks an active administrator and a reason, and records who, when and why on the hold row (`cleared_reason 'admin'`, `cleared_by`, `clear_note`). No API role can clear a hold on its own.
+- **It stays cleared.** A hold an administrator cleared is not re-opened for the same approving session. A later non-PAN approval opens a new one.
+- **Answers.** 409 when there is no open hold.
+- **The UI.** The admin dashboard screen comes later (frontend Phase 3).
+
+**Self-service PAN re-verification comes with the payout feature (DASH-9).** Until then an approved user still gets 409 on a new start, and the KYC start rule and `kyc_effective` are unchanged.
+
+**To confirm in the Didit console / sandbox (D2, D7).** The PAN card's `document_subtype` value
+(`TAX_CARD_STANDARD` from the workflow configuration) and that the key is present on every Approved webhook. Until
+it is, every approval is non-PAN, i.e. activated with payouts held. Adjust `kyc_document_policy` as the operator if
+the sandbox shows otherwise.
+
 ## Didit accounts (migration 0040)
 
 The database can hold several Didit accounts (owner requirement 2026-11-27: spread cost and free quota, and
-failover). Enabling more than one account **for quota purposes waits for the owner's confirmation with Didit** that
-their terms allow it.
+failover). Using several accounts for quota is the owner's decision of 2026-11-27 ("will use several accounts, its our decision").
 
 **Which accounts exist**
 - **Primary.** `public.kyc_provider_config`'s one row stays the account `primary` and the database's environment. Its
@@ -199,7 +269,7 @@ the primary's enable, cap and revoke changes, pin moves and revocations, each wi
 - **After a finished session:** once a session ends in `Declined`, `Expired`, `Abandoned` or `Kyc Expired`, the owner can start again, and Didit issues a new session. `Resubmitted` continues the same session.
 
 ## Privacy and storage
-- **Stored:** session ids, workflow, environment, Didit status and time, and the **statuses** of the identity checks: `id_verifications`, `liveness_checks`, `face_matches`, `aml_screenings`.
+- **Stored:** session ids, workflow, environment, Didit status and time, the **statuses** of the identity checks (`id_verifications`, `liveness_checks`, `face_matches`, `aml_screenings`) and, since 0041, each document's type and subtype labels, issuing country and verification method (no number, name or image); the PAN acknowledgements and payout holds.
 - **Never stored or logged:** documents, selfies, biometrics, names, document numbers, birth dates, addresses, media URLs, the decision or the webhook body.
 - **Retention:**
   - webhook receipts: deleted after 90 days by the daily cleanup;

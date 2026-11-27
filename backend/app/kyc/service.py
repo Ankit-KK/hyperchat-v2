@@ -19,9 +19,15 @@ Several Didit accounts (migration 0040, docs/kyc.md "Didit accounts"): the datab
 and its workflow; this process holds only the accounts' API keys (HYPERCHAT_DIDIT_API_KEY for 'primary',
 HYPERCHAT_DIDIT_EXTRA_API_KEYS for the others). A refused assignment or a missing key answers 503 and raises an
 operator alert (kind kyc_account_unavailable).
+
+PAN (migration 0041, docs/kyc.md "PAN evidence"): before a session starts the owner acknowledges PAN_ACK_TEXT
+(POST /api/v1/me/kyc/pan-acknowledgement); a start needs an acknowledgement from the last 60 minutes, which is bound
+to the session in the same transaction as the session write. The database derives pan_status from the signed
+decision's documents and keeps the payout hold for a non-PAN approval; this process only reads both.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 
@@ -33,10 +39,19 @@ from app.core.config import Settings
 from app.core.errors import ApiError
 from app.kyc.didit import CreatedSession, DiditClient, DiditError, as_uuid, canonical, check_statuses
 from app.security.audit import security_event
+from app.stepup.grants import consume
 
 log = logging.getLogger("hyperchat.kyc")
 RATE_START = ("kyc:session", 5, 3600)       # per user
 RATE_REFRESH = ("kyc:refresh", 30, 3600)    # per admin
+RATE_ACK = ("kyc:pan-ack", 20, 3600)        # per user
+# The owner's wording (2026-11-27), shown before the Didit redirect; the stored hash proves which text was accepted.
+PAN_ACK_TEXT = ("Only use PAN card for verification, otherwise your payout can be put on hold if found using "
+                "different ID")
+PAN_ACK_VERSION = "pan-only-2026-11-27"
+PAN_ACK_SHA256 = hashlib.sha256(PAN_ACK_TEXT.encode("utf-8")).hexdigest()
+PAN_ACK_MINUTES = 60
+ACK_REQUIRED = "Please confirm that you will verify with your PAN card first."
 STATE = {"Not Started": "in_progress", "In Progress": "in_progress", "Resubmitted": "in_progress",
          "Awaiting User": "in_progress", "In Review": "in_review", "Declined": "declined", "Kyc Expired": "expired",
          "Expired": "not_completed", "Abandoned": "not_completed", "Approved": "approved"}
@@ -73,6 +88,10 @@ def summary(sessions: list[dict], environment: str | None, effective: tuple[bool
     return {"approved": approved, "state": state,
             "provider_status": latest["provider_status"] if latest else None,
             "updated_at": _iso(latest["updated_at"]) if latest else None}
+
+
+class _Rollback(Exception):
+    """Leaves a transaction with a refusal code (the grant consumed in it is rolled back too)."""
 
 
 class KycRepository:
@@ -118,16 +137,69 @@ class KycRepository:
     async def record_session(self, user_id: str, created: CreatedSession, workflow_id: str, environment: str,
                              account: str = "primary") -> dict:
         """Store a session Didit returned (idempotent) and apply the signed webhooks that arrived before it."""
-        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT public.kyc_create_session(%s, %s, %s, %s, %s, %s) AS r",
                               (user_id, created.session_id, workflow_id, created.workflow_version, environment,
                                account))
             result = (await cur.fetchone())["r"]
             if result != "ok":
                 raise DiditError(f"session_{result}")  # never handed out: not this user's, or not this configuration
+            # 0041: the PAN acknowledgement this session was started under (a resume keeps its earlier binding)
+            await cur.execute(
+                "UPDATE public.kyc_pan_acknowledgements SET session_id = %(s)s, bound_at = now() WHERE id = ("
+                "SELECT id FROM public.kyc_pan_acknowledgements WHERE user_id = %(u)s AND session_id IS NULL "
+                f"AND acknowledged_at > now() - interval '{PAN_ACK_MINUTES} minutes' ORDER BY acknowledged_at DESC "
+                "LIMIT 1) AND session_id IS NULL AND NOT EXISTS (SELECT 1 FROM public.kyc_pan_acknowledgements "
+                "WHERE user_id = %(u)s AND session_id = %(s)s)", {"s": created.session_id, "u": user_id})
+            # (session_id IS NULL on the row itself: a concurrent start that bound it first makes this one skip it)
+            await cur.execute("SELECT EXISTS (SELECT 1 FROM public.kyc_pan_acknowledgements WHERE user_id = %s "
+                              "AND session_id = %s) AS ok", (user_id, created.session_id))
+            if not (await cur.fetchone())["ok"]:
+                raise DiditError("pan_acknowledgement_missing")  # rolls the session write back
             await cur.execute(f"SELECT {_SESSION_COLS} FROM public.kyc_sessions WHERE session_id = %s",
                               (created.session_id,))
             return await cur.fetchone()
+
+    async def record_pan_ack(self, user_id: str) -> dict:
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("INSERT INTO public.kyc_pan_acknowledgements (user_id, text_version, text_sha256) "
+                              "VALUES (%s, %s, %s) RETURNING id::text, acknowledged_at",
+                              (user_id, PAN_ACK_VERSION, PAN_ACK_SHA256))
+            return await cur.fetchone()
+
+    async def has_recent_pan_ack(self, user_id: str) -> bool:
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT EXISTS (SELECT 1 FROM public.kyc_pan_acknowledgements WHERE user_id = %s "
+                              f"AND acknowledged_at > now() - interval '{PAN_ACK_MINUTES} minutes')", (user_id,))
+            return (await cur.fetchone())[0]
+
+    async def pan(self, user_id: str, environment: str) -> dict:
+        """The database's PAN view (migration 0041): pan_status and the open payout hold."""
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT public.kyc_pan_status(%s, %s) AS pan_status", (user_id, environment))
+            status = (await cur.fetchone())["pan_status"]
+            await cur.execute("SELECT reason, since FROM public.kyc_payout_hold(%s)", (user_id,))
+            hold = await cur.fetchone()
+        return {"pan_status": status,
+                "payout_hold": {"held": hold is not None, "reason": hold["reason"] if hold else None,
+                                "since": _iso(hold["since"]) if hold else None}}
+
+    async def open_hold(self, user_id: str) -> str | None:
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT id::text FROM public.kyc_payout_holds WHERE user_id = %s AND cleared_at IS NULL",
+                              (user_id,))
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    async def clear_hold(self, hold_id: str, actor_id: str, reason: str, grant) -> str:
+        """public.kyc_clear_payout_hold in one transaction with the step-up grant's consumption (SEC-A style)."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+            await consume(cur, grant)
+            await cur.execute("SELECT public.kyc_clear_payout_hold(%s, %s, %s)", (hold_id, actor_id, reason))
+            result = (await cur.fetchone())[0]
+            if result != "cleared":
+                raise _Rollback(result)  # a refused clearance never spends the grant
+            return result
 
     async def receive_webhook(self, canonical_body: str, signature: str | None, x_timestamp: str | None) -> str:
         async with self._conn() as conn, conn.cursor() as cur:
@@ -191,11 +263,30 @@ class KycService:
     async def _effective(self, user_id: str) -> tuple[bool, str | None]:
         return await self.repo.effective(user_id, self.environment) if self.environment else (False, None)
 
+    async def _pan(self, user_id: str) -> dict:
+        if not self.environment:
+            return {"pan_status": "not_approved", "payout_hold": {"held": False, "reason": None, "since": None}}
+        return await self.repo.pan(user_id, self.environment)
+
     async def status(self, user: User) -> dict:
         owns = await self.repo.owns_creator(user.id)
         state = await self._summary(user.id)
         return {**state, "owns_creator": owns, "available": self.client is not None,
-                "can_start": owns and self.client is not None and state["state"] not in ("approved", "in_review")}
+                "can_start": owns and self.client is not None and state["state"] not in ("approved", "in_review"),
+                **await self._pan(user.id),
+                "pan_acknowledgement": {"text": PAN_ACK_TEXT, "text_version": PAN_ACK_VERSION,
+                                        "current": await self.repo.has_recent_pan_ack(user.id)}}
+
+    async def acknowledge_pan(self, user: User, ip: str | None) -> dict:
+        """The owner ticked the PAN-only notice before the Didit redirect (owner decision 2026-11-27). Kept as
+        evidence (who, when, which text, and later the session it was for); valid for a start within 60 minutes."""
+        if not await self.repo.owns_creator(user.id):
+            raise ApiError(403, "Only a creator's owner can verify their identity here", "not_creator_owner")
+        await self._limit(f"user:{user.id}", RATE_ACK)
+        row = await self.repo.record_pan_ack(user.id)
+        security_event("kyc_pan_acknowledged", level=20, user_id=user.id, client_ip=ip)
+        return {"acknowledged_at": _iso(row["acknowledged_at"]), "text_version": PAN_ACK_VERSION, "text": PAN_ACK_TEXT,
+                "valid_minutes": PAN_ACK_MINUTES}
 
     async def start(self, user: User, ip: str | None) -> dict:
         """Start (or resume: Didit returns the open session) the signed-in owner's verification. Answers only the
@@ -209,6 +300,8 @@ class KycService:
             raise ApiError(409, "Your identity is already verified", "kyc_already_approved")
         if state["state"] == "in_review":
             raise ApiError(409, "Your verification is being reviewed", "kyc_in_review")
+        if not await self.repo.has_recent_pan_ack(user.id):  # 0041: the PAN notice comes first
+            raise ApiError(409, ACK_REQUIRED, "pan_acknowledgement_required")
         callback = f"{self.settings.dashboard_link_url}/kyc/return"  # never from the request
         account, workflow, client = await self._account(user.id, ip)
         try:
@@ -217,6 +310,8 @@ class KycService:
         except DiditError as exc:
             if exc.reason == "session_account_at_cap":  # Didit made a NEW session although only a resume fits the cap
                 raise await self._unavailable("account_at_cap", user.id, ip, account) from None
+            if exc.reason == "pan_acknowledgement_missing":  # a NEW session needs a fresh acknowledgement
+                raise ApiError(409, ACK_REQUIRED, "pan_acknowledgement_required") from None
             security_event("kyc_session_failed", reason=exc.reason, user_id=user.id, client_ip=ip)
             raise ApiError(503, UNAVAILABLE, "kyc_provider_unavailable") from None
         security_event("kyc_session_started", level=20, user_id=user.id, client_ip=ip)
@@ -271,10 +366,28 @@ class KycService:
     # ── admin ─────────────────────────────────────────────────────────────
     async def admin_view(self, user_id: str) -> dict:
         sessions = await self.repo.sessions(user_id)
-        return {**summary(sessions, self.environment, await self._effective(user_id)),
+        return {**summary(sessions, self.environment, await self._effective(user_id)), **await self._pan(user_id),
                 "sessions": [{**s, **{k: _iso(s[k]) for k in ("provider_updated_at", "approved_at", "created_at",
                                                               "updated_at")}} for s in sessions],
                 "events": [{**e, "created_at": _iso(e["created_at"])} for e in await self.repo.events(user_id)]}
+
+    async def admin_clear_payout_hold(self, admin: User, user_id: str, hold_id: str, reason: str | None,
+                                      ip: str | None, grant=None) -> dict:
+        """Owner decision 2026-11-27 (option C): an administrator resolves a payout hold, with a reason, under the
+        step-up action kyc.payout_hold.clear. The database checks the admin, records who, when and why, and claims
+        the grant at its own write (migration 0041)."""
+        reason = " ".join((reason or "").split())
+        if not reason or len(reason) > 500:
+            raise ApiError(400, "A reason (at most 500 characters) is required", "reason_required")
+        try:
+            await self.repo.clear_hold(hold_id, admin.id, reason, grant)
+        except _Rollback as refused:
+            code = str(refused)
+            raise ApiError(409 if code == "not_open" else 403 if code == "not_authorized" else 400,
+                           {"not_open": "This payout hold is not open", "not_authorized": "Admins only",
+                            "reason_required": "A reason is required"}.get(code, "Refused"), code) from None
+        security_event("kyc_payout_hold_cleared", level=20, user_id=admin.id, target_user_id=user_id, client_ip=ip)
+        return await self.admin_view(user_id)
 
     async def admin_refresh(self, admin: User, user_id: str, ip: str | None) -> dict:
         """Reconcile the user's newest session with Didit's decision endpoint (two attempts at most; no polling).
