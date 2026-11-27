@@ -243,6 +243,20 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
     check("users: admins are exactly the admin_emails accounts (legacy role 'admin' elsewhere demoted)",
           admins == listed and demoted == should_demote,
           f"admins={len(admins)} admin_emails accounts={len(listed)} demoted={demoted}; roles={roles}")
+    # NV4: users.streamer_id links by kind. An owner link (the creator's streamers.user_id names the account) or a
+    # linked non-owner account (owner decision 2026-11-25: linked accounts keep full power): reported, not a failure;
+    # every link must still name a loaded creator, and the copy must equal the source.
+    links = one(tgt, """
+        SELECT count(*) FILTER (WHERE s.user_id = u.id), count(*) FILTER (WHERE s.user_id IS DISTINCT FROM u.id),
+               count(*) FILTER (WHERE s.id IS NULL),
+               (SELECT count(*) FROM public.streamers x WHERE x.user_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM public.users y WHERE y.id = x.user_id AND y.streamer_id = x.id))
+        FROM public.users u LEFT JOIN public.streamers s ON s.id = u.streamer_id WHERE u.streamer_id IS NOT NULL""")
+    src_links = one(src, "SELECT count(*) FROM public.auth_users WHERE streamer_id IS NOT NULL")[0]
+    check("users: creator links (users.streamer_id) by kind (reported)",
+          links[2] == 0 and links[0] + links[1] == src_links,
+          f"owner={links[0]} linked_non_owner={links[1]} dangling={links[2]} source_links={src_links}; "
+          f"owners_without_their_link={links[3]}")
     kyc = dict(_all(tgt, "SELECT kyc_track || '/' || status || '/' || CASE WHEN user_id IS NULL THEN 'no_owner' "
                          "WHEN user_id = kyc_baseline_owner_id THEN 'baseline_owner' ELSE 'other' END, count(*) "
                          "FROM public.streamers GROUP BY 1"))

@@ -5,8 +5,9 @@ export file, nothing logged or printed), for accounts that match on BOTH auth.us
 the exact top-level email, whose source hash is a bcrypt hash the V2 verifier accepts and whose target hash is still
 empty. It never matches by email alone, never creates or deletes accounts, and changes no other column: roles,
 creator ownership, activation and email verification stay as they are (email_confirmed_at is only counted).
-The one other write is the separate --deactivate mode (NV3-3): it sets is_active = false, and never true, for V2
-accounts whose Supabase account (same legacy id) is deleted or currently banned, with the same controls.
+The one other write is the separate --deactivate mode: it sets is_active = false, and never true, with the same
+controls, for V2 accounts whose Supabase account (same legacy id) is deleted or currently banned (NV3-3), and for the
+accounts the approved D1 exclusion policy keeps on hold until their identity is resolved (NV4-3, HOLD_REASONS).
 
 Without --apply it only reads (READ ONLY transactions on both sides) and prints aggregate counts. --apply also needs a
 typed confirmation, refuses on any blocker (duplicate mappings, unsupported hash formats), re-checks every planned row
@@ -112,6 +113,10 @@ EXCLUSIONS = ("target_legacy_id_not_in_source", "target_email_used_by_other_sour
               "source_deleted", "source_banned", "target_admin_account", "target_already_has_password",
               "source_without_password", "unsupported_hash_format")
 BLOCKERS = ("duplicate_source_ids", "duplicate_target_legacy_ids", "unsupported_hash_format")
+# NV4-3: the exclusions whose account the D1 exclusion policy (2026-10-12) keeps ON HOLD until its identity is resolved
+# (reset / Google recovery only after that): V2 has no hold but is_active, so --deactivate turns them off. Recovery is
+# an admin re-activation after the resolution (D11 email correction / D13 ownership), never this tool.
+HOLD_REASONS = ("target_legacy_id_not_in_source", "target_email_used_by_other_source_id", "id_match_email_mismatch")
 
 
 @dataclass(frozen=True)
@@ -140,9 +145,13 @@ class Target:
 
 @dataclass(frozen=True)
 class Deactivation:
-    """NV3-3: an active V2 account whose Supabase account (same legacy id) is deleted or currently banned."""
+    """An active V2 account turned off by --deactivate (`why`): its Supabase account (same legacy id) is deleted or
+    currently banned (NV3-3, 'banned_or_deleted'), or it is excluded pending identity resolution (NV4-3, one of
+    HOLD_REASONS: the approved D1 exclusion policy keeps such an account on hold until resolved)."""
     target_id: str
     legacy_id: str
+    why: str = "banned_or_deleted"
+    email: str | None = None  # the target email digest at plan time: an email correction since then refuses
 
 
 @dataclass(frozen=True)
@@ -176,6 +185,7 @@ def plan(source: list[Source], target: list[Target]) -> Plan:
             ids_by_email.setdefault(s.email_norm, set()).add(s.id)
     c = Counter({k: 0 for k in ("eligible", "eligible_email_confirmed", *EXCLUSIONS)})
     updates = []
+    reasons: dict[str, str] = {}
     for t in target:
         if not t.legacy_id:
             continue
@@ -203,6 +213,7 @@ def plan(source: list[Source], target: list[Target]) -> Plan:
             c["eligible_email_confirmed"] += s.email_confirmed
             updates.append(Update(t.id, t.legacy_id, t.email, s.password_hash))
         c[reason] += 1
+        reasons[t.id] = reason
     counts = {
         "source_accounts": len(source), "target_accounts": len(target),
         "target_with_legacy_id": sum(tgt_ids.values()),
@@ -216,12 +227,21 @@ def plan(source: list[Source], target: list[Target]) -> Plan:
         raise Refused("internal error: the plan's counts do not add up; nothing was written")
     # NV3-3: Supabase keeps deleted / banned in auth.users only (not in the public dump), so the ETL loads those
     # accounts active. Matched by the exact legacy id (whatever the email): --deactivate turns them off, never on.
-    deactivations = [Deactivation(t.id, t.legacy_id) for t in target if t.legacy_id and t.is_active
-                     and (s := by_id.get(t.legacy_id)) is not None and (s.deleted or s.banned)]
-    counts["deactivate_banned_or_deleted"] = len(deactivations)
-    counts["banned_or_deleted_already_inactive"] = sum(
-        1 for t in target if t.legacy_id and not t.is_active and (s := by_id.get(t.legacy_id)) is not None
-        and (s.deleted or s.banned))
+    # NV4-3: and every account excluded pending identity resolution (HOLD_REASONS), one row per account (flagged
+    # first). A dry run shows each category's ACTIVE accounts; after --deactivate every one of them must be 0.
+    def why(t: Target) -> str | None:
+        if (s := by_id.get(t.legacy_id)) is not None and (s.deleted or s.banned):
+            return "banned_or_deleted"
+        return reasons[t.id] if reasons.get(t.id) in HOLD_REASONS else None
+
+    planned = [(t, why(t)) for t in target if t.legacy_id]
+    deactivations = [Deactivation(t.id, t.legacy_id, w, t.email) for t, w in planned if w and t.is_active]
+    counts["deactivate_banned_or_deleted"] = sum(1 for x in deactivations if x.why == "banned_or_deleted")
+    for r in HOLD_REASONS:
+        counts[f"hold_{r}"] = sum(1 for x in deactivations if x.why == r)
+    counts["banned_or_deleted_already_inactive"] = sum(1 for t, w in planned if w == "banned_or_deleted"
+                                                       and not t.is_active)
+    counts["hold_already_inactive"] = sum(1 for t, w in planned if w in HOLD_REASONS and not t.is_active)
     return Plan(counts, updates, deactivations=deactivations)
 
 
@@ -426,9 +446,9 @@ def lock_source(src: psycopg.Connection, expected_fingerprint: str, p: Plan) -> 
         s = current.get(u.legacy_id)
         if s is None or s.email != u.email or s.deleted or s.banned or s.password_hash != u.password_hash:
             raise Refused("a planned hash no longer matches the locked source; nothing was written")
-    for x in p.deactivations:
+    for x in p.deactivations:  # (a hold's cause, the source ids and emails, is covered by the fingerprint above)
         s = current.get(x.legacy_id)
-        if s is None or not (s.deleted or s.banned):
+        if x.why == "banned_or_deleted" and (s is None or not (s.deleted or s.banned)):
             raise Refused("a planned deactivation no longer matches the locked source; nothing was written")
 
 
@@ -490,7 +510,8 @@ def deactivate(conn: psycopg.Connection, p: Plan, before_commit=None) -> int:
             now = {row[0]: Target(*row) for row in cur.fetchall()}
             for x in p.deactivations:
                 t = now.get(x.target_id)
-                if t is None or (t.legacy_id, t.is_active) != (x.legacy_id, True):
+                if t is None or (t.legacy_id, t.is_active) != (x.legacy_id, True) or (
+                        x.email is not None and t.email != x.email):
                     raise Refused("target changed since the plan; nothing was written")
             for x in p.deactivations:
                 cur.execute("UPDATE public.users SET is_active = false WHERE id = %s AND legacy_supabase_user_id = %s "
@@ -544,8 +565,10 @@ def main(argv: list[str] | None = None) -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="write the hashes (after a typed confirmation)")
     mode.add_argument("--deactivate", action="store_true",
-                      help="NV3-3: deactivate the V2 accounts whose Supabase account is deleted or banned (migration "
-                           "role, after a typed confirmation); never re-activates")
+                      help="deactivate the V2 accounts whose Supabase account is deleted or banned (NV3-3) and those "
+                           "excluded pending identity resolution (NV4-3: legacy id missing in Supabase, email held by "
+                           "another Supabase id, email mismatch); migration role, typed confirmation; never "
+                           "re-activates")
     ap.add_argument("--allow-dev-target", action="store_true",
                     help="permit --apply into hyperchat_dev (real hashes stay out of DEV without separate approval)")
     ap.add_argument("--accept-writable-source-role", action="store_true",
@@ -555,7 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     write = args.apply or args.deactivate
     print("APPLY: hashes will be written after confirmation." if args.apply
-          else "DEACTIVATE: banned / deleted accounts will be deactivated after confirmation." if args.deactivate
+          else "DEACTIVATE: banned / deleted and held (excluded, unresolved) accounts will be deactivated after "
+          "confirmation." if args.deactivate
           else "DRY RUN: nothing will be written.", file=sys.stderr)
     p = None
     try:

@@ -116,13 +116,36 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
      a runtime-role `is_active` change need a step-up grant. It types-confirms, locks and re-verifies the source,
      writes in one transaction, only ever sets `is_active = false` and never re-activates. Re-run the dry run
      afterwards: `deactivate_banned_or_deleted` must be 0.
+   - **Hold the accounts excluded pending identity resolution (NV4-3).** The approved D1 exclusion policy
+     (2026-10-12) lets an excluded account recover by reset or Google sign-in only after its identity is resolved;
+     otherwise it stays on hold. V2's only hold is `is_active = false`, because reset and Google sign-in check nothing
+     else. So the same `--deactivate` run also turns off every active account in these categories, even when its own
+     Supabase row is unflagged. Each dry run counts the active ones per category:
+
+     | Category (importer exclusion) | Count (active, to hold) | What happens before DNS (step 7) |
+     |---|---|---|
+     | (a) legacy id with no Supabase row (`target_legacy_id_not_in_source`, e.g. a Supabase hard delete) | `hold_target_legacy_id_not_in_source` | deactivated; investigated per account, ownership unchanged (policy 2) |
+     | (c) V2 email is the login of another Supabase id (`target_email_used_by_other_source_id`) | `hold_target_email_used_by_other_source_id` | deactivated pending manual review; never merged by email (policy 3) |
+     | (d) email differs from its own Supabase row, case-only included (`id_match_email_mismatch`) | `hold_id_match_email_mismatch` | deactivated until reconciled against reliable identity evidence (policy 1) |
+
+     Already-inactive accounts are only counted (`hold_already_inactive`). No other exclusion is held: an existing
+     password, no source hash, an admin, or an account with no legacy id. A held owner's creator answers `no_owner`
+     under the launch KYC rule, so it takes no donations.
+   - **Releasing a hold** happens only after the account's identity is resolved, and only if the owner decides it, per
+     account:
+     - correct the email with D11 (`PUT /api/v1/admin/users/{id}/email`), or the ownership with D13;
+     - then re-activate with `PATCH /api/v1/admin/users/{id}` and `{"is_active": true}` (admin, step-up
+       `admin.user.change`);
+     - recovery by password reset or Google sign-in is allowed only once that flow is configured and live-verified.
+     The importer never re-activates.
    - **Grants:** none new. The Supabase read role already holds `SELECT (id, email, encrypted_password,
      email_confirmed_at, deleted_at, banned_until) ON auth.users` (D1, `database/README.md`), which covers both flags.
      The target role is the existing `hyperchat_migrator`.
 5. **Reconcile and verify.**
    - Keep the step 3 report; it reconciles the load against the snapshot.
    - After step 4, re-run the importer's dry run: it must show 0 eligible and the applied rows as
-     `target_already_has_password`, and 0 `deactivate_banned_or_deleted`.
+     `target_already_has_password`. It must also show 0 `deactivate_banned_or_deleted` and 0 for each `hold_*`
+     category. **The DNS switch (step 7) waits until every one of them is 0.**
    - Run `python -B -m app.payments.operator verify` as `hyperchat_readonly`. It must report clean, or only I10
      `baseline_unverified` before Phase 2B.
    - Sign in with a migrated account.

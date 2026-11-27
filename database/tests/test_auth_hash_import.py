@@ -76,6 +76,8 @@ EXPECTED = {
     "target_already_has_password": 1, "source_without_password": 2, "unsupported_hash_format": 0,
     "source_ids_not_in_target": 2, "duplicate_source_ids": 0, "duplicate_target_legacy_ids": 0,
     "deactivate_banned_or_deleted": 2, "banned_or_deleted_already_inactive": 0,
+    "hold_target_legacy_id_not_in_source": 1, "hold_target_email_used_by_other_source_id": 1,
+    "hold_id_match_email_mismatch": 2, "hold_already_inactive": 0,
 }
 
 
@@ -106,13 +108,32 @@ def test_plan_categories_and_only_exact_matches_are_eligible():
     assert sorted(u.password_hash for u in p.updates) == sorted(HASHES[k] for k in ELIGIBLE)
 
 
+def test_accounts_excluded_pending_identity_resolution_are_held_by_deactivation():
+    """NV4-3: the D1 exclusion policy (2026-10-12) keeps these on hold until identity is resolved, and V2's only hold
+    is is_active = false: a legacy id missing in Supabase (o1), a V2 email that is another Supabase id's login (x1)
+    and an email mismatch, case-only included (m1, c1), even with their own Supabase row unflagged. An account already
+    inactive is only counted; no other exclusion (existing password, no hash, admin, no legacy id) is held."""
+    p = plan(_sources(), _targets())
+    held = {x.target_id: x.why for x in p.deactivations if x.why != "banned_or_deleted"}
+    assert held == {str(uuid.uuid5(uuid.NAMESPACE_DNS, k)): why for k, why in (
+        ("o1", "target_legacy_id_not_in_source"), ("x1", "target_email_used_by_other_source_id"),
+        ("m1", "id_match_email_mismatch"), ("c1", "id_match_email_mismatch"))}
+    assert all(x.email is not None for x in p.deactivations)  # an email corrected since the plan refuses the write
+    inactive = [x if x.legacy_id != IDS["o1"] else Target(x.id, x.legacy_id, x.email, x.email_norm, x.has_password,
+                                                         False, False) for x in _targets()]
+    p = plan(_sources(), inactive)
+    assert (p.counts["hold_target_legacy_id_not_in_source"], p.counts["hold_already_inactive"]) == (0, 1)
+    assert len(p.deactivations) == 5
+
+
 def test_banned_or_deleted_supabase_accounts_are_planned_for_deactivation_never_reactivation():
     """NV3-3: the deleted (d1) and currently banned (b1) Supabase accounts' V2 rows are planned for deactivation by
     exact legacy id; an expired ban (e4) is not; an account already inactive is only counted; nothing is re-activated."""
     p = plan(_sources(), _targets())
     wanted = {str(uuid.uuid5(uuid.NAMESPACE_DNS, k)) for k in ("d1", "b1")}
-    assert {x.target_id for x in p.deactivations} == wanted
-    assert {x.legacy_id for x in p.deactivations} == {IDS["d1"], IDS["b1"]}
+    flagged = [x for x in p.deactivations if x.why == "banned_or_deleted"]
+    assert {x.target_id for x in flagged} == wanted
+    assert {x.legacy_id for x in flagged} == {IDS["d1"], IDS["b1"]}
     inactive = [x if x.legacy_id != IDS["d1"] else Target(x.id, x.legacy_id, x.email, x.email_norm, x.has_password,
                                                          False, False) for x in _targets()]
     p = plan(_sources(), inactive)
