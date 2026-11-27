@@ -146,6 +146,11 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
    the switch makes a rollback a separately approved plan.
 8. **Streamers create new OBS tokens** in the V2 dashboard and re-add their browser sources (alert, leaderboard, goal).
    No legacy overlay URL works.
+9. **Retire the ETL source (after the rollback window, separately approved):**
+   - Drop `hyperchat_restore_test` on `15/restoretest`.
+   - In the same step, drop the Supabase roles `anon`, `authenticated` and `service_role` (security audit S9, 2026-11-27).
+   - They exist only for this restore: they hold nothing in `hyperchat_dev` or `postgres`, and every grant, default privilege and RLS policy naming them is in `hyperchat_restore_test`. They are NOLOGIN, have no members and own nothing.
+   - Never drop them while the source may still be restored: the legacy dump's `pg_restore` re-grants to them.
 
 ### After the cutover: money captured on legacy orders
 
@@ -215,6 +220,9 @@ The ETL targets 0039. 0038 adds a function and a changed trigger function; 0039 
   Confirm that the new columns default safely for legacy creators.
 - **0041** (automatic activation) and the payout hold: decide what a `legacy` creator gets. Revisit owner decision 1.
 - **0042**: same rule.
+- **pg_temp hardening** (security audit 2026-11-26; its revision number is set at merge, after or before Phase B):
+  `ALTER FUNCTION ... SET search_path` on 11 SECURITY DEFINER payment functions. No table, column or row changes:
+  no ETL change. The reconciliation's I10 expectation (`baseline_unverified` only) is unchanged.
 - Any column added to a straight-copied table must be listed in `etl.mapping.V2_ONLY_COLUMNS` (and `LEGACY_VALUES` if
   existing rows got a value). `test_etl_mapping` fails otherwise.
 - Any new table that holds rows at head must be added to `rehearsal.SEEDED_TABLES`, or the fresh-target check

@@ -2396,3 +2396,70 @@ def test_0042_round_trip_adds_automatic_activation_switched_off_and_refuses_to_d
                 conn.execute("DELETE FROM public.onboarding_settings_events WHERE changed_by = 'migtest42'")
         command.upgrade(cfg, "head")
     assert _version() == HEAD
+
+
+# ── 0043: pg_temp last in the 11 SECURITY DEFINER payment search paths (security audit 2026-11-26) ──────────────
+PG_TEMP_FUNCTIONS = PAYMENT_DEFINER_FUNCTIONS  # the 11 PAY-15 SECURITY DEFINER functions
+
+
+def _functions_0043() -> dict:
+    """{name: (md5 of the body, proconfig, owner, ACL)} of every public function: 0043 may change only 11 proconfigs."""
+    with _owner() as conn:
+        rows = conn.execute("SELECT p.oid::regprocedure::text, md5(p.prosrc), coalesce(p.proconfig, '{}')::text[], "
+                            "p.proowner::regrole::text, coalesce(p.proacl::text, '') FROM pg_proc p "
+                            "WHERE p.pronamespace = 'public'::regnamespace").fetchall()
+    return {sig: (body, tuple(config), owner, acl) for sig, body, config, owner, acl in rows}
+
+
+def _data_0043() -> list:
+    """The payment rows 0043 must never touch, as the owner sees them."""
+    tables = ("donations", "streamer_donator_totals", "donation_credit_events", "donation_reversals",
+              "payment_accounting_state")
+    with _owner() as conn:
+        return [conn.execute(f"SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) "
+                             f"FROM public.{table} t").fetchone()[0] for table in tables]
+
+
+def test_0043_round_trip_changes_only_the_11_search_paths_never_data(monkeypatch):
+    """0043: the upgrade puts pg_temp last in the 11 SECURITY DEFINER payment search paths (lock_timeout on set_state
+    kept) and changes no body, owner, ACL or other function; the downgrade restores exactly the 0042 catalog; neither
+    reads nor writes a row."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0042")
+    try:
+        at_0042, data = _functions_0043(), _data_0043()
+        by_name = {sig.split("(")[0]: sig for sig in at_0042}
+        assert set(PG_TEMP_FUNCTIONS) <= set(by_name)
+        command.upgrade(cfg, "0043")
+        assert _version() == "0043" and _data_0043() == data
+        at_0043 = _functions_0043()
+        assert set(at_0043) == set(at_0042)
+        changed = {sig for sig in at_0042 if at_0043[sig] != at_0042[sig]}
+        assert changed == {by_name[n] for n in PG_TEMP_FUNCTIONS}, changed
+        for name in PG_TEMP_FUNCTIONS:
+            body, config, owner, acl = at_0043[by_name[name]]
+            assert (body, owner, acl) == at_0042[by_name[name]][0:1] + at_0042[by_name[name]][2:], name
+            assert config[0] == "search_path=pg_catalog, public, pg_temp", (name, config)
+            assert config[1:] == at_0042[by_name[name]][1][1:], name  # lock_timeout on set_state kept
+        command.downgrade(cfg, "0042")
+        assert _version() == "0042" and _functions_0043() == at_0042 and _data_0043() == data
+    finally:
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+def test_every_security_definer_function_puts_pg_temp_last(monkeypatch):
+    """Security audit 2026-11-26 (0043): at head, no SECURITY DEFINER function in public lets a caller's TEMP table
+    shadow a name: each sets search_path, and pg_temp is its last entry. A catalog query, so it guards future
+    migrations as well."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    command.upgrade(_cfg(), "head")
+    with _owner() as conn:
+        rows = conn.execute("SELECT p.oid::regprocedure::text, (SELECT c FROM unnest(p.proconfig) c "
+                            "WHERE c LIKE 'search_path=%%') FROM pg_proc p "
+                            "WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef").fetchall()
+    assert rows  # the schema has SECURITY DEFINER functions
+    bad = [(fn, sp) for fn, sp in rows if sp is None or sp.replace(" ", "").split(",")[-1] != "pg_temp"]
+    assert bad == [], bad
