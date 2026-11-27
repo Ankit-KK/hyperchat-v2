@@ -325,6 +325,45 @@ def test_spoken_name_cut_is_moderated(name, rule):
     assert w.repo.blocks[0]["decision"].rule_id == rule
 
 
+class PickLine:
+    """An rng whose randrange always returns one hype-line index (the donor cannot choose it, the test can)."""
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+
+    def randrange(self, n: int) -> int:
+        assert 0 <= self.index < n
+        return self.index
+
+
+@pytest.mark.parametrize("name, message, amount, line, rule", [
+    # legendary line 13 "{user_name}, you didn't have to do that!" completes the CRITICAL phrase "kms you"
+    ("kms", "nice job bro", "5000.00", 13, "thr.term.1"),
+    # insane line 15 "{user_name}, what are you doing?!" puts a target before the message's "should die"
+    ("Jo", "should die nice job bro", "2500.00", 15, "ctx.threat.die_target"),
+])
+def test_the_exact_spoken_sentence_is_moderated(name, message, amount, line, rule):
+    # Security audit run-4: the donor parts pass alone; only the assembled hype-line sentence is blocked.
+    from app.audio.moderation import moderate_for_tts
+    assert moderate_for_tts(name, message, "Creator A").allowed
+    w = World(donation(donor_name=name, message=message, amount=Decimal(amount), amount_inr=Decimal(amount)))
+    w.handler.rng = PickLine(line)
+    assert w.run().result == {"outcome": "silent", "reason": "moderation_blocked"} and w.provider_calls() == 0
+    assert w.repo.blocks[0]["decision"].rule_id == rule
+
+
+def test_every_hype_line_alone_passes_moderation():
+    # The final pass must not silence ordinary donations: no hype line with a benign name and message is blocked.
+    from app.audio.moderation import moderate_for_tts
+    from app.audio.text import announcement
+    for amount in ("40.00", "100.00", "250.00", "500.00", "1000.00", "2500.00", "5000.00"):  # all seven tiers
+        for line in range(20):
+            words = announcement(donor_name="Ravi", amount=Decimal(amount), currency="INR", amount_inr=Decimal(amount),
+                                 message="great stream", media_type=None, is_media=False, language_boost=None,
+                                 rng=PickLine(line))
+            assert moderate_for_tts("Ravi", words, "Creator A").allowed, (amount, line)
+
+
 def test_probe_limit_blocks_clean_text_too():
     w = World(donation(message="nice stream"))
     w.repo.blocked = 3

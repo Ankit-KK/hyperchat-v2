@@ -163,7 +163,7 @@ class DonationAudioHandler:
             raise Retryable("storage_unavailable") from None
         if existing is not None and existing.size > 0 and existing.content_type == "audio/mpeg":
             return Done({"outcome": plan.kind, "reused": True}, self._set(did, self.store.public_url(key)))
-        provider, call = self._provider(d, plan)
+        provider, call, words = self._provider(d, plan)
         if provider is None:
             return await self._silence(did, call)  # call holds the reason here
         if plan.kind in COMMANDS:
@@ -171,7 +171,7 @@ class DonationAudioHandler:
             if limited:
                 return await self._silence(did, limited)
         content = plan.prompt if plan.prompt is not None else self._spoken_message(d, plan)
-        blocked = await self._moderate(d, plan.kind if plan.kind in COMMANDS else "tts", content, plan)
+        blocked = await self._moderate(d, plan.kind if plan.kind in COMMANDS else "tts", content, plan, words)
         if blocked:
             return await self._silence(did, blocked)
         audio = await call()
@@ -204,25 +204,25 @@ class DonationAudioHandler:
         return tts_text.sanitize_for_tts(tts_text.decode_html_entities(d["message"])) or None
 
     def _provider(self, d: dict, plan: Plan):
-        """(provider name, zero-argument coroutine factory) or (None, reason)."""
+        """(provider name, zero-argument coroutine factory, exact speech text or None) or (None, reason, None)."""
         if not self.providers_enabled:
-            return None, "providers_disabled"
+            return None, "providers_disabled", None
         if plan.kind == "sfx":
-            return ("elevenlabs", lambda: self.sound_effects.sound_effect(plan.prompt)) if self.sound_effects \
-                else (None, "provider_not_configured")
+            return ("elevenlabs", lambda: self.sound_effects.sound_effect(plan.prompt), None) if self.sound_effects \
+                else (None, "provider_not_configured", None)
         if plan.kind == "music":
-            return ("elevenlabs", lambda: self.music.music(plan.prompt)) if self.music \
-                else (None, "provider_not_configured")
+            return ("elevenlabs", lambda: self.music.music(plan.prompt), None) if self.music \
+                else (None, "provider_not_configured", None)
         spam = not plan.is_media and tts_text.is_emoji_spam(tts_text.decode_html_entities(d["message"] or ""))
         name, voice = route_speech(d["tts_voice_id"], d["el_voice_id"], spam, self.default_voice)
         provider = self.speech.get(name)
         if provider is None:
-            return None, "provider_not_configured"
+            return None, "provider_not_configured", None
         words = tts_text.announcement(
             donor_name=d["donor_name"], amount=d["amount"], currency=d["currency"], amount_inr=d["amount_inr"],
             message=d["message"], media_type=d["media_type"], is_media=plan.is_media,
             language_boost=d["tts_language_boost"], rng=self.rng)
-        return name, lambda: provider.speech(words, voice, d["tts_language_boost"])
+        return name, lambda: provider.speech(words, voice, d["tts_language_boost"]), words
 
     async def _command_limit(self, d: dict, kind: str) -> str | None:
         command, limit = COMMANDS[kind]
@@ -231,9 +231,11 @@ class DonationAudioHandler:
             return "command_rate_limited"
         return "command_in_flight" if in_flight else None
 
-    async def _moderate(self, d: dict, source: str, content: str | None, plan: Plan | None = None) -> str | None:
+    async def _moderate(self, d: dict, source: str, content: str | None, plan: Plan | None = None,
+                        words: str | None = None) -> str | None:
         """None when allowed, else the silent reason. Fails closed: no key or any error blocks. Speech must pass
-        on the stored strings and again on the exact spoken name and message."""
+        on the stored strings, again on the exact spoken name and message, and finally on `words`, the exact
+        sentence the provider is sent (the hype line can complete a phrase or context rule across its joins)."""
         name = tts_text.decode_html_entities(d["donor_name"] or "")
         streamer = d["streamer_name"] or d["streamer_slug"]
         try:
@@ -246,6 +248,8 @@ class DonationAudioHandler:
                     spoken_name, spoken_msg = tts_text.spoken_parts(
                         d["donor_name"], d["message"], is_media=plan.is_media, language_boost=d["tts_language_boost"])
                     decision = moderate_for_tts(spoken_name, spoken_msg or None, streamer)
+                    if decision.allowed and words is not None:
+                        decision = moderate_for_tts(spoken_name, words, streamer)
             if decision.allowed:
                 return None
             if decision.invalid:
