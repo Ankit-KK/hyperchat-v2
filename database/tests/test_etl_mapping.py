@@ -144,7 +144,8 @@ def test_fresh_start_clears_donation_media_and_skips_obs_tokens_and_soundboard_s
                                              "tts_audio_url", "status_token_hash", "upload_token_hash"}
     assert set(DONATION_CLEARED_COLUMNS) <= set(DONATION_COLUMNS)
     skipped = {t for t, _ in NOT_MIGRATED}
-    assert {"obs_tokens", "platform_soundboard_slots", "streamer_soundboard_slots", "soundboard_swap_log"} <= skipped
+    assert {"obs_tokens", "platform_soundboard_slots", "streamer_soundboard_slots", "soundboard_swap_log",
+            "api_keys", "partner_api_keys"} <= skipped  # owner 2026-11-27: old links and keys are reset
     assert not skipped & set(LOADED_TABLES) and set(STRAIGHT_COPIES) <= set(LOADED_TABLES)
     import etl.mapping
     assert not hasattr(etl.mapping, "obs_token_hash")
@@ -211,16 +212,17 @@ def test_verifier_result_accepts_clean_or_exactly_the_pre_phase_2b_i10_finding()
 
 def test_loader_puts_every_legacy_creator_on_the_legacy_kyc_track():
     """Migration 0020: legacy has no kyc_track / kyc_baseline_owner_id. The import writes 'legacy' and the creator's
-    imported owner as the baseline (so an existing creator keeps accepting donations), and keeps its own status."""
+    imported owner as the baseline, and keeps its own status, except that an active creator without an owner loads
+    'pending' (owner decision 2026-11-27)."""
     from etl.rehearsal import Loader
 
     queries: list[str] = []
     loader = Loader(None, None)
-    loader.fetch = lambda query, params=None: queries.append(query) or []
+    loader.fetch = lambda query, params=None: queries.append(query) or [(0,)] * query.startswith("SELECT count")
     loader.columns = lambda conn, table: ["id", "streamer_slug", "status", "user_id", "kyc_track",
                                           "kyc_baseline_owner_id"]
     loader.copy = lambda table, columns, rows: 0
     loader.tgt = SimpleNamespace(cursor=lambda: contextlib.nullcontext(SimpleNamespace(execute=lambda *a: None)))
     loader.load_users_and_streamers()
-    assert queries[-1] == ('SELECT "id", "streamer_slug", "status", "user_id", \'legacy\', "user_id" '
-                           'FROM public.streamers')
+    assert queries[-2] == ('SELECT "id", "streamer_slug", CASE WHEN user_id IS NULL AND status = \'active\' '
+                           'THEN \'pending\' ELSE status END, "user_id", \'legacy\', "user_id" FROM public.streamers')

@@ -136,7 +136,7 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
                                          "kyc_baseline_owner_id"),
             add='"razorpay-keyid" text, "razorpay-keysecret" text, donation_table_id integer')
     src.execute("CREATE TABLE public.obs_tokens (id uuid, streamer_id uuid, token text, is_active boolean)")
-    for table in rehearsal.STRAIGHT_COPIES:
+    for table in (*rehearsal.STRAIGHT_COPIES, "api_keys", "partner_api_keys"):  # keys: read only to count them
         _mirror(src, tgt, table, drop=V2_ONLY_COLUMNS.get(table, ()))
     _mirror(src, tgt, "order_lookup", add="streamer_slug text, donation_table_id integer")
     _mirror(src, tgt, "moderation_actions", add="donation_table text")
@@ -189,8 +189,6 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
         "soundboard_tnc_acceptances": dict(streamer_slug="alpha", streamer_id=S_ALPHA, user_id=U_S1),
         "terms_acceptances": dict(user_id=U_S1, accepted_version="etl-v1"),
         "banned_donors": dict(streamer_id=S_ALPHA, donor_name="Banned", banned_by_moderator_id=MOD),
-        "api_keys": dict(streamer_slug="alpha", key_type="donation", key_hash="etl" + "0" * 61, key_prefix="etl"),
-        "partner_api_keys": dict(partner_slug="etlpartner", key_hash="etl" + "1" * 61, key_prefix="etl"),
         "partner_signups": dict(partner_slug="etlpartner", channel_name="c", mobile_number="0", youtube_channel="y",
                                 email="partner" + D),
         "tts_moderation_audit": dict(donation_id=_u(999), streamer_id=S_ALPHA, supporter_identity_hash="h",
@@ -203,6 +201,8 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
         "user_queries": dict(user_id=U_PLAIN, query_text="synthetic"),
     }
     assert set(rows) == set(rehearsal.STRAIGHT_COPIES)  # every mapped table has a row
+    rows["api_keys"] = dict(streamer_slug="alpha", key_type="donation", key_hash="etl" + "0" * 61, key_prefix="etl")
+    rows["partner_api_keys"] = dict(partner_slug="etlpartner", key_hash="etl" + "1" * 61, key_prefix="etl")
     for table, values in rows.items():
         _insert(src, table, **values)
 
@@ -265,7 +265,10 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
     assert ok, text
     assert "[PASS] PAY-15 verifier on the loaded database" in text and "FAIL" not in text
     for line in ("rows: obs_tokens  -- source=1 loaded=0", "rows: platform_soundboard_slots  -- source=1 loaded=0",
-                 "rows: user_signups  -- source=1 loaded=1", "rows: telegram_callback_mapping  -- source=2 loaded=1"):
+                 "rows: user_signups  -- source=1 loaded=1", "rows: telegram_callback_mapping  -- source=2 loaded=1",
+                 "rows: api_keys  -- source=1 loaded=0", "rows: partner_api_keys  -- source=1 loaded=0",
+                 "loaded pending for no owner=1", "KYC at launch (enforcement active, no grace)",
+                 "kyc_required=2 "):
         assert line in text, (line, text)
 
     with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as c:
@@ -290,7 +293,18 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
         # CRE-4 / CRE-7 while KYC enforcement is draft: the owned legacy creators keep accepting donations
         decisions = dict(c.execute("SELECT streamer_slug, public.creator_donation_block(id) FROM public.streamers"
                                    ).fetchall())
-        assert decisions == {"alpha": None, "beta": None, "gamma": "not_active", "sapphire": None}
+        assert decisions == {"alpha": None, "beta": None, "gamma": "not_active", "sapphire": "not_active"}
+        # owner 2026-11-27: an active creator without an owner loads 'pending'; a pending one stays pending
+        assert dict(c.execute("SELECT streamer_slug, status FROM public.streamers").fetchall()) == {
+            "alpha": "active", "beta": "active", "gamma": "pending", "sapphire": "pending"}
+        # ...and at launch (enforcement active, no grace grants) no migrated creator takes donations before KYC
+        launch = dict(c.execute("SELECT streamer_slug, public.kyc_donation_decision(id, 'active') "
+                                "FROM public.streamers").fetchall())
+        assert launch == {"alpha": "kyc_required", "beta": "kyc_required", "gamma": "not_active",
+                          "sapphire": "not_active"}
+        assert c.execute("SELECT count(*) FROM public.kyc_grace_grants").fetchone()[0] == 0
+        assert c.execute("SELECT count(*) FROM public.api_keys").fetchone()[0] == 0
+        assert c.execute("SELECT count(*) FROM public.partner_api_keys").fetchone()[0] == 0
         assert c.execute("SELECT state FROM public.kyc_enforcement").fetchone()[0] == "draft"
 
     # 0036 with every trigger back on: the pricing rule binds the runtime roles only. A legacy value below today's

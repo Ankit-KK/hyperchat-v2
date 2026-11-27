@@ -10,6 +10,8 @@ moderators, users and their links). Not migrated, counted in the report:
 * obs_tokens: no legacy OBS token or URL keeps working; streamers create new tokens at launch.
 * platform / streamer soundboard slots and the swap log: their files are not carried over.
 * donation media, voice messages and donor links (etl.mapping.DONATION_CLEARED_COLUMNS): loaded as NULL.
+* api_keys and partner_api_keys: reset; new keys are issued in V2.
+An active creator without an owner loads 'pending'.
 Creator profile pictures and backgrounds are carried over (URLs kept, or rewritten with --media-base-*); the files are
 copied afterwards by docs/operations/legacy-asset-migration-plan.md.
 
@@ -75,10 +77,10 @@ DONATION_COLUMNS = (
 # Tables copied column-for-column (same names in source and target), in FK dependency order.
 STRAIGHT_COPIES = (
     "streamers_moderators", "streamer_payment_health", "payout_accounts", "platform_voice_tiers",
-    "streamer_voice_tiers", "soundboard_tnc_acceptances", "terms_acceptances", "banned_donors", "api_keys",
-    "partner_api_keys", "partner_signups", "tts_moderation_audit", "rate_limits", "system_alerts", "user_signups",
-    "visits", "reviews", "user_queries",
+    "streamer_voice_tiers", "soundboard_tnc_acceptances", "terms_acceptances", "banned_donors", "partner_signups",
+    "tts_moderation_audit", "rate_limits", "system_alerts", "user_signups", "visits", "reviews", "user_queries",
 )
+OWNERLESS_PENDING = "CASE WHEN user_id IS NULL AND status = 'active' THEN 'pending' ELSE status END"
 # Every table the load writes (their user triggers are paused for the load).
 LOADED_TABLES = ("users", "streamers", *STRAIGHT_COPIES, "donations", "order_lookup", "moderation_actions",
                  "telegram_callback_mapping", "discord_callback_mapping", "streamer_donator_totals", "request_nonces")
@@ -88,6 +90,8 @@ NOT_MIGRATED = (
     ("platform_soundboard_slots", "fresh start: soundboard files are not carried over"),
     ("streamer_soundboard_slots", "fresh start: soundboard files are not carried over"),
     ("soundboard_swap_log", "fresh start: soundboard files are not carried over"),
+    ("api_keys", "fresh start: legacy creator API keys are reset; new keys are issued in V2"),
+    ("partner_api_keys", "fresh start: partner keys are reset; partners get re-issued keys"),
     ("auth_sessions", "legacy custom-auth sessions (all expired)"),
     ("password_reset_tokens", "expired one-time tokens"),
     ("admin_emails", "folded into users.role"),
@@ -221,14 +225,19 @@ class Loader:
             sql.SQL('WHEN "razorpay-keyid" = {} AND "razorpay-keysecret" = {} THEN {}').format(
                 sql.Literal(key), sql.Literal(secret), sql.Literal(name))
             for (key, secret), name in RAZORPAY_ACCOUNTS.items())).as_string(self.src)
-        # Legacy creators keep their own status; every one is on the legacy KYC track, with its imported owner as
+        # Legacy creators keep their own status, except an ACTIVE creator without an owner, which loads 'pending'
+        # (owner decision 2026-11-27: no donations until an admin links an owner and KYC follows; it also closes the
+        # draft rule's NULL = NULL baseline match). Every one is on the legacy KYC track, with its imported owner as
         # the baseline owner (migration 0020: the runtime roles can never set these two columns).
         src_expr = [{"razorpay_key_ref": '"razorpay-keyid"', "razorpay_secret_ref": '"razorpay-keysecret"',
-                     "razorpay_account": account, "kyc_track": "'legacy'", "kyc_baseline_owner_id": '"user_id"'}
+                     "razorpay_account": account, "kyc_track": "'legacy'", "kyc_baseline_owner_id": '"user_id"',
+                     "status": OWNERLESS_PENDING}
                     .get(c, sql.Identifier(c).as_string(self.src)) for c in tgt_cols]
         streamers = self.media("streamers", tgt_cols,
                                self.fetch(f"SELECT {', '.join(src_expr)} FROM public.streamers"))
         self.note("streamers", len(streamers), self.copy("streamers", tgt_cols, streamers))
+        self.stats["streamers"]["ownerless_active_loaded_pending"] = self.fetch(
+            "SELECT count(*) FROM public.streamers WHERE user_id IS NULL AND status = 'active'")[0][0]
 
         with self.tgt.cursor() as cur:
             for uid, sid in ((u[0], u[10]) for u in users if u[10] is not None):

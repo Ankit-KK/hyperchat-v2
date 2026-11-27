@@ -126,9 +126,10 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
     a, b = one(src, f"SELECT {counts} FROM ({u}) d"), one(tgt, f"SELECT {counts} FROM public.donations")
     check("donations: non-null counts of the kept history columns", a == b, str(dict(zip(kept, b))))
     left = one(tgt, "SELECT (SELECT count(*) FROM public.obs_tokens), (SELECT count(*) FROM "
-                    "public.platform_soundboard_slots), (SELECT count(*) FROM public.streamer_soundboard_slots)")
-    check("fresh start: no OBS token or soundboard slot in the target", not any(left),
-          f"obs_tokens={left[0]} soundboard_slots={left[1] + left[2]}")
+                    "public.platform_soundboard_slots), (SELECT count(*) FROM public.streamer_soundboard_slots), "
+                    "(SELECT count(*) FROM public.api_keys), (SELECT count(*) FROM public.partner_api_keys)")
+    check("fresh start: no OBS token, soundboard slot or API key in the target", not any(left),
+          f"obs_tokens={left[0]} soundboard_slots={left[1] + left[2]} api_keys={left[3]} partner_api_keys={left[4]}")
 
     # 5. approved_by split covers every source value.
     u = _donation_union(src, "approved_by::text AS a")
@@ -212,7 +213,22 @@ def reconcile(src: psycopg.Connection, tgt: psycopg.Connection, stats: dict, tar
                          "WHEN user_id = kyc_baseline_owner_id THEN 'baseline_owner' ELSE 'other' END, count(*) "
                          "FROM public.streamers GROUP BY 1"))
     check("streamers: every creator on the legacy KYC track with its owner as baseline",
-          all(k.startswith("legacy/") and not k.endswith("/other") for k in kyc), str(kyc))
+          all(k.startswith("legacy/") and not k.endswith("/other") and k != "legacy/active/no_owner" for k in kyc),
+          str(kyc))
+    s_status = Counter(dict(_all(src, "SELECT CASE WHEN user_id IS NULL AND status = 'active' THEN 'pending' "
+                                      "ELSE status END, count(*) FROM public.streamers GROUP BY 1")))
+    t_status = Counter(dict(_all(tgt, "SELECT status, count(*) FROM public.streamers GROUP BY 1")))
+    moved = stats.get("streamers", {}).get("ownerless_active_loaded_pending")
+    check("streamers: status kept, except active creators without an owner loaded 'pending'", s_status == t_status,
+          f"loaded pending for no owner={moved}; status={dict(t_status)}")
+    # Owner decision 2026-11-27: at launch KYC enforcement is switched to 'active' with NO grace grants. What each
+    # creator's new donations would answer then (the 0023 rule, evaluated for state 'active'; nothing is written).
+    launch = Counter(dict(_all(tgt, "SELECT COALESCE(public.kyc_donation_decision(id, 'active'), 'eligible'), "
+                                    "count(*) FROM public.streamers GROUP BY 1")))
+    grants = one(tgt, "SELECT count(*) FROM public.kyc_grace_grants")[0]
+    check("KYC at launch (enforcement active, no grace): no migrated creator takes donations before KYC",
+          launch["eligible"] == 0 and grants == 0,
+          f"kyc_required={launch['kyc_required']} {dict(sorted(launch.items()))} grace_grants={grants}")
     disabled = one(tgt, "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
                         "WHERE c.relnamespace = 'public'::regnamespace AND NOT t.tgisinternal AND t.tgenabled <> 'O'")[0]
     check("target: all user triggers re-enabled", disabled == 0, f"disabled={disabled}")

@@ -21,8 +21,8 @@ passes.
 | Target | Source | Disposition |
 |---|---|---|
 | `users` | `auth_users` (+ `admin_emails` → `role = 'admin'`) | copied; `password_hash` NULL (step 4) |
-| `streamers` | `streamers` | copied; `razorpay_account` from the key-name pair; `kyc_track = 'legacy'`, `kyc_baseline_owner_id = user_id` (0020); logo / background URLs kept, or rewritten with `--media-base-*` |
-| `streamers_moderators`, `streamer_payment_health`, `payout_accounts`, `platform_voice_tiers`, `streamer_voice_tiers`, `soundboard_tnc_acceptances`, `terms_acceptances`, `api_keys`, `partner_api_keys`, `partner_signups`, `tts_moderation_audit`, `rate_limits`, `system_alerts`, `visits`, `reviews`, `user_queries` | same names | copied column for column |
+| `streamers` | `streamers` | copied; `razorpay_account` from the key-name pair; `kyc_track = 'legacy'`, `kyc_baseline_owner_id = user_id` (0020); an **active creator without an owner loads `pending`** (owner 2026-11-27); logo / background URLs kept, or rewritten with `--media-base-*` |
+| `streamers_moderators`, `streamer_payment_health`, `payout_accounts`, `platform_voice_tiers`, `streamer_voice_tiers`, `soundboard_tnc_acceptances`, `terms_acceptances`, `partner_signups`, `tts_moderation_audit`, `rate_limits`, `system_alerts`, `visits`, `reviews`, `user_queries` | same names | copied column for column |
 | `banned_donors` | same | copied; 0016's `unbanned_*` columns defaulted (NULL) |
 | `user_signups` | same | copied; 0021's review columns defaulted, `review_status = 'legacy_unreviewed'` (what 0021 gave existing rows; the default is now `submitted`) |
 | `donations` | 133 × `<slug>_donations` | copied (amounts, statuses, moderation, messages, audio timestamps, `is_hyperemote`, `legacy_source_table`); **`voice_message_url`, `hypersound_url`, `media_url`, `media_type`, `tts_audio_url`, `status_token_hash`, `upload_token_hash` loaded as NULL**; `payment_account`, `provider_payment_id` NULL (legacy recorded none) |
@@ -33,6 +33,7 @@ passes.
 | `request_nonces` | same | unexpired rows only |
 | `obs_tokens` | `obs_tokens` | **not migrated** (counted) |
 | `platform_` / `streamer_soundboard_slots`, `soundboard_swap_log` | same | **not migrated** (counted): their files are not carried over |
+| `api_keys`, `partner_api_keys` | same | **not migrated** (counted): old keys are reset, new ones issued in V2 (owner 2026-11-27) |
 | `auth_sessions`, `password_reset_tokens`, `admin_emails`, `profiles`, `auth_migration_control` | same | not migrated (counted) |
 
 Left empty (nothing to import; the guards are triggers keyed on the runtime roles or are paused for the loaded
@@ -110,12 +111,23 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
    - Run `python -B -m app.payments.operator verify` as `hyperchat_readonly`. It must report clean, or only I10
      `baseline_unverified` before Phase 2B.
    - Sign in with a migrated account.
+5a. **Switch KYC enforcement to `active`, with NO grace grants** (owner decision 2026-11-27: "KYC required at
+   launch"). Needs the owner's approval reference for this window:
+   ```
+   python -B -m app.kyc.operator report
+   python -B -m app.kyc.operator activate --confirm-database hyperchat --operator <name> --authorization <approval ref>
+   ```
+   (migration role, with `HYPERCHAT_KYC_WITNESS_PATH` set to the production witness; `docs/kyc-rollout.md`). Never run
+   `grant`. Afterwards every migrated creator needs its owner's approved Didit KYC before new donations resume: the
+   load report line "KYC at launch" lists how many will be `kyc_required` (all active creators) and requires that
+   none is eligible and no grace grant exists. Creators without an owner were loaded `pending` and stay out until an
+   admin links an owner and KYC follows.
 6. **Copy the profile and background images** (`legacy-asset-migration-plan.md` section 8, option A).
    - Until this step, `brand_logo_url` / `background_url` still hold their legacy values, e.g. `/assets/streamers/…`
      paths.
    - Copy the objects to the production bucket, apply the reviewed per-creator mapping, and check that no
      `legacy_frontend_path` cell remains for a migrated creator.
-7. **Switch DNS and the frontend** only after steps 3–6 pass. Keep legacy read-only for rollback; any write to V2 after
+7. **Switch DNS and the frontend** only after steps 3–6 (and 5a) pass. Keep legacy read-only for rollback; any write to V2 after
    the switch makes a rollback a separately approved plan.
 8. **Streamers create new OBS tokens** in the V2 dashboard and re-add their browser sources (alert, leaderboard, goal).
    No legacy overlay URL works.
@@ -123,32 +135,22 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
 **Abort:** before step 7, drop the production database, re-create it at head and repeat from step 2. After a step 4
 `--apply`, follow the D1 abort rules (never re-run the importer blindly).
 
-## Owner decisions needed before the cutover
+## Owner decisions (2026-11-27)
 
-1. **KYC state of migrated creators (CRE-4 / CRE-7).** Every migrated creator is `kyc_track = 'legacy'`, keeps its
-   legacy `status`, and has its owner as `kyc_baseline_owner_id`. Under `public.kyc_donation_decision`:
-   - enforcement **draft** (today): an active legacy creator whose owner is still the baseline accepts donations without
-     KYC. That includes an active creator with **no owner** (NULL = NULL), which the reconciliation reports as
-     `legacy/active/no_owner`. A pending or rejected creator is `not_active`.
-   - **active**: a legacy creator needs its owner's approved Didit KYC, or an operator grace grant (at most 90 days,
-     bound to that owner, only if the owner never had a Didit decision). Otherwise new donations answer
-     `kyc_required`. No-owner creators answer `no_owner`.
-   - **closed**: every creator needs its owner's own KYC.
-
-   Options:
-   - (a) launch on draft and roll out with grace grants per creator;
-   - (b) activate before launch with grace grants for all active creators;
-   - (c) activate without grace: legacy creators stop accepting donations until KYC;
-   - plus: whether active no-owner creators are set to `pending` in legacy before the snapshot.
-
-   Phase B (0041 automatic activation, 0040 PAN evidence and the payout hold) may change these rules.
-2. **Admin passwords:** confirm admins are excluded from the D1 import and set theirs by the admin reset/bootstrap path
-   (the alternative, an import run as a non-runtime role, would bypass the 0024 boundary).
-3. **Donor links:** `status_token_hash` / `upload_token_hash` are cleared, so legacy donation-status and upload links
-   stop working. Confirm, or keep `status_token_hash` as read-only history.
-4. **`api_keys` / `partner_api_keys`** (legacy donation / audio API keys, partner keys) are copied and stay valid.
-   Confirm, or rotate them as part of the fresh start.
-5. **Soundboards** start empty, platform defaults included (no files are carried over).
+1. **KYC of migrated creators: "KYC required at launch".** The ETL keeps every creator on `kyc_track = 'legacy'`
+   with its owner as baseline. At cutover KYC enforcement is switched to `active` with no grace grants (step 5a), so
+   under `public.kyc_donation_decision` every migrated creator answers `kyc_required` until its owner's Didit KYC is
+   approved. The reconciliation reports the count and fails if any creator would be eligible or a grace grant exists.
+   Phase B (0040 PAN evidence, 0041 automatic activation, the payout hold) may change these rules; revisit then.
+2. **Active creators without an owner: "set to pending".** The ETL loads them `pending` (other statuses unchanged), so
+   they take no donations until an admin links an owner and KYC follows. This also closes the draft rule's NULL =
+   NULL baseline match. The reconciliation reports the count and fails if any active creator has no owner.
+3. **Old links and keys: "reset all".** Donor `status_token_hash` / `upload_token_hash` are cleared; `api_keys` and
+   `partner_api_keys` are not carried over (partners get re-issued keys).
+4. **Admins set a new password:** they stay excluded from the D1 import (`target_admin_account`).
+5. **Soundboards start empty**, platform defaults included (accepted under the fresh start).
+6. **Open, for the production session:** how a drop and re-create of `hyperchat` interacts with the production KYC
+   restore witness and the backup sets (step 3).
 
 ## Future migrations (onboarding Phase B, 0038–0042)
 

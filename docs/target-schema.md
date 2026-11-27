@@ -30,7 +30,7 @@ Roles (no passwords; Unix-socket peer auth through the `hyperchat` ident map):
 | `moderation_actions` | `moderation_actions` | `donation_table` dropped; `donation_id` without FK (audit, orphans kept); `actor_user_id` (0009, FK `users` ON DELETE SET NULL): the web user behind a dashboard action |
 | `telegram_/discord_callback_mapping` | same | `table_name` dropped; FK → donations; only unexpired rows migrated |
 | `streamer_donator_totals` | same | `streamer_slug` → `streamer_id` FK |
-| slug-keyed soundboard tables, `api_keys` | same | FK on `streamer_slug` (ON UPDATE CASCADE) |
+| slug-keyed soundboard tables, `api_keys`, `partner_api_keys` | same (schema) | FK on `streamer_slug` (ON UPDATE CASCADE); **rows not migrated** at the fresh-start cutover (owner 2026-11-27: files not carried, keys reset) |
 | other 20 tables | same | structure copied; FKs to `users` instead of `auth_users` / `auth.users` |
 | — | `contact_submissions` | created by 0005 for the legacy contact form (whose table never existed in the legacy database); **unused** (dropping it would be a separate schema migration): the contact form is retired (D5, 2026-10-15) and no code reads or writes it |
 | `profiles`, `auth_migration_control` | — | Supabase artifacts, not migrated |
