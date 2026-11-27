@@ -143,7 +143,8 @@ async def lifespan(app: FastAPI):
             public=app.state.public, repo=PaymentRepository(conn, vaani_creators=settings.vaani_slugs,
                                                          accounting=settings.payment_accounting_enabled),
             accounts=payment_accounts, client=razorpay,
-            health=AccountHealth(razorpay), library=app.state.hypersounds, store=store, limiter=app.state.auth.repo)
+            health=AccountHealth(razorpay), library=app.state.hypersounds, store=store, limiter=app.state.auth.repo,
+            alerts=Alerts(app.state.db.connection))
         # Phase 9: channel authorization and client config; events are published by the worker.
         app.state.realtime = RealtimeService(
             enabled=settings.realtime_enabled, apps=PusherApps.from_settings(settings), repo=RealtimeRepository(conn),

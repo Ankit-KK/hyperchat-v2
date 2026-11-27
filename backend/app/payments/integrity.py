@@ -196,6 +196,8 @@ def report(rows: list[dict], state: dict, snaps: dict) -> dict:
 
 
 def needs_attention(summary: dict) -> bool:
-    """The CLI's exit-1 rule: an item needs attention, a donation is held, or Razorpay reports unrecorded refunds."""
+    """The CLI's exit-1 rule: an item needs attention, a donation is held, Razorpay reports unrecorded refunds, or
+    money was captured with no V2 donation and is not yet marked resolved (refunded)."""
     return bool(summary["attention"] or summary["accounting"]["held"]
-                or summary["refund_snapshots"]["missing_refund_evidence"])
+                or summary["refund_snapshots"]["missing_refund_evidence"]
+                or summary.get("captured_without_donation"))

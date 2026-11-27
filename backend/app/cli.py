@@ -48,6 +48,7 @@ from contextlib import asynccontextmanager
 import psycopg
 
 from app.admin.repository import AdminRepository, BootstrapRefused
+from app.alerts import Alerts
 from app.bots.clients import DiscordClient, TelegramClient
 from app.auth.passwords import hash_password, validate_new_password
 from app.core.config import Settings
@@ -269,6 +270,7 @@ async def payment_integrity_report(settings: Settings, args) -> int:
     repo = PaymentRepository(connection_factory(settings))
     summary = integrity.report(await repo.integrity_report(since), await repo.accounting_report(),
                                await repo.refund_snapshot_report())
+    summary["captured_without_donation"] = await Alerts(connection_factory(settings)).open_captures()
     print(json.dumps({"report": "payment-integrity", "read_only": True, "since": args.since, **summary},
                      indent=2, sort_keys=True))
     return 1 if integrity.needs_attention(summary) else 0

@@ -572,6 +572,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/payments/captured-without-donation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Captured Without Donation
+         * @description Money Razorpay captured (or authorized) on an order with no V2 donation (an unknown order, or an imported
+         *     legacy order, never applied), not yet marked resolved, oldest first. Each must be refunded by hand in the Razorpay
+         *     dashboard, then resolved with POST .../{payment_id}/resolve.
+         */
+        get: operations["captured_without_donation_api_v1_admin_payments_captured_without_donation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/payments/captured-without-donation/{payment_id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Captured Without Donation
+         * @description Mark a captured-without-donation payment resolved (admin + CSRF), audited as an append-only alert row with the
+         *     admin's id and reason. The refund itself is MANUAL in the Razorpay dashboard: this records it, never refunds.
+         *     'refunded' needs the Razorpay refund id.
+         */
+        post: operations["resolve_captured_without_donation_api_v1_admin_payments_captured_without_donation__payment_id__resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/payments/health": {
         parameters: {
             query?: never;
@@ -2413,6 +2457,16 @@ export interface components {
             swaps_used: number;
             /** Window Days */
             window_days: number;
+        };
+        /** CaptureResolution */
+        CaptureResolution: {
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "refunded" | "not_charged" | "duplicate";
+            /** Refund Id */
+            refund_id?: string | null;
         };
         /** ChangeIn */
         ChangeIn: {
@@ -4411,6 +4465,65 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    captured_without_donation_api_v1_admin_payments_captured_without_donation_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    resolve_captured_without_donation_api_v1_admin_payments_captured_without_donation__payment_id__resolve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                payment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CaptureResolution"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

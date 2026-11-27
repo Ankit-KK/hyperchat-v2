@@ -18,9 +18,11 @@ from app.cli import connection_factory
 from app.core.config import Settings
 from app.maintenance import cleanup
 from app.payments.accounts import AccountHealth
+from app.payments.models import CheckoutRequest
 from app.soundboard.library import HypersoundLibrary
 from app.storage.memory import InMemoryObjectStore, StoredObject
 from tests.integration import (
+    DOMAIN,
     ORIGIN,
     creator_state,
     current_database,
@@ -30,6 +32,7 @@ from tests.integration import (
     make_streamer,
     make_user,
     requires_db,
+    signed_in,
     update_streamer,
 )
 from tests.payments.fakes import (
@@ -359,6 +362,94 @@ def test_a_webhook_never_completes_or_fails_an_imported_legacy_order(client):
     with db() as conn:
         assert conn.execute("SELECT count(*) FROM public.jobs WHERE payload->>'donation_id' = %s",
                             (did,)).fetchone()[0] == 0
+    # the capture moved money: ONE refund alert naming the imported donation; the failure moved none
+    assert [(c["donation_id"], c["amount_paise"]) for c in capture_alerts(payment.id)] == [(did, 10000)]
+
+
+def capture_alerts(payment_id: str) -> list[dict]:
+    with db() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT context || jsonb_build_object('severity', severity, 'code', message) FROM public.system_alerts "
+            "WHERE context->>'kind' = 'captured_without_donation' AND context->>'payment_id' = %s", (payment_id,))]
+
+
+def captured_body(event: str, order: str, payment_id: str, amount: int = 10000) -> bytes:
+    return webhook_body(event, order, payment_id, amount, "INR", "authorized" if event == "payment.authorized"
+                        else "captured")
+
+
+def post_signed(client, raw: bytes, event_id: str):
+    return client.post(W, content=raw, headers={"x-razorpay-signature": sign(secret(client, "PRIMARY_WEBHOOK_SECRET"),
+                                                                             raw), "x-razorpay-event-id": event_id})
+
+
+def test_money_captured_with_no_v2_donation_is_recorded_alerted_once_and_resolved_by_an_admin(client):
+    """A late-approved legacy payment (auto-capture, same Razorpay account) arrives for an order V2 has no donation
+    for: recorded as unknown_order with its ids, never applied, ONE critical refund alert (deduplicated by payment id
+    across payment.authorized, payment.captured and redeliveries under new event ids). Admins see it in the
+    captured-without-donation list and the integrity report until one marks it resolved (audited, append-only)."""
+    order, pid = "order_TESTcwd" + secrets.token_hex(4), "pay_TESTcwd" + secrets.token_hex(4)
+    for n, event in enumerate(("payment.authorized", "payment.captured", "payment.captured")):
+        r = post_signed(client, captured_body(event, order, pid, 25000), f"authtest-cwd-{pid}-{n}")
+        assert (r.status_code, r.json()) == (200, {"status": "unknown_order"})
+    assert [e[3:] for e in events(f"authtest-cwd-{pid}-")] == [("unknown_order", order, pid, False)] * 3
+    (alert,) = capture_alerts(pid)
+    assert {k: alert[k] for k in ("order_id", "account", "amount_paise", "currency", "event_type", "severity",
+                                  "code")} == {"order_id": order, "account": "primary", "amount_paise": 25000,
+                                               "currency": "INR", "event_type": "payment.authorized",
+                                               "severity": "critical", "code": "refund_required"}
+    assert "donation_id" not in alert
+    with db() as conn:
+        assert conn.execute("SELECT count(*) FROM public.donations WHERE provider_payment_id = %s",
+                            (pid,)).fetchone()[0] == 0
+
+    A = "/api/v1/admin/payments/captured-without-donation"
+    plain = signed_in(client, "plain-cwd" + secrets.token_hex(3) + DOMAIN)
+    assert client.get(A).status_code == 403
+    assert client.post(f"{A}/{pid}/resolve", json={"reason": "not_charged"}, headers=plain).status_code == 403
+    headers = signed_in(client, "boss-cwd" + secrets.token_hex(3) + DOMAIN, role="admin")
+    listed = [c for c in client.get(A).json()["captured_without_donation"] if c["payment_id"] == pid]
+    assert [(c["order_id"], c["amount_paise"], c["account"]) for c in listed] == [(order, 25000, "primary")]
+    report = client.get("/api/v1/admin/payments/integrity").json()
+    assert pid in {c["payment_id"] for c in report["captured_without_donation"]} and report["needs_attention"] is True
+    for body, status in (({"reason": "refunded"}, 400), ({"reason": "not_charged", "refund_id": "rfnd_TEST1"}, 400),
+                         ({"reason": "refunded", "refund_id": "nope"}, 422), ({"reason": "other"}, 422)):
+        assert client.post(f"{A}/{pid}/resolve", json=body, headers=headers).status_code == status, body
+    assert client.post(f"{A}/{pid}/resolve", json={"reason": "refunded", "refund_id": "rfnd_TESTcwd1"}).status_code \
+        == 403  # no CSRF token
+    r = client.post(f"{A}/{pid}/resolve", json={"reason": "refunded", "refund_id": "rfnd_TESTcwd1"}, headers=headers)
+    assert r.status_code == 200 and (r.json()["reason"], r.json()["refund_id"]) == ("refunded", "rfnd_TESTcwd1")
+    assert pid not in {c["payment_id"] for c in client.get(A).json()["captured_without_donation"]}
+    assert client.post(f"{A}/{pid}/resolve", json={"reason": "duplicate"}, headers=headers).status_code == 404
+    assert client.post(f"{A}/pay_TESTnever1/resolve", json={"reason": "duplicate"}, headers=headers).status_code \
+        == 404
+    with db() as conn:  # the audit: one append-only resolution row with the admin's id; the alert itself unchanged
+        rows = conn.execute("SELECT context->>'reason', context->>'refund_id', context->>'actor_user_id' IS NOT NULL "
+                            "FROM public.system_alerts WHERE context->>'kind' = 'captured_without_donation_resolved' "
+                            "AND context->>'payment_id' = %s", (pid,)).fetchall()
+    assert rows == [("refunded", "rfnd_TESTcwd1", True)] and len(capture_alerts(pid)) == 1
+    # a later redelivery of the same capture never re-opens or re-alerts it
+    assert post_signed(client, captured_body("payment.captured", order, pid, 25000),
+                       f"authtest-cwd-{pid}-late").json() == {"status": "unknown_order"}
+    assert len(capture_alerts(pid)) == 1
+    assert pid not in {c["payment_id"] for c in client.get(A).json()["captured_without_donation"]}
+
+
+def test_a_legacy_order_id_can_never_be_presented_in_a_v2_confirm(client):
+    """V2 checkout creates its own Razorpay order (CheckoutRequest has no order id); confirm is keyed by the V2 order
+    and its status token, and the Checkout signature is checked against THAT donation's own provider order id. A
+    payment made on a legacy order, signed for the legacy order id, is refused (bad_signature) and changes nothing."""
+    make_streamer("authtest-pay-reuse")
+    out = checkout(client, "authtest-pay-reuse")
+    legacy_order = "order_TESTlegacyR" + secrets.token_hex(3)
+    payment = client.fake.captured(legacy_order, 10000)
+    legacy_sig = sign(secret(client, "PRIMARY_KEY_SECRET"), f"{legacy_order}|{payment.id}".encode())
+    r = confirm(client, out, payment.id, signature=legacy_sig)
+    assert (r.status_code, r.json()) == (400, {"error": "Invalid payment signature"}), r.text
+    row = donation(out["order_id"])
+    assert (row["payment_status"], row["provider_payment_id"], row["provider_order_id"]) == (
+        "pending", None, out["razorpay_order_id"])
+    assert "order_id" not in CheckoutRequest.model_fields and "razorpay_order_id" not in CheckoutRequest.model_fields
 
 
 def test_bad_signature_changes_nothing(client):

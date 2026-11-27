@@ -128,6 +128,22 @@ class FakeLimiter:
         return self.counts[(key, bucket)] <= limit
 
 
+class FakeAlerts:
+    """app.alerts.Alerts.captured_without_donation: one alert per payment id, or a database failure."""
+
+    def __init__(self) -> None:
+        self.captures: list[dict] = []
+        self.fail = False
+
+    async def captured_without_donation(self, **kw):
+        if self.fail:
+            raise psycopg.OperationalError("database down")
+        if any(c["payment_id"] == kw["payment_id"] for c in self.captures):
+            return False
+        self.captures.append(kw)
+        return True
+
+
 class World:
     def __init__(self) -> None:
         self.env = razorpay_env()
@@ -137,6 +153,7 @@ class World:
         self.repo = FakePaymentRepo()
         self.razorpay = FakeRazorpay()
         self.limiter = FakeLimiter()
+        self.alerts = FakeAlerts()
         self.store = InMemoryObjectStore(BASE)
         self.store.seed_library("hypersounds/Air Horn.mp3")
         self.clock = [1_800_000_000_000]
@@ -146,7 +163,7 @@ class World:
         return PaymentService(public=PublicService(self.public_repo), repo=self.repo,
                               accounts=PaymentAccounts.from_settings(self.settings), client=self.razorpay,
                               health=AccountHealth(self.razorpay), library=HypersoundLibrary(store), store=store,
-                              limiter=self.limiter, now_ms=lambda: self.clock[0])
+                              limiter=self.limiter, alerts=self.alerts, now_ms=lambda: self.clock[0])
 
     def secret(self, name: str) -> str:
         return self.env[f"HYPERCHAT_RAZORPAY_{name}"]
@@ -721,6 +738,36 @@ def test_webhook_unknown_order_and_wrong_account(client, world):
     r = post_webhook(client, raw, OTHER_SECRET, event_id="authtest-evt-2")
     assert (r.status_code, r.json()) == (401, {"error": "Invalid signature"})  # ...signed by no account of ours
     assert world.repo.applied == [] and world.razorpay.count("fetch_payment") == 0
+
+
+def test_money_captured_on_an_unknown_order_is_alerted_once_never_applied(client, world):
+    """A late-approved payment on an order V2 has no donation for (a legacy order created before the freeze, same
+    Razorpay account, auto-capture): recorded as unknown_order, nothing applied or fetched, ONE refund alert with the
+    payment id, order id, amount, currency and account; payment.authorized + payment.captured + a redelivery under a
+    new event id stay one alert."""
+    secret = world.secret("PRIMARY_WEBHOOK_SECRET")
+    for n, event in enumerate(("payment.authorized", "payment.captured", "payment.captured")):
+        raw = webhook_body(event, "order_LEGACYlate1", "pay_TESTlate1", 25000, status="authorized" if n == 0
+                           else "captured")
+        assert post_webhook(client, raw, secret, event_id=f"authtest-late-{n}").json() == {"status": "unknown_order"}
+    assert world.alerts.captures == [{"payment_id": "pay_TESTlate1", "order_id": "order_LEGACYlate1",
+                                      "account": "primary", "event_type": "payment.authorized",
+                                      "amount_paise": 25000, "currency": "INR", "donation_id": None}]
+    assert [e[1] for e in world.repo.events] == ["unknown_order"] * 3
+    assert world.repo.applied == [] and world.razorpay.count("fetch_payment") == 0
+    raw = webhook_body("payment.failed", "order_LEGACYlate2", "pay_TESTlate2", 100, status="failed")
+    assert post_webhook(client, raw, secret, event_id="authtest-late-f").json() == {"status": "unknown_order"}
+    assert len(world.alerts.captures) == 1  # a failed payment moved no money: no alert
+
+
+def test_an_alert_that_cannot_be_recorded_answers_502_so_razorpay_redelivers(client, world):
+    world.alerts.fail = True
+    raw = webhook_body("payment.captured", "order_LEGACYlate3", "pay_TESTlate3", 10000)
+    r = post_webhook(client, raw, world.secret("PRIMARY_WEBHOOK_SECRET"), event_id="authtest-late-x")
+    assert r.status_code == 502 and world.repo.events == []  # not marked seen: the redelivery is processed
+    world.alerts.fail = False
+    r = post_webhook(client, raw, world.secret("PRIMARY_WEBHOOK_SECRET"), event_id="authtest-late-x")
+    assert r.json() == {"status": "unknown_order"} and len(world.alerts.captures) == 1
 
 
 def test_webhook_captured_is_verified_server_side(client, world):

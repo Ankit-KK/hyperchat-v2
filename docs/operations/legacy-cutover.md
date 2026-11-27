@@ -147,6 +147,44 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
 8. **Streamers create new OBS tokens** in the V2 dashboard and re-add their browser sources (alert, leaderboard, goal).
    No legacy overlay URL works.
 
+### After the cutover: money captured on legacy orders
+
+**Facts (owner, 2026-11-27):**
+- The 5-minute payment limit is a Razorpay dashboard setting.
+- Capture is automatic, and late-approved payments (slow UPI or bank approval) are captured anyway.
+- V2 uses the same Razorpay account and keys as legacy.
+
+So a donor who started a legacy payment before the freeze can be charged after the cutover. V2 never applies such a
+payment: its legacy order loads `failed` with no order id (NV3-1), and the webhook refuses imported orders. Instead
+the webhook records it and raises a `captured_without_donation` operator alert (`docs/alerting.md`) with the payment
+id, order id, amount and account, once per payment.
+
+1. **Watch the alerts for 5 days after the freeze.**
+   - Razorpay's late-authorization window for this account is **not verified** here, so 5 days is the conservative
+     pick.
+   - Read the Discord channel and `GET /api/v1/admin/payments/captured-without-donation`.
+   - `GET /api/v1/admin/payments/integrity`, and the `payment-integrity-report` CLI's exit 1, report every unresolved
+     one.
+2. **Refund each one by hand** in the Razorpay dashboard: Payments → the payment id → Refund, full amount.
+   - V2 never refunds automatically.
+   - Then record it with `POST /api/v1/admin/payments/captured-without-donation/{payment_id}/resolve` and
+     `{"reason": "refunded", "refund_id": "rfnd_…"}`.
+   - Use `not_charged` (the payment failed or was voided) or `duplicate` only when the dashboard shows that.
+   - The resolution is an append-only, audited row with the admin's id.
+3. **Sweep once, at the end of the window.** A webhook can be missed (for example while the Razorpay webhook URL still
+   pointed at legacy).
+   - In the Razorpay dashboard, list every payment captured since the freeze.
+   - Any payment whose order is not a V2 order is money with no V2 donation. A V2 order is
+     `SELECT provider_order_id FROM public.donations WHERE legacy_source_table IS NULL`.
+   - Refund each one as in point 2. If it has an open alert, resolve that too.
+4. **Keep the Razorpay webhook pointed only at V2** from the switch on. A legacy endpoint that still receives
+   `payment.captured` could complete a legacy donation in the old system that nobody sees.
+5. **An old legacy order id cannot be reused in V2.**
+   - Checkout creates its own Razorpay order and takes no order id.
+   - Confirm is keyed by the V2 order and its status token, and checks the Checkout signature against that donation's
+     own order.
+   - Test: `test_a_legacy_order_id_can_never_be_presented_in_a_v2_confirm`.
+
 **Abort:** before step 7, drop the production database, re-create it at head and repeat from step 2. After a step 4
 `--apply`, follow the D1 abort rules (never re-run the importer blindly).
 

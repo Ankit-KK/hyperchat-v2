@@ -72,8 +72,18 @@ async def payment_integrity(request: Request, since: date | None = None,
     repo = PaymentRepository(single_connection_factory(get_settings().db_conninfo()))
     summary = integrity.report(await repo.integrity_report(since), await repo.accounting_report(),
                                await repo.refund_snapshot_report())
+    summary["captured_without_donation"] = await alerts.Alerts(request.app.state.db.connection).open_captures()
     return {"read_only": True, "since": since.isoformat() if since else None, **summary,
             "needs_attention": integrity.needs_attention(summary)}
+
+
+@router.get("/payments/captured-without-donation")
+async def captured_without_donation(request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
+    """Money Razorpay captured (or authorized) on an order with no V2 donation (an unknown order, or an imported
+    legacy order, never applied), not yet marked resolved, oldest first. Each must be refunded by hand in the Razorpay
+    dashboard, then resolved with POST .../{payment_id}/resolve."""
+    admin_service(request)  # 503 without a database
+    return {"captured_without_donation": await alerts.Alerts(request.app.state.db.connection).open_captures()}
 
 
 @router.get("/jobs")
