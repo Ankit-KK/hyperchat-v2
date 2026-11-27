@@ -18,13 +18,15 @@ import re
 import sys
 from datetime import UTC, datetime, timedelta
 
+from app.audio.silence import ensure_silence
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.kyc.enforcement import EnforcementRepository, EnforcementService
 from app.kyc.witness import KycWitness
 from app.onboarding.images import cleanup_images
 from app.security.audit import security_event
-from app.storage.r2 import UPLOAD_KEY, UPLOAD_PREFIXES, MAX_LISTED_UPLOADS, StorageError, build_object_store
+from app.storage.r2 import (GENERATED_KEY, LEGACY_TTS_KEY, MAX_LISTED_UPLOADS, UPLOAD_KEY, UPLOAD_PREFIXES, StorageError,
+                            build_object_store)
 
 UPLOAD_RETENTION = timedelta(hours=24)
 _KEY_TIME = re.compile(r"_(\d{13})_[0-9a-f]{32}\.[a-z]+$")
@@ -131,6 +133,43 @@ async def abandoned_uploads(store, connection_factory, *, dry_run: bool,
             continue
         try:
             await store.delete_upload(key)
+            counts["deleted"] += 1
+        except (StorageError, ValueError):
+            counts["delete_failed"] += 1
+    return counts
+
+
+async def legacy_tts_audio(store, connection_factory, *, delete: bool) -> dict[str, int]:
+    """Generated audio still at the pre-keyed name tts-audio/<creator>/<donation>.mp3 (security audit run-4 NV4-6):
+    derivable from two ids an OBS token holder learns, on a public bucket. Counts them (and their bytes) and the
+    donations whose tts_audio_url names one in this bucket; never reads an object. With delete: first points those
+    donations at the silence object (an alert replay plays silence, never a 404), then deletes exactly the listed
+    pre-keyed objects. Keyed (#183) and unrecognized names are never touched. Raises (changing nothing) when the
+    public base is unusable or the listing fails."""
+    base = store.public_url("")
+    if not (isinstance(base, str) and base.startswith("https://") and base.endswith("/") and len(base) > 9):
+        raise StorageError("public_base_unusable")
+    listed = await store.list_tts_audio()  # the whole listing first: a failure here changes nothing
+    legacy = [o for o in listed if LEGACY_TTS_KEY.match(o.key)]
+    counts = {"scanned": len(listed), "keyed_kept": sum(1 for o in listed if GENERATED_KEY.match(o.key)),
+              "unrecognized_kept": 0, "legacy": len(legacy), "legacy_bytes": sum(o.size for o in legacy),
+              "referencing_donations": 0, "repointed_to_silence": 0, "deleted": 0, "delete_failed": 0,
+              "listing_capped": int(len(listed) >= MAX_LISTED_UPLOADS)}
+    counts["unrecognized_kept"] = counts["scanned"] - counts["keyed_kept"] - counts["legacy"]
+    urls = [store.public_url(o.key) for o in legacy]
+    async with connection_factory() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT count(*) FROM public.donations WHERE tts_audio_url = ANY(%s::text[])", (urls,))
+        counts["referencing_donations"] = (await cur.fetchone())[0]
+    if not delete or not legacy:
+        return counts
+    silence = await ensure_silence(store)
+    async with connection_factory() as conn, conn.transaction(), conn.cursor() as cur:  # references, then objects
+        await cur.execute("UPDATE public.donations SET tts_audio_url = %s WHERE tts_audio_url = ANY(%s::text[])",
+                          (silence, urls))
+        counts["repointed_to_silence"] = cur.rowcount
+    for obj in legacy:
+        try:
+            await store.delete_legacy_tts(obj.key)
             counts["deleted"] += 1
         except (StorageError, ValueError):
             counts["delete_failed"] += 1
