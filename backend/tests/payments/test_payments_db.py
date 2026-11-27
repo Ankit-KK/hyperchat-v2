@@ -255,7 +255,7 @@ def test_an_imported_hyperemote_order_is_never_completed_by_a_late_capture(clien
     """An imported row may still carry is_hyperemote = true (history). NV3-1 (fresh-start cutover): a late capture of
     ANY imported order is recorded as unknown_order and applies nothing; the history flag is kept as it was."""
     sid = make_streamer("authtest-pay-oldemote")
-    update_streamer(sid, moderation_mode="manual")
+    update_streamer(sid, text_approval_required=True)
     out = checkout(client, "authtest-pay-oldemote")
     with fixture_db() as conn:  # make it look imported (the ETL writes legacy_source_table and keeps the flag)
         conn.execute("UPDATE public.donations SET is_hyperemote = true, legacy_source_table = 'authtest_donations' "
@@ -792,13 +792,22 @@ def upload(client, slug: str, kind: str) -> str:
     return client.store.public_url(key)
 
 
-@pytest.mark.parametrize("cols, attach, status, credited", [
-    ({"moderation_mode": "manual"}, None, "pending", False),
-    ({}, "voice", "pending", False),                                  # D2: voice held when media moderation is on
-    ({}, "media", "pending", False),
-    ({"media_moderation_enabled": False}, "voice", "auto_approved", True),
-    ({"moderation_mode": "manual"}, "hypersound", "auto_approved", True),
-])
+MODES = ("text", "voice", "media")
+
+
+def _cases():
+    """Migration 0046: each mode x auto/manual, the other two modes set the other way; a HyperSound with every mode
+    manual (always auto-approved)."""
+    for mode in MODES:
+        for setting in ("auto", "manual"):
+            other = "manual" if setting == "auto" else "auto"
+            cols = {f"{m}_approval_required": (setting if m == mode else other) == "manual" for m in MODES}
+            auto = setting == "auto"
+            yield cols, None if mode == "text" else mode, "auto_approved" if auto else "pending", auto
+    yield {f"{m}_approval_required": True for m in MODES}, "hypersound", "auto_approved", True
+
+
+@pytest.mark.parametrize("cols, attach, status, credited", list(_cases()))
 def test_auto_approve_rule_on_completion(client, cols, attach, status, credited):
     slug = "authtest-pay-rule"
     sid = make_streamer(slug)
@@ -819,6 +828,62 @@ def test_auto_approve_rule_on_completion(client, cols, attach, status, credited)
     assert totals(sid) == ([("Ravi", 200, 1)] if credited else [])
     if attach == "media":
         assert row["media_type"] == "image"
+
+
+# ── migration 0046: only a text donation carries a message (the donations CHECK) ──
+
+ATTACHMENTS = {"voice_message_url": "https://media.example.test/voice-messages/x.webm",
+               "hypersound_url": "https://media.example.test/hypersounds/Horn.mp3",
+               "media_url": "https://media.example.test/donation-media/x.png"}
+
+
+def _insert(sid: str, *, message: str | None, at: str | None = None, **attachment) -> str:
+    cols = {"streamer_id": sid, "order_id": "authtest-chk-" + secrets.token_hex(6), "donor_name": "Chk",
+            "amount": 100, "currency": "INR", "amount_inr": 100, "payment_status": "pending",
+            "moderation_status": "pending", "message": message, **attachment}
+    if at is not None:
+        cols["created_at"] = at
+    with fixture_db() as conn:  # as the migrator: the CHECK holds for every role, the owner included
+        return conn.execute(f"INSERT INTO public.donations ({', '.join(cols)}) VALUES "
+                            f"({', '.join(['%s'] * len(cols))}) RETURNING id::text", list(cols.values())).fetchone()[0]
+
+
+@pytest.mark.parametrize("column", list(ATTACHMENTS))
+def test_the_database_refuses_a_new_donation_with_a_message_and_an_attachment(client, column):
+    sid = make_streamer("authtest-pay-chk")
+    with pytest.raises(psycopg.errors.CheckViolation, match="donations_attachment_without_message"):
+        _insert(sid, message="hello", **{column: ATTACHMENTS[column]})
+    _insert(sid, message=None, **{column: ATTACHMENTS[column]})  # the attachment alone
+    _insert(sid, message="", **{column: ATTACHMENTS[column]})    # an empty message is no message
+    did = _insert(sid, message="hello")                           # the message alone (a text donation)
+    with pytest.raises(psycopg.errors.CheckViolation):  # nor added to a new row later
+        with fixture_db() as conn:
+            conn.execute(f"UPDATE public.donations SET {column} = %s WHERE id = %s", (ATTACHMENTS[column], did))
+
+
+def test_an_older_donation_with_both_still_completes_and_is_approved(client):
+    """Rows created before 0046 are exempt (its cutoff literal): a pending legacy-shaped row with a message and a
+    voice message still completes, and an approval (the 0031 credit writer runs in the same UPDATE) still works."""
+    slug = "authtest-pay-old-both"
+    sid = make_streamer(slug)
+    update_streamer(sid, voice_approval_required=True)
+    from app.payments.repository import PaymentRepository
+    did = _insert(sid, message="old message", at="2026-01-01T00:00:00+00",
+                  voice_message_url=ATTACHMENTS["voice_message_url"])
+    applied = asyncio.run(PaymentRepository(connection_factory(Settings())).apply(did, "captured",
+                                                                                 "pay_TESTchk" + secrets.token_hex(4)))
+    assert applied.result == "completed" and not applied.auto_approved  # voice: manual
+    from app.dashboard.repository import DashboardRepository
+    step = asyncio.run(DashboardRepository(connection_factory(Settings())).moderate(
+        sid, did, "approve", actor_user_id=None, actor_label="Dashboard", notes=None))
+    assert step is not None
+    with db() as conn:
+        assert conn.execute("SELECT payment_status, moderation_status, message FROM public.donations WHERE id = %s",
+                            (did,)).fetchone() == ("success", "approved", "old message")
+        assert conn.execute("SELECT total_amount FROM public.streamer_donator_totals WHERE streamer_id = %s",
+                            (sid,)).fetchone() is not None  # credited
+    with fixture_db() as conn:  # the row write PAY-15's donation_accounting_apply (0032) makes on an evaluation
+        assert conn.execute("UPDATE public.donations SET updated_at = now() WHERE id = %s", (did,)).rowcount == 1
 
 
 # ── concurrency: one completion, one credit ─────────────────────────────────

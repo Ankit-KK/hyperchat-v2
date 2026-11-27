@@ -71,7 +71,8 @@ def test_creators_search_filter_and_paging(app):
                                                                            "authtest-ar-c3"]
     assert {c["status"] for c in body["creators"]} == {"active", "pending"}
     assert set(body["creators"][0]) == {"id", "slug", "name", "status", "razorpay_account", "pusher_group",
-                                        "order_prefix", "brand_color", "moderation_mode", "claimed", "created_at"}
+                                        "order_prefix", "brand_color", "text_approval_required", "voice_approval_required", "media_approval_required",
+                                        "claimed", "created_at"}
     assert [c["slug"] for c in ok(app, "/creators", q="BETA")["creators"]] == ["authtest-ar-c2"]  # name, any case
     pending = ok(app, "/creators", q="authtest-ar-c", status="pending")
     assert pending["total"] == 1 and pending["creators"][0]["slug"] == "authtest-ar-c3"

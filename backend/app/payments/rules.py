@@ -2,7 +2,7 @@
 
 Legacy sources: create-razorpay-order-unified (validation, sanitising, minimums, order ids) and the two
 completion paths (razorpay-webhook, check-payment-status-unified), whose auto-approve rules disagreed; this
-is the single approved rule (D2: voice messages are held like media when media moderation is on).
+is the single approved rule: since migration 0046 one require-approval switch per donation mode (owner 2026-11-28).
 """
 
 import hashlib
@@ -246,18 +246,25 @@ def payment_mismatch(payment, *, provider_order_id: str | None, amount: Decimal,
     return None
 
 
-def auto_approves(*, has_hypersound: bool, has_voice: bool, has_media: bool,
-                  moderation_mode: str | None, media_moderation_enabled: bool | None) -> bool:
-    """The single auto-approve rule applied when a payment completes.
+# The donation modes with a require-approval switch (streamers.<mode>_approval_required, migration 0046). A HyperSound
+# has none: it is always auto-approved. Room for later modes (e.g. sound effects, music): add the column and the mode.
+MODERATED_MODES = ("text", "voice", "media")
+MESSAGE_MODES = frozenset({"text"})  # owner 2026-11-28: every other mode carries only the donor's name
 
-    HyperSounds are always auto-approved. Otherwise only creators in auto_approve mode (the column default)
-    auto-approve, except that with media moderation on (default true) a donation carrying media OR a voice
-    message waits for a moderator (D2). Every other donation follows these rules. An imported (legacy) order never
-    completes in V2 (NV3-1: the webhook records it as unknown_order), so it never reaches this rule.
+
+def auto_approves(*, has_hypersound: bool, has_voice: bool, has_media: bool, text_approval_required: bool,
+                  voice_approval_required: bool, media_approval_required: bool) -> bool:
+    """The single auto-approve rule applied when a payment completes (migration 0046, owner 2026-11-28).
+
+    A HyperSound is always auto-approved. Every other donation follows its own mode's switch (False approves,
+    anything else waits for a moderator): a voice message voice_approval_required, image/GIF media
+    media_approval_required, a text message (or a plain donation) text_approval_required. Only a text donation
+    carries a message (checkout refuses one on the other modes; the donations CHECK of 0046 too), so no unmoderated
+    text rides on an auto-approved mode. An imported (legacy) order never completes in V2 (NV3-1: the webhook records
+    it as unknown_order).
     """
     if has_hypersound:
         return True
-    if (moderation_mode or "auto_approve") != "auto_approve":
-        return False
-    media_moderation = True if media_moderation_enabled is None else media_moderation_enabled
-    return not (media_moderation and (has_media or has_voice))
+    required = (voice_approval_required if has_voice else media_approval_required if has_media
+                else text_approval_required)
+    return required is False

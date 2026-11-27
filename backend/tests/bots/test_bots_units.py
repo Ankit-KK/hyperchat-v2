@@ -44,7 +44,7 @@ def donation(**kw):
              moderation_status="pending", voice_message_url=None, media_url=None, media_type=None,
              created_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC), mod_notified=False, too_old=False,
              telegram_enabled=True, discord_enabled=True, discord_moderation_channel_id=None,
-             moderation_mode="manual")
+             text_approval_required=True, voice_approval_required=True, media_approval_required=True)
     d.update(kw)
     return d
 
@@ -53,7 +53,8 @@ def moderator(**kw):
     m = dict(id=str(uuid.uuid4()), streamer_id=SID, mod_name="Mod <i>", telegram_user_id="111111111",
              discord_user_id="222222222222222222", role="moderator", can_approve=True, can_reject=True,
              can_hide_message=True, can_ban=False, is_active=True, total_actions=7, telegram_enabled=True,
-             discord_enabled=True, moderation_mode="manual", streamer_name="Ankit", streamer_slug="ankit",
+             discord_enabled=True, text_approval_required=True, voice_approval_required=True, media_approval_required=True,
+             streamer_name="Ankit", streamer_slug="ankit",
              created_at=datetime(2026, 1, 1, tzinfo=UTC), discord_moderation_channel_id=None)
     m.update(kw)
     return m

@@ -110,7 +110,7 @@ def test_payment_completion_writes_events_in_the_same_transaction(clean):
 
 def test_manual_moderation_payment_announces_the_donation_only(clean):
     sid = make_streamer("authtest-p9-manual")
-    update_streamer(sid, moderation_mode="manual")
+    update_streamer(sid, text_approval_required=True)
     did = pending_payment(sid)
     run(PaymentRepository(factory()).apply(did, "captured", "pay_TESTp9" + secrets.token_hex(4)))
     assert events(sid) == ["new-donation"]
@@ -175,7 +175,7 @@ def test_moderation_events(clean):
 def test_settings_events_and_coalescing(clean):
     sid = make_streamer("authtest-p9-set")
     repo = DashboardRepository(factory())
-    run(repo.update_settings(sid, {"tts_enabled": False, "moderation_mode": "manual"}))
+    run(repo.update_settings(sid, {"tts_enabled": False, "text_approval_required": True}))
     assert events(sid) == []  # not pushed live
     run(repo.update_settings(sid, {"brand_color": "#112233"}))
     run(repo.update_settings(sid, {"brand_color": "#445566", "goal_name": "Mic"}))

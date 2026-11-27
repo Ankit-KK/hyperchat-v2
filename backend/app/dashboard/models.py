@@ -31,10 +31,13 @@ class DashboardSettings(_Model):  # D-R1
     slug: str
     name: str
     status: str  # pending / active / rejected (never the rejection reason)
-    moderation_mode: str
+    # migration 0046: a moderator approves this mode's donations before they play. HyperSounds have no switch: they
+    # are always auto-approved
+    text_approval_required: bool   # text messages and plain donations
+    voice_approval_required: bool  # audio (voice) messages
+    media_approval_required: bool  # images / GIFs
     telegram_moderation_enabled: bool
     discord_moderation_enabled: bool
-    media_moderation_enabled: bool
     tts_enabled: bool
     tts_language_boost: str | None
     el_voice_id: str | None
@@ -83,7 +86,9 @@ class SettingsPatch(_Model):  # D-M1 body
     """Any subset of the writable settings; an absent field is left unchanged. JSON null is only
     accepted for the nullable setting el_voice_id. goal_activated_at is server-owned (D-G): not a field here."""
 
-    moderation_mode: Literal["auto_approve", "manual"] | None = None
+    text_approval_required: StrictBool | None = None
+    voice_approval_required: StrictBool | None = None
+    media_approval_required: StrictBool | None = None
     telegram_moderation_enabled: StrictBool | None = None
     discord_moderation_enabled: StrictBool | None = None
     tts_enabled: StrictBool | None = None
@@ -94,7 +99,6 @@ class SettingsPatch(_Model):  # D-M1 body
     goal_target_amount: Annotated[float, Field(strict=True, gt=0, le=v.GOAL_TARGET_MAX,
                                                allow_inf_nan=False)] | None = None
     media_upload_enabled: StrictBool | None = None
-    media_moderation_enabled: StrictBool | None = None
     tts_language_boost: Annotated[StrictStr, AfterValidator(v.tts_language)] | None = None
     alert_overlay_id: _overlay(v.ALERT_OVERLAY_MAX) | None = None
     leaderboard_overlay_id: _overlay(v.LEADERBOARD_OVERLAY_MAX) | None = None

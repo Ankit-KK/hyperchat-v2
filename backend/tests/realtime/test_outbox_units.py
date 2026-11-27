@@ -84,7 +84,8 @@ def test_emit_refuses_anything_but_known_events_ids_and_codes(kwargs):
     (["goal_is_active", "goal_activated_at", "goal_target_amount"], ["goal-progress"]),
     (["leaderboard_widget_enabled"], ["settings-updated", "leaderboard-updated"]),
     (["brand_color", "goal_name"], ["settings-updated", "goal-progress"]),
-    (["tts_enabled", "moderation_mode", "el_voice_id", "media_moderation_enabled"], []),  # not pushed live
+    (["tts_enabled", "text_approval_required", "voice_approval_required", "media_approval_required", "el_voice_id"],
+     []),  # not pushed live
 ])
 def test_settings_changes_map_to_events(changed, events):
     written, _ = emitted(lambda cur: outbox.emit_settings_changed(cur, SID, changed))

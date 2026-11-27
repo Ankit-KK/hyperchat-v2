@@ -496,13 +496,16 @@ try:
     # ── creator dashboard ───────────────────────────────────────────────────
     S = "dashboard"
     # D-G (#117): goal_activated_at is server-owned; the client only activates the goal and the server stamps the time
-    r = owner_a.write("PATCH", settings_a, json={"moderation_mode": "manual", "brand_color": "#123456",
+    # migration 0046 replaced the moderation setting (one switch per mode): patch whichever this release serves
+    mode_key, mode_value = (("text_approval_required", True) if "text_approval_required" in owner_a.get(settings_a).json()
+                            else ("moderation_mode", "manual"))
+    r = owner_a.write("PATCH", settings_a, json={mode_key: mode_value, "brand_color": "#123456",
                                                  "goal_is_active": True, "goal_name": "Smoke goal",
                                                  "goal_target_amount": 1000})
     check(S, "settings update (moderation, colour, goal)", r.is_success, r.text)
     got = owner_a.get(settings_a).json()
     check(S, "settings read back", str(got.get("brand_color", "")).lower() == "#123456"
-          and got.get("moderation_mode") == "manual", str(got)[:200])
+          and got.get(mode_key) == mode_value, str(got)[:200])
     ok, detail = smoke_policy.goal_stamped_by_server(got.get("goal_activated_at"), STARTED, datetime.now(UTC))
     check(S, "D-G: the goal activation time was stamped by the server (this run's window, never client-chosen)",
           ok and got.get("goal_is_active") is True, detail)
@@ -1223,7 +1226,7 @@ try:
                          (too_new, "image/png"), (board, "audio/mpeg")):
                 await r2.put_object(k, b"synthetic", content_type=t)
             sid = make_creator("d9", None)
-            make_donation(sid, "D9 donor", 50)
+            make_donation(sid, "D9 donor", 50, message=None)  # 0046: a voice donation carries no message
             with db() as c:
                 c.execute("UPDATE public.donations SET voice_message_url = %s WHERE streamer_id = %s",
                           (r2.public_url(referenced), sid))

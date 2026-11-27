@@ -23,7 +23,8 @@ MAX_ASSIGNMENTS = 50
 _MOD_COLS = """m.id::text AS id, m.streamer_id::text AS streamer_id, m.mod_name, m.telegram_user_id, m.discord_user_id,
     COALESCE(m.role::text, 'moderator') AS role, m.can_approve, m.can_reject, m.can_hide_message, m.can_ban,
     m.is_active, COALESCE(m.total_actions, 0) AS total_actions, m.created_at"""
-_STREAMER_COLS = """s.streamer_slug, s.streamer_name, COALESCE(s.moderation_mode, 'auto_approve') AS moderation_mode,
+_STREAMER_COLS = """s.streamer_slug, s.streamer_name, s.text_approval_required, s.voice_approval_required,
+    s.media_approval_required,
     COALESCE(s.telegram_moderation_enabled, true) AS telegram_enabled,
     COALESCE(s.discord_moderation_enabled, false) AS discord_enabled, s.discord_moderation_channel_id"""
 

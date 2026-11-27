@@ -31,7 +31,7 @@ from tests.integration import PG_HOST, requires_db, target
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "database"))
 from etl import auth_hash_import as imp  # noqa: E402
 from etl import rehearsal  # noqa: E402
-from etl.mapping import V2_ONLY_COLUMNS  # noqa: E402
+from etl.mapping import MODERATION_FROM_LEGACY, V2_ONLY_COLUMNS  # noqa: E402
 from etl.reconcile import verifier_result  # noqa: E402
 
 pytestmark = [requires_db, pytest.mark.skipif(not os.environ.get("HYPERCHAT_TEST_VERIFY_ADMIN"),
@@ -49,6 +49,12 @@ def _u(n: int) -> str:
 U_ADMIN, U_S1, U_S2, U_PLAIN, U_ROGUE = _u(1), _u(2), _u(3), _u(4), _u(5)
 SUPA = {U_ADMIN: _u(101), U_S1: _u(102), U_S2: _u(103), U_PLAIN: _u(104), U_ROGUE: _u(105)}
 S_ALPHA, S_BETA, S_GAMMA, S_SAPPHIRE = _u(11), _u(12), _u(13), _u(14)
+# 0046: legacy moderation settings, one combination per creator (manual; auto with media moderation off; auto with
+# it NULL, read as on; auto with it on)
+LEGACY_MODERATION = {"alpha": {"moderation_mode": "manual", "media_moderation_enabled": False},
+                     "beta": {"moderation_mode": "auto_approve", "media_moderation_enabled": False},
+                     "gamma": {"moderation_mode": None, "media_moderation_enabled": None},
+                     "sapphire": {"moderation_mode": "auto_approve", "media_moderation_enabled": True}}
 MOD = _u(21)
 
 # (bucket name as given, amount, amount_inr, currency, payment_status, moderation_status) per creator, oldest first.
@@ -134,7 +140,7 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
                 "timestamptz, updated_at timestamptz, streamer_id uuid, password_hash text)")
     src.execute("CREATE TABLE public.admin_emails (email text)")
     _mirror(src, tgt, "streamers", drop=("razorpay_key_ref", "razorpay_secret_ref", "razorpay_account", "kyc_track",
-                                         "kyc_baseline_owner_id"),
+                                         "kyc_baseline_owner_id", *MODERATION_FROM_LEGACY),  # 0046: V2-only
             add='"razorpay-keyid" text, "razorpay-keysecret" text, donation_table_id integer')
     src.execute("CREATE TABLE public.obs_tokens (id uuid, streamer_id uuid, token text, is_active boolean)")
     for table in (*rehearsal.STRAIGHT_COPIES, "api_keys", "partner_api_keys"):  # keys: read only to count them
@@ -177,8 +183,8 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
             (S_BETA, "beta", U_S2, "active", None, f"{LEGACY_BASE}/creator/beta-bg.png"),
             (S_GAMMA, "gamma", None, "pending", None, None), (S_SAPPHIRE, "sapphire", None, "active", None, None)):
         _insert(src, "streamers", id=sid, user_id=owner, streamer_slug=slug, streamer_name=f"ETL {slug}",
-                status=status, brand_logo_url=logo, background_url=bg, **{"razorpay-keyid": "razorpay-keyid",
-                                                                          "razorpay-keysecret": "razorpay-keysecret"})
+                status=status, brand_logo_url=logo, background_url=bg, **LEGACY_MODERATION[slug],
+                **{"razorpay-keyid": "razorpay-keyid", "razorpay-keysecret": "razorpay-keysecret"})
     _insert(src, "obs_tokens", id=_u(31), streamer_id=S_ALPHA, token="obs_" + "a" * 32, is_active=True)
 
     # rows: every straight copy
@@ -308,6 +314,11 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
                                                             "/assets/streamers/alpha/bg.png"),
                                                            (None, f"{MEDIA_BASE}/creator/beta-bg.png")]
         assert c.execute("SELECT review_status FROM public.user_signups").fetchall() == [("legacy_unreviewed",)]
+        # 0046: each legacy creator keeps the approval behaviour it had (never the new-creator defaults)
+        assert {s: m for s, *m in c.execute("SELECT streamer_slug, text_approval_required, voice_approval_required, "
+                                            "media_approval_required FROM public.streamers").fetchall()} == {
+            "alpha": [True, True, True], "beta": [False, False, False],
+            "gamma": [False, True, True], "sapphire": [False, True, True]}
         assert c.execute("SELECT kyc_track, kyc_baseline_owner_id::text FROM public.streamers ORDER BY id"
                          ).fetchall() == [("legacy", U_S1), ("legacy", U_S2), ("legacy", None), ("legacy", None)]
         assert c.execute("SELECT role FROM public.users WHERE id = %s", (U_ADMIN,)).fetchone()[0] == "admin"

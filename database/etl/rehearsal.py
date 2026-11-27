@@ -46,6 +46,7 @@ from etl.mapping import (
     DONATION_CLEARED_COLUMNS,
     LEGACY_VALUES,
     MEDIA_URL_COLUMNS,
+    MODERATION_FROM_LEGACY,
     RAZORPAY_ACCOUNTS,
     V2_ONLY_COLUMNS,
     media_base,
@@ -237,7 +238,7 @@ class Loader:
         # the baseline owner (migration 0020: the runtime roles can never set these two columns).
         src_expr = [{"razorpay_key_ref": '"razorpay-keyid"', "razorpay_secret_ref": '"razorpay-keysecret"',
                      "razorpay_account": account, "kyc_track": "'legacy'", "kyc_baseline_owner_id": '"user_id"',
-                     "status": OWNERLESS_PENDING}
+                     "status": OWNERLESS_PENDING, **MODERATION_FROM_LEGACY}
                     .get(c, sql.Identifier(c).as_string(self.src)) for c in tgt_cols]
         streamers = self.media("streamers", tgt_cols,
                                self.fetch(f"SELECT {', '.join(src_expr)} FROM public.streamers"))

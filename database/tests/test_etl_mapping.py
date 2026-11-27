@@ -230,3 +230,28 @@ def test_loader_puts_every_legacy_creator_on_the_legacy_kyc_track():
     loader.load_users_and_streamers()
     assert queries[-2] == ('SELECT "id", "streamer_slug", CASE WHEN user_id IS NULL AND status = \'active\' '
                            'THEN \'pending\' ELSE status END, "user_id", \'legacy\', "user_id" FROM public.streamers')
+
+
+def test_legacy_creators_keep_their_moderation_in_the_per_mode_columns():
+    """Migration 0046: production is built fresh at head and loaded afterwards, so the migration's backfill never sees
+    a legacy creator. The loader maps each one from its own moderation_mode / media_moderation_enabled with exactly
+    the migration's expressions (else every imported creator would silently get the new-creator defaults)."""
+    import importlib.util
+
+    from etl.mapping import MODERATION_FROM_LEGACY
+    from etl.rehearsal import Loader
+
+    path = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0046_per_mode_moderation.py"
+    spec = importlib.util.spec_from_file_location("_m0046_for_etl", path)
+    m0046 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m0046)
+    assert MODERATION_FROM_LEGACY == m0046.BACKFILL
+
+    queries: list[str] = []
+    loader = Loader(None, None)
+    loader.fetch = lambda query, params=None: queries.append(query) or [(0,)] * query.startswith("SELECT count")
+    loader.columns = lambda conn, table: ["id", *MODERATION_FROM_LEGACY]
+    loader.copy = lambda table, columns, rows: 0
+    loader.tgt = SimpleNamespace(cursor=lambda: contextlib.nullcontext(SimpleNamespace(execute=lambda *a: None)))
+    loader.load_users_and_streamers()
+    assert queries[-2] == 'SELECT "id", ' + ", ".join(MODERATION_FROM_LEGACY.values()) + " FROM public.streamers"

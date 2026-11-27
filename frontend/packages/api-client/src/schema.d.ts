@@ -2582,18 +2582,16 @@ export interface components {
             leaderboard_overlay_id: number;
             /** Leaderboard Widget Enabled */
             leaderboard_widget_enabled: boolean;
+            /** Media Approval Required */
+            media_approval_required: boolean;
             /** Media Min Amount */
             media_min_amount: number | null;
-            /** Media Moderation Enabled */
-            media_moderation_enabled: boolean;
             /** Media Upload Enabled */
             media_upload_enabled: boolean;
             /** Message Char Tiers */
             message_char_tiers: unknown;
             /** Message Min Amount */
             message_min_amount: number | null;
-            /** Moderation Mode */
-            moderation_mode: string;
             /** Name */
             name: string;
             /** Overlay Adjust Mode */
@@ -2604,10 +2602,14 @@ export interface components {
             status: string;
             /** Telegram Moderation Enabled */
             telegram_moderation_enabled: boolean;
+            /** Text Approval Required */
+            text_approval_required: boolean;
             /** Tts Enabled */
             tts_enabled: boolean;
             /** Tts Language Boost */
             tts_language_boost: string | null;
+            /** Voice Approval Required */
+            voice_approval_required: boolean;
             /** Voice Min Amount */
             voice_min_amount: number | null;
             /** Voice Tiers */
@@ -3114,26 +3116,28 @@ export interface components {
             leaderboard_overlay_id?: number | null;
             /** Leaderboard Widget Enabled */
             leaderboard_widget_enabled?: boolean | null;
+            /** Media Approval Required */
+            media_approval_required?: boolean | null;
             /** Media Min Amount */
             media_min_amount?: number | null;
-            /** Media Moderation Enabled */
-            media_moderation_enabled?: boolean | null;
             /** Media Upload Enabled */
             media_upload_enabled?: boolean | null;
             /** Message Char Tiers */
             message_char_tiers?: components["schemas"]["CharTier"][] | null;
             /** Message Min Amount */
             message_min_amount?: number | null;
-            /** Moderation Mode */
-            moderation_mode?: ("auto_approve" | "manual") | null;
             /** Overlay Adjust Mode */
             overlay_adjust_mode?: boolean | null;
             /** Telegram Moderation Enabled */
             telegram_moderation_enabled?: boolean | null;
+            /** Text Approval Required */
+            text_approval_required?: boolean | null;
             /** Tts Enabled */
             tts_enabled?: boolean | null;
             /** Tts Language Boost */
             tts_language_boost?: string | null;
+            /** Voice Approval Required */
+            voice_approval_required?: boolean | null;
             /** Voice Min Amount */
             voice_min_amount?: number | null;
             /** Voice Tiers */

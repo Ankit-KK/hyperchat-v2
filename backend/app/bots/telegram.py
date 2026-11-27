@@ -259,7 +259,11 @@ class TelegramBot:
 
     async def _settings(self, chat_id: str, user_id: str) -> None:
         for m in await self._assignments(chat_id, user_id):
-            manual = m["moderation_mode"] == "manual"
+            def mode(key: str, m: dict = m) -> str:  # migration 0046: one require-approval switch per mode
+                return "Auto-Approve" if m[key] is False else "Manual Approval"
             await self._say(chat_id, f"⚙️ <b>Moderation Settings</b>\n\n🎮 Streamer: <b>{fmt.esc_html(m['streamer_name'])}"
-                                     f"</b>\n\n📋 <b>Mode:</b> {'Manual Approval' if manual else 'Auto-Approve'}\n"
+                                     f"</b>\n\n📋 <b>Text:</b> {mode('text_approval_required')}\n"
+                                     f"🎙️ <b>Voice:</b> {mode('voice_approval_required')}\n"
+                                     f"🖼️ <b>Images/GIFs:</b> {mode('media_approval_required')}\n"
+                                     f"🔊 <b>HyperSounds:</b> Auto-Approve\n"
                                      f"📱 <b>Telegram:</b> {'Enabled ✅' if m['telegram_enabled'] else 'Disabled ❌'}")

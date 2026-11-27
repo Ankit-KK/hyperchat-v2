@@ -1260,6 +1260,9 @@ HEAD_DELTAS = {
     "0045": no_payment_delta("security audit run-4: kyc_change_creator_status, kyc_account_revoke and "
                              "kyc_receive_webhook re-created (KYC witness events; revoked accounts' webhooks "
                              "ignored); creator_donation_block and the donations trigger unchanged, no pinned function"),
+    "0046": no_payment_delta("per-mode moderation: streamers columns, and a CHECK constraint (no trigger) on donations "
+                             "that refuses a message with an attachment; TRIGGER_PINS, ACLs and pinned functions "
+                             "unchanged"),
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD
