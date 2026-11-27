@@ -127,6 +127,13 @@ Since migration 0029 the log is **append-only for every role**:
 
 When a donation is paid:
 - **Payment id**: `provider_payment_id` is stored (unique).
+- **Creator blocked after checkout (owner decision 2026-11-28, audit run-4 NV4-1):** the payment is **completed and
+  credited**. That covers a creator suspended, restricted or otherwise blocked after the order was created, and a
+  payment authorised late (slow UPI or bank). Creator eligibility (`creator_donation_block`) is checked only when
+  checkout inserts the pending donation, and no completion path re-checks it. Razorpay captures late
+  authorisations automatically, and refusing one would hold the donor's money with no donation. Tests:
+  `test_checkout_uploads_and_inserts_follow_one_rule_and_existing_orders_finalize` (restriction) and
+  `test_a_late_capture_for_a_creator_suspended_after_checkout_completes_and_credits` (suspension).
 - **Auto-approve rule (D2, D7)**: HyperSounds are always auto-approved. HyperEmotes are discontinued (owner decision D16, 2026-11-13): no donation is auto-approved for being one, an imported `is_hyperemote` row included. Otherwise only creators in `auto_approve` mode auto-approve, and with media moderation on (default) a donation with **media or a voice message** waits for a moderator.
 - **If auto-approved**:
   - `moderation_status = auto_approved`, `approved_by_label = system`;

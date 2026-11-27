@@ -32,7 +32,7 @@ from tests.integration import (
     target,
 )
 from tests.kyc.test_kyc_db import WF, configure, unconfigure
-from tests.payments.test_payments_db import checkout, client, donation, rz_env, webhook  # noqa: F401 (fixtures)
+from tests.payments.test_payments_db import checkout, client, donation, rz_env, totals, webhook  # noqa: F401 (fixtures)
 
 pytestmark = requires_db
 A = "/api/v1/admin"
@@ -380,6 +380,20 @@ def test_checkout_uploads_and_inserts_follow_one_rule_and_existing_orders_finali
     assert webhook(client, "payment.captured", out, payment.id, event_id="authtest-enf-ev1").json() == {
         "status": "completed"}
     assert donation(out["order_id"])["payment_status"] == "success"  # the earlier order still completes
+
+
+def test_a_late_capture_for_a_creator_suspended_after_checkout_completes_and_credits(client, enf):
+    # Owner decision 2026-11-28 (audit run-4 NV4-1): a payment authorised late for a creator blocked or suspended
+    # after checkout is completed and credited, never refused (docs/payments-api.md section 5).
+    sid = make_streamer("authtest-enf-late", user_id=owner_user("enf-late"))
+    out = checkout(client, "authtest-enf-late")  # created while the creator was active
+    assert status_change(enf, sid, "suspend", "active", "test").status_code == 200
+    assert refused(sid)  # no new donation can be created
+    payment = client.fake.captured(out["razorpay_order_id"], 10000)
+    assert webhook(client, "payment.captured", out, payment.id, event_id="authtest-enf-late1").json() == {
+        "status": "completed"}
+    assert donation(out["order_id"])["payment_status"] == "success"
+    assert totals(sid) == [("Ravi", 100, 1)]  # credited once
 
 
 # ── races (lock order: creator row first) ───────────────────────────────────────
