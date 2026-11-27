@@ -235,13 +235,15 @@ def test_a_real_set_restores_at_the_head_with_its_security_invariants(real_set, 
     assert code == 0 and out["structurally_valid"] and out["backup_valid"] and out["restore_valid"], out
     assert out["kyc_witness"] == "consistent" and "ok" not in out
     assert out["live_operation_approved"] is False  # never approved by this tool
-    assert out["live_operation_blockers"] == ["sessions_revoke_required", "external_reconciliation_required",
+    assert out["live_operation_blockers"] == ["sessions_revoke_required", "authority_reapply_required",
+                                              "stepup_state_unconfirmed", "external_reconciliation_required",
                                               "owner_approval_required"]
     inv = out["invariants"]
     assert inv["alembic_version"] == restore_check.expected_head() and inv["alembic_matches_manifest"]
     assert inv["objects_not_owned_by_hyperchat_owner"] == 0 and inv["public_table_privileges"] == 0
     assert inv["guard_triggers_enabled"] > 0 and inv["guard_triggers_disabled"] == 0
     assert inv["runtime_role_privilege_leaks"] == [] and inv["stepup_enforcement"] == "draft"
+    assert inv["stepup_matches_manifest"]
     assert out["witness"] == {"checked": True, "verdict": "consistent", "problem": None, "database_generation": 0,
                               "witness_generation": 0, "meaning": "consistent: new donations allowed"}
     assert json.loads(out_file.read_text())["structurally_valid"] is True
@@ -329,3 +331,24 @@ def test_restore_runbooks_end_every_session_instead_of_relying_on_the_secret():
     assert "(all sessions end)" not in text
     assert text.count("UPDATE public.sessions SET revoked_at = now() WHERE revoked_at IS NULL") == 2  # corruption, VPS
     assert "the sessions step" in text  # the failed-migration restore points to it
+
+
+def test_authority_blockers_name_the_reapply_step_and_an_unconfirmed_or_behind_stepup_state():
+    # Security audit run-4 NV4-2 (owner decision 2026-11-28): a restore re-applies or rotates authority changes made
+    # after the set, and the restored step-up state is confirmed against the newest record.
+    assert restore_check.authority_blockers(None, None) == ["authority_reapply_required"]  # before 0025
+    assert restore_check.authority_blockers("draft", None) == ["authority_reapply_required", "stepup_state_unconfirmed"]
+    assert restore_check.authority_blockers("draft", "active") == ["authority_reapply_required",
+                                                                   "stepup_enforcement_behind"]
+    assert restore_check.authority_blockers("active", "active") == ["authority_reapply_required"]
+    assert restore_check.authority_blockers("draft", "draft") == ["authority_reapply_required"]
+
+
+def test_every_restore_runbook_runs_the_mandatory_authority_step():
+    text = (Path(__file__).resolve().parents[3] / "docs" / "backup-recovery.md").read_text(encoding="utf-8")
+    assert "### After every whole-database restore: re-apply authority changes (mandatory)" in text
+    assert text.count("**Authority [APPROVAL]:** the mandatory re-apply step") == 2  # corruption, VPS
+    assert "the sessions step, the authority step and reconciliation" in text  # the failed-migration restore
+    for row in ("OBS-token revocations", "Partner-key revocations", "Invite revocations", "Creator suspensions",
+                "Didit account revocations", "Step-up enforcement state", "Admin role or deactivation changes"):
+        assert f"| {row} |" in text, row

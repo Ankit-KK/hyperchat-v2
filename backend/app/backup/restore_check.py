@@ -202,6 +202,8 @@ def invariants(conn: psycopg.Connection, bset: BackupSet, head: str | None) -> d
     out["runtime_roles_present"] = sorted(roles)
     if q("SELECT to_regclass('public.stepup_enforcement') IS NOT NULL"):
         out["stepup_enforcement"] = q("SELECT state FROM public.stepup_enforcement")
+        recorded_stepup = bset.manifest.get("stepup_enforcement") or None
+        out["stepup_matches_manifest"] = recorded_stepup is None or out["stepup_enforcement"] == recorded_stepup
     if q("SELECT to_regclass('public.kyc_enforcement') IS NOT NULL"):
         state, generation = conn.execute("SELECT state, generation FROM public.kyc_enforcement").fetchone()
         out["kyc_enforcement"] = {"state": state, "generation": generation}
@@ -212,7 +214,7 @@ def invariants(conn: psycopg.Connection, bset: BackupSet, head: str | None) -> d
     out["ok"] = (out["alembic_matches_manifest"] and out["alembic_matches_expected_head"]
                  and out["objects_not_owned_by_hyperchat_owner"] == 0 and out["public_table_privileges"] == 0
                  and out["guard_triggers_disabled"] == 0 and not leaks
-                 and out.get("kyc_generation_not_behind_manifest", True)
+                 and out.get("kyc_generation_not_behind_manifest", True) and out.get("stepup_matches_manifest", True)
                  and out.get("stepup_enforcement", "draft") in ("draft", "active"))
     return out
 
@@ -302,6 +304,19 @@ def run(args: argparse.Namespace) -> dict:
     return result
 
 
+def authority_blockers(restored_stepup: str | None, expected_stepup: str | None) -> list[str]:
+    """What a restore of an older set may have undone outside the KYC witness (docs/backup-recovery.md, "Re-apply
+    authority changes"): always the mandatory re-apply step, and the step-up state unless the operator confirmed it
+    against the newest record (--expect-stepup, e.g. the newest manifest of any set or the owner's record)."""
+    blockers = ["authority_reapply_required"]
+    if restored_stepup is not None:
+        if expected_stepup is None:
+            blockers.append("stepup_state_unconfirmed")
+        elif expected_stepup == "active" and restored_stepup == "draft":
+            blockers.append("stepup_enforcement_behind")  # a set from before activation: admin writes lose step-up
+    return blockers
+
+
 @contextmanager
 def _server(target: dict):
     yield target
@@ -322,6 +337,9 @@ def main(argv: list[str] | None = None) -> int:
                                               "'none' to skip)")
     parser.add_argument("--witness", help="the NEWEST witness copy (app.backup.witness select); default: the set's own")
     parser.add_argument("--roles-sql", default=str(REPO / "deploy/postgres/roles.sql"))
+    parser.add_argument("--expect-stepup", choices=["draft", "active"],
+                        help="the environment's newest known step-up state (newest manifest of any set, or the owner's "
+                             "record); without it the restored state stays unconfirmed")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
     result = run(args)
@@ -333,7 +351,9 @@ def main(argv: list[str] | None = None) -> int:
     result["live_operation_blockers"] = (
         ([] if structural else ["not_structurally_valid"])
         + ([] if verdict in ("consistent", "not_applicable") else [f"kyc_witness_{verdict}"])
-        + ["sessions_revoke_required", "external_reconciliation_required", "owner_approval_required"])
+        + ["sessions_revoke_required"]
+        + authority_blockers(result.get("invariants", {}).get("stepup_enforcement"), args.expect_stepup)
+        + ["external_reconciliation_required", "owner_approval_required"])
     text = json.dumps(result, default=str, sort_keys=True)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
