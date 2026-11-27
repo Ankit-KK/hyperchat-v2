@@ -1,0 +1,41 @@
+#!/bin/bash
+# HyperChat off-site alert and heartbeat, run by hyperchat-offsite-alert@.service (fail) and hyperchat-offsite-ok@.service (ok).
+# The label names the environment (F-1 X2): DEV units (hyperchat-dev-*) and TEST keep "[DEV off-site backup]"; every
+# other unit (production's hyperchat-offsite / hyperchat-pgbackup) and TEST-prod say "[PRODUCTION backup]".
+# The webhook and ping URLs stay in systemd credentials (curl --config files): never in argv, never printed.
+set -u
+mode=${1:-}; inst=${2:-}
+[ -n "$inst" ] || { echo "usage: hyperchat-offsite-notify fail|ok <unit|TEST>"; exit 2; }
+CD=${CREDENTIALS_DIRECTORY:-}; [ -d "$CD" ] || { echo "no credentials directory"; exit 2; }
+conf() { [ -s "$CD/$1" ] && ! grep -qx '# not configured' "$CD/$1"; }
+post() { local f=$1; shift; curl -q --silent --show-error --fail --max-time 20 --retry 2 --retry-delay 5 --proto =https --proto-redir =https --config "$CD/$f" "$@"; }
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+case $mode in
+ok)
+  conf heartbeat.curl || { echo "heartbeat not configured (nothing sent)"; exit 0; }
+  post heartbeat.curl --data-binary "ok $inst $now" >/dev/null && echo "heartbeat sent" ;;
+fail)
+  case $inst in TEST|hyperchat-dev-*) label="DEV off-site backup" ;; *) label="PRODUCTION backup" ;; esac
+  case $inst in TEST|TEST-prod) test=1 ;; *) test=0 ;; esac
+  if [ $test = 1 ]; then text="[$label] TEST alert, no failure ($now, $(hostname))"
+  else
+    # systemd hands an OnFailure= unit the failed unit's result (v251+). Use that: inside this DynamicUser sandbox
+    # "systemctl show" returns nothing, which made every real alert say "result=unknown status=unknown" (F-1, 2026-11-28).
+    # A systemctl query is only the fallback (several units triggered at once, or a manual run).
+    r=; s=
+    if [ "${MONITOR_UNIT:-}" = "$inst" ]; then r=${MONITOR_SERVICE_RESULT:-}; s=${MONITOR_EXIT_STATUS:-}; fi
+    [ -n "$r" ] || r=$(systemctl show -p Result --value "$inst" 2>/dev/null)
+    [ -n "$s" ] || s=$(systemctl show -p ExecMainStatus --value "$inst" 2>/dev/null)
+    text="[$label] FAILED: $inst result=${r:-unknown} status=${s:-unknown} ($now, $(hostname)). See journalctl -u $inst"
+  fi
+  text=$(printf %s "$text" | tr -cd 'A-Za-z0-9 ._:@=()/,+[]-')  # safe characters only, so the JSON needs no escaping
+  rc=0
+  if conf notify.curl; then
+    post notify.curl -H 'Content-Type: application/json' --data-binary "{\"text\": \"$text\"}" >/dev/null && echo "alert sent" || { echo "alert NOT sent"; rc=1; }
+  else echo "notify not configured (nothing sent)"; rc=1; fi
+  if [ $test = 0 ] && conf heartbeat-fail.curl; then
+    post heartbeat-fail.curl --data-binary "$text" >/dev/null && echo "fail ping sent" || { echo "fail ping NOT sent"; rc=1; }
+  fi
+  exit $rc ;;
+*) echo "usage: hyperchat-offsite-notify fail|ok <unit|TEST|TEST-prod>"; exit 2 ;;
+esac

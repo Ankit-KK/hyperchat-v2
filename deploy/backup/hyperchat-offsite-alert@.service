@@ -1,0 +1,29 @@
+[Unit]
+Description=HyperChat off-site failure alert for %i (Discord, plus the hc /fail ping if configured; started by OnFailure=)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hyperchat-offsite-notify fail %i
+LoadCredential=notify.curl:/etc/hyperchat-backup/offsite-notify.curl
+LoadCredential=heartbeat-fail.curl:/etc/hyperchat-backup/offsite-heartbeat-fail.curl
+SetCredential=notify.curl:# not configured
+SetCredential=heartbeat-fail.curl:# not configured
+TimeoutStartSec=3min
+UMask=0077
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+InaccessiblePaths=-/etc/hyperchat -/etc/hyperchat-prod -/etc/hyperchat-backup -/etc/hyperchat-dev-backup-monitor -/var/backups -/var/lib/hyperchat-kyc -/var/lib/hyperchat-offsite -/etc/postgresql
