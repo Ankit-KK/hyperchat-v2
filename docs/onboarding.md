@@ -124,8 +124,9 @@ stops the loop.
 # Onboarding checklist (Stage 5, Phase A)
 
 A read-only view of how far each creator is from activation, computed from existing data. Phase A adds no migration,
-table, role, grant or job kind, and changes no lifecycle path. **Activation stays manual** (`POST
-/api/v1/admin/creators/{id}/activate`) until Stage 5 Phase B (migration 0042, behind an operator switch, default off). Code:
+table, role, grant or job kind, and changes no lifecycle path. Activation is manual (`POST
+/api/v1/admin/creators/{id}/activate`) or, since Stage 5 Phase B, automatic while the operator switch is on (migration
+0042, "Automatic activation" below; the switch starts off). Code:
 `backend/app/onboarding/checklist.py`, shared by both routes. Each request uses one connection and one `READ ONLY`
 transaction on the API's own role (`hyperchat_app`); it calls `kyc_activation_block` once per creator, which that role
 may already execute (migration 0023).
@@ -143,8 +144,9 @@ Both answer `Cache-Control: no-store`. Each creator entry holds:
 - `qualifies_for_auto_activation`: the creator came from an application and is on the standard KYC track (owner
   decision Q12);
 - `conditions`: one row per condition below, `{condition, state, detail, blocking}`;
-- `ready_for_activation`: true only for a qualifying `pending` creator with no blocking row. The PAN row blocks
-  while its policy is pending, so this is never true before Stage 3.
+- `ready_for_activation`: true only for a qualifying `pending` creator with no blocking row **and** for which the
+  database's own rule (`onboarding_activation_block`, migration 0042) answers NULL, so the checklist never promises an
+  activation the worker would refuse.
 
 The admin view adds `signup_id` and `invite_delivery` (`{status, auto_attempts, last_failure}`, the same derivation as
 `GET /api/v1/admin/applications/{id}`). `blocked_by` keeps only creators that condition blocks; an unknown code is
@@ -162,12 +164,82 @@ linked account (full owner power) and an admin therefore see the same rows. Stat
 | `invitation_accepted` | an invitation of that application was accepted (accepted invitations are never purged) | the latest invitation's state, or `no_invitation` |
 | `ownership_confirmed` | the user who accepted it is the current owner, and that account is active | `no_owner`, `owner_not_invitee` (an owner linked by an admin), `owner_inactive` |
 | `kyc_approved` | the owner's Didit KYC is approved for this server's Didit environment (`user_kyc_approved`) | `no_owner`, `owner_kyc_required` |
-| `pan_policy` | never blocking (owner decision 2026-11-27: any approved KYC activates): state `ok` when the current approval is PAN-verified (migration 0041, docs/kyc.md "PAN evidence"), `payout_hold` when it is not | `non_pan_kyc` (payouts held until the creator re-verifies with PAN), `kyc_not_approved` |
+| `pan_policy` | owner decision 2026-11-27: any approved KYC activates. State `ok` when the current approval is PAN-verified (migration 0041, docs/kyc.md "PAN evidence"), or `ok` / `hold_cleared` when an administrator cleared its non-PAN hold; `payout_hold` (not blocking) when a hold covers a non-PAN approval | `non_pan_kyc` (payouts held until the creator re-verifies with PAN); `pan_evidence_not_recorded` (**blocking**: a non-PAN approval no hold covers, recorded before 0041 without document evidence; automatic activation refuses it, an admin may activate by hand); `kyc_not_approved` (not blocking here: `kyc_approved` blocks) |
 | `profile_picture` | `brand_logo_url` is exactly the primary URL of the creator's `ready` `creator_image_uploads` row (migration 0039: validity is the row, not the prefix) | `validation_not_recorded` (state `set`, blocking) for a `creator-assets/` URL without that record: a Phase A upload or a legacy copy, so the creator uploads again; `legacy_path` for an `/assets/...` path or any other value; `null` when empty |
 | `background` | the same rule on `background_url` | the same codes |
 | `no_restriction` | no `kyc_restrictions` row with `lifted_at IS NULL` | `open_restriction` (state `blocked`) |
 | `razorpay_account` | the creator's `razorpay_account` is one of this server's configured accounts, as admin activation checks it | `account_not_configured` |
 | `lifecycle_eligible` | `kyc_activation_block(streamer_id)` is NULL | its code: `restricted`, `no_owner`, `kyc_required` (state `blocked`) |
 
-Nothing in either route writes or activates. A creator `pending` with every row met except PAN still waits for an
-admin's activation.
+Nothing in either route writes or activates.
+
+# Automatic activation (Stage 5, Phase B: migration 0042)
+
+PDP v1.1: once every condition holds, the creator becomes `active` with no second admin step, and its public page is
+served at once. **The operator switch starts OFF** and stays off until the owner confirms the Didit console checks
+D1-D3. Manual activation is unchanged.
+
+## The rule
+
+`onboarding_activation_block(streamer_id)` answers NULL or the first failing code. The checklist, the worker and the
+transition all use it:
+
+| Code | Means |
+|---|---|
+| `not_found` / `not_pending` | no such creator, or it is not `pending` (an active, suspended or rejected creator never auto-activates) |
+| `not_application_created` | Q12: no approved application created it, or it is not on the standard KYC track (admin-created and legacy creators stay manual) |
+| `restricted` / `no_owner` / `kyc_required` | `kyc_activation_block` (migration 0023): an open restriction wins (Q15); an active owner; the owner's approved Didit KYC (any approval) |
+| `owner_not_invitee` | the current owner is not the user who accepted the application's invitation (an owner linked by hand stays manual) |
+| `pan_evidence_missing` | `onboarding_pan_covered`: the approval is PAN-verified, or a payout hold for that very approval exists (open, or cleared by an administrator). An approval recorded before 0041 has neither (no document evidence, no automatic hold): an admin activates it by hand, or the operator runs the 0041 backfill (owner decision) |
+| `profile_picture_missing` / `background_missing` | the pointer is not exactly the primary url of the creator's `ready` `creator_image_uploads` row (0039) |
+
+The Razorpay account is the one condition outside SQL: the configured list lives in this server's settings. The worker
+picks only creators whose account is configured, and the transition compares and sets it against the locked row, as
+admin activation does.
+
+## The switch (owner decision Q11)
+
+`onboarding_settings` is one row, `auto_activation` false. Only the operator changes it, with an approval reference:
+
+```sql
+SELECT public.onboarding_set_auto_activation(true, '<operator>', '<owner approval reference>');
+SELECT public.onboarding_set_auto_activation(false, '<operator>', '<reference>');  -- rollback: back to manual only
+```
+
+A trigger writes one append-only `onboarding_settings_events` row for every change, whoever issues it. No runtime role
+writes either table. `GET /api/v1/admin/onboarding/auto-activation` (admins, read-only) shows the switch and the
+automatic activations. Changing the switch from the admin API is not offered: it replaces the passkey for every
+activation, so it would need its own step-up action (an owner decision; "admin API later").
+
+## The transition
+
+`onboarding_auto_activate(streamer_id, expected_account)` is SECURITY DEFINER, EXECUTE for `hyperchat_lifecycle` only.
+- **Refuses first:** `switched_off`; `grant_presented` when the transaction consumed a step-up grant (one grant, one
+  action: the granted path stays `kyc_change_creator_status`).
+- **Under the lock:** it locks only the creator (`FOR NO KEY UPDATE`, as a restriction and the donations trigger do),
+  then compare-and-sets `pending` (`status_changed`) and the account (`account_changed`), then re-evaluates the whole
+  rule, so a restriction added meanwhile wins.
+- **Writes, in one transaction:** the `creator_status_events` row (`activate`, no actor, reason `auto`), the
+  `onboarding_activations` row (owner, application, invitation, KYC session, PAN status, the covering hold, both image
+  records, the account) and the status. One row per creator ever (a creator leaves `pending` once).
+
+**Step-up, explicitly.** 0027's `stepup_guard_streamers` anchors pending to active on `creator.activate`. 0042 re-creates
+it from 0027's text with one change: no grant is needed when, and only when, `session_user` is `hyperchat_lifecycle`,
+an `onboarding_activations` row for this creator was written in this transaction, and the transaction consumed no
+grant. The marker is a row only `onboarding_auto_activate` can write, never a setting: `hyperchat_lifecycle` can also
+run `kyc_change_creator_status` and set any custom setting, and neither opens the exception. Manual activation and
+reactivation keep their grants under `active`. It works with step-up `draft` or `active`.
+
+## The worker loop
+
+`app.onboarding.auto_activate`, started by the worker whenever `hyperchat_lifecycle` is configured. Every
+`HYPERCHAT_AUTO_ACTIVATION_POLL_SECONDS` (60) it reads the switch; while it is on it picks up to 10 creators the rule
+accepts (read-only, `hyperchat_app`), and activates each on `hyperchat_lifecycle`. No job kind, no attempt rows: a
+refusal changes nothing, and the creator is picked again only while the rule still says yes. A database guard refusal
+(never expected) pauses that creator until the worker restarts and is logged. Each activation logs the
+`creator_status_changed` security event (ids and codes only). No activation email yet.
+
+## Rollback
+
+`SELECT public.onboarding_set_auto_activation(false, ...)`: manual activation remains. The downgrade refuses while the
+switch is on or any activation or switch change exists (its audit is never dropped).

@@ -17,7 +17,7 @@ from app.dashboard import validation as v
 from app.dashboard.models import DonationItem, DonationPage
 from app.db.pool import single_connection_factory
 from app.jobs.queue import KINDS, JobQueue
-from app.onboarding import checklist
+from app.onboarding import auto_activate, checklist
 from app.payments import integrity
 from app.payments.repository import PaymentRepository
 from app.routers.admin import admin_service
@@ -117,3 +117,14 @@ async def onboarding_progress(request: Request, status: Literal["pending", "acti
     return await checklist.admin_progress(
         request.app.state.db.connection, status=status, condition=blocked_by, limit=limit, offset=offset,
         environment=kyc.environment if kyc else None, accounts=admin.payment_accounts)
+
+
+@router.get("/onboarding/auto-activation")
+async def onboarding_auto_activation(request: Request, limit: int = Query(50, ge=1, le=200),
+                                     offset: int = Query(0, ge=0, le=100_000),
+                                     current: CurrentUser = Depends(require_admin)) -> dict:
+    """Automatic activation (Stage 5 Phase B, migration 0042, read-only): the operator switch (enabled, when, by
+    which operator, under which approval reference; only the operator changes it) and every automatic activation,
+    newest first (creator id, slug, current status, time, PAN status, whether a payout hold covered it)."""
+    admin_service(request)  # 503 without a database
+    return await auto_activate.admin_view(request.app.state.db.connection, limit=limit, offset=offset)

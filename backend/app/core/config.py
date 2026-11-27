@@ -167,6 +167,9 @@ class Settings(BaseSettings):
     # Onboarding Stage 2 Phase A (docs/onboarding.md): the worker invites approved applicants itself. Off by default.
     auto_invite_enabled: bool = False
     auto_invite_poll_seconds: int = Field(default=60, ge=10, le=3600)
+    # Stage 5 Phase B (migration 0042): how often the worker checks for creators to activate. Whether it activates
+    # at all is the database's operator switch (onboarding_settings.auto_activation, off by default), not a setting.
+    auto_activation_poll_seconds: int = Field(default=60, ge=10, le=3600)
 
     email_backend: Literal["disabled", "resend"] = "disabled"
     # Used only by the opt-in delivery check (tests/e2e/smoke_integrations.py); the API sends per category (below).

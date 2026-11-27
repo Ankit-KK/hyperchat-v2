@@ -53,16 +53,30 @@ def test_a_fresh_approval_is_missing_everything_a_person_has_not_done_yet():
     assert entry["qualifies_for_auto_activation"] is True and entry["ready_for_activation"] is False
 
 
-@pytest.mark.parametrize(("pan_status", "held", "row"), [
-    ("pan_verified", False, ("ok", None, False)),
-    ("non_pan", True, ("payout_hold", "non_pan_kyc", False)),  # owner 2026-11-27: activated, payouts held
-    ("non_pan", False, ("missing", "pan_evidence_not_recorded", False)),  # approved before 0041, no hold yet
-    ("not_approved", False, ("missing", "kyc_not_approved", False)), (None, False, ("missing", "kyc_not_approved", False))])
-def test_pan_never_blocks_activation_it_only_reports_the_payout_hold(pan_status, held, row):
-    entry = evaluate(done(pan_status=pan_status, payout_held=held), ACCOUNTS)
+@pytest.mark.parametrize(("pan_status", "held", "covered", "row"), [
+    ("pan_verified", False, True, ("ok", None, False)),
+    ("non_pan", True, True, ("payout_hold", "non_pan_kyc", False)),  # owner 2026-11-27: activated, payouts held
+    ("non_pan", False, True, ("ok", "hold_cleared", False)),  # an administrator cleared that approval's hold
+    ("not_approved", False, False, ("missing", "kyc_not_approved", False)),
+    (None, False, False, ("missing", "kyc_not_approved", False))])
+def test_pan_only_reports_the_payout_hold_when_a_hold_covers_a_non_pan_approval(pan_status, held, covered, row):
+    entry = evaluate(done(pan_status=pan_status, payout_held=held, pan_covered=covered), ACCOUNTS)
     assert rows(entry)["pan_policy"] == row
     assert not [c for c, (_, _, blocking) in rows(entry).items() if blocking]
     assert entry["ready_for_activation"] is True
+
+
+def test_a_non_pan_approval_no_hold_covers_blocks_automatic_activation():
+    """Approved before 0041 (no document evidence, so no automatic hold): onboarding_pan_covered is false and the
+    database rule refuses it, so the checklist does too (an administrator may still activate it by hand)."""
+    entry = evaluate(done(pan_status="non_pan", activation_block="pan_evidence_missing"), ACCOUNTS)
+    assert rows(entry)["pan_policy"] == ("missing", "pan_evidence_not_recorded", True)
+    assert entry["ready_for_activation"] is False and checklist.blocked_by(entry, "pan_policy")
+
+
+def test_ready_needs_the_database_rule_too():
+    assert evaluate(done(), ACCOUNTS)["ready_for_activation"] is True
+    assert evaluate(done(activation_block="owner_not_invitee"), ACCOUNTS)["ready_for_activation"] is False
 
 
 @pytest.mark.parametrize(("change", "condition", "expected"), [
@@ -119,8 +133,8 @@ def test_blocked_by_matches_only_a_blocking_row():
 
 def test_the_facts_query_only_reads():
     sql = " ".join(checklist._FACTS.split()).upper()
-    for verb in ("INSERT", "UPDATE", "DELETE", "KYC_CHANGE_CREATOR_STATUS", "FOR "):
+    for verb in ("INSERT", "UPDATE", "DELETE", "KYC_CHANGE_CREATOR_STATUS", "ONBOARDING_AUTO_ACTIVATE", "FOR "):
         assert verb not in sql, verb
-    assert "PUBLIC.KYC_ACTIVATION_BLOCK(S.ID)" in sql
+    assert "PUBLIC.KYC_ACTIVATION_BLOCK(S.ID)" in sql and "PUBLIC.ONBOARDING_ACTIVATION_BLOCK(S.ID)" in sql
     for field in ("A.NAME", "A.EMAIL", "A.MOBILE_NUMBER", "STREAMER_NAME"):  # ids and slugs only
         assert field not in sql, field

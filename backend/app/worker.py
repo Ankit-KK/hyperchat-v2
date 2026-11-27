@@ -6,7 +6,9 @@ Next to them, one loop publishes the realtime outbox to Pusher (Phase 9, app.rea
 HYPERCHAT_REALTIME_ENABLED is false it only marks events 'skipped'. A third loop records payment-hold alerts and
 delivers operator alerts to Discord (app.alerts, docs/alerting.md); failed jobs are recorded as alerts too.
 With HYPERCHAT_AUTO_INVITE_ENABLED=true and the `onboarding` email category active, a fourth loop invites
-approved creator applicants (app.onboarding.auto_invite, docs/onboarding.md).
+approved creator applicants (app.onboarding.auto_invite, docs/onboarding.md). With the lifecycle role configured, a
+fifth loop activates creators that meet every onboarding condition, only while the database's operator switch is on
+(app.onboarding.auto_activate, migration 0042).
 Paid providers are only constructed when HYPERCHAT_AUDIO_PROVIDERS_ENABLED=true and their key is set (D7);
 otherwise donation audio resolves to the silent fallback and transcription jobs fail as unavailable.
 SIGTERM/SIGINT stop it gracefully (see app.jobs.runner). Logs carry names and reason codes only.
@@ -31,7 +33,9 @@ from app.core.logging import configure_logging
 from app.db.pool import Database, single_connection_factory
 from app.jobs.queue import JobQueue
 from app.jobs.runner import Worker
+from app.onboarding.auto_activate import AutoActivator
 from app.onboarding.auto_invite import AutoInviter
+from app.payments.accounts import PaymentAccounts
 from app.realtime.outbox import OutboxQueue
 from app.realtime.payloads import Renderer, RealtimeRepository
 from app.realtime.publisher import OutboxPublisher
@@ -92,6 +96,17 @@ def build_auto_inviter(settings: Settings, connection_factory) -> AutoInviter | 
                        poll_seconds=settings.auto_invite_poll_seconds)
 
 
+def build_auto_activator(settings: Settings, connection_factory) -> AutoActivator | None:
+    """The automatic activation loop (migration 0042), or None without the lifecycle role. It runs always and does
+    nothing while the database's operator switch is off."""
+    if not settings.db_lifecycle_user:
+        log.warning("automatic activation not started", extra={"reason": "lifecycle_role_unset"})
+        return None
+    accounts = frozenset(PaymentAccounts.from_settings(settings).summary()["payments"])  # as admin activation checks
+    return AutoActivator(connection_factory, single_connection_factory(settings.db_conninfo(role="lifecycle")),
+                         accounts, poll_seconds=settings.auto_activation_poll_seconds)
+
+
 def build_notifier(settings: Settings, connection_factory) -> AlertNotifier:
     """Operator alerts (docs/alerting.md): delivered only with a channel and the Discord bot token; outside production
     only to a channel on HYPERCHAT_BOT_RECIPIENT_ALLOWLIST (D13). Otherwise they are recorded only."""
@@ -147,13 +162,15 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> int:
             "realtime_enabled": settings.realtime_enabled, "pusher_groups": settings.pusher_groups_configured,
             "pusher_invalid": settings.pusher_config_problems()})
         inviter = build_auto_inviter(settings, db.connection)
-        log.info("onboarding configuration", extra={"auto_invite_enabled": inviter is not None})
+        activator = build_auto_activator(settings, db.connection)
+        log.info("onboarding configuration", extra={"auto_invite_enabled": inviter is not None,
+                                                    "auto_activation_loop": activator is not None})
         try:
             await asyncio.gather(
                 Worker(JobQueue(db.connection), handlers, concurrency=settings.worker_concurrency,
                        on_failure=Alerts(db.connection).job_failed).run(stop),
                 publisher.run(stop), build_notifier(settings, db.connection).run(stop),
-                *([inviter.run(stop)] if inviter else []))
+                *([inviter.run(stop)] if inviter else []), *([activator.run(stop)] if activator else []))
         finally:
             if inviter is not None:
                 await inviter.sender.aclose()

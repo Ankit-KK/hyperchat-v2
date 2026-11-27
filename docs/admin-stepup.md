@@ -107,7 +107,7 @@ answer carries the exact `{action, target, params}` to approve.
 
 | Route | Action | Target | Params (as the database derives them) |
 |---|---|---|---|
-| `POST /api/v1/admin/creators/{id}/activate` | `creator.activate` | `creator:{id}` | `{expected_status}` |
+| `POST /api/v1/admin/creators/{id}/activate` | `creator.activate` | `creator:{id}` | `{expected_status}`. Unchanged by automatic activation (migration 0042): the manual route always claims this grant under `active` |
 | `POST /api/v1/admin/creators/{id}/reactivate` | `creator.reactivate` | `creator:{id}` | `{expected_status}` |
 | `POST /api/v1/admin/creators` | `creator.create` | `creator:new` | `{slug, name, razorpay_account}` |
 | `POST /api/v1/admin/creators/{id}/owner` | `creator.owner.assign` | `creator:{id}` | `{user_id}` |
@@ -227,7 +227,7 @@ Every write path to the tables below was traced (repositories, services, definer
 
 | Sensitive write | Path (role) | Anchor / effect | Action, target, params derived from the row |
 |---|---|---|---|
-| `streamers.status` pending → active | `kyc_change_creator_status` (definer, `hyperchat_lifecycle`) | anchor `streamers.status` | `creator.activate`, `creator:<id>`, `{expected_status: OLD.status}` |
+| `streamers.status` pending → active | `kyc_change_creator_status` (definer, `hyperchat_lifecycle`) | anchor `streamers.status` | `creator.activate`, `creator:<id>`, `{expected_status: OLD.status}`. Exception (0042): no grant for the transition of `onboarding_auto_activate` (EXECUTE `hyperchat_lifecycle` only, the operator switch on): `session_user` `hyperchat_lifecycle`, an `onboarding_activations` row for this creator written in THIS transaction (no runtime role can write one; a setting never opens it), and no grant consumed in the transaction. `kyc_change_creator_status` on the same role still needs the grant |
 | `streamers.status` suspended → active | same | anchor `streamers.status` | `creator.reactivate`, same |
 | `streamers.user_id` NULL → u | `AdminRepository.assign_owner` (`app`) | anchor `streamers.user_id` | `creator.owner.assign`, `creator:<id>`, `{user_id}` |
 | `streamers.user_id` u → v | `AdminRepository.transfer_owner` (`app`) | anchor `streamers.user_id` | `creator.owner.transfer`, `creator:<id>`, `{user_id, expected_owner_id: OLD.user_id}` |

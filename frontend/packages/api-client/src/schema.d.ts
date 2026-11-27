@@ -200,7 +200,8 @@ export interface paths {
         put?: never;
         /**
          * Activate Creator
-         * @description pending -> active. Never automatic: approval, invites and KYC alone do not activate a creator.
+         * @description pending -> active, by hand (step-up creator.activate). Automatic activation (migration 0042) is the worker's
+         *     alone, only while the operator switch is on and every onboarding condition holds (docs/onboarding.md).
          */
         post: operations["activate_creator_api_v1_admin_creators__streamer_id__activate_post"];
         delete?: never;
@@ -499,6 +500,28 @@ export interface paths {
          *     slugs only: never the applicant's name, email or phone.
          */
         get: operations["onboarding_progress_api_v1_admin_onboarding_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/onboarding/auto-activation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Onboarding Auto Activation
+         * @description Automatic activation (Stage 5 Phase B, migration 0042, read-only): the operator switch (enabled, when, by
+         *     which operator, under which approval reference; only the operator changes it) and every automatic activation,
+         *     newest first (creator id, slug, current status, time, PAN status, whether a payout hold covered it).
+         */
+        get: operations["onboarding_auto_activation_api_v1_admin_onboarding_auto_activation_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4258,6 +4281,40 @@ export interface operations {
             query?: {
                 status?: ("pending" | "active") | null;
                 blocked_by?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    onboarding_auto_activation_api_v1_admin_onboarding_auto_activation_get: {
+        parameters: {
+            query?: {
                 limit?: number;
                 offset?: number;
             };

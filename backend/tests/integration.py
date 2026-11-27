@@ -240,6 +240,14 @@ def cleanup_synthetic_rows() -> None:
             owner.execute("ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard")
         with fixture_db() as owner:  # creator audits are RESTRICT / append-only for the runtime roles (0020, 0023)
             synthetic_creators = "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)"
+            # 0042: automatic activations (RESTRICT on the creator and its status event), and the test operator's
+            # switch changes (the switch itself goes back off first: that change is the test operator's too)
+            owner.execute("UPDATE public.onboarding_settings SET auto_activation = false, changed_by = %s, "
+                          "approval_reference = 'cleanup' WHERE auto_activation AND changed_by LIKE %s",
+                          (SLUG_PREFIX + "cleanup", SLUG_PREFIX + "%"))  # never a real operator's switch
+            owner.execute("DELETE FROM public.onboarding_settings_events WHERE changed_by LIKE %s", (SLUG_PREFIX + "%",))
+            owner.execute(f"DELETE FROM public.onboarding_activations WHERE streamer_id IN {synthetic_creators}",
+                          (SLUG_PREFIX + "%",))
             for table in ("kyc_enforcement_events", "kyc_grace_grants", "kyc_restrictions", "creator_status_events",
                           "creator_image_uploads"):  # 0039: image records, RESTRICT, no DELETE for the API
                 owner.execute(f"DELETE FROM public.{table} WHERE streamer_id IN {synthetic_creators}",
