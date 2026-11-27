@@ -14,7 +14,7 @@ from app.onboarding.images import cleanup_images
 from app.routers.creator_images import service_for
 from app.storage.memory import InMemoryObjectStore
 from app.storage.r2 import StorageError
-from tests.integration import db, fixture_db, requires_db
+from tests.integration import db, fixture_db, make_streamer, requires_db
 from tests.onboarding.test_creator_images_api import BASE, creator, imgs, png, pointers, put  # noqa: F401 (imgs)
 
 pytestmark = requires_db
@@ -115,8 +115,8 @@ def test_an_undeletable_object_of_a_failed_upload_is_recorded_for_the_cleanup(im
 
 def test_api_roles_only_insert_their_own_keys_and_only_supersede_or_clean_once(imgs):
     sid, _, h = creator(imgs)
-    other, _, _ = creator(imgs)
-    put(imgs, sid, "profile", png((900, 900)), h)
+    assert put(imgs, sid, "profile", png((900, 900)), h).status_code == 200
+    other = make_streamer("authtest-img-guard-other")  # no login: creator() would sign the client in as its owner
     own = f"creator-assets/{sid}/logo/{'a' * 64}.webp"
     insert = ("INSERT INTO public.creator_image_uploads (streamer_id, kind, state, variants, error_code) "
               "VALUES (%s, %s, %s, %s::jsonb, %s)")
