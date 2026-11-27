@@ -333,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     result["live_operation_blockers"] = (
         ([] if structural else ["not_structurally_valid"])
         + ([] if verdict in ("consistent", "not_applicable") else [f"kyc_witness_{verdict}"])
-        + ["external_reconciliation_required", "owner_approval_required"])
+        + ["sessions_revoke_required", "external_reconciliation_required", "owner_approval_required"])
     text = json.dumps(result, default=str, sort_keys=True)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")
