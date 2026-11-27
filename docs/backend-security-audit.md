@@ -219,8 +219,8 @@ cannot be forged without a provider secret. The open items are logging hygiene, 
 
 ### F7 (P3): unused security code remains
 - **Evidence:** the HMAC request signing, shared-secret and partner-key verifiers in `backend/app/security/` have no
-  route (route inventory below; SEC-L1, owner decision D4). `RazorpayClient.fetch_order` is unused (SEC-L2; reviewed
-  in G3: read-only, validated, no security issue).
+  route (route inventory below; SEC-L1, owner decision D4). `RazorpayClient.fetch_order` was unused and is removed
+  (SEC-L2, owner-approved 2026-11-27; reviewed in G3: read-only, validated, no security issue).
 - **Impact:** none today; unused code tends to be forgotten when the rules around it change.
 - **Remediation:** delete after D4 / SEC-L2 are decided.
 
@@ -670,7 +670,7 @@ New creators start `pending` (column default too) and only an admin activates th
 |---|---|---|
 | D14 | Repeated signup email: identical answer (current) or legacy message | **RESOLVED by the owner on 2026-10-15: KEEP IDENTICAL RESPONSE**: a repeated email (any letter case) gets the same `201` as a new signup, nothing is inserted or changed, no duplicate indicator; prevents email / account enumeration; existing code and tests satisfy it, no code change |
 | D15 | Legacy Media Source URLs on `*.supabase.co` | recommendation in `docs/obs-cutover.md`; awaiting owner (cutover choice, not backend product work) |
-| SEC-L2 | `RazorpayClient.fetch_order` (unused) | delete or keep; awaiting owner (P3 internal cleanup, no API effect; not a blocker) |
+| SEC-L2 | `RazorpayClient.fetch_order` (unused) | removed (owner-approved 2026-11-27; no caller, no API effect) |
 | PAY-11 | Stale smoke assertions | verified on DEV 2026-10-14 (Phase 6 29/29, Phase 7 30/30) |
 | D4 / SEC-L1 | Partner API and the unused HMAC / partner-key layer | **resolved 2026-10-13** (keep ClipWave); SEC-L1 layer removed, verified on DEV |
 | D5 | Discord link and contact form | **resolved 2026-10-15**, **verified on DEV** 2026-10-15: contact form retired (no submission API); static contact details and the Discord invite are intentionally public settings (`HYPERCHAT_PUBLIC_*`), validated at startup and served only through `GET /api/v1/public/config` with a fixed field allow-list |

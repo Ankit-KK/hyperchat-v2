@@ -111,9 +111,6 @@ class FakeRazorpay:
         self._maybe_fail("order_payments")
         return list(self.order_payment_lists.get(order_id, []))
 
-    async def fetch_order(self, account, order_id) -> Order:
-        raise AssertionError("not used by the service")
-
     async def probe(self, account) -> str:
         self.calls.append(("probe", account.name))
         return self.probe_result
