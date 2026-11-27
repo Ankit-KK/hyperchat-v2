@@ -2463,3 +2463,53 @@ def test_every_security_definer_function_puts_pg_temp_last(monkeypatch):
     assert rows  # the schema has SECURITY DEFINER functions
     bad = [(fn, sp) for fn, sp in rows if sp is None or sp.replace(" ", "").split(",")[-1] != "pg_temp"]
     assert bad == [], bad
+
+
+# ── 0044: a new creator starts unclaimed and not soundboard-enabled (security audit run-4) ───────────────────────────
+def _as(role: str):
+    """A connection that logs in as `role` (the CI cluster trusts local connections), so session_user is that role."""
+    return psycopg.connect(_libpq(DSN).replace("hyperchat_migrator@", f"{role}@", 1), autocommit=True)
+
+
+def _insert_guard_0044() -> tuple[bool, bool]:
+    """(the trigger exists, hyperchat_app may EXECUTE its function)."""
+    with _owner() as conn:
+        trigger = conn.execute("SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.streamers'::regclass "
+                               "AND tgname = 'aad_stepup_guard_streamer_insert_columns'").fetchone()[0] == 1
+        fn = conn.execute("SELECT p.oid FROM pg_proc p WHERE p.proname = 'stepup_guard_streamer_insert_columns'"
+                          ).fetchone()
+        callable_by_app = fn is not None and conn.execute(
+            "SELECT has_function_privilege('hyperchat_app', %s::oid, 'EXECUTE')", (fn[0],)).fetchone()[0]
+    return trigger, callable_by_app
+
+
+def test_0044_refuses_a_claimed_or_eligible_new_creator_from_the_api_roles_only(monkeypatch):
+    """0044: an API role cannot insert a creator with user_id set or soundboard_enabled true (any enforcement state),
+    an operator can; the downgrade removes exactly the trigger and its function."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    with _owner() as conn:
+        conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest44%%'")
+        conn.execute("DELETE FROM public.users WHERE email::text = 'migtest44@x.invalid'")
+        uid = conn.execute("INSERT INTO public.users (email) VALUES ('migtest44@x.invalid') RETURNING id").fetchone()[0]
+    try:
+        assert _insert_guard_0044() == (True, False)
+        for role in ("hyperchat_app", "hyperchat_worker"):
+            for column, value in (("user_id", uid), ("soundboard_enabled", True)):
+                with _as(role) as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    conn.execute(f"INSERT INTO public.streamers (streamer_slug, streamer_name, {column}) "
+                                 "VALUES ('migtest44-x', 'X', %s)", (value,))
+        with _owner() as conn:  # the operator and the legacy import (non-API login roles) are unaffected
+            conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id, soundboard_enabled) "
+                         "VALUES ('migtest44-op', 'Op', %s, true)", (uid,))
+        command.downgrade(cfg, "0043")
+        assert _version() == "0043" and _insert_guard_0044() == (False, False)
+        command.upgrade(cfg, "0044")
+        assert _insert_guard_0044() == (True, False)
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest44%%'")
+            conn.execute("DELETE FROM public.users WHERE email::text = 'migtest44@x.invalid'")
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD

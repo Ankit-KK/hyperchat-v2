@@ -63,8 +63,11 @@ def test_raw_inserts_and_other_status_writes_are_refused(enf):
     with pytest.raises(psycopg.errors.InsufficientPrivilege):  # a new creator born active
         raw("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id, status, razorpay_account) "
             "VALUES ('authtest-tr-ins', 'X', %s, 'active', 'primary')", (uid,))
-    raw("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) VALUES ('authtest-tr-ok', 'X', %s)",
-        (uid,))  # pending, as the admin API creates it
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):  # a new creator born claimed (0044, audit run-4)
+        raw("INSERT INTO public.streamers (streamer_slug, streamer_name, user_id) VALUES ('authtest-tr-ins', 'X', %s)",
+            (uid,))
+    raw("INSERT INTO public.streamers (streamer_slug, streamer_name) VALUES ('authtest-tr-ok', 'X')",
+        ())  # pending and unclaimed, as the admin API creates it
     sid = make_streamer("authtest-tr-sus", user_id=owner_user("tr-sus"))
     for status in ("suspended", "rejected", "pending"):  # no unaudited status change at all
         with pytest.raises(psycopg.errors.InsufficientPrivilege):

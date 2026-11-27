@@ -273,10 +273,16 @@ cover):
   administrator can sign in (as 0024).
 
 **Not guarded, by design** (no new authority): suspension, KYC restrictions, grace revocation, session revocation,
-partner-key revocation, rejecting or reopening an application, notes, `user_signups.invite_id` bookkeeping,
+partner-key revocation, rejecting an application, notes, `user_signups.invite_id` bookkeeping,
 ordinary invitations, the creator dashboard's own settings (`WRITABLE_SETTINGS` excludes owner, status and
-account columns), soundboard eligibility, the Razorpay account column (only `primary` is allowed by 0018 and the
-lifecycle function compare-and-sets it at activation). Payouts and wallet are out of scope.
+account columns), the Razorpay account column (only `primary` is allowed by 0018 and the
+lifecycle function compare-and-sets it at activation). Payouts and wallet are out of scope. (Reopening an application
+and soundboard eligibility are anchored since 0037.)
+
+**New creators (0044, security audit run-4):** an API role may never insert a creator that is already claimed
+(`user_id` set) or soundboard-enabled, in any enforcement state. The creator INSERT anchor binds only slug, name and
+account, so ownership and eligibility always arrive through their own UPDATE-time anchors (`creator.owner.assign`,
+`creator.soundboard`) instead of riding a `creator.create` or `application.approve` grant.
 
 ### Privileged exceptions (the trusted boundary)
 - **The operator** (logged in as `hyperchat_migrator`, acting as `hyperchat_owner`): migrations, the legacy import,

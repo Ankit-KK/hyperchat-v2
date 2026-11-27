@@ -1255,6 +1255,8 @@ HEAD_DELTAS = {
         "functions": {}, "pins": {}, "triggers": {},
         "configs": {name: _with_pg_temp(name) for name in DEFINER_FUNCTIONS},
     },
+    "0044": no_payment_delta("security audit run-4: a BEFORE INSERT guard on streamers refuses a claimed or "
+                             "soundboard-enabled new creator from the API roles (not TRIGGER_RELS), no pinned function"),
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD
