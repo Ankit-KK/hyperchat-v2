@@ -69,7 +69,9 @@ api.env.production.example      template for /etc/hyperchat-prod/api.env (PRODUC
 1. `git archive <commit> backend database | ssh root@VPS "[ -d /opt/hyperchat/releases ] && mkdir /opt/hyperchat/releases/<commit> && tar -x -C /opt/hyperchat/releases/<commit>"`
    - **The application directories already exist,** as `root:hyperchat 0750`. On a fresh server, create them once: `install -d -o root -g hyperchat -m 750 /opt/hyperchat /opt/hyperchat/releases` (production: step 2 of its section).
    - **Never `mkdir -p` them:** that creates `root:root 0755` parents, so the service user would reach its code only through "other" access, which `check_isolation.sh` refuses.
-2. `python3.14 -m venv .../venv && .../venv/bin/pip install -r .../backend/requirements.txt`
+2. `python3.14 -m venv .../venv && .../venv/bin/pip install --isolated --require-hashes --no-deps --only-binary :all: -r .../backend/requirements.lock`
+   - **The hash lock** (`backend/requirements.lock`) pins every distribution of `requirements.txt` with its SHA-256 hashes. Its header holds the `uv pip compile` command that regenerates it after `requirements.txt` changes, and CI fails while the two differ.
+   - **Wheels only, no build:** `--only-binary :all:` means no sdist is ever built as root, so no build backend is fetched unhashed. `--isolated` ignores pip configuration and `PIP_*` variables. A missing wheel is a failed install, never a build.
 3. `echo <commit> > .../backend/RELEASE`; `chown -R root:hyperchat .../<commit>`; `chmod -R g+rX,g-w,o-rwx .../<commit>`
 4. Migrations (as root, peer-mapped to hyperchat_migrator):
    `cd .../database && PYTHONDONTWRITEBYTECODE=1 HYPERCHAT_MIGRATION_DSN="postgresql+psycopg://hyperchat_migrator@/<db>?host=/var/run/postgresql&port=<port>" ../venv/bin/alembic upgrade head`

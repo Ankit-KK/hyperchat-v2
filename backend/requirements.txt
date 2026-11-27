@@ -1,5 +1,5 @@
 # Pinned runtime dependencies (resolved on Python 3.14.4, Ubuntu 26.04).
-# Install: python3 -m venv venv && venv/bin/pip install -r requirements.txt
+# Install (servers): pip install --isolated --require-hashes --no-deps --only-binary :all: -r requirements.lock (deploy/README.md)
 alembic==1.20.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
@@ -24,6 +24,7 @@ jmespath==1.1.0
 Mako==1.4.3
 MarkupSafe==3.0.4
 mutagen==1.48.1
+opentelemetry-api==1.45.1  # via fastapi: the 53rd distribution in the DEV venv, now pinned (security audit run-4)
 pillow==13.0.0
 psycopg-binary==3.3.6
 psycopg-pool==3.3.3
