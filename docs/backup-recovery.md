@@ -192,7 +192,29 @@ It protects only while it is **not** restored together with an older backup: an 
 - **Already complete:** a rerun on a complete off-site set checks `COMPLETE.json` (environment, database, set,
   recipient, plaintext hashes against the local set) and verifies every object; it uploads nothing.
 - **No deletion:** the tool has no delete call at all.
-- **Ransomware and stolen credentials:** deletion must be impossible for the uploader. Use **bucket object lock / retention** (R2 "bucket locks"), e.g. 35 days, plus a lifecycle rule for expiry. The upload token cannot shorten either.
+- **Ransomware and stolen credentials:** deletion must be impossible for the uploader. Use **bucket object lock / retention** (R2 "bucket locks"), e.g. 35 days, plus a lifecycle rule for expiry.
+- **What the lock and the token do and do not stop** (Cloudflare's R2 documentation, read 2026-11-28):
+  - **Confirmed:**
+    - A bucket lock rule blocks **deletion and overwriting** of every object under it for the retention period. A write to a locked key is refused (`409 ObjectLockedByBucketPolicy`), and lifecycle deletion waits for the lock.
+    - A lock rule does **not** prevent creating **new** objects, so the bucket's Object Read & Write token can always add new keys, including a whole new set.
+    - Changing lock or lifecycle rules needs the account's dashboard or an admin-level token, not the bucket's Object Read & Write token.
+  - **Not confirmed by the documentation:**
+    - whether the Object Read & Write token may delete objects outside a lock;
+    - whether removing a lock rule frees the objects it protected;
+    - whether a retention period can be cut short.
+    
+    Treat these as possible.
+  - **So the lock protects history but not authenticity.** Whoever holds the token (a leak, a copy outside the server) could plant a self-consistent "newest" set: the objects only need to be encrypted to the public recipient key. Signing (next item) is what refuses such a set.
+- **Signed sets (security audit run-4, NV4-4):**
+  - **The signature:** the upload signs the exact `COMPLETE.json` bytes with the environment's own ed25519 key (`ssh-keygen -Y sign`, namespace `hyperchat-offsite`, principal `hyperchat-offsite-<env>`). It uploads the signature as `COMPLETE.json.sig` **before** the marker.
+  - **Accepted only when signed:** `list`, `verify`, `fetch` and a re-run of `upload` accept a set only when that signature verifies against the environment's **allowed-signers** file.
+    - Unsigned, foreign-signed or re-used signatures are refused, and so is a name that is not a set of this database.
+    - `list` reports them under `refused` and never as a set.
+  - **Fixed paths:** `/etc/hyperchat-backup/offsite-sign-<env>.key` (private, root 0600, upload only) and `/etc/hyperchat-backup/offsite-sign-<env>.allowed` (public, root, not writable by others). The owner can install them before the code that uses them; the env file is unchanged.
+  - **Off-server copy:** the owner keeps the allowed-signers line (one line, public) in their own records, off the server. A recovery takes it from there, **never from the bucket or from a backup**.
+  - **Stamps and upload times:** a set whose stamp is later than its provider upload time (plus 10 minutes) is refused, which defeats a future-stamped plant. `verify` reports the upload time (`uploaded_at`).
+  - **Limit:** the signing key is on the server. Someone who controls the server as root can sign, so after a server compromise only sets uploaded **before** the compromise are trusted. Choose by `uploaded_at`, which the uploader cannot set.
+  - **Older DEV sets:** sets uploaded before signing have no `COMPLETE.json.sig` and are refused by `verify` and `fetch`. They stay locked until their lifecycle expiry; recovery uses signed sets.
 
 **Owner decisions (the questions; the answers follow):**
 1. **Storage:** provider and account (R2 or another), a **separate** bucket per environment or one bucket with `prod/` / `dev/` prefixes, and the region / jurisdiction.
@@ -207,17 +229,32 @@ It protects only while it is **not** restored together with an older backup: an 
 - **Lock and expiry:** object lock of 35 days, lifecycle expiry after 90 days.
 - **Credential:** a token per bucket (Object Read & Write, that bucket only).
 - **Key:** an offline GPG key per environment, its private half on paper. DEV's key is DEV-only.
+- **Signing:** an ed25519 signing key per environment, created on the server. Its private half never leaves the
+  server, and the owner keeps the public allowed-signers line off the server.
 
 **Enable [APPROVAL]:**
 1. **Owner:** installs `/etc/hyperchat-backup/offsite-<env>.env` from `deploy/backup/offsite.env.example` (root 0600) and the environment's **own** public key file:
    - DEV: `backup-recipient.asc`;
    - production: `backup-recipient-prod.asc`, so the two environments never share or swap a key.
+   
+   **The signing key**, created as root on the server:
+   ```
+   ssh-keygen -q -t ed25519 -N "" -C hyperchat-offsite-<env> -f /etc/hyperchat-backup/offsite-sign-<env>.key
+   printf 'hyperchat-offsite-<env> namespaces="hyperchat-offsite" %s\n' "$(cut -d' ' -f1,2 /etc/hyperchat-backup/offsite-sign-<env>.key.pub)" > /etc/hyperchat-backup/offsite-sign-<env>.allowed
+   chmod 600 /etc/hyperchat-backup/offsite-sign-<env>.key; chmod 644 /etc/hyperchat-backup/offsite-sign-<env>.allowed
+   cat /etc/hyperchat-backup/offsite-sign-<env>.allowed
+   ```
+   Copy the printed line, which is public, into the owner's records. Without it, a recovery cannot tell genuine sets from planted ones.
 2. **Units:**
    - Install the units, a `hyperchat[-dev]-offsite.timer.d/schedule.conf` drop-in with the approved time, and an `alert.conf` drop-in (`OnFailure=hyperchat-offsite-alert@%n.service`).
    - The repo timer times are placeholders: set the time outside the maintenance windows, after the environment's backup.
 3. **Production also:** the same `OnFailure=` drop-in on `hyperchat-pgbackup.service`. When production's backup fails, `--latest` re-verifies yesterday's complete set and succeeds, so the off-site unit alone never reports a stale copy.
 4. **First upload:** `systemctl start hyperchat[-dev]-offsite.service` once by hand, then `verify` and `list`.
-5. **Restore check:** the owner downloads and decrypts that first set offline, and checks the hashes against `COMPLETE.json` and the manifest.
+5. **Restore check:** the owner downloads that first set and checks the signature on their own PC, with the allowed-signers line from their records:
+   ```
+   cmd /c "ssh-keygen -Y verify -f allowed -I hyperchat-offsite-<env> -n hyperchat-offsite -s COMPLETE.json.sig < COMPLETE.json"
+   ```
+   The `cmd` redirect passes the exact bytes. The result must be `Good "hyperchat-offsite" signature…`. Then the owner decrypts offline and checks the hashes against `COMPLETE.json` and the manifest.
 6. **Then:** `systemctl enable --now hyperchat[-dev]-offsite.timer`.
 
 ### Production tools tree
@@ -283,10 +320,15 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
    - OS users `hyperchat`, `hyperchat-prod`, `hyperchat-[prod-]stepup`.
 2. **Releases:** deploy the same commit the old server ran; never an unreviewed one.
 3. **Fetch the newest off-site set [APPROVAL]:**
-   - `offsite list` / `verify`.
-   - Download the objects of the chosen set.
+   - **First, the allowed-signers file:** put the environment's allowed-signers line **from the owner's own records** into `/etc/hyperchat-backup/offsite-sign-<env>.allowed` (root, 0644). Never take it from the bucket, a backup or the lost server.
+   - `offsite list` / `verify`: only sets signed by that key are listed; anything else is under `refused`.
+     - Choose the newest set whose `uploaded_at` is before any suspected compromise of the old server.
+     - An unexpected refused set (planted, unsigned, future-stamped) is a security event: report it before going on.
+   - `offsite fetch` the chosen set. It keeps `COMPLETE.json` and `COMPLETE.json.sig`.
+   - **Where the files are decrypted (the owner's PC), check the signature again:**
+     `cmd /c "ssh-keygen -Y verify -f allowed -I hyperchat-offsite-<env> -n hyperchat-offsite -s COMPLETE.json.sig < COMPLETE.json"` must print `Good "hyperchat-offsite" signature…`.
    - Decrypt them **offline with the owner's private key**.
-   - Check each file against `COMPLETE.json` (`plain_sha256`) and the set's manifest.
+   - Check each file against the signed `COMPLETE.json` (`plain_sha256`) and the set's manifest.
 4. **Verify:** `restore_check --scratch` on the decrypted set.
 5. **Restore [APPROVAL]:** as above, into the empty cluster.
 6. **Witness:**
@@ -306,7 +348,15 @@ Every step that changes a server is **[APPROVAL]**. "Read-only" steps can run an
 11. **Reconcile:** Razorpay and Didit.
 
 ### Lost storage credentials
-- **Upload token lost or leaked:** revoke it in the provider console **[APPROVAL]** and issue a new backup-only token. Existing objects stay protected by object lock.
+- **Upload token lost or leaked:** revoke it in the provider console **[APPROVAL]** and issue a new backup-only token.
+  - Existing objects stay protected by object lock.
+  - Objects the token holder **added** are possible (the lock does not stop new keys). They are refused unless signed: run `offsite list` and report anything under `refused`.
+- **Signing key exposed (server compromised):**
+  1. Create a new signing key on the rebuilt or cleaned server, and record its line.
+  2. Keep the old line in the owner's records, marked with the compromise time.
+  3. Old sets still verify with the old line. Trust only those whose `uploaded_at` is before the compromise.
+  
+  Do not use `valid-before` in the file for this: ssh-keygen checks it against the current time, so old sets would stop verifying.
 - **GPG private key lost:** the off-site copies are unreadable. Create a new key pair, switch the recipient file, and take a fresh set at once. Local sets remain plaintext on the server.
 
 ### Accidental deletion
