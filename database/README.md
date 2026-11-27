@@ -169,7 +169,13 @@ their passwords. **Dry run by default.** Nothing is ever written to a file, log 
   activation, `email_verified_at`, `password_changed_at` stay as they are). `email_confirmed_at` is only counted
   (`eligible_email_confirmed`); `confirmed_at` is never used (it can be a phone confirmation).
 - Excluded rows are counted by reason: orphaned target ids, target email belonging to another Supabase id, email
-  mismatch, deleted, banned, already has a password, no source hash, unsupported format.
+  mismatch, deleted, banned, administrator account (`target_admin_account`), already has a password, no source
+  hash, unsupported format.
+- **Administrators are never imported (2026-11-27):** the apply role is `hyperchat_app`, and migration 0024 refuses it
+  every write to an admin row (the ETL makes every `admin_emails` address an admin), so one planned admin would roll
+  the whole run back. Admins set their password by the admin path. The read-only report (phase 1) does not know
+  this rule: its exact-match counts exceed the dry run's `eligible` by `target_admin_account` (and by the deleted /
+  banned accounts), which the owner's count review must expect.
 - `--apply` refuses on any blocker: duplicate ids on either side, or **any** unsupported hash format among otherwise
   eligible rows.
 

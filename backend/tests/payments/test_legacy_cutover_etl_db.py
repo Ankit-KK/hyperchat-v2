@@ -185,7 +185,7 @@ def build_legacy(src: psycopg.Connection, tgt: psycopg.Connection) -> None:
                                 bank_name="ETL Bank", ifsc_code="ETLT0000001", account_number_encrypted="enc:etltest",
                                 account_number_last4="0000", account_type="savings"),
         "platform_voice_tiers": dict(min_amount_inr=150, max_duration_seconds=15),
-        "streamer_voice_tiers": dict(streamer_id=S_ALPHA, min_amount_inr=100, max_duration_seconds=10),  # < 0036 floor
+        "streamer_voice_tiers": dict(streamer_id=S_ALPHA, min_amount_inr=100, max_duration_seconds=10),
         "soundboard_tnc_acceptances": dict(streamer_slug="alpha", streamer_id=S_ALPHA, user_id=U_S1),
         "terms_acceptances": dict(user_id=U_S1, accepted_version="etl-v1"),
         "banned_donors": dict(streamer_id=S_ALPHA, donor_name="Banned", banned_by_moderator_id=MOD),
@@ -292,6 +292,24 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
                                    ).fetchall())
         assert decisions == {"alpha": None, "beta": None, "gamma": "not_active", "sapphire": None}
         assert c.execute("SELECT state FROM public.kyc_enforcement").fetchone()[0] == "draft"
+
+    # 0036 with every trigger back on: the pricing rule binds the runtime roles only. A legacy value below today's
+    # floors loads (the owner / migrator is exempt by design); the same write by the API role is refused.
+    with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as c:
+        c.execute("SET ROLE hyperchat_owner")
+        with c.transaction(force_rollback=True):
+            c.execute("UPDATE public.streamers SET min_voice_amount_inr = 20 WHERE id = %s", (S_ALPHA,))
+            c.execute("UPDATE public.streamer_voice_tiers SET max_duration_seconds = 60 WHERE streamer_id = %s",
+                      (S_ALPHA,))
+    with psycopg.connect(_dsn(verify_db, "hyperchat_app"), autocommit=True) as c:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            c.execute("UPDATE public.streamers SET min_voice_amount_inr = 20 WHERE id = %s", (S_ALPHA,))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            c.execute("UPDATE public.streamer_voice_tiers SET max_duration_seconds = 60 WHERE streamer_id = %s",
+                      (S_ALPHA,))
+        # 0024: the D1 apply role may never write an administrator's credentials (why the importer excludes them)
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            c.execute("UPDATE public.users SET password_hash = 'x' WHERE id = %s", (U_ADMIN,))
 
     # a second load into the same (no longer fresh) database refuses and changes nothing
     with _src_conn(legacy_db) as src, psycopg.connect(_dsn(verify_db, "hyperchat_migrator")) as tgt:

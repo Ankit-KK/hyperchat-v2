@@ -43,7 +43,8 @@ tables, so they never block the migrator):
 - Step-up (0025–0028, 0037): `webauthn_credentials`, `stepup_*`, `session_assurance`. `stepup_enforcement` keeps its `draft` row.
 - KYC (0022–0023): `kyc_sessions`, `kyc_events`, `kyc_webhook_events`, `kyc_grace_grants`, `kyc_restrictions`, `kyc_enforcement_events`. `kyc_enforcement` keeps its `draft` row; `kyc_provider_config` may already be set.
 - `creator_status_events`, `application_events` (0020–0021), `user_identities`, `user_invites`, `sessions`, `jobs`, `realtime_outbox`, `moderator_notifications`, `d1_hash_import_ledger` (written by step 4).
-- Pricing (0036): its triggers check only `hyperchat_app` / `hyperchat_worker` writes (and are paused during the load), so legacy minimums and voice tiers below today's floors load unchanged. The CI test loads a voice tier below the 0036 floor.
+- Pricing (0036): its triggers check only `hyperchat_app` / `hyperchat_worker` writes (and are paused during the load), so legacy minimums and voice tiers outside today's bounds load unchanged and are never re-judged. With every trigger
+  back on, the CI test shows the owner can still write such a value and `hyperchat_app` is refused (`check_violation`).
 
 ### PAY-15: how migrated donations and donor totals are loaded
 
@@ -78,8 +79,16 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
    - Restore it read-only as `hyperchat_restore_test` on the restore cluster.
    - Any legacy write after this point invalidates the snapshot.
 3. **ETL into production.**
-   - Production must be a new database migrated to head (0037 or later) with nothing else in it. The load refuses
+   - Production must be a database migrated to head (0037 or later) with nothing else in it. The load refuses
      anything else and changes nothing.
+   - Production today is an idle stack at 0009 whose API is running, so its tables may already hold rows (rate
+     limits, visits, sessions, a bootstrap admin). First stop the production API, worker and timers. Then either:
+     - migrate it to head and run the load: if the load refuses as "not fresh", the database is not empty; or
+     - drop and re-create `hyperchat` (owner `hyperchat_owner`, the `setup_cluster.sh` grants), then migrate it to
+       head.
+   - **Open item, owner decision:** how a drop and re-create interacts with the production KYC restore witness and
+     the backup sets (`/var/lib/hyperchat-kyc/prod.witness`, `/var/backups/hyperchat`). Decide this with the backup
+     session before the window. This runbook does not guess.
    - Rehearse the same command first on a scratch database at head on the same snapshot.
    - Run:
      ```
