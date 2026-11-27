@@ -1,6 +1,8 @@
 """app.backup.offsite against an in-memory S3 fake (no network, no account) and real GPG when available: disabled by
 default, refuses crossed environments and insecure configuration, encrypts before upload, never overwrites or deletes,
-verifies every object by reading it back, writes COMPLETE.json last and resumes a partial upload."""
+verifies every object by reading it back, writes COMPLETE.json last and resumes a partial upload. Every set is signed
+(COMPLETE.json.sig, ssh-keygen ed25519) and nothing unsigned, forged or future-stamped is listed, verified or fetched
+(security audit run-4, NV4-4)."""
 
 import hashlib
 import io
@@ -8,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -28,11 +31,13 @@ class FakeS3:
 
     def __init__(self):
         self.objects, self.puts, self.fail_put_on, self.corrupt = {}, [], None, set()
+        self.uploaded = {}  # the provider's own LastModified per key (objects placed by a test count as "now")
 
     def head_object(self, Bucket, Key):
         if (Bucket, Key) not in self.objects:
             raise ClientError("404")
-        return {"Metadata": self.objects[(Bucket, Key)][1]}
+        return {"Metadata": self.objects[(Bucket, Key)][1],
+                "LastModified": self.uploaded.get((Bucket, Key), datetime.now(UTC))}
 
     def put_object(self, Bucket, Key, Body, ContentMD5, IfNoneMatch, Metadata):
         assert IfNoneMatch == "*"
@@ -45,6 +50,7 @@ class FakeS3:
         if (Bucket, Key) in self.objects:
             raise ClientError("PreconditionFailed")
         self.objects[(Bucket, Key)] = (data, dict(Metadata))
+        self.uploaded[(Bucket, Key)] = datetime.now(UTC)
 
     def get_object(self, Bucket, Key):
         if (Bucket, Key) not in self.objects:
@@ -67,13 +73,32 @@ def fake_encrypt(src: Path, dst: Path, recipient: Path, home: Path) -> None:
     dst.write_bytes(b"ENC:" + os.urandom(16) + bytes(b ^ 0x5A for b in src.read_bytes()))
 
 
+def signing_keys(tmp: Path, name="sign", principal="hyperchat-offsite-test") -> tuple[Path, Path]:
+    """An ed25519 signing key (0600) and its allowed-signers file, as the owner sets them up per environment."""
+    key, allowed = tmp / f"{name}.key", tmp / f"{name}.allowed"
+    if not key.exists():
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", principal, "-f", str(key)], check=True)
+        key.chmod(0o600)
+        kind, blob = (tmp / f"{name}.key.pub").read_text().split()[:2]
+        allowed.write_text(f'{principal} namespaces="hyperchat-offsite" {kind} {blob}\n')
+        allowed.chmod(0o644)
+    return key, allowed
+
+
+def ssh_sign(key: Path, data: bytes) -> bytes:
+    return subprocess.run(["ssh-keygen", "-Y", "sign", "-q", "-f", str(key), "-n", "hyperchat-offsite"], input=data,
+                          check=True, capture_output=True).stdout
+
+
 def config_file(tmp: Path, env="test", **over) -> Path:
     recipient = tmp / "recipient.asc"
     recipient.write_text("public key")
+    key, allowed = signing_keys(tmp) if env == "test" else (None, None)
     values = {"ENABLED": "true", "ENVIRONMENT": env, "PREFIX": env, "ENDPOINT": "https://storage.example.invalid",
               "BUCKET": "hc-backups-test", "ACCESS_KEY_ID": "AKTEST", "SECRET_ACCESS_KEY": "not-a-real-secret",
               "GPG_RECIPIENT_FILE": str(recipient), "LOCAL_DIR": str(tmp / "backups"),
-              "DATABASE": "hc_backuptest_a", "STATE_DIR": str(tmp / "state" / env), **over}
+              "DATABASE": "hc_backuptest_a", "STATE_DIR": str(tmp / "state" / env),
+              "SIGNING_KEY_FILE": key and str(key), "ALLOWED_SIGNERS_FILE": allowed and str(allowed), **over}
     (tmp / "state").mkdir(mode=0o700, exist_ok=True)
     path = tmp / "offsite.env"
     path.write_text("".join(f"HYPERCHAT_OFFSITE_{k}={v}\n" for k, v in values.items() if v is not None))
@@ -94,6 +119,13 @@ def local_set(tmp_path):
 
 def run(argv, client):
     return offsite.main(argv, client_factory=lambda cfg: client, encrypt=fake_encrypt)
+
+
+def resign(tmp: Path, s3: FakeS3, base: str, marker: dict) -> None:
+    """Replace a set's marker AND sign it with the genuine key: a test of a later check must get past the signature."""
+    data = json.dumps(marker, sort_keys=True).encode()
+    s3.objects[("hc-backups-test", f"test/{base}/COMPLETE.json")] = (data, {})
+    s3.objects[("hc-backups-test", f"test/{base}/COMPLETE.json.sig")] = (ssh_sign(signing_keys(tmp)[0], data), {})
 
 
 # ── configuration ───────────────────────────────────────────────────────────────
@@ -159,8 +191,10 @@ def test_a_verified_set_is_uploaded_encrypted_verified_and_marked_complete_last(
     assert out["ok"] and {o["outcome"] for o in out["objects"]} == {"uploaded"}
     keys = s3.puts
     assert keys[-1] == f"test/{base}/COMPLETE.json" and all(k.startswith(f"test/{base}/") for k in keys)
+    assert keys[-2] == f"test/{base}/COMPLETE.json.sig"  # signed before the marker says "complete"
     assert {k.rsplit("/", 1)[1] for k in keys} == {f"{base}.dump.gpg", f"{base}.dump.sha256.gpg",
-                                                  f"{base}.witness.gpg", f"{base}.manifest.json.gpg", "COMPLETE.json"}
+                                                  f"{base}.witness.gpg", f"{base}.manifest.json.gpg", "COMPLETE.json",
+                                                  "COMPLETE.json.sig"}
     local = load(tmp / "backups", base)
     for path in local.files:  # nothing leaves in plaintext
         assert s3.objects[("hc-backups-test", f"test/{base}/{path.name}.gpg")][0] != path.read_bytes()
@@ -169,7 +203,7 @@ def test_a_verified_set_is_uploaded_encrypted_verified_and_marked_complete_last(
     assert "not-a-real-secret" not in json.dumps(marker)
     assert run(["verify", "--config", str(config_file(tmp)), "--set", base], s3) == 0
     assert run(["list", "--config", str(config_file(tmp))], s3) == 0
-    assert json.loads(capsys.readouterr().out.splitlines()[-1])["sets"] == [base]
+    assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {"ok": True, "sets": [base], "refused": {}}
 
 
 def test_a_partial_upload_has_no_marker_and_a_rerun_resumes_without_replacing(local_set, capsys):
@@ -290,7 +324,8 @@ def test_a_record_of_another_set_or_a_changed_local_ciphertext_is_refused(local_
 
 def test_an_interrupted_marker_is_retried_with_identical_bytes_and_the_state_is_cleaned(local_set):
     tmp, base = local_set
-    s3 = _partial(tmp, base, fail_on=5)  # every object stored, the COMPLETE marker failed
+    s3 = _partial(tmp, base, fail_on=6)  # every object and the signature stored, the COMPLETE marker failed
+    assert ("hc-backups-test", f"test/{base}/COMPLETE.json.sig") in s3.objects
     assert ("hc-backups-test", f"test/{base}/COMPLETE.json") not in s3.objects
     assert run(["upload", "--config", str(config_file(tmp)), "--set", base], s3) == 0
     assert ("hc-backups-test", f"test/{base}/COMPLETE.json") in s3.objects
@@ -326,7 +361,7 @@ def test_a_complete_marker_of_other_content_is_refused_not_trusted(local_set, fi
         marker["database"] = value
     else:
         marker["objects"][0]["plain_sha256"] = value
-    s3.objects[key] = (json.dumps(marker, sort_keys=True).encode(), meta)
+    resign(tmp, s3, base, marker)  # even correctly signed, other content is refused
     puts = list(s3.puts)
     assert run(["upload", "--config", str(config_file(tmp)), "--set", base], s3) == 2 and s3.puts == puts
 
@@ -361,7 +396,7 @@ def test_verify_refuses_a_marker_pointing_outside_its_set(local_set):
     key = ("hc-backups-test", f"test/{base}/COMPLETE.json")
     marker = json.loads(s3.objects[key][0])
     marker["objects"][0]["key"] = "prod/other/x.gpg"
-    s3.objects[key] = (json.dumps(marker).encode(), {})
+    resign(tmp, s3, base, marker)
     assert run(["verify", "--config", str(config_file(tmp)), "--set", base], s3) == 2
 
 
@@ -372,6 +407,10 @@ def test_fetch_downloads_a_complete_set_verified_and_still_encrypted(local_set):
     to = tmp / "fetched"
     assert run(["fetch", "--config", str(config_file(tmp)), "--set", base, "--to", str(to)], s3) == 0
     marker = json.loads((to / "COMPLETE.json").read_text())
+    allowed = signing_keys(tmp)[1]
+    assert subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "hyperchat-offsite-test", "-n",
+                           "hyperchat-offsite", "-s", str(to / "COMPLETE.json.sig")],
+                          input=(to / "COMPLETE.json").read_bytes(), capture_output=True).returncode == 0
     for obj in marker["objects"]:
         data = (to / obj["key"].rsplit("/", 1)[1]).read_bytes()
         assert hashlib.sha256(data).hexdigest() == obj["sha256"] and data.startswith(b"ENC:")
@@ -482,3 +521,99 @@ def test_real_gpg_encryption_round_trips_only_with_the_offline_private_key(local
     finally:
         for home in (keyhome, other):  # no gpg-agent left running after the test
             subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "gpg-agent"], capture_output=True)
+
+
+# ── signed sets (security audit run-4, NV4-4) ─────────────────────────────────────────────────────────────────────────
+
+def _plant(s3: FakeS3, genuine: str, stamp: str, sig: bytes | None) -> str:
+    """What a bucket-token holder can do without the signing key: copy a genuine set's objects under a new set name
+    with a self-consistent marker (every hash matches what it names), optionally with a signature of their own."""
+    base = f"hc_backuptest_a_{stamp}"
+    marker = json.loads(s3.objects[("hc-backups-test", f"test/{genuine}/COMPLETE.json")][0])
+    for obj in marker["objects"]:
+        data = s3.objects[("hc-backups-test", obj["key"])][0]
+        obj["key"] = obj["key"].replace(genuine, base)
+        obj["plain_name"] = obj["plain_name"].replace(genuine, base)
+        s3.objects[("hc-backups-test", obj["key"])] = (data, {})
+    marker.update(set=base, created_at=stamp)
+    data = json.dumps(marker, sort_keys=True).encode()
+    s3.objects[("hc-backups-test", f"test/{base}/COMPLETE.json")] = (data, {})
+    if sig is not None:
+        s3.objects[("hc-backups-test", f"test/{base}/COMPLETE.json.sig")] = (sig, {})
+    return base
+
+
+@pytest.mark.parametrize("signature", ["none", "own key", "genuine signature of another marker"])
+def test_a_planted_newest_set_is_never_listed_verified_or_fetched(local_set, capsys, signature):
+    tmp, genuine = local_set
+    s3 = FakeS3()
+    assert run(["upload", "--config", str(config_file(tmp)), "--set", genuine], s3) == 0
+    stamp = (datetime.now(UTC) + timedelta(minutes=1)).strftime("%Y%m%dT%H%M%SZ")  # newer, within the clock skew
+    genuine_sig = s3.objects[("hc-backups-test", f"test/{genuine}/COMPLETE.json.sig")][0]
+    planted = _plant(s3, genuine, stamp, genuine_sig if signature.startswith("genuine") else None)
+    if signature == "own key":  # the attacker signs their own marker with a key of their own
+        data = s3.objects[("hc-backups-test", f"test/{planted}/COMPLETE.json")][0]
+        s3.objects[("hc-backups-test", f"test/{planted}/COMPLETE.json.sig")] = (
+            ssh_sign(signing_keys(tmp, name="attacker")[0], data), {})
+    capsys.readouterr()
+    assert run(["list", "--config", str(config_file(tmp))], s3) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["sets"] == [genuine]
+    assert out["refused"] == {planted: "offsite_set_unsigned" if signature == "none" else "offsite_set_signature_invalid"}
+    assert run(["verify", "--config", str(config_file(tmp)), "--set", planted], s3) == 2
+    assert run(["fetch", "--config", str(config_file(tmp)), "--set", planted, "--to", str(tmp / "got")], s3) == 2
+    assert not (tmp / "got").exists()
+    assert run(["verify", "--config", str(config_file(tmp)), "--set", genuine], s3) == 0
+
+
+def test_a_signed_set_stamped_after_its_upload_is_refused(local_set):
+    """Even with the signing key (a host-root attacker), a future-stamped plant meant to stay "newest" is refused:
+    the provider's upload time is not the uploader's to choose."""
+    tmp, genuine = local_set
+    s3 = FakeS3()
+    assert run(["upload", "--config", str(config_file(tmp)), "--set", genuine], s3) == 0
+    planted = _plant(s3, genuine, "20991231T000000Z", None)
+    data = s3.objects[("hc-backups-test", f"test/{planted}/COMPLETE.json")][0]
+    s3.objects[("hc-backups-test", f"test/{planted}/COMPLETE.json.sig")] = (ssh_sign(signing_keys(tmp)[0], data), {})
+    cfg = offsite.read_config(str(config_file(tmp)))
+    with pytest.raises(offsite.Refused, match="offsite_set_stamped_after_its_upload"):
+        offsite.verify(cfg, planted, s3)
+    result = offsite.verify(cfg, genuine, s3)
+    assert result["signed_by"] == "hyperchat-offsite-test" and result["uploaded_at"].endswith("Z")
+
+
+def test_an_unsigned_marker_planted_before_the_upload_is_refused_not_completed(local_set):
+    tmp, base = local_set
+    s3 = FakeS3()
+    s3.objects[("hc-backups-test", f"test/{base}/COMPLETE.json")] = (json.dumps(
+        {"format": 1, "environment": "test", "database": "hc_backuptest_a", "set": base, "objects": []}).encode(), {})
+    assert run(["upload", "--config", str(config_file(tmp)), "--set", base], s3) == 2 and s3.puts == []
+
+
+@pytest.mark.parametrize("what", ["key readable by others", "no key", "no allowed signers"])
+def test_an_upload_without_a_usable_signing_key_uploads_nothing(local_set, what):
+    tmp, base = local_set
+    cfg_path = config_file(tmp)
+    key, allowed = signing_keys(tmp)
+    if what == "key readable by others":
+        key.chmod(0o644)
+    elif what == "no key":
+        key.unlink()
+    else:
+        allowed.unlink()
+    s3 = FakeS3()
+    assert run(["upload", "--config", str(cfg_path), "--set", base], s3) == 2 and s3.puts == []
+
+
+def test_signing_paths_are_fixed_for_production_and_dev(tmp_path):
+    cfg = offsite.read_config(str(config_file(tmp_path, env="prod", LOCAL_DIR="/var/backups/hyperchat",
+                                              DATABASE="hyperchat", STATE_DIR="/var/lib/hyperchat-offsite/prod")))
+    assert str(cfg.signing_key) == "/etc/hyperchat-backup/offsite-sign-prod.key"
+    assert str(cfg.allowed_signers) == "/etc/hyperchat-backup/offsite-sign-prod.allowed"
+    assert cfg.principal == "hyperchat-offsite-prod"
+    with pytest.raises(offsite.Refused, match="config_signing_paths_are_fixed"):
+        offsite.read_config(str(config_file(tmp_path, env="dev", LOCAL_DIR="/var/backups/hyperchat-dev",
+                                            DATABASE="hyperchat_dev", STATE_DIR="/var/lib/hyperchat-offsite/dev",
+                                            SIGNING_KEY_FILE="/tmp/k")))
+    with pytest.raises(offsite.Refused, match="config_test_scope"):
+        offsite.read_config(str(config_file(tmp_path, SIGNING_KEY_FILE="/etc/hyperchat-backup/offsite-sign-prod.key")))
