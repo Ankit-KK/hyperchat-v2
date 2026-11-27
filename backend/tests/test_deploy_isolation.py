@@ -604,3 +604,27 @@ def test_the_audit_fails_each_broken_boundary(tmp_path, break_it, expected):
     out = audit(tmp_path)
     assert out.returncode == 1
     assert any(line.startswith("FAIL") and expected in line for line in out.stdout.splitlines()), out.stdout
+
+
+# ── database reach (security audit run-4: pg_hba "database all") ───────────────
+def test_the_isolation_audit_checks_each_environments_database_acl_against_its_own_database():
+    script = (DEPLOY / "check_isolation.sh").read_text()
+    assert "PGPORT=5433; OWN_DB=hyperchat_dev" in script and "PGPORT=5432; OWN_DB=hyperchat" in script
+    api = {f: dict(line.split("=", 1) for line in read(f).splitlines() if line and not line.startswith("#"))
+           for f in ("api.env.example", "api.env.production.example")}
+    assert (api["api.env.example"]["HYPERCHAT_DB_PORT"], api["api.env.example"]["HYPERCHAT_DB_NAME"]) == (
+        "5433", "hyperchat_dev")
+    assert (api["api.env.production.example"]["HYPERCHAT_DB_PORT"],
+            api["api.env.production.example"]["HYPERCHAT_DB_NAME"]) == ("5432", "hyperchat")
+    assert 'check "no HyperChat runtime role can connect to another database' in script
+    assert "has_database_privilege(r.rolname, d.datname, 'CONNECT')" in script
+
+
+@needs_bash
+@pytest.mark.parametrize("args", [("5433", "hyperchat_dev"), ("5432", "hyperchat"), ("5433", "postgres"),
+                                  ("5433", "template1"), ("x", "hyperchat_restore_test"), ("5433", "bad-name"),
+                                  ("5433", "hyperchat_restore_test", "--apply-everything")])
+def test_the_acl_narrowing_script_refuses_hyperchat_and_system_databases_and_bad_arguments(args):
+    r = subprocess.run(["bash", str(DEPLOY / "postgres/narrow_database_acl.sh"), *args], capture_output=True,
+                       text=True)
+    assert r.returncode == 2 and r.stdout == "", (r.stdout, r.stderr)  # refused before touching anything (or root)

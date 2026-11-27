@@ -19,9 +19,11 @@ set -uo pipefail
 case "${1:-}" in
   dev)  SVC=hyperchat;      OTHER=hyperchat-prod; APP=/opt/hyperchat;      ETC=/etc/hyperchat
         UNITS="hyperchat-api hyperchat-worker hyperchat-cleanup"; PGCONF=/etc/postgresql/15/restoretest
+        PGPORT=5433; OWN_DB=hyperchat_dev
         VSVC=hyperchat-stepup;      VAPP=/opt/hyperchat-stepup;      VETC=/etc/hyperchat-stepup ;;
   prod) SVC=hyperchat-prod; OTHER=hyperchat;      APP=/opt/hyperchat-prod; ETC=/etc/hyperchat-prod
         UNITS="hyperchat-prod-api hyperchat-prod-worker hyperchat-prod-cleanup"; PGCONF=/etc/postgresql/17/hyperchat
+        PGPORT=5432; OWN_DB=hyperchat
         VSVC=hyperchat-prod-stepup; VAPP=/opt/hyperchat-prod-stepup; VETC=/etc/hyperchat-prod-stepup ;;
   *) echo "usage: $0 dev|prod" >&2; exit 2 ;;
 esac
@@ -212,6 +214,21 @@ if [ -f "$HBA" ] && [ -f "$IDENT" ]; then
   check "only $VSVC maps to hyperchat_stepup, and $VSVC to nothing else"     awk -v v="$VSVC" '$1 == "hyperchat" && (($3 == "hyperchat_stepup") != ($2 == v))' "$IDENT"
 else
   fail "$PGCONF/pg_hba.conf or pg_ident.conf missing"
+fi
+# The rule matches database "all", so the database ACLs decide which databases the runtime roles reach (security
+# audit run-4): no runtime role may CONNECT to any database but this environment's (postgres and the templates hold
+# no data). Fix with deploy/postgres/narrow_database_acl.sh. Live cluster only: the test fake root has none.
+foreign_db_reach() {
+  local roles; roles="$(printf "'%s'," $LOGIN_ROLES | sed 's/,$//')"
+  (cd / && sudo -u postgres psql -X -q -At -h /var/run/postgresql -p "$PGPORT" -d postgres -c "
+    SELECT d.datname || ': ' || string_agg(r.rolname, ' ' ORDER BY r.rolname)
+    FROM pg_database d CROSS JOIN pg_roles r
+    WHERE d.datname NOT IN ('$OWN_DB', 'postgres', 'template0', 'template1') AND r.rolname IN ($roles)
+      AND r.rolname <> 'hyperchat_migrator' AND has_database_privilege(r.rolname, d.datname, 'CONNECT')
+    GROUP BY d.datname ORDER BY 1")
+}
+if [ -z "$P" ]; then
+  check "no HyperChat runtime role can connect to another database on :$PGPORT" foreign_db_reach
 fi
 
 # 6. The step-up verifier (S1): its own OS user, release tree, environment and socket. Its code is audited like the

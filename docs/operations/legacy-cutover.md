@@ -79,6 +79,15 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
 2. **Take the final snapshot.**
    - Dump legacy only after the drain.
    - Restore it read-only as `hyperchat_restore_test` on the restore cluster.
+   - **[APPROVAL]** Narrow its ACL at once.
+     - **Why:** a fresh restore re-creates the database with the default PUBLIC CONNECT and TEMPORARY, so every
+       HyperChat runtime role reaches the legacy data again (security audit run-4).
+     - **Run:** `deploy/postgres/narrow_database_acl.sh 5433 hyperchat_restore_test` (R0, read-only), then
+       `--apply-r2`.
+     - **Role `hyperchat`:** if R4 was applied, a restore leaves it NOLOGIN; the legacy dump's grants to it are
+       still restored. The ETL source must then use `postgres` read-only
+       (`docs/operations/backend-readiness-plan.md`).
+     - **Isolation audit:** `check_isolation.sh dev` fails until R2 is applied again.
    - Any legacy write after this point invalidates the snapshot.
 3. **ETL into production.**
    - Production must be a database migrated to head (0039 or later) with nothing else in it. The load refuses
