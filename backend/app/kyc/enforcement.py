@@ -100,7 +100,12 @@ class EnforcementService:
         that diverged from it (a restore) is never re-anchored here (that is the operator's acknowledgement)."""
         head, problem = await self.check()
         if problem is None:
-            self.witness.record(head["state"], head["generation"], head["chain"], **event)
+            try:
+                self.witness.record(head["state"], head["generation"], head["chain"], **event)
+            except OSError as exc:  # committed but unwitnessed: a restore to before it would go undetected
+                security_event("kyc_enforcement_witness_write_failed", level=50, reason=type(exc).__name__)
+                raise ApiError(503, "The change was saved but the restore witness could not be written",
+                               "kyc_witness_write_failed") from None
         elif self.witness.path is not None:
             security_event("kyc_enforcement_witness_mismatch", level=50, reason=problem)
 

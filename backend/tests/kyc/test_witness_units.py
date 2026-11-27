@@ -49,3 +49,38 @@ def test_a_torn_or_foreign_line_is_never_trusted(tmp_path):
 def test_an_unreadable_witness_fails_closed(tmp_path):
     w = KycWitness(str(tmp_path))  # a directory: reading it fails
     assert w.problem("draft", 0, None) == "witness_unreadable"
+
+
+class _HeadRepo:
+    def __init__(self, head: dict) -> None:
+        self._head = head
+
+    async def head(self, anchor_generation: int) -> dict:
+        return self._head
+
+
+def test_a_failed_witness_append_is_a_visible_503_never_a_silent_gap(tmp_path, monkeypatch, caplog):
+    # Security audit run-4: a sandboxed unit without a writable witness path raised an unhandled OSError after the
+    # database change had committed. Now it is a 503 naming the gap, plus a critical security event.
+    import asyncio
+    import errno
+    import logging
+
+    import pytest
+
+    from app.core.errors import ApiError
+    from app.kyc.enforcement import EnforcementService
+
+    path = tmp_path / "w"
+    path.touch()
+
+    def read_only(self, *args, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(KycWitness, "record", read_only)
+    svc = EnforcementService(_HeadRepo({"state": "draft", "generation": 2, "chain": "c2", "anchor_chain": None}),
+                             KycWitness(str(path)))
+    with caplog.at_level(logging.WARNING), pytest.raises(ApiError) as exc:
+        asyncio.run(svc.sync_witness(action="restriction_added"))
+    assert (exc.value.status, exc.value.reason) == (503, "kyc_witness_write_failed")
+    assert any(getattr(r, "security_event", None) == "kyc_enforcement_witness_write_failed" for r in caplog.records)

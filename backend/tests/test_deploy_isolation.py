@@ -135,6 +135,15 @@ def test_every_unit_runs_hardened_as_its_own_user(rel, user):
     assert u["ExecStart"].startswith(root) and u["WorkingDirectory"].startswith(root)
 
 
+@pytest.mark.parametrize("rel", ["systemd/hyperchat-api.service", "systemd/hyperchat-cleanup.service",
+                                 "systemd/hyperchat-prod-api.service", "systemd/hyperchat-prod-cleanup.service"])
+def test_the_api_and_cleanup_may_append_to_the_kyc_restore_witness(rel):
+    # Security audit run-4: ProtectSystem=strict mounts /var/lib read-only for these units; the KYC witness
+    # (docs/kyc-rollout.md, HYPERCHAT_KYC_WITNESS_PATH) lives in /var/lib/hyperchat-kyc and must stay writable.
+    assert unit(rel).get("ReadWritePaths", "").split() == ["-/var/lib/hyperchat-kyc"], rel
+    assert "/var/lib/hyperchat-kyc/" in read("api.env.example")  # the documented witness path is inside it
+
+
 # ── sync_pg_hba.sh ──────────────────────────────────────────────────────────────
 
 GENERIC = ("# default\n"

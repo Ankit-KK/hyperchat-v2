@@ -131,6 +131,7 @@ install -o hyperchat -g hyperchat -m 0600 /dev/null /var/lib/hyperchat-kyc/<env>
 chattr +a /var/lib/hyperchat-kyc/<env>.witness   # append-only: not even its owner can rewrite or delete it
 ```
 - **Running the service:** set `HYPERCHAT_KYC_WITNESS_PATH` in that environment's api.env (DEV and production use different files). The cleanup service uses the same env file.
+- **The sandbox:** the API and cleanup units run with `ProtectSystem=strict`, which mounts `/var/lib` read-only, so they declare `ReadWritePaths=-/var/lib/hyperchat-kyc` (security audit run-4). Install the units from the release (then `systemctl daemon-reload` and restart) before the first enforcement change; without it every restriction or grace revocation is saved but not witnessed. A failed append is now a 503 `kyc_witness_write_failed` and a critical `kyc_enforcement_witness_write_failed` event, and the daily cleanup exits 1.
 - **Running the operator tool:** run it as root with the same path.
 
 **After a restore:**
