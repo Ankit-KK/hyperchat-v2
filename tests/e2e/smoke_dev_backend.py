@@ -804,9 +804,10 @@ try:
     if me.status_code == 404:
         blocked(S4, "Owner identity verification (KYC PR3)", "not deployed on DEV yet")
     else:
-        check(S4, "an owner sees their KYC state (never identity data)", me.status_code == 200 and set(me.json()) == {
-            "approved", "state", "provider_status", "updated_at", "owns_creator", "available", "can_start"},
-              me.text[:200])
+        base = {"approved", "state", "provider_status", "updated_at", "owns_creator", "available", "can_start"}
+        pan = {"pan_status", "payout_hold", "pan_acknowledgement"}  # migration 0041's fields
+        check(S4, "an owner sees their KYC state (never identity data)",
+              me.status_code == 200 and set(me.json()) in (base, base | pan), me.text[:200])
         check(S4, "anonymous -> 401", httpx.get(API + "/api/v1/me/kyc", timeout=15).status_code == 401)
         unsigned = httpx.post(API + "/api/v1/webhooks/didit", content=b"{}",
                               headers={"content-type": "application/json"}, timeout=15)

@@ -23,7 +23,9 @@ Revises: 0040
   'non_pan_kyc', the approving session) when the user's current approval is not PAN, and clears it
   ('pan_verified') when a PAN-verified approval is current; losing the approval never clears it. Triggers re-sync
   on every session status / evidence / veto change, and on every policy or account change. No API role can write
-  it. Existing approvals get no hold until the operator runs kyc_sync_payout_holds() (an owner decision).
+  it. Holds open automatically only for approvals recorded after 0041 (their check_statuses carry
+  `id_documents`); approvals recorded before get one only when the operator runs kyc_sync_payout_holds() (an owner
+  decision), not as a side effect of a configuration change.
 * kyc_pan_acknowledgements: the creator ticked "Only use PAN card for verification, otherwise your payout can be put
   on hold if found using different ID" before KYC: who, when, the text version and its hash, and the session it was
   bound to. The API inserts it and binds it once (guarded); nothing deletes it.
@@ -53,7 +55,7 @@ LABEL = "CASE WHEN jsonb_typeof(e -> '{k}') = 'string' AND char_length(e ->> '{k
 DOC_FIELDS = ("status", "document_type", "document_subtype", "issuing_state", "verification_method")
 APP_FUNCTIONS = ("public.kyc_pan_status(uuid, text)", "public.kyc_payout_hold(uuid)")
 OPERATOR_FUNCTIONS = ("public.kyc_sync_payout_holds()",)
-INTERNAL_FUNCTIONS = ("public.kyc_documents_pan(jsonb)", "public.kyc_sync_payout_hold(uuid)",
+INTERNAL_FUNCTIONS = ("public.kyc_documents_pan(jsonb)", "public.kyc_sync_payout_hold(uuid, boolean)",
                       "public.kyc_payout_hold_on_session()", "public.kyc_payout_hold_on_config()",
                       "public.kyc_pan_acknowledgements_guard()")
 SEED = ("IND", None, "TAX_CARD_STANDARD")
@@ -88,11 +90,14 @@ def upgrade() -> None:
                               AND char_length(e ->> 'status') <= 32)), '{{}}'::jsonb)
                     FROM unnest(ARRAY['id_verifications', 'liveness_checks', 'face_matches', 'aml_screenings']) AS k
                     WHERE jsonb_typeof(p_decision) = 'object' AND jsonb_typeof(p_decision -> k) = 'array')
-                || CASE WHEN jsonb_typeof(p_decision -> 'id_verifications') = 'array' THEN jsonb_build_object(
-                       'id_documents', (SELECT COALESCE(jsonb_agg(jsonb_build_object({labels}) ORDER BY n), '[]'::jsonb)
-                                        FROM jsonb_array_elements(p_decision -> 'id_verifications')
-                                             WITH ORDINALITY AS t(e, n)
-                                        WHERE jsonb_typeof(e) = 'object'))
+                -- every signed decision gets the key (an empty list without id_verifications), so "recorded
+                -- after 0041" is the key's presence
+                || CASE WHEN jsonb_typeof(p_decision) = 'object' THEN jsonb_build_object(
+                       'id_documents', CASE WHEN jsonb_typeof(p_decision -> 'id_verifications') = 'array' THEN
+                           (SELECT COALESCE(jsonb_agg(jsonb_build_object({labels}) ORDER BY n), '[]'::jsonb)
+                            FROM jsonb_array_elements(p_decision -> 'id_verifications') WITH ORDINALITY AS t(e, n)
+                            WHERE jsonb_typeof(e) = 'object')
+                           ELSE '[]'::jsonb END)
                    ELSE '{{}}'::jsonb END
         $$
     """)
@@ -178,8 +183,9 @@ def upgrade() -> None:
     op.execute("CREATE UNIQUE INDEX kyc_payout_holds_one_open ON public.kyc_payout_holds (user_id) "
                "WHERE cleared_at IS NULL")
     op.execute(f"""
-        CREATE FUNCTION public.kyc_sync_payout_hold(p_user_id uuid) RETURNS void LANGUAGE plpgsql {DEFINER} AS $$
-        DECLARE env text; st text; sess uuid;
+        CREATE FUNCTION public.kyc_sync_payout_hold(p_user_id uuid, p_backfill boolean) RETURNS void
+        LANGUAGE plpgsql {DEFINER} AS $$
+        DECLARE env text; st text; sess uuid; recorded boolean;
         BEGIN
             SELECT environment INTO env FROM public.kyc_provider_config;
             IF env IS NULL THEN
@@ -187,7 +193,10 @@ def upgrade() -> None:
             END IF;
             st := public.kyc_pan_status(p_user_id, env);
             SELECT e.session_id INTO sess FROM public.kyc_effective(p_user_id, env) e;
-            IF st = 'non_pan' THEN
+            -- automatic opening only for an approval whose decision was recorded after 0041 (it carries the key);
+            -- older approvals are held only by the operator's kyc_sync_payout_holds() (an owner decision)
+            SELECT ks.check_statuses ? 'id_documents' INTO recorded FROM public.kyc_sessions ks WHERE ks.session_id = sess;
+            IF st = 'non_pan' AND (p_backfill OR coalesce(recorded, false)) THEN
                 INSERT INTO public.kyc_payout_holds (user_id, reason, session_id) VALUES (p_user_id, 'non_pan_kyc', sess)
                 ON CONFLICT (user_id) WHERE cleared_at IS NULL DO NOTHING;
             ELSIF st = 'pan_verified' THEN
@@ -200,7 +209,7 @@ def upgrade() -> None:
     op.execute(f"""
         CREATE FUNCTION public.kyc_payout_hold_on_session() RETURNS trigger LANGUAGE plpgsql {DEFINER} AS $$
         BEGIN
-            PERFORM public.kyc_sync_payout_hold(NEW.user_id);
+            PERFORM public.kyc_sync_payout_hold(NEW.user_id, false);
             RETURN NULL;
         END $$
     """)
@@ -209,7 +218,7 @@ def upgrade() -> None:
         DECLARE u uuid; n integer := 0;
         BEGIN
             FOR u IN SELECT DISTINCT user_id FROM public.kyc_sessions LOOP
-                PERFORM public.kyc_sync_payout_hold(u);
+                PERFORM public.kyc_sync_payout_hold(u, true);
                 n := n + 1;
             END LOOP;
             RETURN n;
@@ -220,7 +229,7 @@ def upgrade() -> None:
         BEGIN
             -- a policy row, an account revocation or a workflow epoch can change the current approval without a
             -- session write: re-sync users whose hold is open, and users whose current approval may now be non-PAN
-            PERFORM public.kyc_sync_payout_hold(u) FROM (
+            PERFORM public.kyc_sync_payout_hold(u, false) FROM (
                 SELECT DISTINCT s.user_id AS u FROM public.kyc_sessions s WHERE s.provider_status = 'Approved'
                 UNION SELECT h.user_id FROM public.kyc_payout_holds h WHERE h.cleared_at IS NULL) x;
             RETURN NULL;
@@ -311,6 +320,7 @@ def downgrade() -> None:
     for table in ("kyc_pan_acknowledgements", "kyc_payout_holds", "kyc_document_policy"):
         op.execute(f"DROP TABLE public.{table}")
     for fn in ("public.kyc_payout_hold(uuid)", "public.kyc_sync_payout_holds()", "public.kyc_payout_hold_on_config()",
-               "public.kyc_payout_hold_on_session()", "public.kyc_sync_payout_hold(uuid)", "public.kyc_pan_status(uuid, text)",
+               "public.kyc_payout_hold_on_session()", "public.kyc_sync_payout_hold(uuid, boolean)",
+               "public.kyc_pan_status(uuid, text)",
                "public.kyc_documents_pan(jsonb)", "public.kyc_pan_acknowledgements_guard()"):
         op.execute(f"DROP FUNCTION {fn}")

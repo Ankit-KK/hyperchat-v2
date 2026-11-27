@@ -53,12 +53,13 @@ def test_a_fresh_approval_is_missing_everything_a_person_has_not_done_yet():
     assert entry["qualifies_for_auto_activation"] is True and entry["ready_for_activation"] is False
 
 
-@pytest.mark.parametrize(("pan_status", "row"), [
-    ("pan_verified", ("ok", None, False)),
-    ("non_pan", ("payout_hold", "non_pan_kyc", False)),  # owner 2026-11-27: activated, payouts held
-    ("not_approved", ("missing", "kyc_not_approved", False)), (None, ("missing", "kyc_not_approved", False))])
-def test_pan_never_blocks_activation_it_only_reports_the_payout_hold(pan_status, row):
-    entry = evaluate(done(pan_status=pan_status), ACCOUNTS)
+@pytest.mark.parametrize(("pan_status", "held", "row"), [
+    ("pan_verified", False, ("ok", None, False)),
+    ("non_pan", True, ("payout_hold", "non_pan_kyc", False)),  # owner 2026-11-27: activated, payouts held
+    ("non_pan", False, ("missing", "pan_evidence_not_recorded", False)),  # approved before 0041, no hold yet
+    ("not_approved", False, ("missing", "kyc_not_approved", False)), (None, False, ("missing", "kyc_not_approved", False))])
+def test_pan_never_blocks_activation_it_only_reports_the_payout_hold(pan_status, held, row):
+    entry = evaluate(done(pan_status=pan_status, payout_held=held), ACCOUNTS)
     assert rows(entry)["pan_policy"] == row
     assert not [c for c, (_, _, blocking) in rows(entry).items() if blocking]
     assert entry["ready_for_activation"] is True

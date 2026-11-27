@@ -116,8 +116,8 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
     complete = entry_of(owner.get(ME), cid)
     assert rows(complete)["profile_picture"] == ("ok", None) and rows(complete)["background"] == ("ok", None)
     assert [r["condition"] for r in complete["conditions"] if r["blocking"]] == []
-    # the approval's decision named no document: not PAN (fail closed), so activation may follow but payouts are held
-    assert rows(complete)["pan_policy"] == ("payout_hold", "non_pan_kyc")
+    # recorded without a signed decision's documents (as before 0041): not PAN, no hold opened automatically
+    assert rows(complete)["pan_policy"] == ("missing", "pan_evidence_not_recorded")
     assert complete["ready_for_activation"] is True
 
     app.app_state.admin.payment_accounts = frozenset()  # this server no longer configures the account
@@ -128,7 +128,7 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
     held = entry_of(owner.get(ME), cid)
     assert rows(held)["no_restriction"] == ("blocked", "open_restriction")
     assert rows(held)["lifecycle_eligible"] == ("blocked", "restricted")
-    assert rows(held)["pan_policy"] == ("payout_hold", "non_pan_kyc")
+    assert rows(held)["pan_policy"] == ("missing", "pan_evidence_not_recorded")
     assert held["ready_for_activation"] is False
     with db() as conn:  # nothing here activates
         assert conn.execute("SELECT status FROM public.streamers WHERE id = %s", (cid,)).fetchone()[0] == "pending"

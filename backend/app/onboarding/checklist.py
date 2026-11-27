@@ -41,6 +41,7 @@ _FACTS = f"""
                 ELSE public.user_kyc_approved(s.user_id, %(env)s::text) END AS kyc_approved,
            CASE WHEN s.user_id IS NULL OR %(env)s::text IS NULL THEN 'not_approved'
                 ELSE public.kyc_pan_status(s.user_id, %(env)s::text) END AS pan_status,
+           s.user_id IS NOT NULL AND EXISTS (SELECT 1 FROM public.kyc_payout_hold(s.user_id)) AS payout_held,
            EXISTS (SELECT 1 FROM public.kyc_restrictions r WHERE r.streamer_id = s.id AND r.lifted_at IS NULL)
                AS restricted,
            public.kyc_activation_block(s.id) AS lifecycle_block
@@ -68,13 +69,19 @@ def image_state(value: str | None, ready_url: str | None = None) -> tuple[str, s
     return "missing", "legacy_path"
 
 
-def pan_row(pan_status: str | None) -> dict:
-    """pan_verified: ok; non_pan: payout_hold (non_pan_kyc); otherwise missing (kyc_not_approved). Never blocking."""
+def pan_row(pan_status: str | None, held: bool = False) -> dict:
+    """Never blocking. ok: the current approval is PAN-verified; payout_hold (non_pan_kyc): the database holds the
+    owner's payouts (kyc_payout_holds); missing: pan_evidence_not_recorded (an approval from before migration 0041,
+    no document recorded) or kyc_not_approved."""
+    def row(state, detail):
+        return {"condition": "pan_policy", "state": state, "detail": detail, "blocking": False}
     if pan_status == "pan_verified":
-        return {"condition": "pan_policy", "state": "ok", "detail": None, "blocking": False}
+        return row("ok", None)
+    if held:
+        return row("payout_hold", "non_pan_kyc")
     if pan_status == "non_pan":
-        return {"condition": "pan_policy", "state": "payout_hold", "detail": "non_pan_kyc", "blocking": False}
-    return {"condition": "pan_policy", "state": "missing", "detail": "kyc_not_approved", "blocking": False}
+        return row("missing", "pan_evidence_not_recorded")
+    return row("missing", "kyc_not_approved")
 
 
 def evaluate(facts: dict, accounts: frozenset[str]) -> dict:
@@ -96,7 +103,7 @@ def evaluate(facts: dict, accounts: frozenset[str]) -> dict:
              ("owner_kyc_required" if claimed else "no_owner")),
         # Owner decision 2026-11-27 (replacing Q6's reading): any approved KYC activates; a non-PAN approval puts the
         # payouts on hold (migration 0041). So this row informs and never blocks.
-        pan_row(facts.get("pan_status")),
+        pan_row(facts.get("pan_status"), facts.get("payout_held", False)),
         _row("profile_picture", logo == "ok", logo_detail, state=logo),
         _row("background", background == "ok", background_detail, state=background),
         _row("no_restriction", not facts["restricted"], "open_restriction" if facts["restricted"] else None,

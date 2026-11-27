@@ -76,8 +76,8 @@ def test_a_signed_pan_approval_is_pan_verified_and_keeps_labels_only(kyc):
     ((PAN, {**PAN, "document_subtype": "VOTER_CARD"}), False),           # EVERY document must be PAN
     (({k: v for k, v in PAN.items() if k != "issuing_state"},), False),  # a field absent altogether
 ])
-def test_anything_else_approved_activates_but_holds_payouts(kyc, docs, liveness):
-    headers, uid = owner(kyc, f"kyc-pan-no{abs(hash(str(docs))) % 10_000}")
+def test_anything_else_approved_activates_but_holds_payouts(kyc, docs, liveness, request):
+    headers, uid = owner(kyc, f"kyc-pan-no{request.node.callspec.indices['docs']}")
     sid = start(kyc, headers)["session_id"]
     assert approve(kyc, uid, sid, *docs, liveness=liveness) == "applied"
     with db() as conn:
@@ -111,6 +111,20 @@ def test_a_policy_change_re_evaluates_every_approval(kyc):
             conn.execute("INSERT INTO public.kyc_document_policy (issuing_state, document_subtype) "
                          "VALUES ('IND', 'TAX_CARD_STANDARD')")
     assert pan_status(uid) == "pan_verified" and holds(uid)[-1][2] == "pan_verified"
+
+
+def test_approvals_from_before_0041_are_held_only_by_the_operator(kyc):
+    from tests.kyc.test_enforcement_db import verify
+    headers, uid = owner(kyc, "kyc-pan-legacy")
+    sid = verify(uid)  # an approval recorded without document evidence (as every approval before 0041)
+    assert pan_status(uid) == "non_pan" and holds(uid) == []
+    with fixture_db() as conn:  # a configuration change re-syncs, but never opens a hold for it as a side effect
+        conn.execute("UPDATE public.kyc_provider_config SET monthly_cap = NULL")
+        conn.execute("UPDATE public.kyc_document_policy SET document_type = NULL")
+    assert holds(uid) == []
+    with fixture_db() as conn:  # the operator's backfill (an owner decision)
+        assert conn.execute("SELECT public.kyc_sync_payout_holds()").fetchone()[0] >= 1
+    assert holds(uid) == [("non_pan_kyc", sid, None, None)]
 
 
 def test_an_unsigned_refresh_never_changes_the_document_evidence(kyc):

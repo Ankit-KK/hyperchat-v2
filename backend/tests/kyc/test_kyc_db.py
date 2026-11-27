@@ -379,7 +379,9 @@ def test_approved_from_a_complete_signed_event_and_minimal_storage(kyc):
                               (sid,)).fetchone()[0]
     assert after == before  # no activation, no eligibility change (PR4 wires KYC in)
     assert checks == {"id_verifications": ["Approved"], "liveness_checks": ["Approved"], "face_matches": ["Approved"],
-                      "aml_screenings": ["Approved"]}
+                      "aml_screenings": ["Approved"],  # 0041: the document labels (none named here), never PII
+                      "id_documents": [{"status": "Approved", "document_type": None, "document_subtype": None,
+                                        "issuing_state": None, "verification_method": None}]}
     for secret in ("DOC-SECRET-77", "Asha", "1990-02-03", "Secret Lane", "media.didit.me", "signature=abc"):
         assert secret not in stored, secret
         assert not any(secret in rec for rec in kyc.app_state.log_capture.records), secret

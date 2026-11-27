@@ -62,8 +62,9 @@ HYPERCHAT_MIGRATION_DSN=... python -m etl.kyc_provider_config --environment sand
 ## API
 | Endpoint | Who | What |
 |---|---|---|
-| `GET /api/v1/me/kyc` | signed-in user | `{approved, state, provider_status, updated_at, owns_creator, available, can_start}`. `state` is one of `none`, `in_progress`, `in_review`, `approved`, `declined`, `expired`, `not_completed`, `reverification_required` (the newest session is `Approved` but the approval rule doesn't accept it). `approved` is always `public.user_kyc_approved`. |
+| `GET /api/v1/me/kyc` | signed-in user | `{approved, state, provider_status, updated_at, owns_creator, available, can_start, pan_status, payout_hold {held, reason, since}, pan_acknowledgement {text, text_version, current}}` (the last three since 0041). `state` is one of `none`, `in_progress`, `in_review`, `approved`, `declined`, `expired`, `not_completed`, `reverification_required` (the newest session is `Approved` but the approval rule doesn't accept it). `approved` is always `public.user_kyc_approved`. |
 | `POST /api/v1/me/kyc/session` | the **owner** of at least one creator, including legacy ones (Origin + CSRF; 5 per hour) | Starts or resumes the session and returns `{session_id, status, url}`. `url` must be an https `*.didit.me` link. A linked moderator or a user without a creator gets 403; an already-verified user or one in review gets 409; a provider problem gets 503. |
+| `POST /api/v1/me/kyc/pan-acknowledgement` | the **owner** of a creator (Origin + CSRF; 20 per hour) | Records the PAN-only notice (migration 0041): `{acknowledged_at, text_version, text, valid_minutes}`. A start needs one from the last 60 minutes, else 409 `pan_acknowledgement_required` |
 | `POST /api/v1/webhooks/didit` | Didit | See "Webhooks" below |
 | `GET /api/v1/admin/users/{id}/kyc` | admin | Sessions (status, workflow, environment, dates, check statuses) and the audit; no identity data |
 | `POST /api/v1/admin/users/{id}/kyc/refresh` | admin (CSRF; 30 per hour) | Reconciles the newest session with Didit's decision endpoint (two attempts at most, no polling). Answers the admin view plus `refresh`: `applied`, `unchanged`, `stale`, or `approval_needs_webhook`. **It never approves** (the response isn't signed). |
@@ -165,6 +166,8 @@ in Didit's `document_subtype`. `document_type` is a human label ("Tax Card"), so
 - **Existing approvals.** Holds start with signed decisions after 0041. The operator runs `SELECT
   public.kyc_sync_payout_holds();` to open holds for approvals recorded before 0041. Those approvals carry no
   document evidence, so they would all be held: an owner decision.
+
+**Not yet possible: self-service re-verification.** An approved user still gets 409 on a new start, and a new session would become the current one at once (checkout pauses; a decline vetoes). So a held creator cannot lift the hold themselves yet; the owner decides how re-verification works.
 
 **To confirm in the Didit console / sandbox (D2, D7).** The PAN card's `document_subtype` value
 (`TAX_CARD_STANDARD` from the workflow configuration) and that the key is present on every Approved webhook. Until
