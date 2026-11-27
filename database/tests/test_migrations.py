@@ -734,15 +734,16 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
                 # 0040 (several Didit accounts): its tables' and two functions' grants; test_0040 pins them
                 "kyc_account_pins", "kyc_account_events", "kyc_account_reservations",
                 "kyc_assign_account(uuid)", "kyc_create_session(uuid,uuid,uuid,integer,text,text)",
-                # 0041 (PAN evidence): its tables' and two functions' grants; test_0041 pins them
+                # 0041 (PAN evidence): its tables' and three functions' grants; test_0041 pins them
                 "kyc_document_policy", "kyc_payout_holds", "kyc_pan_acknowledgements",
-                "kyc_pan_status(uuid,text)", "kyc_payout_hold(uuid)")
+                "kyc_pan_status(uuid,text)", "kyc_payout_hold(uuid)", "kyc_clear_payout_hold(uuid,uuid,text)")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     at_head = _api_role_privileges()  # each exclusion names a real head privilege (not a typo that hides nothing)
     assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in at_head
     assert ("hyperchat_app", "creator_image_uploads", "INSERT") in at_head
     assert ("hyperchat_app", "kyc_assign_account(uuid)", "EXECUTE") in at_head
     assert ("hyperchat_app", "kyc_pan_acknowledgements", "INSERT") in at_head
+    assert ("hyperchat_app", "kyc_clear_payout_hold(uuid,uuid,text)", "EXECUTE") in at_head
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
