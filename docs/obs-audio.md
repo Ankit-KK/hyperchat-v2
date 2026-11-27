@@ -56,7 +56,7 @@ RETURNING …;                                -- index donations_audio_queue_idx
 - **Servable URLs:** only exactly one of these:
   - `<public base>/hypersounds/<one segment>.mp3`
   - `<public base>/voice-messages/<this creator's slug>_<ms>_<hex>.webm`
-  - `<public base>/tts-audio/<this creator's id>/<this donation's id>.mp3`
+  - `<public base>/tts-audio/<this creator's id>/<this donation's id>-<tag>.mp3` (or without `-<tag>`: audio generated before it)
   - `<public base>/system/silence.mp3`
 - **Anything else is skipped:** other hosts (legacy R2, Supabase storage), other creators' objects, query strings,
   fragments, `..` and encoded separators. Up to 10 such items are skipped per claim.

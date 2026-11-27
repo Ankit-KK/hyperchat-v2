@@ -11,7 +11,7 @@ Otherwise, in legacy order:
   5. media                 TTS announcement ("... And they sent a GIF.") when the creator's TTS is on
   6. text                  TTS when TTS is on and amount_inr >= max(Rs 40, the creator's TTS minimum)
   7. anything else         the silent fallback
-Generated audio goes to tts-audio/<creator id>/<donation id>.mp3 (deterministic). Before any paid call the
+Generated audio goes to tts-audio/<creator id>/<donation id>-<keyed tag>.mp3 (deterministic, audio_key). Before any paid call the
 handler looks for that object: a previous attempt that generated and stored it but never reached the database
 is reused, never generated again. Every paid call is preceded by the moderation guard (fail closed). A
 permanent failure, or the last attempt failing, writes the silence URL instead (fallback): the alert is never lost.
@@ -22,6 +22,8 @@ voice_transcription (requested from the dashboard). Reads only the donation's ow
 key, size-capped read), sends it to Sarvam and stores the transcript once.
 """
 
+import hashlib
+import hmac
 import logging
 import random
 import re
@@ -94,10 +96,17 @@ def plan_audio(d: dict) -> Plan:
     return Plan("speech")
 
 
-def audio_key(streamer_id: str, donation_id: str) -> str:
+def audio_key(streamer_id: str, donation_id: str, secret: str) -> str:
+    """tts-audio/<creator id>/<donation id>-<tag>.mp3. The tag is keyed so that an OBS token holder, who learns both
+    ids, cannot derive the URL of audio it is never handed (a hidden message is claimed as silence). It is
+    deterministic, so a stored-but-unrecorded object is still found and reused."""
     if not (_UUID.match(streamer_id or "") and _UUID.match(donation_id or "")):
         raise Permanent("invalid_ids")
-    return f"tts-audio/{streamer_id}/{donation_id}.mp3"
+    if not secret:
+        raise Permanent("hash_key_missing")
+    tag = hmac.new(f"tts-audio-key:{secret}".encode(), f"{streamer_id}:{donation_id}".encode(),
+                   hashlib.sha256).hexdigest()[:32]
+    return f"tts-audio/{streamer_id}/{donation_id}-{tag}.mp3"
 
 
 def _donation_id(job: Job) -> str:
@@ -156,7 +165,9 @@ class DonationAudioHandler:
         plan = plan_audio(d)
         if plan.kind == "silent":
             return await self._silence(did, plan.reason)
-        key = audio_key(d["streamer_id"], did)
+        if not self.moderation_key:  # moderation fails closed without it, and it also keys the object name
+            return await self._silence(did, "moderation_unavailable")
+        key = audio_key(d["streamer_id"], did, self.moderation_key)
         try:
             existing = await self.store.head_generated(key)
         except StorageError:
