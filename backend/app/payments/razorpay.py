@@ -132,11 +132,6 @@ class RazorpayClient:
             raise RazorpayError("bad_response")
         return order
 
-    async def fetch_order(self, account: RazorpayAccount, order_id: str) -> Order:
-        if not ORDER_ID.match(order_id or ""):
-            raise RazorpayError("not_found")
-        return parse_order(await self._request(account, "GET", f"/orders/{order_id}"))
-
     async def order_payments(self, account: RazorpayAccount, order_id: str) -> list[Payment]:
         if not ORDER_ID.match(order_id or ""):
             raise RazorpayError("not_found")

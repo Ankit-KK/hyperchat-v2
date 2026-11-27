@@ -95,7 +95,7 @@ def test_bad_bodies(body):
     assert reason(client.fetch_payment(ACCOUNT, "pay_XYZ789")) == "bad_response"
 
 
-def test_fetch_payment_and_order_payments_and_fetch_order():
+def test_fetch_payment_and_order_payments():
     def respond(request):
         path = request.url.path
         if path == "/v1/payments/pay_XYZ789":
@@ -103,15 +103,17 @@ def test_fetch_payment_and_order_payments_and_fetch_order():
         if path == "/v1/orders/order_ABC123/payments":
             return httpx.Response(200, json={"entity": "collection", "count": 2,
                                              "items": [PAYMENT, {**PAYMENT, "id": "pay_FAIL1", "status": "failed"}]})
-        if path == "/v1/orders/order_ABC123":
-            return httpx.Response(200, json={**ORDER, "status": "paid"})
         return httpx.Response(404)
     client, rec = client_for(respond)
     p = run(client.fetch_payment(ACCOUNT, "pay_XYZ789"))
     assert (p.id, p.order_id, p.status, p.amount, p.currency) == ("pay_XYZ789", "order_ABC123", "captured", 4000, "INR")
     assert [x.status for x in run(client.order_payments(ACCOUNT, "order_ABC123"))] == ["captured", "failed"]
-    assert run(client.fetch_order(ACCOUNT, "order_ABC123")).status == "paid"
     assert all(r.method == "GET" for r in rec.requests)
+
+
+def test_the_client_has_no_order_fetch():
+    """SEC-L2: the unused GET /orders/{id} wrapper is gone; orders are read only as their payments list."""
+    assert not hasattr(RazorpayClient, "fetch_order")
 
 
 @pytest.mark.parametrize("bad", ["", "pay_", "pay_../../orders", "pay_x/y", "order_ABC", "pay_X?y=1", "PAY_ABC",
@@ -127,7 +129,6 @@ def test_payment_ids_are_checked_before_any_request(bad):
 def test_order_ids_are_checked_before_any_request(bad):
     client, rec = client_for(lambda r: httpx.Response(200, json=ORDER))
     assert reason(client.order_payments(ACCOUNT, bad)) == "not_found"
-    assert reason(client.fetch_order(ACCOUNT, bad)) == "not_found"
     assert rec.requests == []
 
 
@@ -156,7 +157,7 @@ def test_timeout_is_ten_seconds():
 
     def respond(request):
         seen.append(request.extensions.get("timeout"))
-        return httpx.Response(200, json=ORDER)
+        return httpx.Response(200, json=PAYMENT)
     client, _ = client_for(respond)
-    run(client.fetch_order(ACCOUNT, "order_ABC123"))
-    assert seen == [{"connect": 10.0, "read": 10.0, "write": 10.0, "pool": 10.0}]
+    run(client.fetch_payment(ACCOUNT, "pay_XYZ789"))
+    assert seen ==[{"connect": 10.0, "read": 10.0, "write": 10.0, "pool": 10.0}]
