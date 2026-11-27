@@ -2537,7 +2537,7 @@ def test_0045_round_trip_and_its_downgrade_refuses_once_the_audit_holds_its_even
         try:
             with pytest.raises(Exception, match="0045 downgrade refused"):
                 command.downgrade(cfg, "0044")
-            assert _version() == HEAD
+            assert _version() == "0045"  # the refusal stops at 0045 (later revisions were already downgraded)
         finally:
             with _owner() as conn:
                 conn.execute("DELETE FROM public.kyc_enforcement_events WHERE id = %s", (event,))
