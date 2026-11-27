@@ -635,7 +635,9 @@ def test_admin_view_refresh_never_approves_and_no_manual_approval(kyc):
     view = boss.get(f"/api/v1/admin/users/{uid}/kyc").json()
     assert view["sessions"][0]["session_id"] == sid and set(view["sessions"][0]) == {
         "session_id", "workflow_id", "workflow_version", "environment", "provider_status", "provider_updated_at",
-        "check_statuses", "approved_at", "created_at", "updated_at"}
+        "check_statuses", "approved_at", "created_at", "updated_at",
+        "account_id"}  # 0040: which Didit account the session is on (an id, no identity data)
+    assert view["sessions"][0]["account_id"] == "primary"
     kyc.fake.decisions[sid] = approved_decision(sid)
     r = boss.post(f"/api/v1/admin/users/{uid}/kyc/refresh", headers=bh)
     assert r.status_code == 200 and r.json()["refresh"] == "approval_needs_webhook"  # unsigned: never approves
