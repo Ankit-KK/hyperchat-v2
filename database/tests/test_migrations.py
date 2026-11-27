@@ -39,6 +39,7 @@ EXPECTED_TABLES = {
     "stepup_events", "stepup_rate_limits", "stepup_enforcement", "payment_integrity_events",
     "donation_credit_events", "donation_reversals",
     "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs", "donation_accounting_evaluations",
+    "creator_image_uploads",  # 0039
 }
 
 
