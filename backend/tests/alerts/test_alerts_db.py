@@ -69,8 +69,9 @@ class FakeDiscord:
         return "1"
 
 
-def notifier(discord=None, channel=CHANNEL) -> AlertNotifier:
-    return AlertNotifier(Alerts(factory()), discord=discord, channel_id=channel, app_env="development", interval=0.01)
+def notifier(discord=None, channel=CHANNEL, batch=20) -> AlertNotifier:
+    return AlertNotifier(Alerts(factory()), discord=discord, channel_id=channel, app_env="development", interval=0.01,
+                         batch=batch)
 
 
 def cycles(n: AlertNotifier, times: int) -> list[dict]:
@@ -157,7 +158,8 @@ def test_each_alert_is_sent_once_and_marked_delivered(alerts_clean):
 def test_a_failing_delivery_is_retried_recorded_and_given_up_after_five(alerts_clean):
     aid = run(Alerts(factory()).record(kind="job_failed", source="worker", code="provider_auth", job_id="x"))
     discord = FakeDiscord(Retryable("discord_server_error"))
-    n = notifier(discord)
+    # batch=1: with the 10 ms test backoff, a slow runner could otherwise retry the same alert inside one cycle.
+    n = notifier(discord, batch=1)
     run(n.run_once())
     *_, context, notified_at = alert(aid)
     assert notified_at is None and context["delivery_attempts"] == 1 and context["delivery_error"] == "discord_server_error"
