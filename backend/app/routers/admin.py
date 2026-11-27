@@ -9,9 +9,11 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
 from app.admin.service import AdminService
+from app.alerts import Alerts
 from app.auth.dependencies import CurrentUser, client_ip, require_admin
 from app.auth.service import AuthError
 from app.payments.accounts import health_report
+from app.payments.razorpay import PAYMENT_ID
 from app.security.audit import security_event
 from app.stepup.actions import StepUp, step_up, uid
 
@@ -129,6 +131,31 @@ async def change_user_email(user_id: str, body: EmailChange, request: Request,
 @router.post("/users/{user_id}/sessions/revoke")
 async def revoke_user_sessions(user_id: str, request: Request, current: CurrentUser = Depends(require_admin)) -> dict:
     return await admin_service(request).revoke_sessions(current.user, user_id)
+
+
+class CaptureResolution(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: Literal["refunded", "not_charged", "duplicate"]
+    refund_id: StrictStr | None = Field(None, pattern=r"^rfnd_[A-Za-z0-9]{1,40}$")
+
+
+@router.post("/payments/captured-without-donation/{payment_id}/resolve")
+async def resolve_captured_without_donation(payment_id: str, body: CaptureResolution, request: Request,
+                                            current: CurrentUser = Depends(require_admin)) -> dict:
+    """Mark a captured-without-donation payment resolved (admin + CSRF), audited as an append-only alert row with the
+    admin's id and reason. The refund itself is MANUAL in the Razorpay dashboard: this records it, never refunds.
+    'refunded' needs the Razorpay refund id."""
+    admin_service(request)  # 503 without a database
+    if not PAYMENT_ID.match(payment_id):
+        raise AuthError(404, "Not found", "not_found")
+    if (body.reason == "refunded") != (body.refund_id is not None):
+        raise AuthError(400, "A refund id is required exactly when the reason is 'refunded'", "invalid_resolution")
+    done = await Alerts(request.app.state.db.connection).resolve_capture(
+        payment_id, reason=body.reason, refund_id=body.refund_id, actor_user_id=current.user.id)
+    if done is None:
+        raise AuthError(404, "No open captured-without-donation payment with this id", "not_found")
+    security_event("admin_capture_resolved", actor_user_id=current.user.id, payment_id=payment_id, reason=body.reason)
+    return done
 
 
 @router.post("/creators", status_code=201)

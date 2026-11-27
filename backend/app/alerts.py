@@ -35,7 +35,24 @@ from app.jobs.retry import Permanent, Retryable, reason_code
 
 log = logging.getLogger("hyperchat.alerts")
 KINDS = ("job_failed", "payment_on_hold", "invite_failed",  # invite_failed: app.onboarding.auto_invite
-         "kyc_account_unavailable")  # app.kyc.service: a user's pinned Didit account cannot take a session (0040)
+         "kyc_account_unavailable",  # app.kyc.service: a user's pinned Didit account cannot take a session (0040)
+         # app.payments.service webhook: Razorpay captured (or authorized) money for an order V2 has no donation for
+         # (an unknown order, or an imported legacy order, which is never applied): it must be refunded by hand
+         "captured_without_donation",
+         "captured_without_donation_resolved")  # an admin marked one resolved (append-only audit row)
+CAPTURE_KIND, RESOLVED_KIND = "captured_without_donation", "captured_without_donation_resolved"
+RESOLVE_REASONS = ("refunded", "not_charged", "duplicate")
+# One captured_without_donation alert per payment id, and one resolution: both writes serialize on this key.
+_CAPTURE_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('hyperchat:captured-without-donation:' || %s, 0))"
+_OPEN_CAPTURES = f"""
+    SELECT a.id::text AS id, a.created_at, a.message AS code, a.context->>'payment_id' AS payment_id,
+           a.context->>'order_id' AS order_id, a.context->>'account' AS account,
+           (a.context->>'amount_paise')::bigint AS amount_paise, a.context->>'currency' AS currency,
+           a.context->>'donation_id' AS imported_donation_id, a.notified_at
+    FROM public.system_alerts a
+    WHERE a.context->>'kind' = '{CAPTURE_KIND}'
+      AND NOT EXISTS (SELECT 1 FROM public.system_alerts r WHERE r.context->>'kind' = '{RESOLVED_KIND}'
+                      AND r.context->>'payment_id' = a.context->>'payment_id')"""
 MAX_ATTEMPTS = 5
 HOLD_STATUSES = ("invalid_key", "missing_key")
 _COLUMNS = ("id::text AS id, source, severity, message AS code, context->>'kind' AS kind, "
@@ -55,6 +72,55 @@ class Alerts:
             await cur.execute("INSERT INTO public.system_alerts (id, source, severity, message, context) "
                               "VALUES (%s, %s, 'error', %s, %s)", (alert_id, source, reason_code(code), Jsonb(context)))
         return alert_id
+
+    async def captured_without_donation(self, *, payment_id: str, order_id: str, account: str, event_type: str,
+                                        amount_paise: int | None, currency: str | None,
+                                        donation_id: str | None = None) -> bool:
+        """Record that money was captured (or authorized) with no V2 donation, once per payment id (a redelivery, or
+        payment.authorized then payment.captured, adds nothing). True when this call recorded it. Unlike the other
+        hooks this one RAISES on a database error: the webhook then answers 502 and Razorpay redelivers, so the alert
+        is never lost (the event is recorded only after it)."""
+        context = {"kind": CAPTURE_KIND, "payment_id": payment_id, "order_id": order_id, "account": account,
+                   "event_type": event_type, "amount_paise": amount_paise, "currency": currency,
+                   "donation_id": donation_id}
+        context = {k: v for k, v in context.items() if v is not None}
+        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+            await cur.execute(_CAPTURE_LOCK, (payment_id,))
+            await cur.execute("SELECT EXISTS (SELECT 1 FROM public.system_alerts WHERE context->>'kind' = %s "
+                              "AND context->>'payment_id' = %s)", (CAPTURE_KIND, payment_id))
+            if (await cur.fetchone())[0]:
+                return False
+            await cur.execute("INSERT INTO public.system_alerts (source, severity, message, context) "
+                              "VALUES ('payments', 'critical', 'refund_required', %s)", (Jsonb(context),))
+        return True
+
+    async def open_captures(self) -> list[dict]:
+        """Captured-without-donation payments that no admin has marked resolved yet, oldest first."""
+        async with self._conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_OPEN_CAPTURES + " ORDER BY a.created_at, a.id")
+            rows = await cur.fetchall()
+        # JSON-ready (the payment-integrity-report CLI prints it with json.dumps)
+        return [{**r, **{k: r[k].isoformat() for k in ("created_at", "notified_at") if r[k] is not None}}
+                for r in rows]
+
+    async def resolve_capture(self, payment_id: str, *, reason: str, refund_id: str | None,
+                              actor_user_id: str) -> dict | None:
+        """An admin marks an open captured-without-donation payment resolved: one append-only resolution row (who,
+        why, the Razorpay refund id when refunded), under the same per-payment lock. None: no open alert for it."""
+        assert reason in RESOLVE_REASONS
+        async with self._conn() as conn, conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_CAPTURE_LOCK, (payment_id,))
+            await cur.execute(_OPEN_CAPTURES + " AND a.context->>'payment_id' = %s", (payment_id,))
+            if await cur.fetchone() is None:
+                return None
+            context = {"kind": RESOLVED_KIND, "payment_id": payment_id, "reason": reason,
+                       "actor_user_id": actor_user_id, **({"refund_id": refund_id} if refund_id else {})}
+            await cur.execute("INSERT INTO public.system_alerts (source, severity, message, context) "
+                              "VALUES ('payments', 'info', %s, %s) RETURNING id::text AS id, created_at",
+                              (reason, Jsonb(context)))
+            row = await cur.fetchone()
+        return {"payment_id": payment_id, "reason": reason, "refund_id": refund_id, "resolution_id": row["id"],
+                "resolved_at": row["created_at"]}
 
     async def job_failed(self, job, reason: str) -> None:
         """Worker hook (app.jobs.runner on_failure): a job finished 'failed' (attempts exhausted or a permanent error)."""

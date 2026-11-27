@@ -56,6 +56,8 @@ RATE_RULES = {  # per client IP: (bucket, limit, window seconds)
 }
 POLL_COOLDOWN_SECONDS = 5  # at most one Razorpay lookup per order per 5 s, whoever polls
 HANDLED_EVENTS = ("payment.captured", "payment.failed")
+# Money may have moved: on an order with no V2 donation these raise a captured_without_donation alert
+CAPTURE_EVENTS = ("payment.captured", "payment.authorized")
 WEBHOOK_MAX_BYTES = 64 * 1024
 _EVENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -75,8 +77,9 @@ def _payment_entity(payload: dict) -> dict:
 class PaymentService:
     def __init__(self, *, public: PublicService, repo: PaymentRepository, accounts: PaymentAccounts,
                  client: RazorpayClient, health: AccountHealth, library: HypersoundLibrary,
-                 store: ObjectStore | None, limiter, now_ms=None) -> None:
+                 store: ObjectStore | None, limiter, alerts, now_ms=None) -> None:
         self.public, self.repo, self.accounts, self.client, self.health = public, repo, accounts, client, health
+        self.alerts = alerts  # app.alerts.Alerts: captured-without-donation operator alerts
         self.library, self.store, self.limiter = library, store, limiter
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
 
@@ -312,19 +315,22 @@ class PaymentService:
                              received_at)
         if event_type in integrity.INTEGRITY_EVENTS:  # C1: disputes / provider refunds: evidence only (0029)
             return {"status": await integrity.record(self.repo, event, integrity.parse(event_type, payload), signed_by)}
-        if event_type not in HANDLED_EVENTS:
+        if event_type not in HANDLED_EVENTS and event_type not in CAPTURE_EVENTS:
             return await self._record(event, "ignored")
         if event.provider_order_id is None or event.provider_payment_id is None:
-            return await self._record(event, "no_order")
+            return await self._record(event, "no_order" if event_type in HANDLED_EVENTS else "ignored")
         row = await self.repo.by_provider_order(event.provider_order_id)
-        if row is None:
-            return await self._record(event, "unknown_order")
-        if row.get("imported"):
+        if row is not None and row.get("imported"):
             # NV3-1: an imported legacy order is history, never completed or failed by a webhook (no creator / KYC
             # check, no PAY-15 reversal path for it): recorded as an order V2 does not know, nothing applied
             security_event("webhook_rejected", reason="imported_order", order_id=row["order_id"],
                            account=signed_by[0])
-            return await self._record(event, "unknown_order", row["id"])
+        if row is None or row.get("imported"):
+            if event_type in CAPTURE_EVENTS:  # the donor may have been charged: an operator must refund it
+                await self._captured_without_donation(event, entity, row)
+            return await self._record(event, "unknown_order", row["id"] if row else None)
+        if event_type not in HANDLED_EVENTS:  # payment.authorized of a known V2 order: captured follows, as before
+            return await self._record(event, "ignored")
         if row["account"] not in signed_by:  # signed only by another account's secret: never trusted here
             security_event("webhook_rejected", reason="account_mismatch", order_id=row["order_id"],
                            account=signed_by[0])
@@ -353,6 +359,26 @@ class PaymentService:
         captured_id = event.provider_payment_id if outcome == "captured" else None
         applied = await self.repo.apply(row["id"], outcome, captured_id, event)
         return self._result(self._captured(row, applied, captured_id))
+
+    async def _captured_without_donation(self, event: WebhookEvent, entity: dict, row: dict | None) -> None:
+        """Razorpay captured (auto-capture: also a late-approved UPI / bank payment) or authorized money on an order
+        V2 has no donation for: a stale legacy order created before the cutover freeze (same Razorpay account), or
+        any unknown order. Nothing is applied; one operator alert per payment id says it must be refunded. Recorded
+        BEFORE the event row, so a failure answers 502 and Razorpay redelivers instead of the alert being lost."""
+        amount, currency = entity.get("amount"), entity.get("currency")
+        try:
+            new = await self.alerts.captured_without_donation(
+                payment_id=event.provider_payment_id, order_id=event.provider_order_id, account=event.account,
+                event_type=event.event_type,
+                amount_paise=amount if type(amount) is int and amount >= 0 else None,
+                currency=currency if isinstance(currency, str) and re.fullmatch(r"[A-Z]{3}", currency) else None,
+                donation_id=row["id"] if row else None)
+        except Exception as exc:  # noqa: BLE001 - never lose it: Razorpay retries a 5xx
+            log.warning("captured-without-donation alert not recorded", extra={"error": type(exc).__name__})
+            raise ApiError(502, "Payment event could not be recorded", "alert_unavailable") from None
+        if new:
+            security_event("payment_without_donation", order_id=event.provider_order_id, account=event.account,
+                           payment_id=event.provider_payment_id, imported=row is not None)
 
     async def _record(self, event: WebhookEvent, outcome: str, donation_id: str | None = None) -> dict:
         return {"status": outcome if await self.repo.record_event(event, outcome, donation_id) else "duplicate"}

@@ -12,6 +12,8 @@ publisher.
 | `job_failed` | `worker` | a background job finishes `failed`: its attempts ran out, or it hit a permanent error | the job's reason code (`provider_auth`, `max_attempts`, ...) | `job_id`, `job_kind`, `dedupe_key` (the job's subject id) |
 | `invite_failed` | `auto_invite` | an automatic creator invitation stopped: its fifth email failed, or the database refused it (step-up `active`; `docs/onboarding.md`) | the email failure code (`transient`, ...) or `stepup_refused` / `guard_refused` | `signup_id`, and `invite_id` after a failed email |
 | `kyc_account_unavailable` | `kyc` | a creator owner's KYC start was refused because their Didit account cannot take a session (migration 0040, docs/kyc.md "Didit accounts") | `account_disabled`, `account_revoked`, `account_at_cap`, `no_account_available`, `account_key_missing`, `primary_workflow_mismatch` | `account`, `user_id` |
+| `captured_without_donation` | `payments` | a signed `payment.captured` or `payment.authorized` webhook names an order V2 has no donation for: an unknown order, or an imported legacy order (never applied, NV3-1). Razorpay auto-captures, late-approved payments included, and V2 shares legacy's account, so a legacy order created before the cutover freeze can be paid afterwards. **The donor was charged and must be refunded by hand.** One alert per payment id (an advisory lock per payment id serialises the check and the insert; `payment.authorized` then `payment.captured`, and redeliveries, add nothing). Severity `critical`. If the row cannot be written the webhook answers 502, so Razorpay redelivers | `refund_required` | `payment_id`, `order_id`, `account`, `event_type`, `amount_paise`, `currency`, `donation_id` (only for an imported order) |
+| `captured_without_donation_resolved` | `payments` | an admin marked one resolved: `POST /api/v1/admin/payments/captured-without-donation/{payment_id}/resolve` (admin + CSRF). Append-only audit row; also delivered | the reason: `refunded` (needs the refund id), `not_charged` or `duplicate` | `payment_id`, `reason`, `actor_user_id`, `refund_id` |
 | `payment_on_hold` | `payments` | a creator's `streamer_payment_health` row goes on hold, or its hold reason changes; a hold that clears and comes back is alerted again | `invalid_key` or `missing_key` | `streamer_id` |
 
 - **Severity:** every alert is `error`.
@@ -45,7 +47,7 @@ Delivery is at-least-once: if a message was sent but its `notified_at` write was
 
 ## Reading alerts
 
-`GET /api/v1/admin/alerts?kind=job_failed|payment_on_hold|invite_failed|kyc_account_unavailable&delivered=true|false&limit&offset` is admins only and
+`GET /api/v1/admin/alerts?kind=job_failed|payment_on_hold|invite_failed|kyc_account_unavailable|captured_without_donation|captured_without_donation_resolved&delivered=true|false&limit&offset` is admins only and
 `no-store`. It lists alerts newest first, with their delivery state. Alerts that are not delivered, including ones
 that were given up, show `notified_at: null` and their `delivery_error`.
 

@@ -553,6 +553,37 @@
         "title": "Budget",
         "type": "object"
       },
+      "CaptureResolution": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "enum": [
+              "refunded",
+              "not_charged",
+              "duplicate"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "refund_id": {
+            "anyOf": [
+              {
+                "pattern": "^rfnd_[A-Za-z0-9]{1,40}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refund Id"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "CaptureResolution",
+        "type": "object"
+      },
       "ChangeIn": {
         "properties": {
           "current_password": {
@@ -5472,6 +5503,85 @@
           }
         },
         "summary": "Revoke Partner Key",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/payments/captured-without-donation": {
+      "get": {
+        "description": "Money Razorpay captured (or authorized) on an order with no V2 donation (an unknown order, or an imported\nlegacy order, never applied), not yet marked resolved, oldest first. Each must be refunded by hand in the Razorpay\ndashboard, then resolved with POST .../{payment_id}/resolve.",
+        "operationId": "captured_without_donation_api_v1_admin_payments_captured_without_donation_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Captured Without Donation Api V1 Admin Payments Captured Without Donation Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Captured Without Donation",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/payments/captured-without-donation/{payment_id}/resolve": {
+      "post": {
+        "description": "Mark a captured-without-donation payment resolved (admin + CSRF), audited as an append-only alert row with the\nadmin's id and reason. The refund itself is MANUAL in the Razorpay dashboard: this records it, never refunds.\n'refunded' needs the Razorpay refund id.",
+        "operationId": "resolve_captured_without_donation_api_v1_admin_payments_captured_without_donation__payment_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "payment_id",
+            "required": true,
+            "schema": {
+              "title": "Payment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureResolution"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resolve Captured Without Donation Api V1 Admin Payments Captured Without Donation  Payment Id  Resolve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Captured Without Donation",
         "tags": [
           "admin"
         ]
