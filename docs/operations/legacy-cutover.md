@@ -12,7 +12,7 @@ needs the owner's approval for that window. Owner decisions of 2026-11-27 (bindi
    over (`docs/operations/legacy-asset-migration-plan.md`). Voice messages, donation media and soundboard files are
    not.
 
-## What the ETL loads (head 0037)
+## What the ETL loads (head 0038)
 
 `database/etl/rehearsal.py` loads one read-only snapshot of the restored legacy database into a **fresh** database at
 head, in one transaction, then runs `database/etl/reconcile.py` and the PAY-15 verifier. Exit 0 only if every check
@@ -79,7 +79,7 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
    - Restore it read-only as `hyperchat_restore_test` on the restore cluster.
    - Any legacy write after this point invalidates the snapshot.
 3. **ETL into production.**
-   - Production must be a database migrated to head (0037 or later) with nothing else in it. The load refuses
+   - Production must be a database migrated to head (0038 or later) with nothing else in it. The load refuses
      anything else and changes nothing.
    - Production today is an idle stack at 0009 whose API is running, so its tables may already hold rows (rate
      limits, visits, sessions, a bootstrap admin). First stop the production API, worker and timers. Then either:
@@ -152,9 +152,9 @@ Run Python only on script files, with `-B` (`python -B -m etl.…`), from a rele
 
 ## Future migrations (onboarding Phase B, 0038–0042)
 
-The ETL targets 0037. When a Phase B migration merges, the ETL and its CI test must follow:
+The ETL targets 0038 (0038 adds a function and a changed trigger function, no table or column: nothing to load). When a Phase B migration merges, the ETL and its CI test must follow:
 
-- **0038** (invite guard exception): no ETL change expected. Legacy users get no invite rows.
+- **0038** (invite guard exception, merged 03e7c02): no ETL change (checked). Legacy users get no invite rows.
 - **0039** (creator image assets): if it adds an image table or columns, migrated creators need a decision: no rows
   (images are registered by step 6), or rows built from `brand_logo_url` / `background_url` after the copy. A new
   `streamers` column without a default fails the load, because the streamers copy is column for column; it must be
