@@ -3,7 +3,7 @@
 One facts query per request, in one READ ONLY transaction on the API's own role (hyperchat_app), and one pure
 evaluator shared by GET /api/v1/me/onboarding and GET /api/v1/admin/onboarding. Nothing here writes or activates:
 activation stays the admin's (POST /api/v1/admin/creators/{id}/activate)
-until Stage 5 Phase B (migration 0041, operator switch off by default).
+until Stage 5 Phase B (migration 0042, operator switch off by default).
 
 Every condition is evaluated against the creator's CURRENT OWNER (streamers.user_id), never the viewer, so the owner,
 a linked account and an admin see the same rows. KYC is the owner's (app.kyc.service). The Razorpay account check
@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from psycopg.rows import dict_row
 
 from app.admin.applications import DELIVERY, invite_delivery
+from app.onboarding.images import validated_url
 
 # The §4.1 conditions, in the order the checklist shows them.
 CONDITIONS = ("application_approved", "invitation_accepted", "ownership_confirmed", "kyc_approved", "pan_policy",
@@ -25,6 +26,10 @@ ASSET_PREFIX = "creator-assets/"  # Stage 4A's R2 prefix for creator images
 _FACTS = f"""
     SELECT s.id::text AS streamer_id, s.streamer_slug AS slug, s.status, s.kyc_track, s.razorpay_account,
            s.brand_logo_url, s.background_url, s.user_id IS NOT NULL AS claimed,
+           (SELECT u.variants -> 0 ->> 'url' FROM public.creator_image_uploads u WHERE u.streamer_id = s.id
+              AND u.kind = 'profile' AND u.state = 'ready') AS profile_ready_url,
+           (SELECT u.variants -> 0 ->> 'url' FROM public.creator_image_uploads u WHERE u.streamer_id = s.id
+              AND u.kind = 'background' AND u.state = 'ready') AS background_ready_url,
            a.id::text AS signup_id, a.review_status,
            (SELECT {DELIVERY} FROM public.user_invites WHERE id = a.invite_id) AS invite_status,
            EXISTS (SELECT 1 FROM public.user_invites i WHERE i.signup_id = a.id AND i.accepted_at IS NOT NULL)
@@ -46,15 +51,19 @@ def _row(condition: str, met: bool, detail: str | None = None, state: str | None
             "blocking": not met}
 
 
-def image_state(value: str | None) -> tuple[bool, str | None]:
-    """(set, detail): set only for an https URL under the creator-assets/ prefix. A legacy /assets/... path or an empty
-    value is missing. Informational: only Phase B's validation record (a ready upload row) proves the image valid."""
+def image_state(value: str | None, ready_url: str | None = None) -> tuple[str, str | None]:
+    """(state, detail). 'ok' only when the pointer is exactly the primary url of the creator's 'ready'
+    creator_image_uploads row (migration 0039: validity is the row). An https creator-assets/ pointer without that
+    record (a Phase A upload, or a legacy copy) is 'set' with validation_not_recorded and still blocks: the creator
+    uploads again. A legacy /assets/... path or any other value is missing (legacy_path); an empty one is missing."""
+    if validated_url(value, ready_url):
+        return "ok", None
     if not value:
-        return False, None
+        return "missing", None
     parts = urlsplit(value)
     if parts.scheme == "https" and f"/{ASSET_PREFIX}" in parts.path:
-        return True, "validation_not_recorded"
-    return False, "legacy_path"
+        return "set", "validation_not_recorded"
+    return "missing", "legacy_path"
 
 
 def evaluate(facts: dict, accounts: frozenset[str]) -> dict:
@@ -64,8 +73,8 @@ def evaluate(facts: dict, accounts: frozenset[str]) -> dict:
         owner = "no_owner" if not claimed else "owner_not_invitee"
     else:
         owner = None if facts["owner_active"] else "owner_inactive"
-    logo, logo_detail = image_state(facts["brand_logo_url"])
-    background, background_detail = image_state(facts["background_url"])
+    logo, logo_detail = image_state(facts["brand_logo_url"], facts.get("profile_ready_url"))
+    background, background_detail = image_state(facts["background_url"], facts.get("background_ready_url"))
     rows = [
         _row("application_approved", facts["review_status"] == "approved",
              None if facts["review_status"] == "approved" else (facts["review_status"] or "no_application")),
@@ -76,8 +85,8 @@ def evaluate(facts: dict, accounts: frozenset[str]) -> dict:
              ("owner_kyc_required" if claimed else "no_owner")),
         # Q6: PAN-only applies to automatic activation; its evidence exists only from Stage 3 (migration 0038).
         _row("pan_policy", False, "pan_evidence_not_recorded", state="policy_pending"),
-        _row("profile_picture", logo, logo_detail, state="set" if logo else "missing"),
-        _row("background", background, background_detail, state="set" if background else "missing"),
+        _row("profile_picture", logo == "ok", logo_detail, state=logo),
+        _row("background", background == "ok", background_detail, state=background),
         _row("no_restriction", not facts["restricted"], "open_restriction" if facts["restricted"] else None,
              state=None if not facts["restricted"] else "blocked"),
         _row("razorpay_account", facts["razorpay_account"] in accounts,

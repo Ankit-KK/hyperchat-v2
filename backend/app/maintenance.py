@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from app.core.config import Settings
 from app.kyc.enforcement import EnforcementRepository, EnforcementService
 from app.kyc.witness import KycWitness
+from app.onboarding.images import cleanup_images
 from app.security.audit import security_event
 from app.storage.r2 import UPLOAD_KEY, UPLOAD_PREFIXES, MAX_LISTED_UPLOADS, StorageError, build_object_store
 
@@ -164,4 +165,13 @@ async def run_cleanup(settings: Settings, connection_factory, *, dry_run: bool, 
     if not dry_run:
         security_event("maintenance_upload_cleanup", level=20 if not uploads["delete_failed"] else 30,
                        count=uploads["deleted"], reason=f"failed={uploads['delete_failed']}")
-    return 1 if uploads["delete_failed"] or uploads["listing_capped"] else 0
+    try:  # migration 0039: superseded (after 30 days) and failed creator image objects, tracked by their rows
+        images = await cleanup_images(store, connection_factory, dry_run=dry_run)
+    except Exception as exc:  # noqa: BLE001 - the failure class only; rows not reached stay for the next run
+        print(f"creator images: failed ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    print(f"creator images ({label}): " + ", ".join(f"{k} {v}" for k, v in images.items()))
+    if not dry_run:
+        security_event("maintenance_creator_image_cleanup", level=20 if not images["delete_failed"] else 30,
+                       count=images["deleted"], reason=f"failed={images['delete_failed']}")
+    return 1 if uploads["delete_failed"] or uploads["listing_capped"] or images["delete_failed"] else 0

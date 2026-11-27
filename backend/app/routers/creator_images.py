@@ -44,7 +44,7 @@ async def _upload(kind: str, request: Request, access: StreamerAccess, crop=None
     limit = check_declared(kind, content_type, request.headers.get("content-length"))
     await service.check_rate(access.streamer.id)  # before the body: refused attempts count too
     data = await _read_body(request, limit, too_large(kind))
-    result = await service.upload(access.streamer.id, kind, data, content_type, crop)
+    result = await service.upload(access.streamer.id, kind, data, content_type, crop, access.current.user.id)
     return JSONResponse(result, headers=NO_STORE)
 
 

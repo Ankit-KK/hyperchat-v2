@@ -85,7 +85,10 @@ def test_owner_uploads_both_images_and_the_public_api_serves_them(imgs):
     assert len(imgs.store.objects) == 4
     listed = imgs.get(f"/api/v1/streamers/{sid}/images")
     assert listed.status_code == 200
-    assert listed.json() == {"profile": {"url": body["url"]}, "background": {"url": bg["url"]}}
+    view = listed.json()
+    assert (view["profile"]["url"], view["background"]["url"]) == (body["url"], bg["url"])
+    assert view["profile"]["validated"] and view["background"]["validated"]  # their ready records (0039)
+    assert [v["url"] for v in view["background"]["variants"]] == [v["url"] for v in bg["variants"]]
     public = imgs.get(f"/api/v1/public/streamers/{slug}").json()
     assert (public["brand_logo_url"], public["background_url"]) == (body["url"], bg["url"])
 

@@ -104,8 +104,17 @@ def test_the_checklist_follows_each_step_and_never_activates(app, repo, approved
     assert rows(verified)["profile_picture"] == ("missing", "legacy_path")
     assert rows(verified)["background"] == ("set", "validation_not_recorded")
 
-    update_streamer(cid, brand_logo_url=f"https://cdn.example/creator-assets/{cid}/logo/{'b' * 64}.webp")
+    logo = f"https://cdn.example/creator-assets/{cid}/logo/{'b' * 64}.webp"
+    update_streamer(cid, brand_logo_url=logo)
+    assert rows(entry_of(owner.get(ME), cid))["profile_picture"] == ("set", "validation_not_recorded")  # no record
+    background = f"https://cdn.example/creator-assets/{cid}/background/{'a' * 64}.webp"
+    with fixture_db() as conn:  # the pipeline's records (migration 0039), as the upload transaction writes them
+        for kind, url in (("profile", logo), ("background", background)):
+            conn.execute("INSERT INTO public.creator_image_uploads (streamer_id, kind, state, variants) VALUES "
+                         "(%s, %s, 'ready', jsonb_build_array(jsonb_build_object('key', %s::text, 'url', %s::text)))",
+                         (cid, kind, url.split("/", 3)[3], url))
     complete = entry_of(owner.get(ME), cid)
+    assert rows(complete)["profile_picture"] == ("ok", None) and rows(complete)["background"] == ("ok", None)
     assert [r["condition"] for r in complete["conditions"] if r["blocking"]] == ["pan_policy"]
     assert complete["ready_for_activation"] is False  # PAN stays policy_pending until Stage 3
 
