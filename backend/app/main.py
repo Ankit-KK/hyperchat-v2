@@ -26,6 +26,7 @@ from app.audio.repository import AudioRepository
 from app.audio.transcriptions import TranscriptionService
 from app.jobs.queue import JobQueue
 from app.kyc.enforcement import EnforcementRepository, EnforcementService
+from app.alerts import Alerts
 from app.kyc.service import KycRepository, KycService
 from app.kyc.witness import KycWitness
 from app.payments.accounts import AccountHealth, PaymentAccounts
@@ -110,7 +111,8 @@ async def lifespan(app: FastAPI):
                                        payment_accounts=frozenset(payment_accounts.summary()["payments"]),
                                        pusher_groups=tuple(settings.pusher_groups_configured))
         app.state.kyc = KycService.from_settings(KycRepository(app.state.db.connection), settings,
-                                                 limiter=app.state.auth.repo)  # 503 until Didit is configured
+                                                 limiter=app.state.auth.repo,  # 503 until Didit is configured
+                                                 alerts=Alerts(app.state.db.connection))
         app.state.applications = ApplicationService(ApplicationRepository(app.state.db.connection, lifecycle),
                                                     admin=app.state.admin, auth=app.state.auth)
         conn = app.state.db.connection

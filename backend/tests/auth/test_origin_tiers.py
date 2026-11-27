@@ -355,10 +355,13 @@ def test_the_kyc_return_url_uses_the_dashboard_url():
         async def record_session(self, *args):
             return {"session_id": "k1", "provider_status": "Not Started"}
 
+        async def assign_account(self, user_id):  # migration 0040
+            return "ok", "primary", "wf"
+
     class Client:
         workflow_id = "wf"
 
-        async def create_session(self, user_id, callback):
+        async def create_session(self, user_id, callback, workflow_id=None):
             calls.append(callback)
             return type("Created", (), {"url": "https://verify.example/k1"})()
 

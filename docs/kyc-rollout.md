@@ -153,6 +153,39 @@ chattr +a /var/lib/hyperchat-kyc/<env>.witness   # append-only: not even its own
 - **Not a defence against a compromised host or operator:** the schema owner can disable any trigger. The witness is a detection mechanism for restores and wrong-snapshot mistakes.
 - **Release switching:** an older application release (before PR4) still uses the database rule, because the rule lives in PostgreSQL. It lacks only the witness check. A database can't be downgraded below 0023 once enforcement left `draft` or has any history: the downgrade refuses.
 
+## Didit accounts: operator steps (migration 0040)
+
+Run from `database/` with the migration DSN. Every change is audited with `--operator`. Secrets are read without
+echo, or one line of stdin with `--secret-stdin`, never from argv.
+
+1. **Primary first.** It needs its application id: `python -m etl.kyc_provider_config --environment <env>
+   --workflow-id <uuid> --application-id <uuid>`.
+2. **Add an account:**
+   - `python -m etl.kyc_provider_account --operator <you> add --account acct-b --application-id <uuid>
+     --workflow-id <uuid> [--monthly-cap N] [--order N] [--disabled]`;
+   - put its API key into `HYPERCHAT_DIDIT_EXTRA_API_KEYS` in `api.env` (mode 600) and restart the API;
+   - in that Didit application's console, point its webhook at `https://<api host>/api/v1/webhooks/didit`.
+   - Enabling it for quota (rotation) waits for the owner's Didit terms confirmation. Add it `--disabled` until then.
+3. **Enable or disable:** `... enable|disable --account <id|primary>`. Disabling stops NEW sessions on it. Its pinned
+   users get 503 and an alert until it is enabled again or they are moved.
+4. **Cap:** `... cap --account <id|primary> --monthly N|none`. The cap counts sessions created this UTC month plus
+   assignments in flight.
+5. **Move a user** (sensitive: only when an account is retired): `... move-user --user <uuid> --to <id> --reason
+   "<why>"`. The user's declines keep vetoing older approvals.
+6. **Revoke** (final): `... revoke --account <id> --reason "<why>"`. Its approvals stop counting at once. Move its
+   users to another account and tell them to re-verify. Run the enforcement preview first: with enforcement
+   `active`, their donations stop.
+7. **List:** `... list` (ids, workflows, flags, this month's usage; never a secret).
+
+**Switching to a new Didit organisation (the owner's 2026-11-27 switch).** Add the new organisation's application as
+an extra account. Then disable the old one, which is kept, not revoked, so existing approvals keep counting; new users
+then go to the new account. Do **not** overwrite the primary row with the new organisation's workflow: that starts a
+new epoch and voids every existing approval (C11).
+
+**Rollback.** Code only (the previous release keeps working: `kyc_create_session`'s five-argument form remains and
+uses the primary). `alembic downgrade 0039` refuses while any extra account, a session, receipt or pin of another
+account, an account event, or changed primary flags exist.
+
 ## Rollout runbook (each step needs the owner's approval; none is automatic)
 1. **Code merged.**
    - **Result:** PR4 is on `main`, and nothing runs.

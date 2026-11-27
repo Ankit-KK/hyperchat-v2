@@ -40,6 +40,7 @@ EXPECTED_TABLES = {
     "donation_credit_events", "donation_reversals",
     "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs", "donation_accounting_evaluations",
     "creator_image_uploads",  # 0039
+    "kyc_provider_accounts", "kyc_account_pins", "kyc_account_reservations", "kyc_account_events",  # 0040
 }
 
 
@@ -728,11 +729,15 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
                 # downgrade below 0038 drops with the function; test_0038 pins that grant
                 "onboarding_issue_invite(uuid,text,integer,uuid,boolean)",
                 # 0039 (creator image records): hyperchat_app's SELECT, INSERT, UPDATE; test_0039 pins them
-                "creator_image_uploads")
+                "creator_image_uploads",
+                # 0040 (several Didit accounts): its tables' and two functions' grants; test_0040 pins them
+                "kyc_account_pins", "kyc_account_events", "kyc_account_reservations",
+                "kyc_assign_account(uuid)", "kyc_create_session(uuid,uuid,uuid,integer,text,text)")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
     at_head = _api_role_privileges()  # each exclusion names a real head privilege (not a typo that hides nothing)
     assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in at_head
     assert ("hyperchat_app", "creator_image_uploads", "INSERT") in at_head
+    assert ("hyperchat_app", "kyc_assign_account(uuid)", "EXECUTE") in at_head
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
@@ -2142,5 +2147,79 @@ def test_0039_round_trip_adds_only_the_image_records_and_refuses_to_drop_any(mon
             with _owner() as conn:
                 conn.execute("DELETE FROM public.creator_image_uploads WHERE streamer_id = %s", (sid,))
                 conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+WF40 = "a3b2c1d0-4444-4555-8666-777777777777"
+FUNCTIONS_0040 = ("kyc_create_session", "kyc_receive_webhook", "kyc_effective")
+
+
+def _objects_0040() -> dict:
+    with _owner() as conn:
+        return {
+            "tables": sorted(t for t in _tables() if t.startswith("kyc_")),
+            "functions": conn.execute("SELECT p.oid::regprocedure::text, md5(p.prosrc), "
+                                      "coalesce(p.proacl, '{}')::text[] FROM pg_proc p "
+                                      "WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'kyc\\_%%' "
+                                      "ORDER BY 1").fetchall(),
+            "columns": conn.execute("SELECT table_name, column_name FROM information_schema.columns WHERE "
+                                    "table_schema = 'public' AND table_name LIKE 'kyc\\_%%' ORDER BY 1, 2").fetchall(),
+            "payment": conn.execute("SELECT p.proname, md5(p.prosrc) FROM pg_proc p WHERE p.proname = ANY(%s) "
+                                    "ORDER BY 1", (list(PAYMENT_DEFINER_FUNCTIONS),)).fetchall(),
+        }
+
+
+def test_0040_round_trip_keeps_the_primary_and_refuses_to_drop_another_account(monkeypatch):
+    """0040 (several Didit accounts): the 0022 functions are replaced (the five-argument kyc_create_session stays,
+    for the previous release), the new tables are unreadable for every runtime role where they hold secrets, no
+    PAY-15 function changes, and the downgrade refuses while an extra account exists, then restores the exact 0039
+    catalog."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0039")
+    added = False
+    try:
+        before = _objects_0040()
+        command.upgrade(cfg, "0040")
+        after = _objects_0040()
+        assert after["payment"] == before["payment"]
+        assert set(after["tables"]) - set(before["tables"]) == {
+            "kyc_provider_accounts", "kyc_account_pins", "kyc_account_reservations", "kyc_account_events"}
+        names = {f for f, _, _ in after["functions"]}
+        assert {"kyc_create_session(uuid,uuid,uuid,integer,text)",
+                "kyc_create_session(uuid,uuid,uuid,integer,text,text)", "kyc_assign_account(uuid)"} <= names
+        with _owner() as conn:
+            for role in ("hyperchat_app", "hyperchat_worker", "hyperchat_readonly", "hyperchat_auth",
+                         "hyperchat_lifecycle", "hyperchat_stepup"):
+                for table in ("kyc_provider_accounts", "kyc_provider_config"):
+                    assert not conn.execute("SELECT has_table_privilege(%s, %s, 'SELECT')",
+                                            (role, "public." + table)).fetchone()[0], (role, table)
+            assert conn.execute("SELECT has_function_privilege('hyperchat_app', 'public.kyc_create_session(uuid, uuid, "
+                                "uuid, integer, text)', 'EXECUTE')").fetchone()[0]  # the previous release's call
+            conn.execute("INSERT INTO public.kyc_provider_config (environment, workflow_id, application_id, "
+                         "webhook_secret) VALUES ('sandbox', %s, gen_random_uuid(), 'whsec_migtest_0123456789')",
+                         (WF40,))
+            conn.execute("INSERT INTO public.kyc_provider_accounts (account_id, environment, workflow_id, "
+                         "application_id, webhook_secret) VALUES ('migtest-b', 'sandbox', %s, gen_random_uuid(), "
+                         "'whsec_migtest_b_0123456789')", (WF40,))
+            added = True
+        with pytest.raises(Exception, match="downgrade of 0040 stopped"):
+            command.downgrade(cfg, "0039")
+        assert _version() == "0040"
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.kyc_provider_accounts WHERE account_id = 'migtest-b'")
+            conn.execute("DELETE FROM public.kyc_account_events")
+            conn.execute("DELETE FROM public.kyc_provider_config")
+            added = False
+        command.downgrade(cfg, "0039")
+        assert _version() == "0039" and _objects_0040() == before
+    finally:
+        if added:
+            with _owner() as conn:
+                conn.execute("DELETE FROM public.kyc_provider_accounts WHERE account_id = 'migtest-b'")
+                conn.execute("DELETE FROM public.kyc_account_events")
+                conn.execute("DELETE FROM public.kyc_provider_config")
         command.upgrade(cfg, "head")
     assert _version() == HEAD

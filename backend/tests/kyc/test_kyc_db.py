@@ -51,8 +51,9 @@ class FakeDidit:
         self.fail: str | None = None
         self.calls = 0
 
-    async def create_session(self, vendor_data, callback):
+    async def create_session(self, vendor_data, callback, workflow_id=None):
         self.calls += 1
+        self.last_workflow = workflow_id
         if self.fail:
             raise DiditError(self.fail)
         assert callback.endswith("/kyc/return")

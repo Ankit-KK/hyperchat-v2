@@ -1233,6 +1233,8 @@ HEAD_DELTAS = {
                              "and the user_invites step-up guard (not TRIGGER_RELS), no pinned function"),
     "0039": no_payment_delta("creator image records: the creator_image_uploads table and its guard trigger (not "
                              "TRIGGER_RELS), no pinned function"),
+    "0040": no_payment_delta("several Didit accounts: kyc_* tables, triggers and functions (not TRIGGER_RELS); "
+                             "creator_donation_block and the donations trigger unchanged, no pinned function"),
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD

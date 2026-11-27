@@ -112,6 +112,63 @@ These checks run in order; any failure stops processing.
 
 **Answers:** 200 for anything stored (Didit doesn't retry), 401 or 403 for authentication failures (not retried), and 5xx only for real server faults (retried).
 
+## Didit accounts (migration 0040)
+
+The database can hold several Didit accounts (owner requirement 2026-11-27: spread cost and free quota, and
+failover). Enabling more than one account **for quota purposes waits for the owner's confirmation with Didit** that
+their terms allow it.
+
+**Which accounts exist**
+- **Primary.** `public.kyc_provider_config`'s one row stays the account `primary` and the database's environment. Its
+  API key is `HYPERCHAT_DIDIT_API_KEY`.
+- **Further accounts.** Each lives in `public.kyc_provider_accounts` with its own:
+  - Didit application id: unique, required, and the primary's must be set first;
+  - workflow and webhook secret;
+  - `enabled` flag and optional `monthly_cap`;
+  - rotation order and workflow epoch.
+
+  Their API keys are `HYPERCHAT_DIDIT_EXTRA_API_KEYS` (a JSON object `{"<account id>": "<key>"}`). No runtime role can
+  read either table.
+
+**Which account a user gets**
+- **Pinned.** Every user is pinned (`kyc_account_pins`) to the account of their first session. A user with sessions
+  from before 0040 is pinned to their earliest session's account.
+- **Rotation.** `public.kyc_assign_account` assigns only a NEW user, under one lock: the least-used account this UTC
+  month (sessions created plus assignments in flight for up to 10 minutes) that is enabled, not revoked and under its
+  cap. Ties go by order, then id.
+- **Never re-routed.** Every later session and retry uses the pinned account, so Didit's per-account duplicate checks
+  see the user. If the pinned account is disabled, revoked or at its cap, the start answers **503** and raises an
+  operator alert (`kyc_account_unavailable`, code `account_disabled`, `account_revoked`, `account_at_cap`). So does no
+  usable account for a new user (`no_account_available`), and an account without an API key on this server
+  (`account_key_missing`).
+- **Moving a user.** Only the operator can, with `kyc_account_move_user` (audited, with a reason). It is a sensitive
+  action and keeps all of the user's history, declines included.
+
+**Webhooks**
+- The signed body's `application_id` names the account (an extra account's id, otherwise the primary). The
+  signature must verify with **that account's** secret.
+- A receipt never changes a session of another account. Account A's signature can never update a session created
+  on account B, and an early webhook applies only to a session of its own account. Each receipt records its account.
+
+**Approval across accounts**
+- **The current session** is the user's newest session of a not-revoked account, inside that account's current
+  workflow epoch (C11, per account).
+- **The veto.** A `Declined` or `Kyc Expired` on ANY of the user's sessions in this environment (every account,
+  revoked ones included) vetoes every approval up to that time. A newer signed approval wins, as within one account.
+  With pinning, a retry on another account needs an operator move first.
+- **Disabling** an account stops new sessions only: its approvals keep counting, and its webhooks are still applied.
+- **Revoking** an account (`kyc_account_revoke`, final, audited) retires its approvals: its users need a new
+  approval, after an operator move.
+- `kyc_owner_decided` already counts every session of the environment, so grace never returns after a decision on
+  any account.
+
+**Known limit (not solved here).** Didit's duplicate-face and cross-organisation fraud detection runs per account, so
+it does not see across accounts. Pinning keeps one person's attempts on one account. A person with two accounts here
+(two users) is not detected across Didit accounts.
+
+**Audit.** `kyc_account_events` holds account additions and changes (changed column names only, never a secret),
+the primary's enable, cap and revoke changes, pin moves and revocations, each with the operator.
+
 ## Status transitions
 - **Statuses:** Didit's exact values are stored as they are: `Not Started`, `In Progress`, `Awaiting User`, `In Review`, `Approved`, `Declined`, `Resubmitted`, `Abandoned`, `Expired`, `Kyc Expired`.
 - **The approval rule** (`public.kyc_effective(user, environment)` returns `(approved, current session)`; `user_kyc_approved`, the API's `approved` and its displayed state all use it) is fail-closed.
