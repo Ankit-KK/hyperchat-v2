@@ -256,6 +256,7 @@ def _assert_verified(report: dict, why: str) -> None:
 def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
     with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as tgt, \
             _src_conn(legacy_db) as src:
+        tgt.execute("SET ROLE hyperchat_owner")  # the migrator has no USAGE on public of its own (NOINHERIT)
         with src.transaction():
             build_legacy(src, tgt)
 
