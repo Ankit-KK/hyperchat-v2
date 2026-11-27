@@ -2,6 +2,8 @@
 Description=Nightly HyperChat off-site backup copy (PRODUCTION; enable only after approval)
 
 [Timer]
+# Placeholder time: the server sets the approved time with a drop-in (hyperchat-offsite.timer.d/schedule.conf,
+# OnCalendar= then OnCalendar=<time>), as DEV does, outside the maintenance windows (docs/backup-recovery.md).
 OnCalendar=*-*-* 03:30:00 UTC
 RandomizedDelaySec=10min
 Persistent=true

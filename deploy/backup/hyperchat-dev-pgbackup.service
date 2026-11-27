@@ -12,3 +12,11 @@ ExecStart=/usr/local/sbin/hyperchat-pgbackup
 Nice=10
 IOSchedulingClass=idle
 UMask=0077
+# S7 sandbox: writes only its own backup directory; reads the witness and the PostgreSQL socket. PrivateTmp gives a
+# private writable /tmp (the retention check's heredoc may use one). sudo to postgres under NoNewPrivileges is checked
+# by a transient-unit probe before this unit is installed on a server (docs/backup-recovery.md).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/backups/hyperchat-dev
+PrivateTmp=yes
+ProtectHome=yes

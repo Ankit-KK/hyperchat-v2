@@ -6,10 +6,13 @@ ConditionPathExists=/etc/hyperchat-backup/offsite-prod.env
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/hyperchat-prod/current/backend
+# The standalone backup tools tree (docs/backup-recovery.md), not a production release: app/backup/{sets,offsite}.py
+# of a merged commit plus a venv with the boto3 closure, so production's off-site copy never waits for or changes
+# with an API deploy. -B: no bytecode is written (the tree is also read-only under ProtectSystem=strict).
+WorkingDirectory=/opt/hyperchat-backup-tools/current
 # Root reads the root-only backup directory; the config (root 0600) holds the BACKUP storage credential, which is
 # never the API's media credential and is never in api.env.
-ExecStart=/opt/hyperchat-prod/current/venv/bin/python -m app.backup.offsite upload --config /etc/hyperchat-backup/offsite-prod.env --latest
+ExecStart=/opt/hyperchat-backup-tools/current/venv/bin/python -B -m app.backup.offsite upload --config /etc/hyperchat-backup/offsite-prod.env --latest
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=yes

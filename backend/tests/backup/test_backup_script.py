@@ -169,14 +169,39 @@ def test_two_concurrent_runs_produce_exactly_one_set(box):
     assert len(sets_in(tmp / "backups")) == 1
 
 
-def test_a_missing_witness_keeps_the_database_set_but_fails_visibly(box):
+@pytest.mark.parametrize("kyc", [{"STUB_KYC": "draft 0"}, {"STUB_KYC_TABLE": "f"}])
+def test_no_witness_file_without_kyc_history_is_not_applicable(box, kyc):
+    tmp, bin_dir = box  # production before its first enforcement change: app.kyc.witness has written nothing yet
+    (tmp / "test.witness").unlink()
+    r = run_script(env_for(tmp, bin_dir, **kyc))
+    assert r.returncode == 0, r.stderr
+    assert "witness=not_applicable" in r.stdout and "WARNING" not in r.stderr
+    d = tmp / "backups"
+    (base,) = sets_in(d)
+    m = manifest(d, base)
+    assert m["witness_status"] == "not_applicable" and m["witness"] is None and load(d, base).witness is None
+    assert "retention verified=1 unverified=0" in r.stdout
+
+
+@pytest.mark.parametrize("kyc", ["draft 1", "active 0", "closed 4"])
+def test_a_missing_witness_with_kyc_history_keeps_the_set_but_fails_visibly(box, kyc):
     tmp, bin_dir = box
     (tmp / "test.witness").unlink()
-    r = run_script(env_for(tmp, bin_dir))
+    r = run_script(env_for(tmp, bin_dir, STUB_KYC=kyc))
     assert r.returncode == 3 and "witness" in r.stderr
     d = tmp / "backups"
     (base,) = sets_in(d)
     assert manifest(d, base)["witness_status"] == "missing" and load(d, base).witness is None
+
+
+def test_an_unreadable_witness_fails_visibly_even_without_kyc_history(box):
+    tmp, bin_dir = box
+    (tmp / "test.witness").unlink()
+    (tmp / "test.witness").mkdir()  # exists, but is not a plain file
+    r = run_script(env_for(tmp, bin_dir))
+    assert r.returncode == 3 and "witness" in r.stderr
+    (base,) = sets_in(tmp / "backups")
+    assert manifest(tmp / "backups", base)["witness_status"] == "missing"
 
 
 def test_a_witness_symlink_is_never_followed(box):
