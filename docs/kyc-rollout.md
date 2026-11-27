@@ -171,7 +171,7 @@ echo, or one line of stdin with `--secret-stdin`, never from argv.
      --workflow-id <uuid> [--monthly-cap N] [--order N] [--disabled]`;
    - put its API key into `HYPERCHAT_DIDIT_EXTRA_API_KEYS` in `api.env` (mode 600) and restart the API;
    - in that Didit application's console, point its webhook at `https://<api host>/api/v1/webhooks/didit`.
-   - Enabling it for quota (rotation) waits for the owner's Didit terms confirmation. Add it `--disabled` until then.
+   - Using several Didit accounts for quota (rotation) is the owner's decision of 2026-11-27 ("will use several accounts, its our decision"): an account can be enabled for rotation as soon as it is added.
 3. **Enable or disable:** `... enable|disable --account <id|primary>`. Disabling stops NEW sessions on it. Its pinned
    users get 503 and an alert until it is enabled again or they are moved.
 4. **Cap:** `... cap --account <id|primary> --monthly N|none`. The cap counts sessions created this UTC month plus

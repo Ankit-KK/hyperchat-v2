@@ -67,6 +67,7 @@ HYPERCHAT_MIGRATION_DSN=... python -m etl.kyc_provider_config --environment sand
 | `POST /api/v1/me/kyc/pan-acknowledgement` | the **owner** of a creator (Origin + CSRF; 20 per hour) | Records the PAN-only notice (migration 0041): `{acknowledged_at, text_version, text, valid_minutes}`. A start needs one from the last 60 minutes, else 409 `pan_acknowledgement_required` |
 | `POST /api/v1/webhooks/didit` | Didit | See "Webhooks" below |
 | `GET /api/v1/admin/users/{id}/kyc` | admin | Sessions (status, workflow, environment, dates, check statuses) and the audit; no identity data |
+| `POST /api/v1/admin/users/{id}/kyc/payout-hold/clear` | admin (CSRF; step-up `kyc.payout_hold.clear`) | Lifts the user's open payout hold with a required `reason` (migration 0041); answers the admin view; 409 when none is open |
 | `POST /api/v1/admin/users/{id}/kyc/refresh` | admin (CSRF; 30 per hour) | Reconciles the newest session with Didit's decision endpoint (two attempts at most, no polling). Answers the admin view plus `refresh`: `applied`, `unchanged`, `stale`, or `approval_needs_webhook`. **It never approves** (the response isn't signed). |
 
 **There is no endpoint that marks a user approved.**
@@ -167,7 +168,15 @@ in Didit's `document_subtype`. `document_type` is a human label ("Tax Card"), so
   public.kyc_sync_payout_holds();` to open holds for approvals recorded before 0041. Those approvals carry no
   document evidence, so they would all be held: an owner decision.
 
-**Not yet possible: self-service re-verification.** An approved user still gets 409 on a new start, and a new session would become the current one at once (checkout pauses; a decline vetoes). So a held creator cannot lift the hold themselves yet; the owner decides how re-verification works.
+**Lifting a hold: an administrator, for now** (owner decision 2026-11-27, option C: "Admin resolves for now").
+- **The route.** `POST /api/v1/admin/users/{id}/kyc/payout-hold/clear` with `{reason}` (1-500 characters).
+- **Step-up.** It is the action `kyc.payout_hold.clear` on `user:<id>` with `{hold_id}`. 0041 adds it to the action CHECK, and the database claims the grant at its own write. In `draft` the usual no-grant path applies.
+- **The database decides.** `kyc_clear_payout_hold` checks an active administrator and a reason, and records who, when and why on the hold row (`cleared_reason 'admin'`, `cleared_by`, `clear_note`). No API role can clear a hold on its own.
+- **It stays cleared.** A hold an administrator cleared is not re-opened for the same approving session. A later non-PAN approval opens a new one.
+- **Answers.** 409 when there is no open hold.
+- **The UI.** The admin dashboard screen comes later (frontend Phase 3).
+
+**Self-service PAN re-verification comes with the payout feature (DASH-9).** Until then an approved user still gets 409 on a new start, and the KYC start rule and `kyc_effective` are unchanged.
 
 **To confirm in the Didit console / sandbox (D2, D7).** The PAN card's `document_subtype` value
 (`TAX_CARD_STANDARD` from the workflow configuration) and that the key is present on every Approved webhook. Until
@@ -177,8 +186,7 @@ the sandbox shows otherwise.
 ## Didit accounts (migration 0040)
 
 The database can hold several Didit accounts (owner requirement 2026-11-27: spread cost and free quota, and
-failover). Enabling more than one account **for quota purposes waits for the owner's confirmation with Didit** that
-their terms allow it.
+failover). Using several accounts for quota is the owner's decision of 2026-11-27 ("will use several accounts, its our decision").
 
 **Which accounts exist**
 - **Primary.** `public.kyc_provider_config`'s one row stays the account `primary` and the database's environment. Its

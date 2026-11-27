@@ -200,3 +200,61 @@ def test_a_start_needs_the_pan_acknowledgement_and_records_which_session_it_was_
 def test_only_an_owner_acknowledges(kyc):
     h = signed_in(kyc, "kyc-pan-stranger" + DOMAIN)
     assert kyc.post(f"{ME}/pan-acknowledgement", headers=h).status_code == 403
+
+
+# ── an administrator resolves a hold (owner decision 2026-11-27, option C) ──────────────────────────────────────
+
+def test_an_admin_clears_a_hold_with_a_reason_audited_and_it_stays_cleared_for_that_approval(kyc):
+    from tests.integration import new_browser
+    headers, uid = owner(kyc, "kyc-pan-clear")
+    sid = start(kyc, headers)["session_id"]
+    approve(kyc, uid, sid, {**PAN, "issuing_state": "USA"})
+    assert holds(uid)[0][2] is None
+    url = f"/api/v1/admin/users/{uid}/kyc/payout-hold/clear"
+    assert kyc.post(url, headers=headers, json={"reason": "x"}).status_code == 403  # the owner is no admin
+    boss = new_browser(kyc)
+    bh = signed_in(boss, "kyc-pan-clear-boss" + DOMAIN, role="admin")
+    assert boss.post(url, headers=bh, json={"reason": ""}).status_code == 422
+    r = boss.post(url, headers=bh, json={"reason": "  PAN card checked by support  "})
+    assert r.status_code == 200 and r.json()["payout_hold"] == {"held": False, "reason": None, "since": None}
+    with fixture_db() as conn:
+        row = conn.execute("SELECT cleared_reason, cleared_by::text, clear_note, cleared_at IS NOT NULL FROM "
+                           "public.kyc_payout_holds WHERE user_id = %s", (uid,)).fetchone()
+        admin_id = conn.execute("SELECT id::text FROM public.users WHERE email = %s",
+                                ("kyc-pan-clear-boss" + DOMAIN,)).fetchone()[0]
+    assert row == ("admin", admin_id, "PAN card checked by support", True)
+    assert boss.post(url, headers=bh, json={"reason": "again"}).status_code == 409  # nothing open any more
+    with fixture_db() as conn:  # a re-sync (any configuration change) never re-opens it for that approval
+        conn.execute("UPDATE public.kyc_document_policy SET document_type = NULL")
+    assert [h[2] for h in holds(uid)] == ["admin"]
+
+
+def test_no_api_role_clears_a_hold_on_its_own_and_active_step_up_needs_the_grant(kyc):
+    from tests.onboarding.conftest import set_enforcement
+    headers, uid = owner(kyc, "kyc-pan-clear-db")
+    sid = start(kyc, headers)["session_id"]
+    approve(kyc, uid, sid, {**PAN, "issuing_state": "USA"})
+    with fixture_db() as conn:
+        hold_id = conn.execute("SELECT id::text FROM public.kyc_payout_holds WHERE user_id = %s",
+                               (uid,)).fetchone()[0]
+    with db() as conn:  # the API's role naming a non-admin actor, or no reason
+        assert conn.execute("SELECT public.kyc_clear_payout_hold(%s, %s, 'x')", (hold_id, uid)).fetchone()[0] == \
+            "not_authorized"
+    from tests.integration import make_user
+    make_user("kyc-pan-clear-db-boss" + DOMAIN, role="admin")
+    with fixture_db() as conn:
+        admin_id = conn.execute("SELECT id::text FROM public.users WHERE email = %s",
+                                ("kyc-pan-clear-db-boss" + DOMAIN,)).fetchone()[0]
+    with db() as conn:
+        assert conn.execute("SELECT public.kyc_clear_payout_hold(%s, %s, '  ')", (hold_id, admin_id)).fetchone()[0] \
+            == "reason_required"
+    for role in ("hyperchat_worker", "hyperchat_auth", "hyperchat_lifecycle"):
+        with pytest.raises(REFUSED), db(role) as conn:
+            conn.execute("SELECT public.kyc_clear_payout_hold(%s, %s, 'x')", (hold_id, admin_id))
+    set_enforcement("active")
+    try:  # step-up enforced: the database refuses the clearance without a passkey grant for exactly this hold
+        with pytest.raises(REFUSED), db() as conn:
+            conn.execute("SELECT public.kyc_clear_payout_hold(%s, %s, 'x')", (hold_id, admin_id))
+    finally:
+        set_enforcement("draft")
+    assert holds(uid)[0][2] is None

@@ -508,8 +508,8 @@ def test_every_mapped_route_consumes_the_presented_grant_in_its_own_transaction(
 def test_every_action_is_bound_to_a_route_or_explained(api):
     actions = {a for a, purpose in ACTIONS.items() if purpose == "action"}
     assert set(ROUTES.values()) | set(UNBOUND) == actions and not set(ROUTES.values()) & set(UNBOUND)
-    from app.routers import admin, auth, partners
-    routes = {(m, r.path): r for router in (admin.router, auth.router, partners.admin_router)
+    from app.routers import admin, auth, kyc, partners
+    routes = {(m, r.path): r for router in (admin.router, auth.router, partners.admin_router, kyc.admin_router)
               for r in router.routes for m in r.methods}
     for (method, path), action in ROUTES.items():
         route = routes[(method, path)]

@@ -26,6 +26,10 @@ Revises: 0040
   it. Holds open automatically only for approvals recorded after 0041 (their check_statuses carry
   `id_documents`); approvals recorded before get one only when the operator runs kyc_sync_payout_holds() (an owner
   decision), not as a side effect of a configuration change.
+* kyc_clear_payout_hold(hold, admin, reason): the administrator's resolution (owner decision 2026-11-27, option C):
+  an active admin, a reason, and the step-up action kyc.payout_hold.clear (user:<id>, {hold_id}) claimed at this
+  write (0041 widens the stepup_challenges action CHECK); the hold row keeps who, when and why, and a hold an admin
+  cleared is not re-opened for the same approving session. Self-service re-verification comes with payouts (DASH-9).
 * kyc_pan_acknowledgements: the creator ticked "Only use PAN card for verification, otherwise your payout can be put
   on hold if found using different ID" before KYC: who, when, the text version and its hash, and the session it was
   bound to. The API inserts it and binds it once (guarded); nothing deletes it.
@@ -53,7 +57,8 @@ DEFINER = "SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp"
 REFUSE = "USING ERRCODE = 'insufficient_privilege'"
 LABEL = "CASE WHEN jsonb_typeof(e -> '{k}') = 'string' AND char_length(e ->> '{k}') <= 64 THEN e ->> '{k}' END"
 DOC_FIELDS = ("status", "document_type", "document_subtype", "issuing_state", "verification_method")
-APP_FUNCTIONS = ("public.kyc_pan_status(uuid, text)", "public.kyc_payout_hold(uuid)")
+APP_FUNCTIONS = ("public.kyc_pan_status(uuid, text)", "public.kyc_payout_hold(uuid)",
+                 "public.kyc_clear_payout_hold(uuid, uuid, text)")
 OPERATOR_FUNCTIONS = ("public.kyc_sync_payout_holds()",)
 INTERNAL_FUNCTIONS = ("public.kyc_documents_pan(jsonb)", "public.kyc_sync_payout_hold(uuid, boolean)",
                       "public.kyc_payout_hold_on_session()", "public.kyc_payout_hold_on_config()",
@@ -76,6 +81,25 @@ def _m0022() -> list[str]:
 def _function_0022(statements: list[str], name: str) -> str:
     (sql,) = [s for s in statements if f"CREATE FUNCTION public.{name}(" in s]
     return sql.replace(f"CREATE FUNCTION public.{name}(", f"CREATE OR REPLACE FUNCTION public.{name}(", 1)
+
+
+def _m0037():
+    path = pathlib.Path(__file__).with_name("0037_stepup_sec_a_anchors.py")
+    spec = importlib.util.spec_from_file_location("_hyperchat_0037_for_0041", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+OLD_ACTIONS = _m0037().ACTIONS
+ACTIONS = OLD_ACTIONS + ("kyc.payout_hold.clear",)  # app.stepup.canonical.ACTIONS
+
+
+def _action_check(actions, valid: bool = True) -> None:
+    op.execute("ALTER TABLE public.stepup_challenges DROP CONSTRAINT stepup_challenges_action_check")
+    quoted = ", ".join(f"'{a}'" for a in actions)
+    op.execute(f"ALTER TABLE public.stepup_challenges ADD CONSTRAINT stepup_challenges_action_check "
+               f"CHECK (action IN ({quoted})){'' if valid else ' NOT VALID'}")
 
 
 def upgrade() -> None:
@@ -175,9 +199,12 @@ def upgrade() -> None:
             session_id uuid,          -- the approving session (no foreign key: the hold outlives it)
             set_at timestamptz NOT NULL DEFAULT now(),
             cleared_at timestamptz,
-            cleared_reason text CHECK (cleared_reason IN ('pan_verified')),
+            cleared_reason text CHECK (cleared_reason IN ('pan_verified', 'admin')),
             cleared_session_id uuid,  -- the PAN-verified session that cleared it
-            CHECK ((cleared_at IS NULL) = (cleared_reason IS NULL))
+            cleared_by uuid,          -- the administrator who cleared it (no foreign key: the audit outlives them)
+            clear_note text CHECK (char_length(clear_note) BETWEEN 1 AND 500),
+            CHECK ((cleared_at IS NULL) = (cleared_reason IS NULL)),
+            CHECK ((cleared_reason = 'admin') = (cleared_by IS NOT NULL AND clear_note IS NOT NULL))
         )
     """)
     op.execute("CREATE UNIQUE INDEX kyc_payout_holds_one_open ON public.kyc_payout_holds (user_id) "
@@ -197,8 +224,12 @@ def upgrade() -> None:
             -- older approvals are held only by the operator's kyc_sync_payout_holds() (an owner decision)
             SELECT ks.check_statuses ? 'id_documents' INTO recorded FROM public.kyc_sessions ks WHERE ks.session_id = sess;
             IF st = 'non_pan' AND (p_backfill OR coalesce(recorded, false)) THEN
-                INSERT INTO public.kyc_payout_holds (user_id, reason, session_id) VALUES (p_user_id, 'non_pan_kyc', sess)
-                ON CONFLICT (user_id) WHERE cleared_at IS NULL DO NOTHING;
+                IF NOT EXISTS (SELECT 1 FROM public.kyc_payout_holds h WHERE h.user_id = p_user_id
+                               AND h.session_id = sess AND h.cleared_reason = 'admin') THEN  -- an admin resolved it
+                    INSERT INTO public.kyc_payout_holds (user_id, reason, session_id)
+                    VALUES (p_user_id, 'non_pan_kyc', sess)
+                    ON CONFLICT (user_id) WHERE cleared_at IS NULL DO NOTHING;
+                END IF;
             ELSIF st = 'pan_verified' THEN
                 UPDATE public.kyc_payout_holds SET cleared_at = now(), cleared_reason = 'pan_verified',
                     cleared_session_id = sess
@@ -247,6 +278,34 @@ def upgrade() -> None:
             SELECT h.reason, h.set_at FROM public.kyc_payout_holds h WHERE h.user_id = p_user_id AND h.cleared_at IS NULL
         $$
     """)
+
+    # Owner decision 2026-11-27 (option C, "Admin resolves for now"): an administrator clears a hold, audited with
+    # a reason, under the step-up action kyc.payout_hold.clear (user:<id>, {hold_id}); self-service PAN
+    # re-verification comes with the payout feature (DASH-9).
+    op.execute(f"""
+        CREATE FUNCTION public.kyc_clear_payout_hold(p_hold_id uuid, p_actor uuid, p_reason text) RETURNS text
+        LANGUAGE plpgsql {DEFINER} AS $$
+        DECLARE h public.kyc_payout_holds%ROWTYPE;
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM public.users WHERE id = p_actor AND role = 'admin' AND is_active) THEN
+                RETURN 'not_authorized';
+            END IF;
+            IF nullif(btrim(p_reason), '') IS NULL OR char_length(btrim(p_reason)) > 500 THEN
+                RETURN 'reason_required';
+            END IF;
+            SELECT * INTO h FROM public.kyc_payout_holds WHERE id = p_hold_id FOR UPDATE;
+            IF NOT FOUND OR h.cleared_at IS NOT NULL THEN
+                RETURN 'not_open';
+            END IF;
+            PERFORM public.stepup_authorize('kyc.payout_hold.clear', 'user:' || h.user_id,
+                                            jsonb_build_object('hold_id', h.id::text), 'kyc_payout_holds.clear');
+            UPDATE public.kyc_payout_holds SET cleared_at = now(), cleared_reason = 'admin', cleared_by = p_actor,
+                clear_note = btrim(p_reason)
+            WHERE id = h.id;
+            RETURN 'cleared';
+        END $$
+    """)
+    _action_check(ACTIONS)
 
     # ── the PAN acknowledgement ──────────────────────────────────────────────────────────────────────────────
     op.execute("""
@@ -311,6 +370,8 @@ def downgrade() -> None:
             END IF;
         END $$
     """)
+    _action_check(OLD_ACTIONS, valid=False)  # challenges already issued for the action stay as audit history
+    op.execute("DROP FUNCTION public.kyc_clear_payout_hold(uuid, uuid, text)")
     statements = _m0022()
     for name in REPLACED_0022:
         op.execute(_function_0022(statements, name))

@@ -113,6 +113,7 @@ answer carries the exact `{action, target, params}` to approve.
 | `POST /api/v1/admin/creators/{id}/owner` | `creator.owner.assign` | `creator:{id}` | `{user_id}` |
 | `POST /api/v1/admin/creators/{id}/owner/transfer` | `creator.owner.transfer` | `creator:{id}` | `{user_id, expected_owner_id}` |
 | `POST /api/v1/admin/applications/{id}/approve` | `application.approve` | `application:{id}` | `{slug, name, razorpay_account, email}`: `email` is the applicant's address, lower-cased (NV-3, migration 0037) |
+| `POST /api/v1/admin/users/{id}/kyc/payout-hold/clear` | `kyc.payout_hold.clear` | `user:{id}` | `{hold_id}`: the user's open payout hold (migration 0041 adds the action and anchors `kyc_clear_payout_hold`) |
 | `POST /api/v1/admin/applications/{id}/invite` | `application.invite` | `application:{id}` | `{}` (the application's own address and creator: the database checks both). Grant optional since onboarding Stage 2 (Q3): the route never asks for one, in either state; without one the invitation is issued by `onboarding_issue_invite` on `hyperchat_lifecycle` (migration 0038, docs/onboarding.md); a presented one is consumed and claimed here |
 | `POST /api/v1/auth/invites` **with `role: admin` or a `streamer_id`** | `admin.invite` | `invite` | `{email, role, streamer_id}` |
 | `PATCH /api/v1/admin/users/{id}` | `admin.user.change` | `user:{id}` | the account's **resulting** `{role, is_active, streamer_id}` |

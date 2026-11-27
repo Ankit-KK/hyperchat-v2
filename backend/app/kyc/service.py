@@ -39,6 +39,7 @@ from app.core.config import Settings
 from app.core.errors import ApiError
 from app.kyc.didit import CreatedSession, DiditClient, DiditError, as_uuid, canonical, check_statuses
 from app.security.audit import security_event
+from app.stepup.grants import consume
 
 log = logging.getLogger("hyperchat.kyc")
 RATE_START = ("kyc:session", 5, 3600)       # per user
@@ -87,6 +88,10 @@ def summary(sessions: list[dict], environment: str | None, effective: tuple[bool
     return {"approved": approved, "state": state,
             "provider_status": latest["provider_status"] if latest else None,
             "updated_at": _iso(latest["updated_at"]) if latest else None}
+
+
+class _Rollback(Exception):
+    """Leaves a transaction with a refusal code (the grant consumed in it is rolled back too)."""
 
 
 class KycRepository:
@@ -178,6 +183,23 @@ class KycRepository:
         return {"pan_status": status,
                 "payout_hold": {"held": hold is not None, "reason": hold["reason"] if hold else None,
                                 "since": _iso(hold["since"]) if hold else None}}
+
+    async def open_hold(self, user_id: str) -> str | None:
+        async with self._conn() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT id::text FROM public.kyc_payout_holds WHERE user_id = %s AND cleared_at IS NULL",
+                              (user_id,))
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    async def clear_hold(self, hold_id: str, actor_id: str, reason: str, grant) -> str:
+        """public.kyc_clear_payout_hold in one transaction with the step-up grant's consumption (SEC-A style)."""
+        async with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+            await consume(cur, grant)
+            await cur.execute("SELECT public.kyc_clear_payout_hold(%s, %s, %s)", (hold_id, actor_id, reason))
+            result = (await cur.fetchone())[0]
+            if result != "cleared":
+                raise _Rollback(result)  # a refused clearance never spends the grant
+            return result
 
     async def receive_webhook(self, canonical_body: str, signature: str | None, x_timestamp: str | None) -> str:
         async with self._conn() as conn, conn.cursor() as cur:
@@ -348,6 +370,24 @@ class KycService:
                 "sessions": [{**s, **{k: _iso(s[k]) for k in ("provider_updated_at", "approved_at", "created_at",
                                                               "updated_at")}} for s in sessions],
                 "events": [{**e, "created_at": _iso(e["created_at"])} for e in await self.repo.events(user_id)]}
+
+    async def admin_clear_payout_hold(self, admin: User, user_id: str, hold_id: str, reason: str | None,
+                                      ip: str | None, grant=None) -> dict:
+        """Owner decision 2026-11-27 (option C): an administrator resolves a payout hold, with a reason, under the
+        step-up action kyc.payout_hold.clear. The database checks the admin, records who, when and why, and claims
+        the grant at its own write (migration 0041)."""
+        reason = " ".join((reason or "").split())
+        if not reason or len(reason) > 500:
+            raise ApiError(400, "A reason (at most 500 characters) is required", "reason_required")
+        try:
+            await self.repo.clear_hold(hold_id, admin.id, reason, grant)
+        except _Rollback as refused:
+            code = str(refused)
+            raise ApiError(409 if code == "not_open" else 403 if code == "not_authorized" else 400,
+                           {"not_open": "This payout hold is not open", "not_authorized": "Admins only",
+                            "reason_required": "A reason is required"}.get(code, "Refused"), code) from None
+        security_event("kyc_payout_hold_cleared", level=20, user_id=admin.id, target_user_id=user_id, client_ip=ip)
+        return await self.admin_view(user_id)
 
     async def admin_refresh(self, admin: User, user_id: str, ip: str | None) -> dict:
         """Reconcile the user's newest session with Didit's decision endpoint (two attempts at most; no polling).

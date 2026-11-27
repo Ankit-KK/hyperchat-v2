@@ -9,6 +9,7 @@ Didit (no cookies, no CSRF: authenticated by X-Signature-V2 over the whole body 
 Admin:
   GET  /api/v1/admin/users/{user_id}/kyc           sessions (status, workflow, dates), audit; no identity data
   POST /api/v1/admin/users/{user_id}/kyc/refresh   reconcile the newest session with Didit's decision endpoint
+  POST /api/v1/admin/users/{user_id}/kyc/payout-hold/clear   lift an open payout hold (0041; step-up, reason)
 There is deliberately no endpoint that marks a user approved.
 """
 
@@ -24,6 +25,7 @@ from app.auth.dependencies import CurrentUser, client_ip, require_admin, require
 from app.core.errors import ApiError
 from app.kyc.enforcement import EnforcementService
 from app.kyc.service import KycService
+from app.stepup.actions import StepUp, step_up
 
 me_router = APIRouter(prefix="/api/v1/me/kyc", tags=["kyc"])
 webhook_router = APIRouter(prefix="/api/v1/webhooks", tags=["kyc"])
@@ -86,6 +88,27 @@ async def didit_webhook(request: Request):
 @admin_router.get("/{user_id}/kyc")
 async def admin_user_kyc(user_id: str, request: Request, current: CurrentUser = Depends(require_admin)):
     return JSONResponse(await _service(request).admin_view(_user_id(user_id)), headers=NO_STORE)
+
+
+class PayoutHoldClear(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: StrictStr = Field(min_length=1, max_length=500)
+
+
+@admin_router.post("/{user_id}/kyc/payout-hold/clear")
+async def admin_clear_payout_hold(user_id: str, body: PayoutHoldClear, request: Request,
+                                  current: CurrentUser = Depends(require_admin),
+                                  stepup: StepUp = Depends(step_up("kyc.payout_hold.clear"))):
+    """Lift the user's open payout hold (owner decision 2026-11-27, option C: admins resolve non-PAN holds until
+    self-service PAN re-verification arrives with payouts, DASH-9). A reason is required; step-up action
+    kyc.payout_hold.clear on user:<id> with {hold_id}; the database records who, when and why (migration 0041)."""
+    service, target = _service(request), _user_id(user_id)
+    hold_id = await service.repo.open_hold(target)
+    if hold_id is None:
+        raise ApiError(409, "This user has no open payout hold", "not_open")
+    grant = stepup.bind(f"user:{target}", {"hold_id": hold_id})
+    return JSONResponse(await service.admin_clear_payout_hold(current.user, target, hold_id, body.reason,
+                                                              client_ip(request), grant), headers=NO_STORE)
 
 
 @admin_router.post("/{user_id}/kyc/refresh")

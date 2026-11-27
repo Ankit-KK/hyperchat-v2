@@ -662,6 +662,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/users/{user_id}/kyc/payout-hold/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Clear Payout Hold
+         * @description Lift the user's open payout hold (owner decision 2026-11-27, option C: admins resolve non-PAN holds until
+         *     self-service PAN re-verification arrives with payouts, DASH-9). A reason is required; step-up action
+         *     kyc.payout_hold.clear on user:<id> with {hold_id}; the database records who, when and why (migration 0041).
+         */
+        post: operations["admin_clear_payout_hold_api_v1_admin_users__user_id__kyc_payout_hold_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/users/{user_id}/kyc/refresh": {
         parameters: {
             query?: never;
@@ -2800,6 +2822,11 @@ export interface components {
             /** User Id */
             user_id: string;
         };
+        /** PayoutHoldClear */
+        PayoutHoldClear: {
+            /** Reason */
+            reason: string;
+        };
         /** PlatformMetrics */
         PlatformMetrics: {
             /** Active Streams */
@@ -4526,6 +4553,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_clear_payout_hold_api_v1_admin_users__user_id__kyc_payout_hold_clear_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PayoutHoldClear"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
