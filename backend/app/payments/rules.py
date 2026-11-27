@@ -252,7 +252,8 @@ def auto_approves(*, has_hypersound: bool, has_voice: bool, has_media: bool,
 
     HyperSounds are always auto-approved. Otherwise only creators in auto_approve mode (the column default)
     auto-approve, except that with media moderation on (default true) a donation carrying media OR a voice
-    message waits for a moderator (D2). Every other donation, an imported one included, follows these rules.
+    message waits for a moderator (D2). Every other donation follows these rules. An imported (legacy) order never
+    completes in V2 (NV3-1: the webhook records it as unknown_order), so it never reaches this rule.
     """
     if has_hypersound:
         return True

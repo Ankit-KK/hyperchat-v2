@@ -248,9 +248,9 @@ def test_checkout_never_creates_a_hyperemote(client):
     assert r.status_code == 422 and client.fake.count("create_order") == 1  # refused before Razorpay
 
 
-def test_an_imported_hyperemote_completes_under_the_ordinary_moderation_rule(client):
-    """An imported row may still carry is_hyperemote = true (history). A late capture of it is no longer
-    auto-approved: a creator in manual moderation gets it in the queue, and no donor total is credited."""
+def test_an_imported_hyperemote_order_is_never_completed_by_a_late_capture(client):
+    """An imported row may still carry is_hyperemote = true (history). NV3-1 (fresh-start cutover): a late capture of
+    ANY imported order is recorded as unknown_order and applies nothing; the history flag is kept as it was."""
     sid = make_streamer("authtest-pay-oldemote")
     update_streamer(sid, moderation_mode="manual")
     out = checkout(client, "authtest-pay-oldemote")
@@ -259,9 +259,9 @@ def test_an_imported_hyperemote_completes_under_the_ordinary_moderation_rule(cli
                      "WHERE order_id = %s", (out["order_id"],))
     payment = client.fake.captured(out["razorpay_order_id"], 10000)
     r = webhook(client, "payment.captured", out, payment.id, event_id="authtest-wh-oldemote")
-    assert (r.status_code, r.json()) == (200, {"status": "completed"})
+    assert (r.status_code, r.json()) == (200, {"status": "unknown_order"})
     row = donation(out["order_id"])
-    assert (row["payment_status"], row["moderation_status"], row["approved"]) == ("success", "pending", False)
+    assert (row["payment_status"], row["moderation_status"], row["approved"]) == ("pending", "pending", False)
     assert totals(sid) == []
     assert _hyperemote(out["order_id"]) is True  # history is kept as it was
 
