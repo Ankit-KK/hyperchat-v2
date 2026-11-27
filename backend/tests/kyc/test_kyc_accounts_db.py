@@ -282,6 +282,39 @@ def test_disabling_keeps_approvals_and_revoking_retires_them_for_good(multi):
     assert r.status_code == 503 and alerts() == ["account_revoked"]
 
 
+def test_a_revoked_accounts_webhooks_are_refused_and_record_nothing(multi):
+    # Migration 0045 (audit run-4 hardening): a revoked account's (possibly leaked) secret records no status, so a
+    # decline cannot veto and nothing waits to count again after a restore.
+    set_primary(enabled=False)
+    h, uid = owner(multi, "kyc-acc-revhook")
+    sid = start(multi, h)["session_id"]
+    with fixture_db() as conn:
+        assert conn.execute("SELECT public.kyc_account_revoke(%s, 'ops', 'secret exposed')",
+                            (B,)).fetchone()[0] == "revoked"
+
+    def receipts(account: str) -> int:
+        with db() as conn:
+            return conn.execute("SELECT count(*) FROM public.kyc_webhook_events WHERE account_id = %s",
+                                (account,)).fetchone()[0]
+    def status() -> tuple:
+        with db() as conn:
+            return conn.execute("SELECT provider_status, provider_updated_at FROM public.kyc_sessions WHERE "
+                                "session_id = %s", (sid,)).fetchone()
+    before, session_before = receipts(B), status()
+    r = b_hook(multi, session_id=sid, vendor=uid, status="Declined", created_at=int(time.time()))
+    assert r.status_code == 403 and receipts(B) == before and status() == session_before
+    with fixture_db() as conn:  # the primary the same way
+        assert conn.execute("SELECT public.kyc_account_revoke('primary', 'ops', 'secret exposed')").fetchone()[0] == \
+            "revoked"
+    before = receipts("primary")
+    assert hook(multi, session_id=str(uuid.uuid4()), vendor=uid, status="Approved",
+                created_at=int(time.time())).status_code == 403
+    assert receipts("primary") == before
+    r = hook(multi, secret="whsec_not_this_accounts_secret", application_id=B_APP, workflow_id=B_WF, session_id=sid,
+             vendor=uid, status="Approved", created_at=int(time.time()))
+    assert r.status_code == 401  # a bad signature still learns nothing about the account
+
+
 def test_a_pin_moves_only_through_the_audited_operator_function(multi):
     h, uid = owner(multi, "kyc-acc-move")
     start(multi, h)

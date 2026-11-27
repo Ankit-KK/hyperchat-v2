@@ -149,6 +149,9 @@ def run(conn, args) -> int:
         if result != "revoked":
             print(f"Refused: {result}.", file=sys.stderr)
             return 2
+        # migration 0045: once the KYC witness history has started, the revocation is an enforcement event too
+        print("Now record it in the KYC restore witness: python -m app.kyc.operator witness-sync --operator <name> "
+              "--confirm-database <db> (from backend/, with HYPERCHAT_KYC_WITNESS_PATH); the daily cleanup also does.")
     elif cmd == "move-user":
         result = conn.execute("SELECT public.kyc_account_move_user(%s, %s, %s, %s)",
                               (args.user, args.to, args.operator, args.reason)).fetchone()[0]

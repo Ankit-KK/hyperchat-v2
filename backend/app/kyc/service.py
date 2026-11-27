@@ -61,7 +61,8 @@ REFUSED = {"not_configured": (503, UNAVAILABLE, "kyc_not_configured"),
            "bad_signature": (401, "Invalid signature", "kyc_webhook_bad_signature"),
            "stale_timestamp": (401, "Stale or missing timestamp", "kyc_webhook_stale"),
            "malformed": (400, "Malformed payload", "kyc_webhook_malformed"),
-           "wrong_application": (403, "Not this environment's Didit application", "kyc_webhook_wrong_application")}
+           "wrong_application": (403, "Not this environment's Didit application", "kyc_webhook_wrong_application"),
+           "account_revoked": (403, "This Didit account is revoked", "kyc_webhook_account_revoked")}  # 0045
 _SESSION_COLS = """session_id::text, workflow_id::text, workflow_version, environment, account_id, provider_status,
     provider_updated_at, check_statuses, approved_at, created_at, updated_at"""
 

@@ -1257,6 +1257,9 @@ HEAD_DELTAS = {
     },
     "0044": no_payment_delta("security audit run-4: a BEFORE INSERT guard on streamers refuses a claimed or "
                              "soundboard-enabled new creator from the API roles (not TRIGGER_RELS), no pinned function"),
+    "0045": no_payment_delta("security audit run-4: kyc_change_creator_status, kyc_account_revoke and "
+                             "kyc_receive_webhook re-created (KYC witness events; revoked accounts' webhooks "
+                             "ignored); creator_donation_block and the donations trigger unchanged, no pinned function"),
 }
 EXPECTED_HEADS = tuple(HEAD_DELTAS)  # the heads verify accepts, in revision order
 assert list(EXPECTED_HEADS) == sorted(EXPECTED_HEADS) and EXPECTED_HEADS[0] == EXPECTED_HEAD
