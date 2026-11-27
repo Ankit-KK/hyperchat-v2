@@ -1,6 +1,8 @@
 """Units of the automatic invitation loop (no database): the backoff schedule, the selection SQL's shape, the
 failure codes and when the worker starts the loop at all."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.auth.email import EmailCategoryInactive, EmailDeliveryError, EmailRecipientNotAllowed
@@ -15,15 +17,17 @@ def test_backoff_schedule_is_the_owners():
     assert DELAYS == (60, 300, 1800, 7200, 43200)
 
 
-def test_selection_locks_one_application_and_skips_rows_another_worker_holds():
+def test_selection_only_reads_one_application():
+    """Migration 0038: onboarding_issue_invite locks the application on the lifecycle connection and re-checks it, so
+    the pick (on hyperchat_app) must not hold a lock the other connection would wait for."""
     sql = " ".join(PICK.split())
-    assert sql.endswith("LIMIT 1 FOR UPDATE OF a SKIP LOCKED")
+    assert sql.endswith("LIMIT 1") and "FOR UPDATE" not in sql
     for rule in ("a.review_status = 'approved'", "s.user_id IS NULL", "i.expires_at > now()",
                  "e.note IS DISTINCT FROM 'auto'", "'auto:skipped:%%'", "'auto:paused:%%'", "'auto:failed:%%'",
                  "< %(max_attempts)s", "(%(delays)s::int[])[count(*)::int]", "a.reviewed_at >= %(since)s",
                  "a.reviewed_at >= now() - make_interval(days => %(window_days)s)"):
         assert rule in sql, rule
-    assert "jobs" not in sql and "INSERT" not in sql and "UPDATE" not in sql.replace("FOR UPDATE", "")
+    assert "jobs" not in sql and "INSERT" not in sql and "UPDATE" not in sql
 
 
 @pytest.mark.parametrize(("exc", "code"), [
@@ -48,6 +52,9 @@ def test_the_loop_is_off_by_default_and_never_starts_without_onboarding_email(mo
     assert build_auto_inviter(_settings(monkeypatch), None) is None
     off = _settings(monkeypatch, HYPERCHAT_AUTO_INVITE_ENABLED="true", HYPERCHAT_EMAIL_BACKEND="disabled")
     assert build_auto_inviter(off, None) is None  # the disabled sender would "succeed" without sending
+    no_lifecycle = SimpleNamespace(auto_invite_enabled=True, email_backend="resend", email_categories=("onboarding",),
+                                   db_lifecycle_user=None)
+    assert build_auto_inviter(no_lifecycle, None) is None  # migration 0038: the invitation needs hyperchat_lifecycle
 
 
 @pytest.mark.parametrize("value", ["0", "9", "3601"])

@@ -62,7 +62,7 @@ def invites(signup_id: str) -> list[tuple]:
 
 @pytest.fixture
 def repo(env) -> ApplicationRepository:
-    return ApplicationRepository(connection_factory(Settings()))
+    return ApplicationRepository(connection_factory(Settings()), connection_factory(Settings(), role="lifecycle"))
 
 
 @pytest.fixture

@@ -722,8 +722,13 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
                 "donation_credit_events",
                 # 0034 (accounting state, its audit, runs, evaluation metadata, the API's state lock)
                 "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs",
-                "donation_accounting_evaluations", "payment_accounting_lock_state()")
+                "donation_accounting_evaluations", "payment_accounting_lock_state()",
+                # 0038 (onboarding invite exception): its function's EXECUTE for hyperchat_lifecycle, which the
+                # downgrade below 0038 drops with the function; test_0038 pins that grant
+                "onboarding_issue_invite(uuid,text,integer,uuid,boolean)")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
+    assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in \
+        _api_role_privileges()  # the exclusion names a real head privilege (not a typo that hides nothing)
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
@@ -2011,5 +2016,62 @@ def test_0037_round_trip_changes_only_its_guards_and_triggers_never_data_or_paym
     finally:
         with _owner() as conn:
             conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest37@authtest.invalid'")
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+def _objects_0038() -> dict:
+    """{name: (md5 of the body, proconfig, ACL)} of the invite guard, onboarding_issue_invite and the PAY-15-pinned
+    DEFINER functions, and the user_invites triggers."""
+    with _owner() as conn:
+        rows = conn.execute("SELECT p.proname, md5(p.prosrc), coalesce(p.proconfig, '{}')::text[], "
+                            "coalesce(p.proacl, '{}')::text[] FROM pg_proc p "
+                            "WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY(%s)",
+                            (list(PAYMENT_DEFINER_FUNCTIONS + ("stepup_guard_user_invites",
+                                                               "onboarding_issue_invite")),)).fetchall()
+        triggers = conn.execute("SELECT t.tgname FROM pg_trigger t WHERE NOT t.tgisinternal "
+                                "AND t.tgrelid = 'public.user_invites'::regclass ORDER BY 1").fetchall()
+    return {"functions": {n: (h, tuple(c), tuple(a)) for n, h, c, a in rows}, "triggers": triggers}
+
+
+def _data_0038() -> list:
+    """Every application, invitation and application event, as the owner sees them: 0038 never changes data."""
+    with _owner() as conn:
+        return [conn.execute(f"SELECT * FROM public.{t} ORDER BY id").fetchall()
+                for t in ("user_signups", "user_invites", "application_events")]
+
+
+def test_0038_round_trip_changes_only_the_invite_guard_and_its_function_never_data(monkeypatch):
+    """0038 (onboarding invite guard exception): the upgrade adds onboarding_issue_invite (EXECUTE for
+    hyperchat_lifecycle only) and re-creates 0027's user_invites guard with the one exception; no trigger and no
+    PAY-15-pinned function changes; the downgrade restores exactly the 0037 catalog; no row is read or written."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0037")
+    try:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest38@authtest.invalid'")
+            conn.execute("INSERT INTO public.user_signups (name, email, mobile_number) VALUES "
+                         "('M38', 'migtest38@authtest.invalid', '+91 90000 00038')")
+        at_0037, data = _objects_0038(), _data_0038()
+        assert "onboarding_issue_invite" not in at_0037["functions"]
+        command.upgrade(cfg, "0038")
+        assert _version() == "0038" and _data_0038() == data
+        at_0038 = _objects_0038()
+        for name in PAYMENT_DEFINER_FUNCTIONS:  # no payment object: the verifier's no_payment_delta holds
+            assert at_0038["functions"][name] == at_0037["functions"][name], name
+        guard_37 = at_0037["functions"]["stepup_guard_user_invites"]
+        guard_38 = at_0038["functions"]["stepup_guard_user_invites"]
+        assert guard_38[0] != guard_37[0] and guard_38[1:] == guard_37[1:]  # body only: same config, same ACL
+        _, config, acl = at_0038["functions"]["onboarding_issue_invite"]
+        assert "search_path=pg_catalog, public, pg_temp" in config
+        assert {entry.split("=", 1)[0] for entry in acl} == {"hyperchat_owner", "hyperchat_lifecycle"}, acl
+        assert at_0038["triggers"] == at_0037["triggers"]
+        command.downgrade(cfg, "0037")  # restores exactly the 0037 objects, keeps every row
+        assert _version() == "0037" and _objects_0038() == at_0037 and _data_0038() == data
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest38@authtest.invalid'")
         command.upgrade(cfg, "head")
     assert _version() == HEAD

@@ -1,9 +1,11 @@
-# Creator onboarding: automatic invitations (Stage 2, Phase A)
+# Creator onboarding: automatic invitations (Stage 2)
 
 PDP v1.1 replaces "approve, then invite by hand" with one admin approval followed by an automatic invitation. Phase A
-is code only: no migration, no job kind, no new table, role or grant (the PAY-15 soak pins the database head until
-2026-12-01). Code: `backend/app/onboarding/auto_invite.py`, run by the worker (`python -m app.worker`) next to the job
-slots and the realtime outbox publisher, on the worker's `hyperchat_app` connection.
+(#150) is the worker loop: `backend/app/onboarding/auto_invite.py`, run by the worker (`python -m app.worker`) next
+to the job slots and the realtime outbox publisher. Phase B is migration 0038 (the invite guard exception, below): the
+loop picks due applications on the worker's `hyperchat_app` connection and issues each invitation through
+`onboarding_issue_invite` on a `hyperchat_lifecycle` connection, so it works with step-up enforcement `draft` or
+`active` (owner decision Q14).
 
 ## Settings
 
@@ -14,7 +16,8 @@ slots and the realtime outbox publisher, on the worker's `hyperchat_app` connect
 
 The loop also needs `HYPERCHAT_EMAIL_BACKEND=resend` with the `onboarding` category active. Without them the worker
 logs `automatic invitations not started` (`onboarding_email_inactive`) and does not run it, because the disabled
-sender would report success without sending anything. Rollback: set the setting to `false` and restart the worker;
+sender would report success without sending anything. It also needs `HYPERCHAT_DB_LIFECYCLE_USER` (the API's own
+setting, read from the same env file); without it the reason is `lifecycle_role_unset`. Rollback: set the setting to `false` and restart the worker;
 the manual route keeps working throughout.
 
 ## What a pass does
@@ -30,10 +33,9 @@ Each pass handles at most 10 applications, each in its own transaction. An appli
   paused;
 - every earlier automatic attempt failed, there were fewer than 5, and the backoff since the last one has passed.
 
-The application row is locked `FOR UPDATE SKIP LOCKED` inside the same transaction that issues the invitation
-(`ApplicationRepository.issue_auto_invite`, which reuses the manual path's `issue_invite` body). The eligibility query
-runs a second time under the lock, so two worker processes never invite the same application twice. The invitation
-has no actor: `user_invites.invited_by` and `application_events.actor_user_id` are NULL, and the `invite` event's
+The pick only reads. `onboarding_issue_invite` then locks the application and re-checks it: an automatic call is
+refused as `not_due` while an earlier invitation of the application is unrevoked and unaccepted, so two worker
+processes never invite the same application twice (the loser moves on silently). The invitation has no actor: `user_invites.invited_by` and `application_events.actor_user_id` are NULL, and the `invite` event's
 note is `auto`. After commit the email is sent through the `onboarding` category with the same template and link as
 the manual route.
 
@@ -46,8 +48,8 @@ text.
 |---|---|---|
 | `invite`, note `auto` | an automatic attempt and its invitation | done when the email is accepted |
 | `note`, `auto:failed:<code>` | the email failed (`transient`, `rejected`, `refused_auth`, `category_inactive`, `recipient_not_allowed`, `send_error`); the new link was revoked in the same transaction | retried with a fresh link after 60 s, 5 min, 30 min, then 2 h |
-| `note`, `auto:skipped:<code>` | `account_exists`: the applicant already has an account (owner decision Q2: link it with `POST /api/v1/admin/creators/{id}/owner`), or a creator claimed meanwhile | never retried automatically |
-| `note`, `auto:paused:<code>` | the database refused the invitation: `stepup_refused` (see below) or `guard_refused` | never retried automatically; an alert is raised |
+| `note`, `auto:skipped:<code>` | `account_exists`: the applicant already has an account (owner decision Q2: link it with `POST /api/v1/admin/creators/{id}/owner`), a creator claimed meanwhile, or `attempts_exhausted` (the database's own 5-attempt cap) | never retried automatically |
+| `note`, `auto:paused:<code>` | a database guard refused the invitation (`stepup_refused` or `guard_refused`; not expected since migration 0038) | never retried automatically; an alert is raised |
 
 The fifth failed attempt raises an `invite_failed` alert, and no sixth attempt follows (owner decision Q4). The owner's
 schedule also lists a 12 h step, which only a sixth attempt would wait for. An invitation that expires after its 7
@@ -73,17 +75,47 @@ stops the loop.
   account. This reverses D12 for application approval only; `POST /api/v1/admin/creators` still requires the account
   by name. The approve form accepts only `primary`, the one logical account since D6 retired `secondary` (migration
   0018). A second account would need that field widened.
-- **Q3:** the manual resend `POST /api/v1/admin/applications/{id}/invite` no longer asks for a passkey grant. A
-  presented grant is still consumed. Its refusal rules are unchanged (`creator_claimed`, `account_exists`).
+- **Q3:** the manual resend `POST /api/v1/admin/applications/{id}/invite` asks for no passkey grant, in either
+  step-up state: without one it calls `onboarding_issue_invite` (manual mode, the administrator as actor) on the
+  API's `hyperchat_lifecycle` connection (503 when `HYPERCHAT_DB_LIFECYCLE_USER` is unset). A presented grant is still
+  consumed and claimed by 0027's anchor on the `hyperchat_app` path. Its refusal rules are unchanged
+  (`creator_claimed`, `account_exists`).
 
-## Limits (Phase A)
+## The invite guard exception (migration 0038)
 
-- **Step-up.** The loop works only while step-up enforcement is `draft` (owner decision Q13). With `active`, migration
-  0027's guard refuses an application invitation from a transaction that presented no grant. The loop records
-  `auto:paused:stepup_refused`, raises an alert and leaves that application alone; it never crashes the worker (Q14).
-  The manual resend then needs a grant as well: the database answers the route's attempt with 403
-  `step_up_required`. Migration 0037 (Phase B, after the soak) adds the guard exception that lifts both limits. In
-  `draft` the loop adds no new power: any `hyperchat_app` caller can already insert such an invitation.
+0027's `stepup_guard_user_invites` refuses an application invitation without a passkey grant while enforcement is
+`active`. 0038 opens exactly one way around it:
+
+- **`onboarding_issue_invite(signup, token_hash, ttl_days, actor, automatic)`**: SECURITY DEFINER, EXECUTE for
+  `hyperchat_lifecycle` only. That role has no table access of its own, so it can write `user_invites` only through a
+  definer function. Lock order: application, its open invitations, its creator (as `ApplicationRepository._issue`
+  and `accept_invite`). It refuses (nothing written) unless the application is `approved`, its creator is unclaimed and
+  no account has its address. It takes the address and the creator from the locked application, never from the
+  caller, and caps the expiry at 7 days. Automatic calls (actor NULL) are also refused while an earlier invitation is
+  unrevoked and unaccepted (open, or expired after delivery), when an earlier automatic attempt has no
+  `auto:failed:` note (Q4's "no automatic resend after the expiry", which therefore holds even after the 30-day
+  cleanup deleted the expired row: the events are append-only), after any manual invitation (`not_due`), and after 5
+  automatic ones (`attempts_exhausted`, Q4). Manual calls name an active
+  administrator. A transaction that consumed a step-up grant is refused (`grant_presented`): one grant, one action.
+- **The guard** needs no grant only when `session_user` is `hyperchat_lifecycle`, the row's token hash is the one the
+  function announced for this transaction (`hyperchat.onboarding_invite`), the address is exactly the approved
+  application's, and the transaction consumed no grant. Every other writer keeps 0027's rule.
+- **What stays closed.** `hyperchat_app`, `hyperchat_auth`, `hyperchat_worker` and `hyperchat_stepup` cannot insert an
+  application invitation without a grant under `active`, whatever they set: a SQL injection on the API's general
+  role still gains nothing. Different addresses, unapproved applications and non-application invitations are
+  refused as before.
+- **What Q13 accepted.** Whoever can open `hyperchat_lifecycle` (the API or worker process, or its OS user) can
+  issue a known link for an approved, unclaimed application to the applicant's own address. The attempt cap and the
+  alerts are the mitigation.
+- **Tests:** `backend/tests/stepup/test_onboarding_invite_db.py` (both states),
+  `backend/tests/onboarding/test_auto_invite_db.py` (the loop and the manual resend in both states),
+  `database/tests/test_migrations.py::test_0038_round_trip_changes_only_the_invite_guard_and_its_function_never_data`.
+- **DEV deploy.** Expected alembic line: `Running upgrade 0037 -> 0038, Onboarding Stage 2 Phase B (PDP v1.1, ...`.
+  Pre-check that the worker's env file sets `HYPERCHAT_DB_LIFECYCLE_USER` and that the cluster's ident map lets the
+  worker's OS user open `hyperchat_lifecycle` (as for the API). Rollback: `alembic downgrade 0037` (drops the
+  function, restores 0027's guard, keeps every row), with the previous release.
+
+## Limits
 - **Crash after commit.** An invitation committed but never sent, because the worker stopped between commit and send,
   stays open until it expires. It is not retried automatically, and the admin view shows it as `pending`.
 - **Imports.** The worker now imports `app.admin.applications`, which pulls in `app.payments.figures` (read helpers
@@ -93,7 +125,7 @@ stops the loop.
 
 A read-only view of how far each creator is from activation, computed from existing data. Phase A adds no migration,
 table, role, grant or job kind, and changes no lifecycle path. **Activation stays manual** (`POST
-/api/v1/admin/creators/{id}/activate`) until Stage 5 Phase B (migration 0040, after the PAY-15 soak). Code:
+/api/v1/admin/creators/{id}/activate`) until Stage 5 Phase B (migration 0041, behind an operator switch, default off). Code:
 `backend/app/onboarding/checklist.py`, shared by both routes. Each request uses one connection and one `READ ONLY`
 transaction on the API's own role (`hyperchat_app`); it calls `kyc_activation_block` once per creator, which that role
 may already execute (migration 0023).
@@ -130,7 +162,7 @@ linked account (full owner power) and an admin therefore see the same rows. Stat
 | `invitation_accepted` | an invitation of that application was accepted (accepted invitations are never purged) | the latest invitation's state, or `no_invitation` |
 | `ownership_confirmed` | the user who accepted it is the current owner, and that account is active | `no_owner`, `owner_not_invitee` (an owner linked by an admin), `owner_inactive` |
 | `kyc_approved` | the owner's Didit KYC is approved for this server's Didit environment (`user_kyc_approved`) | `no_owner`, `owner_kyc_required` |
-| `pan_policy` | never in Phase A: state `policy_pending` until Stage 3 (migration 0038) records PAN evidence. PAN-only applies to automatic activation only (owner decision Q6) | `pan_evidence_not_recorded` |
+| `pan_policy` | never in Phase A: state `policy_pending` until Stage 3 (migration 0040) records PAN evidence. PAN-only applies to automatic activation only (owner decision Q6) | `pan_evidence_not_recorded` |
 | `profile_picture` | `brand_logo_url` is an https URL under the `creator-assets/` prefix: state `set`, detail `validation_not_recorded` (informational until Phase B records validation) | `legacy_path` for an `/assets/...` path or any other value; `null` when empty |
 | `background` | the same rule on `background_url` | the same codes |
 | `no_restriction` | no `kyc_restrictions` row with `lifted_at IS NULL` | `open_restriction` (state `blocked`) |
