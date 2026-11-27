@@ -10,6 +10,7 @@ V2-only columns (etl.mapping.V2_ONLY_COLUMNS), with types and defaults read from
 
 import hashlib
 import os
+import re
 import secrets
 import sys
 import uuid
@@ -275,12 +276,18 @@ def test_fresh_start_cutover_load_reconciles_and_verifies(verify_db, legacy_db):
                  "rows: api_keys  -- source=1 loaded=0", "rows: partner_api_keys  -- source=1 loaded=0",
                  "loaded pending for no owner=1", "KYC at launch (enforcement active, no grace)",
                  "rows: order_lookup  -- source=3 loaded=1 skipped={'unpaid_legacy_order': 2}",
-                 "source unpaid={'failed': 1, 'pending': 2}; loaded failed=3 non-terminal=0 with_order_id=0 lookups=0",
                  "admins=1 admin_emails accounts=1 demoted=1",
                  "kyc_required=2 "):
         if line not in text:  # pytest.fail keeps the whole message (an assert repr is truncated)
             pytest.fail(f"missing: {line}\nreport lines:\n" + "\n".join(
                 x for x in text.splitlines() if any(w in x for w in ("unpaid", "order_lookup", "admins="))))
+
+    # NV3-1: the unpaid-legacy-order check passed, with these counts (parsed, not string-matched)
+    unpaid = [x for x in text.splitlines() if "no unpaid legacy order can be completed" in x]
+    assert len(unpaid) == 1 and unpaid[0].startswith("[PASS] "), unpaid
+    counts = dict(re.findall(r"(non-terminal|with_order_id|lookups|loaded failed)=(\d+)", unpaid[0]))
+    assert counts == {"loaded failed": "3", "non-terminal": "0", "with_order_id": "0", "lookups": "0"}, unpaid
+    assert "source unpaid={'failed': 1, 'pending': 2}" in unpaid[0], unpaid
 
     with psycopg.connect(_dsn(verify_db, "hyperchat_migrator"), autocommit=True) as c:
         c.execute("SET ROLE hyperchat_owner")
