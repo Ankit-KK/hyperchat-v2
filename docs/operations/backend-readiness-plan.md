@@ -63,6 +63,16 @@ production still has no off-site copy (interim C3). Details per row in
 | R3 verify | `has_database_privilege(<each runtime role>, 'hyperchat_restore_test', 'CONNECT')` false; DEV API healthy; isolation audit OK; `hyperchat_dev` unaffected | |
 | R4 [APPROVAL] | `ALTER ROLE hyperchat NOLOGIN` (closes the peer path); an ETL run uses `postgres` read-only, or a dedicated reader role no service user can reach | reverse with `ALTER ROLE hyperchat LOGIN` |
 
+**Script (security audit run-4):** `deploy/postgres/narrow_database_acl.sh 5433 hyperchat_restore_test` runs R0
+read-only; `--apply-r2` and `--apply-r4` are the two approved steps, each printing its undo.
+- **R2:** one transaction, committed only if no runtime role can still connect.
+- **Isolation audit:** `deploy/check_isolation.sh` now fails while any runtime role can CONNECT to a database other
+  than its environment's own. On DEV it fails until R2 is applied.
+- **R2 vs the ETL:** R2 keeps role `hyperchat`'s explicit CONNECT, so it never breaks an ETL source that uses that
+  role or `postgres`.
+- **R4 vs the ETL:** R4 does break an ETL source that logs in as `hyperchat`. Before R4, the source DSN must use
+  `postgres` with `default_transaction_read_only=on`, or a dedicated reader role that no service user can reach.
+
 The undo for R2 is `GRANT CONNECT, TEMPORARY ON DATABASE hyperchat_restore_test TO PUBLIC`. Production's cluster has no
 `hyperchat_restore_test`, and its `hyperchat` database already lists named roles only.
 
