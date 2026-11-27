@@ -142,7 +142,8 @@ witness inconsistent, missing or not checked; 1 not structurally valid, or the c
 The witness is what stops an older database from silently undoing:
 - later restrictions;
 - revoked grace;
-- an activated or closed enforcement.
+- an activated or closed enforcement;
+- once its history has started (migration 0045): creator suspensions and Didit account revocations.
 
 It protects only while it is **not** restored together with an older backup: an old database plus its own old witness looks consistent.
 

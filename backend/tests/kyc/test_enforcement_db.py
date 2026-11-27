@@ -523,6 +523,46 @@ def test_a_database_behind_its_witness_refuses_new_donations_until_reconciled(cl
     assert events().count("restore_acknowledged") == 2
 
 
+def test_suspensions_and_account_revocations_enter_the_witness_once_its_history_started(enf):
+    # Migration 0045 (audit run-4 NV4-2): a restore to before either is detected like one before a restriction.
+    from tests.kyc.test_kyc_accounts_db import B, add_account, clear_accounts
+    uid = owner_user("enf-sw")
+    verify(uid)
+    quiet = standard_creator("authtest-enf-sw0", uid, status="active")
+    assert status_change(enf, quiet, "suspend", "active", "before the rollout").status_code == 200
+    assert state() == ("draft", 0) and events(quiet) == []  # untouched database: nothing logged, nothing to witness
+    other = standard_creator("authtest-enf-sw1", uid, status="active")
+    view = enf.admin.get(f"{A}/kyc/enforcement").json()  # ... and every other creator keeps accepting donations
+    assert view["witness"]["problem"] is None and view["new_donations_fail_closed"] is False
+    assert block(other) is None and not refused(other)
+    assert grant(enf, make_streamer("authtest-enf-sw-g", user_id=owner_user("enf-sw-g"))) == 0  # history starts
+    sid = standard_creator("authtest-enf-sw", uid, status="active")  # no grace to revoke
+    assert status_change(enf, sid, "suspend", "active", "fraud review").status_code == 200
+    generation = state()[1]
+    assert generation == 2 and events(sid) == ["creator_suspended"]
+    assert enf.witness.seen()["generation"] == generation  # the API recorded it outside PostgreSQL
+    with db() as conn:
+        before = conn.execute("SELECT chain FROM public.kyc_enforcement_events WHERE generation = 1").fetchone()[0]
+    assert enf.witness.problem("draft", 1, before) == "restore_suspected"  # a set taken before the suspension
+    add_account()
+    try:
+        with fixture_db() as conn:
+            assert conn.execute("SELECT public.kyc_account_revoke(%s, 'ops', 'secret exposed')",
+                                (B,)).fetchone()[0] == "revoked"
+        assert state()[1] == generation + 1 and events()[-1] == "account_revoked"
+        with db() as conn:
+            before = conn.execute("SELECT chain FROM public.kyc_enforcement_events WHERE generation = %s",
+                                  (generation,)).fetchone()[0]
+        assert operator(enf, "witness-sync", "--operator", "ops-test", *confirm()) == 0
+        assert enf.witness.seen()["generation"] == generation + 1
+        with open(enf.witness.path, encoding="utf-8") as f:
+            line = json.loads(f.read().splitlines()[-1])
+        assert (line["last_action"], line["detail"]) == ("account_revoked", B)  # names what a restore would lose
+        assert enf.witness.problem("draft", generation, before) == "restore_suspected"  # a set from before the revoke
+    finally:
+        clear_accounts()
+
+
 def test_without_a_witness_only_the_untouched_database_is_accepted(client, enf):
     sid = make_streamer("authtest-enf-nowit", user_id=owner_user("enf-nowit"))
     no_witness = KycWitness(None)

@@ -100,7 +100,11 @@ The alternative is to require a step-up second factor for lifecycle actions, ver
 - **Public errors stay generic:** `503 {"error": "Donations are temporarily unavailable"}`. Reason codes appear only in the admin views.
 
 ## Restore safety (and its limits)
-**Why:** a database restored from an older snapshot would silently go back on all of this: re-open revoked grace, lift restrictions, or return to `draft`. Nothing inside that database can tell. So the API and the operator tool record the database's **generation, chain and state** in a **restore witness outside PostgreSQL**:
+**Why:** a database restored from an older snapshot would silently go back on all of this: re-open revoked grace, lift restrictions, return to `draft`, re-activate a suspended creator or count a revoked Didit account's approvals again. Nothing inside that database can tell.
+- **Suspensions and account revocations (migration 0045, audit run-4):** once the witness history has started (generation above 0, or the state left `draft`), an admin suspension and an operator account `revoke` are enforcement events too (`creator_suspended`, `account_revoked`). Before that, on an untouched database, they move nothing: without a witness, any generation above 0 already stops every new donation.
+- **Production before activation:** configure production's witness path (`HYPERCHAT_KYC_WITNESS_PATH` and the empty file above) **before** `activate` or any other first enforcement change. That change starts the history; without a path every new donation then fails closed. Suspensions and account revocations made before it are not anchored: after a restore, the mandatory re-apply step of `docs/backup-recovery.md` covers them.
+
+So the API and the operator tool record the database's **generation, chain and state** in a **restore witness outside PostgreSQL**:
 - **Where:** `HYPERCHAT_KYC_WITNESS_PATH`.
 - **Format:** one JSON line per change, ids and codes only, fsynced.
 
@@ -180,9 +184,11 @@ echo, or one line of stdin with `--secret-stdin`, never from argv.
    one.
 5. **Move a user** (sensitive: only when an account is retired): `... move-user --user <uuid> --to <id> --reason
    "<why>"`. The user's declines keep vetoing older approvals.
-6. **Revoke** (final): `... revoke --account <id> --reason "<why>"`. Its approvals stop counting at once. Move its
-   users to another account and tell them to re-verify. Run the enforcement preview first: with enforcement
-   `active`, their donations stop.
+6. **Revoke** (final): `... revoke --account <id> --reason "<why>"`. Its approvals stop counting at once, and its
+   webhooks are refused (403, nothing recorded: migration 0045). Move its users to another account and tell them to
+   re-verify. Run the enforcement preview first: with enforcement `active`, their donations stop. Then record it in
+   the witness: `python -m app.kyc.operator witness-sync --operator <name> --confirm-database <db>` (the daily
+   cleanup also does).
 7. **List:** `... list` (ids, workflows, flags, this month's usage; never a secret).
 
 **API settings.** `HYPERCHAT_DIDIT_ENVIRONMENT` must always be set. Each account a user can be pinned to needs its key: `HYPERCHAT_DIDIT_API_KEY` (and `HYPERCHAT_DIDIT_WORKFLOW_ID`, equal to the database's) for the primary, `HYPERCHAT_DIDIT_EXTRA_API_KEYS` for the others. An account without a key answers 503 with `account_key_missing` to its pinned users; extra accounts work without the primary's key.

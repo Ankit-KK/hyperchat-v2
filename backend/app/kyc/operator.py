@@ -15,6 +15,9 @@ approvals in docs/kyc-rollout.md. The API and its database role cannot do any of
                               active -> closed: no more grace, every creator needs its owner's KYC; never reopens
   witness-init --operator NAME --confirm-database DB
                               create the witness file from the database's head (only when no witness file exists)
+  witness-sync --operator NAME --confirm-database DB
+                              record the database's head after a change made elsewhere (etl.kyc_provider_account
+                              revoke, migration 0045), only as an extension of the witnessed history
   acknowledge-restore --operator NAME --detail TEXT --confirm-database DB
                               after a restore was reconciled (lost changes re-applied): an audited database change
                               that re-anchors the witness on the database's history
@@ -54,7 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     report = sub.add_parser("report")
     report.add_argument("--json", action="store_true")
-    for name in ("grant", "lift-restriction", "activate", "close", "witness-init", "acknowledge-restore"):
+    for name in ("grant", "lift-restriction", "activate", "close", "witness-init", "witness-sync",
+                 "acknowledge-restore"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--confirm-database", required=True)
         cmd.add_argument("--operator", required=True)
@@ -99,6 +103,18 @@ def main(argv: list[str] | None = None) -> int:
             witness.record(state["state"], state["generation"], state["chain"], action="witness_init",
                            operator=args.operator)
             print(f"Witness anchored at generation {state['generation']} ({state['state']}).")
+            return 0
+        if args.command == "witness-sync":  # never over a mismatch: that is acknowledge-restore
+            if problem is not None:
+                return _refuse(f"the restore witness reports {problem}; reconcile first")
+            last = conn.execute("SELECT action, streamer_id::text AS streamer_id, detail FROM "
+                                "public.kyc_enforcement_events WHERE generation = %s",
+                                (state["generation"],)).fetchone() or {}
+            # name the change, so after a restore the line says what was lost (e.g. which account was revoked)
+            witness.record(state["state"], state["generation"], state["chain"], action="witness_sync",
+                           operator=args.operator, last_action=last.get("action"),
+                           streamer_id=last.get("streamer_id"), detail=last.get("detail"))
+            print(f"Witness at generation {state['generation']} ({state['state']}).")
             return 0
         if args.command == "acknowledge-restore":
             seen = witness.seen()

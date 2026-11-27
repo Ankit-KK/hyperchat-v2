@@ -2513,3 +2513,42 @@ def test_0044_refuses_a_claimed_or_eligible_new_creator_from_the_api_roles_only(
             conn.execute("DELETE FROM public.users WHERE email::text = 'migtest44@x.invalid'")
         command.upgrade(cfg, "head")
     assert _version() == HEAD
+
+
+# ── 0045: suspensions and account revocations in the KYC witness; revoked accounts' webhooks ignored (audit run-4) ──
+def _body(name: str) -> str:
+    with _owner() as conn:
+        return conn.execute("SELECT prosrc FROM pg_proc WHERE proname = %s", (name,)).fetchone()[0]
+
+
+def test_0045_round_trip_and_its_downgrade_refuses_once_the_audit_holds_its_events(monkeypatch):
+    """0045 re-creates three KYC functions with one insertion each; the downgrade restores 0023's and 0040's bodies
+    and the narrower action CHECK, and refuses while a 'creator_suspended' or 'account_revoked' event exists."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    try:
+        assert "'creator_suspended', s.id" in _body("kyc_change_creator_status")
+        assert "kyc_enforcement_log('account_revoked'" in _body("kyc_account_revoke")
+        assert "RETURN 'account_revoked'" in _body("kyc_receive_webhook")
+        with _owner() as conn:
+            event = conn.execute("INSERT INTO public.kyc_enforcement_events (action, detail) "
+                                 "VALUES ('account_revoked', 'migtest45') RETURNING id").fetchone()[0]
+        try:
+            with pytest.raises(Exception, match="0045 downgrade refused"):
+                command.downgrade(cfg, "0044")
+            assert _version() == HEAD
+        finally:
+            with _owner() as conn:
+                conn.execute("DELETE FROM public.kyc_enforcement_events WHERE id = %s", (event,))
+        command.downgrade(cfg, "0044")
+        assert _version() == "0044"
+        assert "creator_suspended', s.id" not in _body("kyc_change_creator_status")
+        assert "RETURN 'account_revoked'" not in _body("kyc_receive_webhook")
+        with _owner() as conn, pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("INSERT INTO public.kyc_enforcement_events (action) VALUES ('creator_suspended')")
+        command.upgrade(cfg, "0045")
+        assert "RETURN 'account_revoked'" in _body("kyc_receive_webhook")
+    finally:
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
