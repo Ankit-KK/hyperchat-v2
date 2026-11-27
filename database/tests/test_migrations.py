@@ -39,6 +39,7 @@ EXPECTED_TABLES = {
     "stepup_events", "stepup_rate_limits", "stepup_enforcement", "payment_integrity_events",
     "donation_credit_events", "donation_reversals",
     "payment_accounting_state", "payment_accounting_events", "payment_accounting_runs", "donation_accounting_evaluations",
+    "creator_image_uploads",  # 0039
 }
 
 
@@ -725,10 +726,13 @@ def test_0027_stepup_enforcement_round_trip(monkeypatch):
                 "donation_accounting_evaluations", "payment_accounting_lock_state()",
                 # 0038 (onboarding invite exception): its function's EXECUTE for hyperchat_lifecycle, which the
                 # downgrade below 0038 drops with the function; test_0038 pins that grant
-                "onboarding_issue_invite(uuid,text,integer,uuid,boolean)")
+                "onboarding_issue_invite(uuid,text,integer,uuid,boolean)",
+                # 0039 (creator image records): hyperchat_app's SELECT, INSERT, UPDATE; test_0039 pins them
+                "creator_image_uploads")
     with_guards = {p for p in _api_role_privileges() if p[1] not in evidence}
-    assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in \
-        _api_role_privileges()  # the exclusion names a real head privilege (not a typo that hides nothing)
+    at_head = _api_role_privileges()  # each exclusion names a real head privilege (not a typo that hides nothing)
+    assert ("hyperchat_lifecycle", "onboarding_issue_invite(uuid,text,integer,uuid,boolean)", "EXECUTE") in at_head
+    assert ("hyperchat_app", "creator_image_uploads", "INSERT") in at_head
     command.downgrade(cfg, "0026")
     try:
         assert _stepup_guards() == (0, 0)
@@ -2073,5 +2077,70 @@ def test_0038_round_trip_changes_only_the_invite_guard_and_its_function_never_da
     finally:
         with _owner() as conn:
             conn.execute("DELETE FROM public.user_signups WHERE email = 'migtest38@authtest.invalid'")
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+def _objects_0039() -> dict:
+    with _owner() as conn:
+        return {
+            "table": conn.execute("SELECT to_regclass('public.creator_image_uploads') IS NOT NULL").fetchone()[0],
+            "guard": conn.execute("SELECT count(*) FROM pg_proc WHERE proname = 'creator_image_uploads_guard'"
+                                  ).fetchone()[0],
+            "functions": conn.execute("SELECT p.proname, md5(p.prosrc) FROM pg_proc p WHERE p.proname = ANY(%s) "
+                                      "ORDER BY 1", (list(PAYMENT_DEFINER_FUNCTIONS),)).fetchall(),
+            "streamers": conn.execute("SELECT id, updated_at, brand_logo_url, background_url FROM public.streamers "
+                                      "ORDER BY id").fetchall(),
+        }
+
+
+def _privileges_0039() -> dict:
+    with _owner() as conn:
+        return {role: [p for p in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE")
+                       if conn.execute("SELECT has_table_privilege(%s, 'public.creator_image_uploads', %s)",
+                                       (role, p)).fetchone()[0]]
+                for role in ("hyperchat_app", "hyperchat_worker", "hyperchat_auth", "hyperchat_lifecycle",
+                             "hyperchat_stepup", "hyperchat_readonly")}
+
+
+def test_0039_round_trip_adds_only_the_image_records_and_refuses_to_drop_any(monkeypatch):
+    """0039 (creator_image_uploads): the table, its guard and grants (the API: SELECT, INSERT, UPDATE; no DELETE; the
+    worker nothing); no streamer row and no PAY-15-pinned function changes; the downgrade refuses while a record
+    exists, changing nothing, and on an empty table restores the 0038 catalog."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0038")
+    sid = None
+    try:
+        before = _objects_0039()
+        assert (before["table"], before["guard"]) == (False, 0)
+        command.upgrade(cfg, "0039")
+        after = _objects_0039()
+        assert (after["table"], after["guard"]) == (True, 1)
+        assert after["functions"] == before["functions"] and after["streamers"] == before["streamers"]
+        assert _privileges_0039() == {"hyperchat_app": ["SELECT", "INSERT", "UPDATE"], "hyperchat_worker": [],
+                                      "hyperchat_auth": [], "hyperchat_lifecycle": [], "hyperchat_stepup": [],
+                                      "hyperchat_readonly": ["SELECT"]}
+        with _owner() as conn:
+            sid = conn.execute("INSERT INTO public.streamers (streamer_slug, streamer_name, razorpay_account) VALUES "
+                               "('migtest-0039', 'M39', 'primary') RETURNING id::text").fetchone()[0]
+            conn.execute("INSERT INTO public.creator_image_uploads (streamer_id, kind, state, variants) VALUES "
+                         "(%s, 'profile', 'ready', %s::jsonb)",
+                         (sid, f'[{{"key": "creator-assets/{sid}/logo/{"a" * 64}.webp"}}]'))
+        with pytest.raises(Exception, match="downgrade of 0039 stopped"):
+            command.downgrade(cfg, "0038")
+        assert _version() == "0039" and _objects_0039()["table"]  # nothing was changed
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.creator_image_uploads WHERE streamer_id = %s", (sid,))
+            conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
+        sid = None
+        command.downgrade(cfg, "0038")
+        assert _version() == "0038" and _objects_0039() == before
+    finally:
+        if sid is not None:
+            with _owner() as conn:
+                conn.execute("DELETE FROM public.creator_image_uploads WHERE streamer_id = %s", (sid,))
+                conn.execute("DELETE FROM public.streamers WHERE id = %s", (sid,))
         command.upgrade(cfg, "head")
     assert _version() == HEAD

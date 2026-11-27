@@ -1,4 +1,4 @@
-# Creator images API (onboarding Stage 4, Phase A)
+# Creator images API (onboarding Stage 4)
 
 Every creator uploads a **profile picture** and a **16:9 background** (PDP v1.1 §6). The API validates, decodes and
 re-encodes both server-side and writes WebP variants to Cloudflare R2. A creator can replace either image at any time
@@ -12,7 +12,7 @@ Owner decisions implemented here:
   `streamers.background_url`. No new column.
 - **Q10**: Pillow, pinned (`backend/requirements.txt`), with a decode pixel cap and decoding in a bounded thread pool.
 
-Phase A adds no migration, no table, no job kind, no role and no grant (PAY-15 soak until 2026-12-01).
+Phase A (#152) added the pipeline with no migration. Phase B is migration 0039: the `creator_image_uploads` records, validity by record and the tracked cleanup (below).
 
 ## Routes
 
@@ -22,7 +22,7 @@ Base path `/api/v1/streamers/{streamer}/images` (`{streamer}` is the creator's U
 |---|---|---|---|
 | `PUT` | `.../images/profile` | raw image | 200 upload result |
 | `PUT` | `.../images/background?crop_x&crop_y&crop_width&crop_height` | raw image | 200 upload result |
-| `GET` | `.../images` | | `{"profile": {"url"}, "background": {"url"}}` (the two pointers; `null` when unset) |
+| `GET` | `.../images` | | per kind: `{"url", "validated", "variants", "quality_warning", "uploaded_at"}` (the pointer, `null` when unset; `validated` and the variants from its `ready` record) |
 
 - **Access**: the owner, an account linked to the creator (`users.streamer_id`; linked accounts have full owner power,
   owner decision 2026-11-25) or an admin with admin assurance: `require_streamer_access`, as the dashboard.
@@ -47,8 +47,8 @@ Upload result:
 }
 ```
 
-`url` is the first variant, the one written to the pointer column. The other variant URLs are returned only here:
-Phase A stores no list of variants (the `GET` answers only the pointers).
+`url` is the first variant, the one written to the pointer column. Every variant (with its key, size and bytes) is
+kept in the upload's `creator_image_uploads` row, and the `GET` lists them while that record is current.
 
 ### Background crop
 
@@ -117,26 +117,49 @@ creator-assets/<streamer uuid>/<logo|background>/<sha256 of the variant's own by
   `SELECT … FOR UPDATE` on the creator row, the pointer `UPDATE`, commit.
 - Any failure from the first R2 write to the commit (R2 error: 502 `storage_failed`; database error; the creator
   gone) deletes the objects the call created and leaves the pointer as it was. A delete that itself fails is logged
-  (`creator_image_orphaned`, codes only) and left for Phase B's cleanup.
+  in a `failed` record, and the daily cleanup deletes it. The discard runs inside the upload transaction, under its
+  advisory lock. If the commit itself fails, nothing is deleted at once: the created objects go into a `failed`
+  record. Only when that record cannot be written is `creator_image_orphaned` logged (codes only).
 - **Deviation from the Stage 1 review** (§4, "one upload in progress per creator and kind, enforced with a row lock on
   the creator"): the in-progress guard is an advisory lock keyed by creator and kind, and the creator row is locked
   only for the pointer update. A row lock held across R2 writes would block that creator's donations (their trigger
   takes `FOR SHARE` on the row) and settings saves for as long as R2 is slow, and could not tell the two kinds apart.
-- **Replacement**: the new pointer simply replaces the old one. Superseded objects stay in R2; Phase B tracks and
-  removes them.
+- **Replacement**: in the same transaction as the pointer switch, the previous `ready` record becomes `superseded`
+  and the new one is inserted `ready`. Superseded objects stay in R2 for 30 days, then the cleanup removes them.
 - **Realtime**: no outbox event. Neither column is an overlay setting (`app.realtime.outbox.OVERLAY_SETTINGS`), and no
   realtime payload carries them.
 
-## What Phase B adds (after 2026-12-01)
+## Records and cleanup (migration 0039)
 
-- The `creator_image_uploads` table (migration 0039): one row per variant with its role (1024 px, 256 px, 1920x1080,
-  2560x1440), dimensions and state `ready` / `superseded` / `failed`. The pointer switch and the row states change in
-  one transaction.
-- **Validity is the row, not the prefix.** Legacy copies live under the same prefix unvalidated, so only a `ready`
-  row satisfies activation conditions 6 and 7 (Stage 5). A Phase A upload has no row yet.
-- The delete pattern narrows to keys a row marks `failed` or `superseded`. The daily cleanup removes superseded objects
-  after 30 days.
-- `GET …/images` can then list every variant.
+- **`creator_image_uploads`**: one row per upload.
+  - Columns: creator, `kind` (`profile`, `background`), `state`, `variants` (`[{key, url, width, height, bytes}]`,
+    primary first: the profile's 1024 px and 256 px, the background's 1920x1080 and 2560x1440), source size, quality
+    warning, uploader id, created, `superseded_at` and `cleaned_at`.
+  - At most one `ready` row per creator and kind (a partial unique index).
+- **Validity is the record, not the prefix.** An image is validated when a `ready` row exists and the pointer is
+  exactly its primary URL. This is the rule automatic activation will use.
+  - Legacy copies (S6) live under the same prefix unvalidated and never get a row.
+  - A Phase A upload has no row either: the checklist shows `validation_not_recorded` until the creator uploads
+    again. There is no backfill, because a migration cannot read R2 and Phase A kept no dimensions.
+- **Guard** (every API role):
+  - a row starts `ready` or `failed`, now;
+  - every variant key must be a pipeline `.webp` key of the row's own creator and kind;
+  - afterwards only two changes: `ready` -> `superseded` (now, once), and `cleaned_at` (now, once, superseded or
+    failed rows only).
+  - The API keeps SELECT, INSERT and UPDATE. DELETE and TRUNCATE are revoked, and the worker has no access. The creator
+    foreign key is RESTRICT, like the other creator audit tables. The operator stays outside the guard.
+- **Cleanup** (`python -m app.cli cleanup`, daily, after the abandoned donor uploads):
+  - What it handles: `failed` rows, and rows superseded more than 30 days ago.
+  - Per creator and kind, under the upload's advisory lock. If an upload holds the lock, that creator is skipped until
+    the next run.
+  - A key still named by a `ready` row, or by the creator's pointer columns on any host, is kept. So is a key outside
+    the row's own creator and kind.
+  - The delete itself admits only pipeline `.webp` keys, so legacy copies are never deleted (D-M2b).
+  - A row is marked `cleaned_at` only when every object is gone or kept for a reference. A failed delete leaves it for
+    the next run (exit 1).
+  - `--dry-run` only counts.
+- **Downgrade** refuses while any record exists. The operational rollback is the previous release: records are kept,
+  and the pointer columns stay valid R2 URLs.
 
 ## Configuration
 

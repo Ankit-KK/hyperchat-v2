@@ -24,7 +24,8 @@ def done(**kw) -> dict:
     """Everything a person can do today is done."""
     return facts(**{"claimed": True, "invite_status": "accepted", "invite_accepted": True, "owner_is_invitee": True,
                     "owner_active": True, "kyc_approved": True, "lifecycle_block": None, "brand_logo_url": LOGO,
-                    "background_url": BACKGROUND, **kw})
+                    "background_url": BACKGROUND, "profile_ready_url": LOGO, "background_ready_url": BACKGROUND,
+                    **kw})
 
 
 def rows(entry: dict) -> dict:
@@ -69,7 +70,9 @@ def test_pan_alone_keeps_a_complete_creator_from_being_ready():
      ("blocked", "kyc_required", True)),
     ({"brand_logo_url": "/assets/legacy/logo.png"}, "profile_picture", ("missing", "legacy_path", True)),
     ({"background_url": ""}, "background", ("missing", None, True)),
-    ({}, "profile_picture", ("set", "validation_not_recorded", False)),
+    ({}, "profile_picture", ("ok", None, False)),
+    ({"profile_ready_url": None}, "profile_picture", ("set", "validation_not_recorded", True)),  # no record (0039)
+    ({"background_ready_url": BACKGROUND + "?old"}, "background", ("set", "validation_not_recorded", True)),
     ({"review_status": "rejected"}, "application_approved", ("missing", "rejected", True)),
 ])
 def test_one_fact_flips_its_own_row(change, condition, expected):
@@ -90,14 +93,16 @@ def test_only_application_created_standard_track_creators_qualify(change, qualif
     assert evaluate(facts(**change), ACCOUNTS)["qualifies_for_auto_activation"] is qualifies  # Q12
 
 
-@pytest.mark.parametrize(("value", "expected"), [
-    (None, (False, None)), ("", (False, None)),
-    ("/assets/streamers/abc/logo.png", (False, "legacy_path")),
-    ("https://cdn.example/assets/abc.png", (False, "legacy_path")),
-    ("http://cdn.example/creator-assets/x/logo/h.webp", (False, "legacy_path")),
-    (LOGO, (True, "validation_not_recorded"))])
-def test_only_a_creator_assets_url_counts_as_set(value, expected):
-    assert image_state(value) == expected
+@pytest.mark.parametrize(("value", "ready", "expected"), [
+    (None, None, ("missing", None)), ("", None, ("missing", None)),
+    ("/assets/streamers/abc/logo.png", None, ("missing", "legacy_path")),
+    ("https://cdn.example/assets/abc.png", None, ("missing", "legacy_path")),
+    ("http://cdn.example/creator-assets/x/logo/h.webp", None, ("missing", "legacy_path")),
+    (LOGO, None, ("set", "validation_not_recorded")),
+    (LOGO, BACKGROUND, ("set", "validation_not_recorded")),  # a ready row for another image
+    (LOGO, LOGO, ("ok", None))])
+def test_only_the_pointer_of_a_ready_upload_row_is_valid(value, ready, expected):
+    assert image_state(value, ready) == expected
 
 
 def test_blocked_by_matches_only_a_blocking_row():

@@ -240,7 +240,8 @@ def cleanup_synthetic_rows() -> None:
             owner.execute("ALTER TABLE public.donations ENABLE TRIGGER donations_credit_delete_guard")
         with fixture_db() as owner:  # creator audits are RESTRICT / append-only for the runtime roles (0020, 0023)
             synthetic_creators = "(SELECT id FROM public.streamers WHERE streamer_slug LIKE %s)"
-            for table in ("kyc_enforcement_events", "kyc_grace_grants", "kyc_restrictions", "creator_status_events"):
+            for table in ("kyc_enforcement_events", "kyc_grace_grants", "kyc_restrictions", "creator_status_events",
+                          "creator_image_uploads"):  # 0039: image records, RESTRICT, no DELETE for the API
                 owner.execute(f"DELETE FROM public.{table} WHERE streamer_id IN {synthetic_creators}",
                               (SLUG_PREFIX + "%",))
         conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE %s", (SLUG_PREFIX + "%",))
