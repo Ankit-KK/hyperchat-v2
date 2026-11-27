@@ -214,7 +214,12 @@ It protects only while it is **not** restored together with an older backup: an 
   - **Off-server copy:** the owner keeps the allowed-signers line (one line, public) in their own records, off the server. A recovery takes it from there, **never from the bucket or from a backup**.
   - **Stamps and upload times:** a set whose stamp is later than its provider upload time (plus 10 minutes) is refused, which defeats a future-stamped plant. `verify` reports the upload time (`uploaded_at`).
   - **Limit:** the signing key is on the server. Someone who controls the server as root can sign, so after a server compromise only sets uploaded **before** the compromise are trusted. Choose by `uploaded_at`, which the uploader cannot set.
-  - **Older DEV sets:** sets uploaded before signing have no `COMPLETE.json.sig` and are refused by `verify` and `fetch`. They stay locked until their lifecycle expiry; recovery uses signed sets.
+  - **Sets uploaded before signing (DEV's sets up to the rollout):**
+    - They have no `COMPLETE.json.sig`. The tool never accepts them again: `verify` and `fetch` refuse them, `list` reports them under `refused`, and there is no flag that overrides this.
+    - **They are not back-signed:** a marker in the bucket cannot prove it is the one this server uploaded.
+    - They expire under the normal lifecycle rule (90 days after upload) and stay locked until then.
+    - **No gap when signing is enabled:** the rollout takes a fresh signed set in the same window (see *Enable signing on an environment that already uploads* below). An environment therefore always has a restorable signed off-site set from that moment on.
+    - **Last resort only (an explicitly flagged manual path, owner decision):** an old set can still be downloaded from the provider console and decrypted offline. Trust it only if the decrypted dump's SHA-256 equals a hash recorded **outside the bucket**, either from the backup's own `backup ok … sha256=<dump hash>` line (journal of `hyperchat[-dev]-pgbackup`, or a local set's `.dump.sha256`) or from the owner's evidence records. Neither `COMPLETE.json` nor the decrypted manifest counts as that record: the token holder could have written both.
 
 **Owner decisions (the questions; the answers follow):**
 1. **Storage:** provider and account (R2 or another), a **separate** bucket per environment or one bucket with `prod/` / `dev/` prefixes, and the region / jurisdiction.
@@ -256,6 +261,21 @@ It protects only while it is **not** restored together with an older backup: an 
    ```
    The `cmd` redirect passes the exact bytes. The result must be `Good "hyperchat-offsite" signature…`. Then the owner decrypts offline and checks the hashes against `COMPLETE.json` and the manifest.
 6. **Then:** `systemctl enable --now hyperchat[-dev]-offsite.timer`.
+
+**Enable signing on an environment that already uploads (DEV) [APPROVAL], one window:**
+1. **Before** the release with signing is deployed, create the environment's signing key (step 1 above) and record its allowed-signers line.
+   - An older release ignores the key files, so this can come first.
+   - A release with signing but without the key refuses every upload, and the off-site alert fires.
+2. **Deploy** the release (its own runbook).
+3. **At once, take a fresh signed set.** The newest local set already has an unsigned off-site copy, which can never be accepted or overwritten.
+   - `systemctl start hyperchat[-dev]-pgbackup.service` makes a new local set. On DEV, the S0-6 monitor reports it as an expected `OFF_SCHEDULE_RUN` warning.
+   - `systemctl start hyperchat[-dev]-offsite.service` then uploads it signed.
+4. **Check** before the window closes:
+   - `offsite verify --set <new set>`: exit 0, `signed_by` is the environment's principal.
+   - `offsite list`: the new set under `sets`, and the pre-signing sets under `refused` as `offsite_set_unsigned`.
+   - `offsite fetch --set <new set> --to <new dir>`: then `ssh-keygen -Y verify` of the fetched `COMPLETE.json` passes, and fails on a copy with one byte changed and on the signature of another set. This changes local copies only, never the bucket.
+   - Delete the fetched directory.
+5. **Afterwards:** the next scheduled run signs as usual. Until the first signed set exists, the environment has no off-site set the tool accepts, which is why step 3 is in the same window.
 
 ### Production tools tree
 Production's off-site unit runs from `/opt/hyperchat-backup-tools/current`, not from a production release.
