@@ -24,6 +24,9 @@ Every operation is limited to the key patterns it needs, so a bug can never touc
                                     upload created (never a legacy copy, never an object that existed before)
   list (list_uploads)               the donor upload prefixes voice-messages/ and donation-media/: keys and
                                     LastModified only (D9 abandoned-upload cleanup, CLI only)
+  list (list_tts_audio)             tts-audio/: keys, LastModified and sizes (CLI legacy-tts-audio only)
+  delete (delete_legacy_tts)        one pre-keyed tts-audio/<uuid>/<uuid>.mp3 object (audit run-4, CLI only, never a
+                                    keyed name or anything else)
   delete (delete_upload)            one donor upload key matching the upload pattern (D9 cleanup, CLI only;
                                     the caller decides it is unreferenced and older than 24 hours)
 """
@@ -61,6 +64,10 @@ VOICE_KEY = re.compile(rf"^voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm$
 SILENCE_KEY = "system/silence.mp3"
 _GENERATED = rf"tts-audio/{_UUID}/{_UUID}-[0-9a-f]{{32}}\.mp3|system/silence\.mp3"
 GENERATED_KEY = re.compile(rf"^({_GENERATED})$")
+# Audio generated before the keyed tag (#183): its name is derivable from the two ids an OBS token holder learns, so
+# the legacy-tts-audio CLI lists and (with approval) deletes exactly these. Nothing writes this shape any more.
+LEGACY_TTS_KEY = re.compile(rf"^tts-audio/{_UUID}/{_UUID}\.mp3$")
+TTS_PREFIX = "tts-audio/"
 # Creator images (S6 scheme, docs/operations/legacy-asset-migration-plan.md section 2): content-addressed by the
 # object's own bytes, so a key is never rewritten with other content.
 _CREATOR_ASSET = rf"creator-assets/{_UUID}/(logo|background)/[0-9a-f]{{64}}\.(jpg|png|webp|gif)"
@@ -94,6 +101,7 @@ class ObjectHead:
 class ListedObject:
     key: str
     last_modified: datetime  # timezone-aware, from the listing
+    size: int = 0
 
 
 class ObjectStore(Protocol):
@@ -126,6 +134,10 @@ class ObjectStore(Protocol):
     async def list_uploads(self, prefix: str) -> list[ListedObject]: ...
 
     async def delete_upload(self, key: str) -> None: ...
+
+    async def list_tts_audio(self) -> list[ListedObject]: ...
+
+    async def delete_legacy_tts(self, key: str) -> None: ...
 
 
 def check_writable_key(key: str) -> None:
@@ -164,6 +176,11 @@ def check_voice_key(key: str) -> None:
     """get_voice only ever reads donor voice messages."""
     if not isinstance(key, str) or not VOICE_KEY.match(key):
         raise ValueError("refusing to read an object outside voice-messages/<slug>_<ms>_<hex>.webm")
+
+
+def check_legacy_tts_key(key: str) -> None:
+    if not isinstance(key, str) or not LEGACY_TTS_KEY.match(key):
+        raise ValueError("not a pre-keyed generated audio key")
 
 
 def check_upload_prefix(prefix: str) -> None:
@@ -407,6 +424,28 @@ class R2Store:
 
     async def delete_upload(self, key: str) -> None:
         check_upload_key(key)
+        await self._call(lambda: self._s3().delete_object(Bucket=self._config.bucket, Key=key))
+
+    async def list_tts_audio(self) -> list[ListedObject]:
+        """Every object under tts-audio/ (key, LastModified, size), at most MAX_LISTED_UPLOADS. A failed page fails
+        the whole listing (StorageError): nothing is then deleted."""
+        def list_all():
+            found, token = [], None
+            while len(found) < MAX_LISTED_UPLOADS:
+                kwargs = {"Bucket": self._config.bucket, "Prefix": TTS_PREFIX, "MaxKeys": 1000}
+                if token:
+                    kwargs["ContinuationToken"] = token
+                r = self._s3().list_objects_v2(**kwargs)
+                found += [ListedObject(o["Key"], o["LastModified"], int(o.get("Size") or 0))
+                          for o in r.get("Contents", []) if o.get("Key") and isinstance(o.get("LastModified"), datetime)]
+                if not r.get("IsTruncated"):
+                    break
+                token = r.get("NextContinuationToken")
+            return found[:MAX_LISTED_UPLOADS]
+        return await self._call(list_all)
+
+    async def delete_legacy_tts(self, key: str) -> None:
+        check_legacy_tts_key(key)
         await self._call(lambda: self._s3().delete_object(Bucket=self._config.bucket, Key=key))
 
 

@@ -33,6 +33,11 @@ payment-integrity-report [--since YYYY-MM-DD] lists the current state of every r
 refund (C1, see app.payments.integrity) as JSON: read-only, no Razorpay call, no change to any donation. Exit 0 when
 nothing needs attention, 1 when something does (open or lost disputes, refunds, mismatches, conflicts, payments not
 matched to a donation), 2 on a refused argument.
+legacy-tts-audio [--delete --confirm-database DB] lists the generated TTS audio still at the pre-keyed, derivable name
+tts-audio/<creator>/<donation>.mp3 (security audit run-4 NV4-6; app.maintenance.legacy_tts_audio): count, total
+bytes and the donations referencing one, as JSON; object contents are never read. With --delete AND
+--confirm-database naming the connected database it points those donations at the silence object, then deletes
+exactly the listed pre-keyed objects (keyed names and anything else are never touched). Exit 1 if a delete failed.
 """
 
 import argparse
@@ -54,7 +59,7 @@ from app.auth.passwords import hash_password, validate_new_password
 from app.core.config import Settings
 from app.core.logging import configure_logging
 from app.jobs.queue import enqueue
-from app.maintenance import run_cleanup
+from app.maintenance import legacy_tts_audio, run_cleanup
 from app.payments.accounts import AccountHealth, PaymentAccounts, health_report
 from app.payments import integrity, reconcile
 from app.payments.razorpay import RazorpayClient
@@ -171,6 +176,29 @@ async def set_discord_endpoint(settings: Settings, url: str, expect_application_
     security_event("bot_webhook_registered", level=20, reason="discord")
     print(f"Discord interactions endpoint of application {app_id} set to {url}.")
     return 0
+
+
+async def legacy_tts(settings: Settings, delete: bool, confirm_database: str | None, store=None) -> int:
+    store = store or build_object_store(settings)
+    if store is None:
+        print("R2 storage is not configured (HYPERCHAT_R2_* variables).", file=sys.stderr)
+        return 2
+    factory = connection_factory(settings)
+    if delete:
+        async with factory() as conn:
+            database = (await (await conn.execute("SELECT current_database()")).fetchone())[0]
+        if confirm_database != database:
+            print("Refused: --delete needs --confirm-database naming the connected database.", file=sys.stderr)
+            return 2
+    try:
+        counts = await legacy_tts_audio(store, factory, delete=delete)
+    except (StorageError, psycopg.Error) as exc:  # the failure class only: never connection details
+        print(f"legacy-tts-audio failed: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    security_event("maintenance_legacy_tts_audio", level=20, reason="delete" if delete else "report",
+                   count=counts["legacy"])
+    print(json.dumps({"report": "legacy-tts-audio", "delete": delete, **counts}, sort_keys=True))
+    return 1 if counts["delete_failed"] else 0
 
 
 async def seed_platform_soundboard(settings: Settings, dry_run: bool, store=None) -> int:
@@ -303,6 +331,9 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--max-age-days", type=int, default=reconcile.MAX_AGE_DAYS)
     rec.add_argument("--limit", type=int, default=reconcile.LIMIT)
     rec.add_argument("--report-file", help="also write the JSON report to this NEW file (mode 0600)")
+    lt = sub.add_parser("legacy-tts-audio", help="list (or with --delete remove) pre-keyed generated TTS audio")
+    lt.add_argument("--delete", action="store_true", help="repoint referencing donations to silence, then delete")
+    lt.add_argument("--confirm-database", help="the connected database's name, typed out (required with --delete)")
     pir = sub.add_parser("payment-integrity-report", help="list recorded disputes / provider refunds (read-only)")
     pir.add_argument("--since", help="only items received on or after this date (YYYY-MM-DD)")
     args = parser.parse_args(argv)
@@ -326,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(payment_reconcile(settings, args))
     if args.command == "payment-integrity-report":
         return asyncio.run(payment_integrity_report(settings, args))
+    if args.command == "legacy-tts-audio":
+        return asyncio.run(legacy_tts(settings, args.delete, args.confirm_database))
     if args.command == "seed-platform-soundboard":
         return asyncio.run(seed_platform_soundboard(settings, args.dry_run))
     if args.command == "enqueue-donation-audio":

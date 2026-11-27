@@ -12,6 +12,7 @@ from app.storage.r2 import (
     IMMUTABLE,
     LISTABLE_PREFIXES,
     PRESIGN_SECONDS,
+    TTS_PREFIX,
     ListedObject,
     ObjectHead,
     StorageError,
@@ -19,6 +20,7 @@ from app.storage.r2 import (
     check_creator_asset_key,
     check_listable_prefix,
     check_generated_key,
+    check_legacy_tts_key,
     check_soundboard_key,
     check_upload_key,
     check_upload_prefix,
@@ -152,6 +154,17 @@ class InMemoryObjectStore:
 
     async def delete_upload(self, key: str) -> None:
         check_upload_key(key)
+        self._maybe_fail("delete")
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+    async def list_tts_audio(self) -> list[ListedObject]:
+        self._maybe_fail("list")
+        return [ListedObject(k, datetime.fromtimestamp(o.modified, UTC), len(o.data))
+                for k, o in sorted(self.objects.items()) if k.startswith(TTS_PREFIX)]
+
+    async def delete_legacy_tts(self, key: str) -> None:
+        check_legacy_tts_key(key)
         self._maybe_fail("delete")
         self.deleted.append(key)
         self.objects.pop(key, None)
