@@ -190,7 +190,7 @@ transition all use it:
 | `not_application_created` | Q12: no approved application created it, or it is not on the standard KYC track (admin-created and legacy creators stay manual) |
 | `restricted` / `no_owner` / `kyc_required` | `kyc_activation_block` (migration 0023): an open restriction wins (Q15); an active owner; the owner's approved Didit KYC (any approval) |
 | `owner_not_invitee` | the current owner is not the user who accepted the application's invitation (an owner linked by hand stays manual) |
-| `pan_evidence_missing` | `onboarding_pan_covered`: the approval is PAN-verified, or a payout hold for that very approval exists (open, or cleared by an administrator). An approval recorded before 0041 has neither (no document evidence, no automatic hold): an admin activates it by hand, or the operator runs the 0041 backfill (owner decision) |
+| `pan_evidence_missing` | `onboarding_pan_covered`: the approval is PAN-verified, or the user has an open payout hold (0041 keeps one per user, whichever non-PAN approval opened it), or an administrator cleared this approval's hold. An approval recorded before 0041 has none of these (no document evidence, no automatic hold): an admin activates it by hand, or the operator runs the 0041 backfill (owner decision) |
 | `profile_picture_missing` / `background_missing` | the pointer is not exactly the primary url of the creator's `ready` `creator_image_uploads` row (0039) |
 
 The Razorpay account is the one condition outside SQL: the configured list lives in this server's settings. The worker

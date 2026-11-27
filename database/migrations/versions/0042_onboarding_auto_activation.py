@@ -16,8 +16,8 @@ The rule lives here, in one function the API, the checklist and the worker share
       of the creator's 'ready' creator_image_uploads row, migration 0039).
     The Razorpay account is the one condition outside it: the configured list lives in this server's settings, so the
     caller checks it and the transition compares and sets it against the locked row (as admin activation does).
-  * public.onboarding_pan_covered(user): the current approval is PAN-verified (0041), or a payout hold for that very
-    approval exists (open, or cleared by an administrator). An approval recorded before 0041 carries no document
+  * public.onboarding_pan_covered(user): the current approval is PAN-verified (0041), or the user has an open payout
+    hold (0041 keeps one per user, whichever approval opened it), or an administrator cleared this approval's hold. An approval recorded before 0041 carries no document
     evidence and so no automatic hold: it is never auto-activated (the operator backfill kyc_sync_payout_holds() is
     the owner's decision; an administrator may still activate it by hand).
   * public.onboarding_settings: one row, auto_activation false. Only the operator changes it, through
@@ -128,10 +128,15 @@ def upgrade() -> None:
         CREATE FUNCTION public.onboarding_pan_covered(p_user_id uuid) RETURNS boolean
         LANGUAGE sql STABLE {DEFINER} AS $$
             SELECT coalesce((
-                SELECT public.kyc_pan_status(p_user_id, c.environment) = 'pan_verified' OR EXISTS (
-                    SELECT 1 FROM public.kyc_effective(p_user_id, c.environment) e
-                    JOIN public.kyc_payout_holds h ON h.user_id = p_user_id AND h.session_id = e.session_id
-                    WHERE e.approved AND (h.cleared_at IS NULL OR h.cleared_reason = 'admin'))
+                SELECT public.kyc_pan_status(p_user_id, c.environment) = 'pan_verified'
+                    -- any open hold: 0041 keeps ONE open hold per user, opened by an earlier non-PAN approval and
+                    -- never cleared by losing it, so a later non-PAN re-approval gets no row of its own
+                    OR EXISTS (SELECT 1 FROM public.kyc_payout_holds h WHERE h.user_id = p_user_id
+                               AND h.cleared_at IS NULL)
+                    -- an administrator cleared the hold of exactly this approval
+                    OR EXISTS (SELECT 1 FROM public.kyc_effective(p_user_id, c.environment) e
+                               JOIN public.kyc_payout_holds h ON h.user_id = p_user_id AND h.session_id = e.session_id
+                               WHERE e.approved AND h.cleared_reason = 'admin')
                 FROM public.kyc_provider_config c), false)
         $$
     """)
@@ -206,8 +211,9 @@ def upgrade() -> None:
             SELECT environment INTO env FROM public.kyc_provider_config;
             SELECT e.session_id INTO sess FROM public.kyc_effective(s.user_id, env) e;
             pan := public.kyc_pan_status(s.user_id, env);
-            SELECT h.id INTO hold FROM public.kyc_payout_holds h WHERE h.user_id = s.user_id AND h.session_id = sess
-            ORDER BY h.set_at DESC, h.id LIMIT 1;
+            SELECT h.id INTO hold FROM public.kyc_payout_holds h  -- the covering hold: the open one, else this approval's
+            WHERE h.user_id = s.user_id AND (h.cleared_at IS NULL OR h.session_id = sess)
+            ORDER BY h.cleared_at IS NULL DESC, h.set_at DESC, h.id LIMIT 1;
             SELECT a.id, i.id INTO signup, invite FROM public.user_signups a JOIN public.user_invites i ON i.signup_id = a.id
             WHERE a.streamer_id = s.id AND a.review_status = 'approved' AND i.accepted_at IS NOT NULL
               AND i.accepted_user_id = s.user_id

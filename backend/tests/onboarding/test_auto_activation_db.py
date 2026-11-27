@@ -43,7 +43,8 @@ def auto(app, kyc, boss):  # noqa: F811
 def evidence(session_id: str, *docs: dict) -> None:
     """The signed decision's document labels (as 0041's kyc_check_statuses records them): the hold trigger runs."""
     with fixture_db() as conn:
-        conn.execute("UPDATE public.kyc_sessions SET check_statuses = check_statuses || jsonb_build_object("
+        conn.execute("UPDATE public.kyc_sessions SET check_statuses = coalesce(check_statuses, '{}'::jsonb) || "
+                     "jsonb_build_object("
                      "'id_documents', %s::jsonb) WHERE session_id = %s", (json.dumps(list(docs)), session_id))
 
 
@@ -152,6 +153,25 @@ def test_a_non_pan_approval_activates_with_its_payout_hold_but_one_without_evide
     with db() as conn:  # the hold stays open: payouts wait for a PAN re-verification or an administrator
         assert conn.execute("SELECT count(*) FROM public.kyc_payout_holds WHERE user_id = %s AND cleared_at IS NULL",
                             (uid,)).fetchone()[0] == 1
+
+    # 0041 keeps one open hold per user: a later non-PAN re-approval (session B) adds no row, and the open hold of
+    # session A still covers it
+    again, owner2, first = eligible(app, repo, approved, "aa-reapproved", PASSPORT)
+    with fixture_db() as conn:
+        hold_a = conn.execute("SELECT id::text FROM public.kyc_payout_holds WHERE user_id = %s AND cleared_at IS NULL",
+                              (owner2,)).fetchone()[0]
+    from tests.kyc.test_kyc_pan_db import new_session
+    from tests.kyc.test_enforcement_db import set_kyc
+    second = new_session(owner2)
+    set_kyc(second, "Approved")
+    evidence(second, PASSPORT)
+    with db() as conn:
+        assert conn.execute("SELECT e.session_id::text FROM public.kyc_effective(%s, 'sandbox') e",
+                            (owner2,)).fetchone()[0] == second != first
+    assert block(again) is None and lifecycle_activate(again) == "ok"
+    with db() as conn:
+        assert conn.execute("SELECT payout_hold_id::text FROM public.onboarding_activations WHERE streamer_id = %s",
+                            (again,)).fetchone()[0] == hold_a
 
     sid, old, email = approved("aa-noevidence")  # approved as before 0041: no documents recorded, so no hold
     _, owner_id = accept(app, repo, sid, email)

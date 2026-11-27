@@ -162,7 +162,9 @@ in Didit's `document_subtype`. `document_type` is a human label ("Tax Card"), so
 - **Who can write it.** No runtime role. The API only reads it (`kyc_payout_hold(user)` → reason and since).
 - **Where it shows.** `GET /api/v1/me/kyc` adds `pan_status`, `payout_hold {held, reason, since}` and
   `pan_acknowledgement {text, text_version, current}`. The admin view adds the first two. The onboarding checklist's
-  `pan_policy` row reports it and never blocks.
+  `pan_policy` row reports it without blocking. It blocks only a non-PAN approval that no hold covers (recorded
+  before 0041, no document evidence): automatic activation (migration 0042, docs/onboarding.md) refuses that one, and
+  an administrator may still activate it by hand.
 - **Payouts are not built yet** (DASH-9). The hold is the contract the payout feature must honour.
 - **Existing approvals.** Holds start with signed decisions after 0041. The operator runs `SELECT
   public.kyc_sync_payout_holds();` to open holds for approvals recorded before 0041. Those approvals carry no
