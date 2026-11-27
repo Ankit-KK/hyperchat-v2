@@ -386,8 +386,9 @@ def upgrade() -> None:
             -- At the cap only the user's own unfinished session may come back (a resume); a NEW provider session is
             -- refused and its link is never handed out.
             IF public.kyc_account_full(p_account, p_user_id) AND NOT EXISTS (
-                    SELECT 1 FROM public.kyc_sessions s WHERE s.session_id = p_session_id AND s.user_id = p_user_id
-                      AND s.account_id = p_account AND s.session_id = public.kyc_open_session(p_user_id, p_account)) THEN
+                    SELECT 1 FROM public.kyc_sessions ks  -- not "s": that is this function's row variable
+                    WHERE ks.session_id = p_session_id AND ks.user_id = p_user_id AND ks.account_id = p_account
+                      AND ks.session_id = public.kyc_open_session(p_user_id, p_account)) THEN
                 RETURN 'account_at_cap';
             END IF;
             """ + lock.format("p_session_id") + """
