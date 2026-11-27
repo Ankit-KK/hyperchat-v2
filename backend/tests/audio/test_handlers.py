@@ -4,6 +4,7 @@ tests/jobs/test_jobs_db.py repeats the important flows through PostgreSQL and th
 import asyncio
 import logging
 import random
+import re
 import uuid
 from decimal import Decimal
 
@@ -126,7 +127,8 @@ def make_job(did=DID, payload=None) -> Job:
                1, 4, "w1", False)
 
 
-GEN_URL = f"{BASE}/tts-audio/{SID}/{DID}.mp3"
+GEN_KEY = audio_key(SID, DID, MOD_KEY)
+GEN_URL = f"{BASE}/{GEN_KEY}"
 SILENCE_URL = f"{BASE}/{SILENCE_KEY}"
 
 
@@ -176,7 +178,7 @@ def test_text_donation_uses_minimax_and_a_deterministic_key():
     w = World()
     done = w.run()
     assert done.result["outcome"] == "speech" and done.result["provider"] == "minimax"
-    assert w.repo.urls == {DID: GEN_URL} and w.store.objects[f"tts-audio/{SID}/{DID}.mp3"].content_type == "audio/mpeg"
+    assert w.repo.urls == {DID: GEN_URL} and w.store.objects[GEN_KEY].content_type == "audio/mpeg"
     assert w.repo.ready == [DID]  # exactly one audio-ready, with the URL write
     ((text, voice, boost),) = w.minimax.calls
     assert voice == "moss_audio_creator" and boost == "Hindi" and "Ravi" in text and "100 rupees" in text
@@ -280,7 +282,7 @@ def test_routed_provider_not_configured():
 
 def test_existing_object_is_reused_without_a_provider_call():
     w = World()
-    w.store.objects[f"tts-audio/{SID}/{DID}.mp3"] = StoredObject(MP3, "audio/mpeg", "", {})
+    w.store.objects[GEN_KEY] = StoredObject(MP3, "audio/mpeg", "", {})
     done = w.run()
     assert done.result == {"outcome": "speech", "reused": True} and w.repo.urls == {DID: GEN_URL}
     assert w.repo.ready == [DID]
@@ -288,10 +290,25 @@ def test_existing_object_is_reused_without_a_provider_call():
 
 
 def test_audio_keys_only_from_uuids():
-    assert audio_key(SID, DID) == f"tts-audio/{SID}/{DID}.mp3"
+    assert re.fullmatch(rf"tts-audio/{SID}/{DID}-[0-9a-f]{{32}}\.mp3", audio_key(SID, DID, MOD_KEY))
     for bad in ("../x", "x/../../y", SID.upper(), "", None):
         with pytest.raises(Permanent):
-            audio_key(bad, DID)
+            audio_key(bad, DID, MOD_KEY)
+    with pytest.raises(Permanent):
+        audio_key(SID, DID, "")
+
+
+def test_audio_key_is_not_derivable_from_the_ids_alone():
+    # An OBS token holder learns both ids; without the server key it cannot name a hidden message's audio.
+    key = audio_key(SID, DID, MOD_KEY)
+    assert key != f"tts-audio/{SID}/{DID}.mp3" and key != audio_key(SID, DID, "another-key")
+    assert key == audio_key(SID, DID, MOD_KEY) and key != audio_key(SID, str(uuid.uuid4()), MOD_KEY)
+
+
+def test_hidden_message_audio_is_not_at_the_legacy_key():
+    w = World()
+    w.run()
+    assert f"tts-audio/{SID}/{DID}.mp3" not in w.store.objects and GEN_KEY in w.store.objects
 
 
 @pytest.mark.parametrize("did, payload", [("not-a-uuid", {"donation_id": "not-a-uuid"}),

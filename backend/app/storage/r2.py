@@ -10,7 +10,7 @@ Every operation is limited to the key patterns it needs, so a bug can never touc
   read (head_object, get_object)    creator soundboard keys
   metadata (head_upload)            donor upload keys (voice-messages/, donation-media/): existence, size,
                                     type and stored metadata only, never the bytes (Phase 7 checkout)
-  write (put_object)                + generated donation audio tts-audio/<creator uuid>/<donation uuid>.mp3
+  write (put_object)                + generated donation audio tts-audio/<creator uuid>/<donation uuid>-<tag>.mp3
                                     and the silent fallback system/silence.mp3 (Phase 8 worker)
   metadata (head_generated)         generated audio + silence: lets a retried job reuse an existing object
   read (get_voice)                  donor voice messages only, size-capped (Phase 8 transcription)
@@ -56,10 +56,10 @@ _UPLOAD = (rf"voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm"
            rf"|donation-media/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.(jpg|png|webp|gif)")
 UPLOAD_KEY = re.compile(rf"^({_UPLOAD})$")
 VOICE_KEY = re.compile(rf"^voice-messages/{_SLUG}_\d{{13}}_[0-9a-f]{{32}}\.webm$")
-# Generated donation audio (Phase 8, legacy layout): tts-audio/<creator uuid>/<donation uuid>.mp3, and the
-# silent fallback. Both are written only by the worker, at keys it derives from database ids.
+# Generated donation audio (Phase 8): tts-audio/<creator uuid>/<donation uuid>-<keyed tag>.mp3 (app.audio.handlers
+# audio_key), and the silent fallback. Both are written only by the worker, at keys it derives from database ids.
 SILENCE_KEY = "system/silence.mp3"
-_GENERATED = rf"tts-audio/{_UUID}/{_UUID}\.mp3|system/silence\.mp3"
+_GENERATED = rf"tts-audio/{_UUID}/{_UUID}-[0-9a-f]{{32}}\.mp3|system/silence\.mp3"
 GENERATED_KEY = re.compile(rf"^({_GENERATED})$")
 # Creator images (S6 scheme, docs/operations/legacy-asset-migration-plan.md section 2): content-addressed by the
 # object's own bytes, so a key is never rewritten with other content.

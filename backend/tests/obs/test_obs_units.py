@@ -25,7 +25,8 @@ BASE = "https://media.example.test"
 SID, DID, OTHER = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
 SLUG = "ankit"
 VOICE = f"{BASE}/voice-messages/{SLUG}_1800000000000_{'a' * 32}.webm"
-TTS = f"{BASE}/tts-audio/{SID}/{DID}.mp3"
+TTS = f"{BASE}/tts-audio/{SID}/{DID}.mp3"  # audio generated before the keyed tag (still plays)
+TTS_KEYED = f"{BASE}/tts-audio/{SID}/{DID}-{'c' * 32}.mp3"
 SILENCE = f"{BASE}/system/silence.mp3"
 TOKEN_HASH = "ab" * 32  # one active OBS token of the creator (NV-4 per-token channels)
 SESSION_ID = "11111111-1111-4111-8111-111111111111"  # one session with dashboard access (NV-4b)
@@ -45,6 +46,7 @@ def row(**kw):
     ({"hypersound_url": f"{BASE}/hypersounds/Air%20Horn.mp3"}, ("hypersound", f"{BASE}/hypersounds/Air%20Horn.mp3")),
     ({"voice_message_url": VOICE}, ("voice", VOICE)),
     ({"tts_audio_url": TTS}, ("tts", TTS)),
+    ({"tts_audio_url": TTS_KEYED}, ("tts", TTS_KEYED)),
     ({"tts_audio_url": SILENCE}, ("silence", SILENCE)),
     ({"hypersound_url": f"{BASE}/hypersounds/x.mp3", "voice_message_url": VOICE, "tts_audio_url": TTS},
      ("hypersound", f"{BASE}/hypersounds/x.mp3")),                         # legacy order: hypersound first
@@ -61,6 +63,9 @@ def test_servable(cols, expected):
     {"tts_audio_url": f"http://media.example.test/tts-audio/{SID}/{DID}.mp3"},
     {"tts_audio_url": f"{BASE}/tts-audio/{OTHER}/{DID}.mp3"},                # another creator's folder
     {"tts_audio_url": f"{BASE}/tts-audio/{SID}/{OTHER}.mp3"},                # another donation's audio
+    {"tts_audio_url": f"{BASE}/tts-audio/{SID}/{OTHER}-{'c' * 32}.mp3"},
+    {"tts_audio_url": f"{BASE}/tts-audio/{SID}/{DID}-{'C' * 32}.mp3"},
+    {"tts_audio_url": f"{BASE}/tts-audio/{SID}/{DID}-{'c' * 31}.mp3"},
     {"tts_audio_url": f"{TTS}?x=1"}, {"tts_audio_url": f"{TTS}#f"},
     {"tts_audio_url": f"{BASE}/tts-audio/{SID}/../{SID}/{DID}.mp3"},
     {"tts_audio_url": f"{BASE}/system/silence.mp3.exe"},

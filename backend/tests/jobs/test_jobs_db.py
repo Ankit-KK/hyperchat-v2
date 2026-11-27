@@ -14,7 +14,7 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from app.audio.handlers import DonationAudioHandler, VoiceTranscriptionHandler
+from app.audio.handlers import DonationAudioHandler, VoiceTranscriptionHandler, audio_key
 from app.audio.repository import AudioRepository
 from app.audio.silence import ensure_silence, silent_mp3
 from app.dashboard.repository import DashboardRepository
@@ -270,8 +270,8 @@ def test_payment_auto_approval_enqueues_atomically_and_the_worker_speaks(clean):
     work(handler, did)
     audio_job = [j for j in jobs(did) if j[3] == "donation_audio"]
     assert audio_job[0][0] == "succeeded" and len(speech.calls) == 1 and SECRET_MESSAGE in speech.calls[0]
-    assert donation_audio(did) == f"https://media.example.test/tts-audio/{sid}/{did}.mp3"
-    assert store.objects[f"tts-audio/{sid}/{did}.mp3"].data == MP3
+    assert donation_audio(did) == "https://media.example.test/" + audio_key(sid, did, MOD_KEY)
+    assert store.objects[audio_key(sid, did, MOD_KEY)].data == MP3
 
 
 def test_approval_rolls_back_when_the_enqueue_fails(clean, monkeypatch):
@@ -343,10 +343,10 @@ def test_retry_after_success_reuses_the_stored_object(clean):
     did = paid_donation(sid, moderation="auto_approved")
     run(JobQueue(factory()).enqueue("donation_audio", did, {"donation_id": did}))
     store = InMemoryObjectStore()
-    store.objects[f"tts-audio/{sid}/{did}.mp3"] = StoredObject(MP3, "audio/mpeg", "", {})
+    store.objects[audio_key(sid, did, MOD_KEY)] = StoredObject(MP3, "audio/mpeg", "", {})
     handler, speech = audio_handler(store)
     work(handler, did)
-    assert speech.calls == [] and donation_audio(did).endswith(f"/tts-audio/{sid}/{did}.mp3")
+    assert speech.calls == [] and donation_audio(did).endswith("/" + audio_key(sid, did, MOD_KEY))
 
 
 def test_existing_audio_is_never_overwritten(clean):
@@ -412,7 +412,7 @@ def test_sfx_limit_counts_recent_paid_commands_in_the_database(clean):
     other = paid_donation(sid, moderation="auto_approved", message="!sfx boom", name="Someone Else")
     run(JobQueue(factory()).enqueue("donation_audio", other, {"donation_id": other}))
     work(handler, other)
-    assert commands.calls == ["boom"] and donation_audio(other).endswith(f"/tts-audio/{sid}/{other}.mp3")
+    assert commands.calls == ["boom"] and donation_audio(other).endswith("/" + audio_key(sid, other, MOD_KEY))
 
 
 def test_worker_logs_contain_no_donor_content_or_keys(clean, caplog):

@@ -5,7 +5,8 @@ JSON) only when it is EXACTLY an object of this environment's public bucket unde
 
   hypersound  <base>/hypersounds/<one path segment>.mp3                (the platform library)
   voice       <base>/voice-messages/<this creator's slug>_<ms>_<hex>.webm   (Phase 6 upload of this creator)
-  tts         <base>/tts-audio/<this creator's id>/<this donation's id>.mp3 (Phase 8), or <base>/system/silence.mp3
+  tts         <base>/tts-audio/<this creator's id>/<this donation's id>[-<keyed tag>].mp3 (Phase 8), or
+              <base>/system/silence.mp3
 
 Anything else (legacy hosts, Supabase storage, another creator's object, query strings, fragments, encoded or
 relative paths) is never served: the claim marks the item played and moves on. This also removes legacy's open
@@ -39,7 +40,9 @@ def _valid(kind: str, key: str | None, d: dict, slug: str) -> bool:
     if kind == "voice":
         return bool(_SLUG.fullmatch(slug)) and bool(
             re.fullmatch(rf"voice-messages/{re.escape(slug)}_\d{{13}}_[0-9a-f]{{32}}\.webm", key))
-    return key == SILENCE_KEY or key == f"tts-audio/{d['streamer_id']}/{d['id']}.mp3"
+    # The keyed tag is optional only so audio generated before it existed still plays.
+    return key == SILENCE_KEY or bool(
+        re.fullmatch(rf"tts-audio/{re.escape(d['streamer_id'])}/{re.escape(d['id'])}(-[0-9a-f]{{32}})?\.mp3", key))
 
 
 def choose(d: dict, base: str | None, slug: str) -> tuple[str, str] | None:
