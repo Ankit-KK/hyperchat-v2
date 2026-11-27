@@ -64,6 +64,21 @@ def test_invalid_or_crossed_configurations_are_refused_before_anything_runs(box,
     assert not (tmp / "backups").exists() or not any((tmp / "backups").iterdir())
 
 
+def test_the_postgres_tools_run_through_runuser_never_sudo():
+    """F-1 X3 (2026-11-28): under the units' NoNewPrivileges=yes, sudo-rs refuses to run; runuser works."""
+    code = [line.split("#", 1)[0] for line in SCRIPT.read_text().splitlines()]
+    assert not any(re.search(r"\bsudo\b", line) for line in code)
+    assert sum('runuser -u "$RUN_AS" -- "$@"' in line for line in code) == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="runs as a non-root user")
+def test_running_the_tools_as_another_user_without_root_is_refused_before_anything_runs(box):
+    tmp, bin_dir = box
+    r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_RUN_AS="nobody"))
+    assert r.returncode == 2 and "through runuser, which needs root" in r.stderr, r.stderr
+    assert not (tmp / "backups").exists() or not any((tmp / "backups").iterdir())
+
+
 def test_outside_test_the_owner_host_and_run_as_are_fixed(box):
     tmp, bin_dir = box
     r = run_script(env_for(tmp, bin_dir, HYPERCHAT_BACKUP_ENV="prod", HYPERCHAT_BACKUP_DB="hyperchat",
