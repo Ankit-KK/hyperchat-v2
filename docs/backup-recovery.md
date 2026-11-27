@@ -3,10 +3,11 @@
 Repository-side backup, verification and recovery for HyperChat V2 (A3).
 
 **Status:**
-- **Code ready:** this document and its tools are in the repository.
-- **Not installed:** nothing here runs on any server yet.
+- **DEV:** the backup and the off-site copy run nightly. The DEV off-site copy has been live since 2026-11-23: a
+  Cloudflare R2 bucket in a separate backup-only account, object lock, and an offline GPG key.
+- **Production:** the nightly backup still runs the pre-manifest script, and there is no off-site copy yet. The
+  production off-site plan (backup item F-1) uses the standalone tools tree below; each step needs approval.
 - **Approvals:** every server step is marked **[APPROVAL]**.
-- **Off-site copies:** disabled until the owner decides the open questions below.
 
 ## What exists
 
@@ -19,6 +20,7 @@ Repository-side backup, verification and recovery for HyperChat V2 (A3).
 | Restore verification | Restores into a disposable PostgreSQL and checks schema and security invariants | `python -m app.backup.restore_check` |
 | Witness selection | Chooses the KYC witness to keep after a recovery; read-only | `python -m app.backup.witness select` |
 | Off-site copy | Optional; encrypted, verified, never overwrites or deletes | `python -m app.backup.offsite`, `hyperchat[-dev]-offsite.{service,timer}`, `offsite.env.example` |
+| Production backup tools | `app/backup/{sets,offsite}.py` of a merged commit and a venv with the boto3 closure, for production's off-site unit only | `/opt/hyperchat-backup-tools/releases/<commit>`, `current` link ([below](#production-tools-tree)) |
 
 ### Environments
 | | Production | DEV |
@@ -43,7 +45,7 @@ Each run writes one set (`<db>_<UTC>`), all or nothing:
 |---|---|
 | `.dump` | `pg_dump -Fc`, made with the **source cluster's own major version**. The script checks the tools and the answering server against the named cluster. |
 | `.dump.sha256` | `sha256sum -c` format, as before |
-| `.witness` | A copy of the environment's KYC witness, taken **after** the dump |
+| `.witness` | A copy of the environment's KYC witness, taken **after** the dump. **Absent** when the witness file does not exist and the database has no KYC history (no enforcement table, or draft at generation 0). The manifest then records `witness_status: "not_applicable"`. That is the API's own untouched state, where `app.kyc.witness` writes nothing yet, as in production before its first enforcement change |
 | `.manifest.json` | Written **last**: environment, database, cluster, server version, Alembic head, KYC and MFA enforcement state before the dump, every file's SHA-256, archive TOC count. No secrets. A schema without an enforcement table (production at 0009, DEV at 0019) records it as `""` (KYC generation `0`). An enforcement table that exists but doesn't hold exactly one row, or any failed query, fails the backup: it is never recorded as absent. |
 
 - **Atomicity:**
@@ -72,7 +74,7 @@ Each run writes one set (`<db>_<UTC>`), all or nothing:
   | 0 | ok |
   | 2 | refused configuration |
   | 1 | backup failed |
-  | 3 | set written, but the witness is missing or unreadable (the unit fails visibly) |
+  | 3 | set written, but the witness is missing while the database has KYC history, or the witness path exists but is not a readable plain file (the unit fails visibly) |
   | 4 | set written, but an older set failed verification; it is kept for the operator (never pruned) |
   | 75 | another run is in progress |
 
@@ -165,8 +167,8 @@ It protects only while it is **not** restored together with an older backup: an 
 | Witness missing while the database has history | Protection lost | Blocked (`witness_missing`). Restore the newest witness copy from sets / off-site. Never create an empty one for a database with history. |
 | Copies diverge | Possible tampering | Stop. The owner decides from the audit. |
 
-## Off-site disaster recovery (optional; disabled)
-**Design (implemented, configurable, not enabled):**
+## Off-site disaster recovery (DEV live; production planned)
+**Design (implemented; enabled on DEV):**
 - **Destination:** any S3-compatible HTTPS endpoint. Cloudflare R2 is the candidate.
 - **Credentials:** `/etc/hyperchat-backup/offsite-<env>.env` (root 0600; the tool refuses anything else).
   - It holds a **backup-only** token scoped to the backup bucket.
@@ -192,18 +194,43 @@ It protects only while it is **not** restored together with an older backup: an 
 - **No deletion:** the tool has no delete call at all.
 - **Ransomware and stolen credentials:** deletion must be impossible for the uploader. Use **bucket object lock / retention** (R2 "bucket locks"), e.g. 35 days, plus a lifecycle rule for expiry. The upload token cannot shorten either.
 
-**Owner decisions needed before enabling [APPROVAL]:**
+**Owner decisions (the questions; the answers follow):**
 1. **Storage:** provider and account (R2 or another), a **separate** bucket per environment or one bucket with `prod/` / `dev/` prefixes, and the region / jurisdiction.
 2. **Credential:** a token scoped to the backup bucket. Who creates it and where it is kept.
 3. **Retention:** retention and object-lock period, and the lifecycle expiry.
 4. **Encryption key custody:** who holds the GPG private key, where (offline), the backup of that key, and its rotation. **Without it no off-site copy can be restored.**
 5. **Restore drills:** cadence and who runs them.
 
+**Decided:**
+- **Storage:** Cloudflare R2, one bucket per environment, in a backup-only account that is separate from the media
+  account.
+- **Lock and expiry:** object lock of 35 days, lifecycle expiry after 90 days.
+- **Credential:** a token per bucket (Object Read & Write, that bucket only).
+- **Key:** an offline GPG key per environment, its private half on paper. DEV's key is DEV-only.
+
 **Enable [APPROVAL]:**
-1. Install `/etc/hyperchat-backup/offsite-<env>.env` from `deploy/backup/offsite.env.example` (root 0600) with the public key file.
-2. Install the units.
-3. `systemctl enable --now hyperchat[-dev]-offsite.timer`.
-4. Check: `python -m app.backup.offsite upload --config … --latest` once by hand, then `verify` and `list`.
+1. **Owner:** installs `/etc/hyperchat-backup/offsite-<env>.env` from `deploy/backup/offsite.env.example` (root 0600) and the environment's **own** public key file:
+   - DEV: `backup-recipient.asc`;
+   - production: `backup-recipient-prod.asc`, so the two environments never share or swap a key.
+2. **Units:**
+   - Install the units, a `hyperchat[-dev]-offsite.timer.d/schedule.conf` drop-in with the approved time, and an `alert.conf` drop-in (`OnFailure=hyperchat-offsite-alert@%n.service`).
+   - The repo timer times are placeholders: set the time outside the maintenance windows, after the environment's backup.
+3. **Production also:** the same `OnFailure=` drop-in on `hyperchat-pgbackup.service`. When production's backup fails, `--latest` re-verifies yesterday's complete set and succeeds, so the off-site unit alone never reports a stale copy.
+4. **First upload:** `systemctl start hyperchat[-dev]-offsite.service` once by hand, then `verify` and `list`.
+5. **Restore check:** the owner downloads and decrypts that first set offline, and checks the hashes against `COMPLETE.json` and the manifest.
+6. **Then:** `systemctl enable --now hyperchat[-dev]-offsite.timer`.
+
+### Production tools tree
+Production's off-site unit runs from `/opt/hyperchat-backup-tools/current`, not from a production release.
+- **Why:** a release lacking the tool must not keep production without off-site copies, and an API deploy or rollback
+  never changes the backup path. This is the same reason the backup script is an installed copy.
+- **Contents of `releases/<commit12>/`:**
+  - `app/__init__.py` and `app/backup/{__init__,sets,offsite}.py` (`git archive` of a merged commit; `offsite.py` imports only `sets.py`, the standard library and boto3);
+  - a `python3.14` venv with exactly the boto3 closure of `backend/requirements.txt` (boto3, botocore, jmespath, python-dateutil, s3transfer, six, urllib3), wheels only, every file compared with the DEV release's venv;
+  - a `SOURCE` file: commit, file hashes, pins.
+- **Ownership:** root-owned, nothing secret, and no unit but `hyperchat-offsite.service` uses it. The unit runs `python -B`, and `ProtectSystem=strict` keeps the tree read-only.
+- **Upgrade [APPROVAL]:** a new `releases/<commit12>`, then the `current` link switched.
+- **Rollback:** the link back, or the tree removed, once no unit references it.
 
 ## Recovery point and limits (honest)
 - **RPO:**
@@ -300,6 +327,10 @@ Stop order is the reverse. The worker can stop at any time.
 ## Installation (later; each step [APPROVAL])
 - **Script:** `install -o root -g root -m 750 deploy/backup/hyperchat-pgbackup.sh /usr/local/sbin/hyperchat-pgbackup`. The same script serves both environments.
 - **Units:** `install -o root -g root -m 644 deploy/backup/hyperchat-{,dev-}pgbackup.{service,timer} /etc/systemd/system/`, then `systemctl daemon-reload`.
+- **Sandbox (audit S7):** both backup units carry `NoNewPrivileges`, `ProtectSystem=strict` with `ReadWritePaths` for the environment's own backup directory only, `PrivateTmp` and `ProtectHome`.
+  - **Before** a sandboxed unit is installed on a server, a transient-unit probe with the same properties must show that `sudo -u postgres psql` works there. The host's sudo is sudo-rs.
+  - Then one manual run per unit must end `backup ok`.
+  - **DEV:** the S0-6 backup monitor pins the DEV unit's hash, so the unit and a re-pinned monitor go in together, between two monitor runs.
 - **Production:** keeps its existing timer. A manual run (`systemctl start hyperchat-pgbackup.service`) must end `backup ok`. Existing old-layout dumps stay until 3 new sets exist.
 - **DEV:** `systemctl enable --now hyperchat-dev-pgbackup.timer`.
 - **Then:** `restore_check --scratch` on the first set of each environment, and record the JSON result.

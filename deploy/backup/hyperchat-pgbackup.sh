@@ -15,7 +15,8 @@
 # sets of THIS database (manifest, every SHA-256, the witness when needed: python3 standard library), prunes a set
 # older than KEEP_DAYS only when KEEP_MIN verified sets are newer than it, and never prunes a set that does not
 # verify. Logs carry names, sizes, counts and hashes only. Exit: 0 ok; 2 refused configuration; 3 set written but
-# the KYC witness is missing or unreadable; 4 set written but older sets do not verify (kept; the unit fails
+# the KYC witness is missing or unreadable (a witness that does not exist while the database has no KYC history is
+# "not_applicable", exit 0); 4 set written but older sets do not verify (kept; the unit fails
 # visibly); 75 another backup is running; 1 or other: the backup failed.
 set -euo pipefail
 umask 077
@@ -125,6 +126,10 @@ DUMP_SHA="$(sha256sum "$WORK/$BASE.dump" | cut -d' ' -f1)"
 echo "$DUMP_SHA  $BASE.dump" > "$WORK/$BASE.dump.sha256"
 DUMP_BYTES="$(stat -c %s "$WORK/$BASE.dump")"
 
+KYC_STATE=""; KYC_GEN=0
+[[ -z "$KYC" ]] || { [[ "$KYC" =~ ^([a-z]+)\ ([0-9]+)$ ]] || die "unexpected database facts"; KYC_STATE="${BASH_REMATCH[1]}"; KYC_GEN="${BASH_REMATCH[2]}"; }
+[[ "$ALEMBIC" =~ ^[0-9a-z_]*$ && "$STEPUP" =~ ^[a-z]*$ ]] || die "unexpected database facts"
+
 # The KYC witness, copied AFTER the dump: it is at least as new as the dump, so a restore of this set alone is
 # detected (restore_suspected) whenever enforcement changed meanwhile. Never installed automatically (docs).
 WITNESS_JSON=null; WITNESS_STATUS=not_configured
@@ -133,14 +138,15 @@ if [[ -n "$WITNESS" ]]; then
     W_SHA="$(sha256sum "$WORK/$BASE.witness" | cut -d' ' -f1)"
     WITNESS_JSON="{\"file\": \"$BASE.witness\", \"sha256\": \"$W_SHA\", \"bytes\": $(stat -c %s "$WORK/$BASE.witness")}"
     WITNESS_STATUS=copied
+  elif [[ ! -e "$WITNESS" && ! -L "$WITNESS" && "$KYC_GEN" == 0 && ( -z "$KYC_STATE" || "$KYC_STATE" == draft ) ]]; then
+    # No file at all and no KYC history (no table, or draft at generation 0): the API's own untouched state, where
+    # app.kyc.witness writes nothing yet (production before its first enforcement change). Any history, or a path
+    # that exists but is not a readable plain file, stays "missing" (exit 3).
+    WITNESS_STATUS=not_applicable
   else
     rm -f -- "$WORK/$BASE.witness"; WITNESS_STATUS=missing
   fi
 fi
-
-KYC_STATE=""; KYC_GEN=0
-[[ -z "$KYC" ]] || { [[ "$KYC" =~ ^([a-z]+)\ ([0-9]+)$ ]] || die "unexpected database facts"; KYC_STATE="${BASH_REMATCH[1]}"; KYC_GEN="${BASH_REMATCH[2]}"; }
-[[ "$ALEMBIC" =~ ^[0-9a-z_]*$ && "$STEPUP" =~ ^[a-z]*$ ]] || die "unexpected database facts"
 cat > "$WORK/$BASE.manifest.json" <<EOF
 {"format": 1, "environment": "$ENV_NAME", "database": "$DB", "cluster": "$CLUSTER", "server_version_num": $SERVER_NUM,
  "created_at": "$STAMP", "alembic_version": "$ALEMBIC", "kyc_enforcement": {"state": "$KYC_STATE", "generation": $KYC_GEN},
