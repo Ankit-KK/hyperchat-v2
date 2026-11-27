@@ -168,6 +168,32 @@ def test_monthly_caps_hold_under_concurrent_assignments(multi):
     assert r.status_code == 503 and "no_account_available" in alerts()
 
 
+def test_a_full_account_lets_a_user_resume_their_unfinished_session_but_never_start_a_new_one(multi):
+    """Owner decision 2026-11-27 ("Allow resume"): at the monthly cap the SAME unfinished Didit session may be resumed
+    (no new billed check); a new provider session is refused, even one Didit hands out in place of a resume."""
+    set_primary(enabled=False)
+    me = new_browser(multi)
+    h, uid = owner(me, "kyc-acc-resume")
+    sid = start(me, h)["session_id"]
+    with fixture_db() as conn:  # the one session this month fills the cap
+        conn.execute("UPDATE public.kyc_provider_accounts SET monthly_cap = 1 WHERE account_id = %s", (B,))
+    assert start(me, h)["session_id"] == sid and multi.fake_b.calls == 2  # resumed: Didit returned the same session
+    multi.fake_b.finish(uid)  # Didit now hands out a NEW session instead of the unfinished one
+    r = me.post(f"{ME}/session", headers=h)
+    assert r.status_code == 503 and "url" not in r.json() and alerts() == ["account_at_cap"]
+    with db() as conn:  # the new provider session was never stored, its link never handed out
+        assert conn.execute("SELECT count(*) FROM public.kyc_sessions WHERE user_id = %s", (uid,)).fetchone()[0] == 1
+    assert b_hook(multi, session_id=sid, vendor=uid, status="Declined",
+                  created_at=int(time.time())).json()["status"] == "applied"
+    calls = multi.fake_b.calls
+    r = me.post(f"{ME}/session", headers=h)  # finished: nothing to resume, and the cap is full
+    assert r.status_code == 503 and multi.fake_b.calls == calls and alerts() == ["account_at_cap", "account_at_cap"]
+    other = make_user("kyc-acc-resume-other" + DOMAIN)  # another user's open session is never theirs to resume
+    with db() as conn:
+        assert conn.execute("SELECT public.kyc_create_session(%s, %s, %s, 1, 'sandbox', %s)",
+                            (other, sid, B_WF, B)).fetchone()[0] == "wrong_account"
+
+
 def test_an_account_without_an_api_key_here_answers_503(multi):
     multi.app_state.kyc.clients.pop(B)
     set_primary(enabled=False)

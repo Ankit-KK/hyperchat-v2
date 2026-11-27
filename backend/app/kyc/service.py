@@ -215,6 +215,8 @@ class KycService:
             created = await client.create_session(user.id, callback, workflow_id=workflow)
             row = await self.repo.record_session(user.id, created, workflow, self.environment, account)
         except DiditError as exc:
+            if exc.reason == "session_account_at_cap":  # Didit made a NEW session although only a resume fits the cap
+                raise await self._unavailable("account_at_cap", user.id, ip, account) from None
             security_event("kyc_session_failed", reason=exc.reason, user_id=user.id, client_ip=ip)
             raise ApiError(503, UNAVAILABLE, "kyc_provider_unavailable") from None
         security_event("kyc_session_started", level=20, user_id=user.id, client_ip=ip)

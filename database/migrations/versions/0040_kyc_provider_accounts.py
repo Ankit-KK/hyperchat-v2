@@ -23,7 +23,9 @@ Functions:
   * kyc_assign_account(user) -> (result, account, workflow), for hyperchat_app: under one rotation lock, the user's
     pinned account, or for a new user the least-used enabled, not-revoked account this UTC month that is under its
     cap (sessions created this month plus reservations in flight), ties by order then id; the choice is pinned and
-    reserved. A pinned account that is revoked, disabled or at its cap is refused ('account_revoked',
+    reserved. At the cap, only a resume passes: the user's own unfinished session on that account (owner decision
+    2026-11-27, "Allow resume"), and kyc_create_session then accepts only that same session id. A pinned account that
+    is revoked, disabled or at its cap (without a resumable session) is refused ('account_revoked',
     'account_disabled', 'account_at_cap'): never re-routed, so Didit's per-account duplicate checks keep seeing the
     user. No usable account: 'no_account_available'.
   * kyc_create_session(user, session, workflow, version, environment, account) stores a session only for the account
@@ -57,6 +59,7 @@ depends_on = None
 
 ACCOUNT_ID = "^[a-z][a-z0-9-]{1,31}$"
 RESERVATION = "interval '10 minutes'"
+UNFINISHED = "'Not Started', 'In Progress', 'Awaiting User', 'Resubmitted'"  # a session Didit can still continue
 EVERYONE = ("hyperchat_app, hyperchat_worker, hyperchat_auth, hyperchat_lifecycle, hyperchat_readonly, "
             "hyperchat_stepup, PUBLIC")
 NEW_TABLES = ("kyc_provider_accounts", "kyc_account_pins", "kyc_account_reservations", "kyc_account_events")
@@ -65,6 +68,7 @@ APP_FUNCTIONS = ("public.kyc_assign_account(uuid)",
 OPERATOR_FUNCTIONS = ("public.kyc_account_move_user(uuid, text, text, text)",
                       "public.kyc_account_revoke(text, text, text)")
 INTERNAL_FUNCTIONS = ("public.kyc_accounts()", "public.kyc_account_usage(text)", "public.kyc_user_pin(uuid, text)",
+                      "public.kyc_account_full(text, uuid)", "public.kyc_open_session(uuid, text)",
                       "public.kyc_provider_accounts_guard()", "public.kyc_provider_config_guard()",
                       "public.kyc_account_audit()", "public.kyc_account_pins_guard()")
 REPLACED_0022 = ("kyc_create_session", "kyc_receive_webhook", "kyc_effective")
@@ -270,6 +274,30 @@ def upgrade() -> None:
                       AND r.reserved_at > now() - {RESERVATION})
         $$
     """))
+    # Is the account at its cap for a NEW session of this user (their own in-flight reservation not counted)?
+    op.execute(sql(f"""
+        CREATE FUNCTION public.kyc_account_full(p_account text, p_user_id uuid) RETURNS boolean
+        LANGUAGE sql STABLE __DEFINER__ AS $$
+            SELECT coalesce((SELECT c.monthly_cap IS NOT NULL
+                                    AND public.kyc_account_usage(p_account)
+                                        - (SELECT count(*) FROM public.kyc_account_reservations r
+                                           WHERE r.user_id = p_user_id AND r.account_id = p_account
+                                             AND r.reserved_at > now() - {RESERVATION}) >= c.monthly_cap
+                             FROM public.kyc_accounts() c WHERE c.account_id = p_account), false)
+        $$
+    """))
+    # The user's resumable session on the account: unfinished, in the account's current workflow epoch (owner
+    # decision 2026-11-27: resuming the SAME unfinished session starts no new billed check, so a full cap allows it).
+    op.execute(sql(f"""
+        CREATE FUNCTION public.kyc_open_session(p_user_id uuid, p_account text) RETURNS uuid
+        LANGUAGE sql STABLE __DEFINER__ AS $$
+            SELECT s.session_id FROM public.kyc_sessions s
+            JOIN public.kyc_accounts() c ON c.account_id = s.account_id AND c.workflow_id = s.workflow_id
+            WHERE s.user_id = p_user_id AND s.account_id = p_account AND s.provider_status IN ({UNFINISHED})
+              AND (s.created_at >= c.workflow_since OR s.provider_updated_at >= c.workflow_since)
+            ORDER BY s.created_at DESC, s.id DESC LIMIT 1
+        $$
+    """))
     # The user's pin; without one, derived from the user's earliest session (existing users stay with their
     # history), else p_default; written when known.
     op.execute(sql("""
@@ -322,11 +350,12 @@ def upgrade() -> None:
                     o_result := 'account_revoked'; RETURN;
                 ELSIF NOT a.enabled THEN
                     o_result := 'account_disabled'; RETURN;
-                ELSIF a.monthly_cap IS NOT NULL AND public.kyc_account_usage(o_account)
-                          - (SELECT count(*) FROM public.kyc_account_reservations r WHERE r.user_id = p_user_id
-                               AND r.account_id = o_account AND r.reserved_at > now() - {RESERVATION})
-                          >= a.monthly_cap THEN
-                    o_result := 'account_at_cap'; RETURN;
+                ELSIF public.kyc_account_full(o_account, p_user_id) THEN
+                    IF public.kyc_open_session(p_user_id, o_account) IS NULL THEN
+                        o_result := 'account_at_cap'; RETURN;
+                    END IF;
+                    -- a resume: no new usage is reserved; kyc_create_session accepts only that same session
+                    o_workflow := a.workflow_id; o_result := 'ok'; RETURN;
                 END IF;
             END IF;
             INSERT INTO public.kyc_account_reservations (user_id, account_id) VALUES (p_user_id, o_account)
@@ -353,6 +382,13 @@ def upgrade() -> None:
             END IF;
             IF public.kyc_user_pin(p_user_id, NULL) IS DISTINCT FROM p_account THEN
                 RETURN 'wrong_account';  -- only kyc_assign_account pins; sessions live on the pinned account only
+            END IF;
+            -- At the cap only the user's own unfinished session may come back (a resume); a NEW provider session is
+            -- refused and its link is never handed out.
+            IF public.kyc_account_full(p_account, p_user_id) AND NOT EXISTS (
+                    SELECT 1 FROM public.kyc_sessions s WHERE s.session_id = p_session_id AND s.user_id = p_user_id
+                      AND s.account_id = p_account AND s.session_id = public.kyc_open_session(p_user_id, p_account)) THEN
+                RETURN 'account_at_cap';
             END IF;
             """ + lock.format("p_session_id") + """
             INSERT INTO public.kyc_sessions (user_id, vendor_data, session_id, workflow_id, workflow_version,
@@ -617,7 +653,8 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER kyc_provider_config_guard ON public.kyc_provider_config")
     for table in ("kyc_account_events", "kyc_account_reservations", "kyc_account_pins", "kyc_provider_accounts"):
         op.execute(f"DROP TABLE public.{table}")
-    for fn in ("public.kyc_user_pin(uuid, text)", "public.kyc_account_usage(text)", "public.kyc_accounts()",
+    for fn in ("public.kyc_open_session(uuid, text)", "public.kyc_account_full(text, uuid)",
+               "public.kyc_user_pin(uuid, text)", "public.kyc_account_usage(text)", "public.kyc_accounts()",
                "public.kyc_provider_accounts_guard()", "public.kyc_provider_config_guard()",
                "public.kyc_account_audit()", "public.kyc_account_pins_guard()"):
         op.execute(f"DROP FUNCTION {fn}")

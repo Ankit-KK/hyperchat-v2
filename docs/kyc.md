@@ -141,6 +141,11 @@ their terms allow it.
   operator alert (`kyc_account_unavailable`, code `account_disabled`, `account_revoked`, `account_at_cap`). So does no
   usable account for a new user (`no_account_available`), and an account without an API key on this server
   (`account_key_missing`).
+- **Resume at the cap** (owner decision 2026-11-27, "Allow resume"): a user whose pinned account is at its cap may
+  still resume their own unfinished session on it (`Not Started`, `In Progress`, `Awaiting User`, `Resubmitted`, in
+  the account's current epoch). It starts no new billed check and reserves nothing. The database then stores only
+  that same session id: if Didit hands out a NEW session instead, it is refused (503, alert `account_at_cap`) and its
+  link is never given to the user.
 - **Moving a user.** Only the operator can, with `kyc_account_move_user` (audited, with a reason). It is a sensitive
   action and keeps all of the user's history, declines included.
 

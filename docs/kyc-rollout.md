@@ -169,7 +169,8 @@ echo, or one line of stdin with `--secret-stdin`, never from argv.
 3. **Enable or disable:** `... enable|disable --account <id|primary>`. Disabling stops NEW sessions on it. Its pinned
    users get 503 and an alert until it is enabled again or they are moved.
 4. **Cap:** `... cap --account <id|primary> --monthly N|none`. The cap counts sessions created this UTC month plus
-   assignments in flight.
+   assignments in flight. At the cap, a user may still resume their own unfinished session, but never start a new
+   one.
 5. **Move a user** (sensitive: only when an account is retired): `... move-user --user <uuid> --to <id> --reason
    "<why>"`. The user's declines keep vetoing older approvals.
 6. **Revoke** (final): `... revoke --account <id> --reason "<why>"`. Its approvals stop counting at once. Move its
