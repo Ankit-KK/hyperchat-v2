@@ -47,10 +47,15 @@ class CreatorConflict(Exception):
 # The legacy launch defaults for a new creator (legacy docs/ADD_NEW_STREAMER.md, step 3 "Recommended: one insert
 # with every launch default"). Written explicitly: some column defaults differ (e.g. telegram_moderation_enabled
 # defaults to true in the schema, false at launch).
+# Per-mode moderation (migration 0046): the one place a new creator's approval defaults are decided. Owner decision
+# 2026-11-28 "Keep manual approval": images/GIFs and voice messages wait for a moderator, text is auto-approved. (Before
+# 0046 the launch defaults wrote media_moderation_enabled = False, which auto-approved voice and media.)
+NEW_CREATOR_MODERATION = {"text_approval_required": False, "voice_approval_required": True,
+                          "media_approval_required": True}
 LAUNCH_DEFAULTS = {
-    "status": "pending", "moderation_mode": "auto_approve", "tts_enabled": True,
+    "status": "pending", **NEW_CREATOR_MODERATION, "tts_enabled": True,
     "telegram_moderation_enabled": False, "discord_moderation_enabled": False, "leaderboard_widget_enabled": True,
-    "media_upload_enabled": True, "media_moderation_enabled": False,
+    "media_upload_enabled": True,
     "min_text_amount_inr": 40, "min_tts_amount_inr": 40, "min_voice_amount_inr": 150,
     "min_hypersound_amount_inr": 30, "media_min_amount": 100, "media_max_file_size_mb": 10,
     "message_char_tiers": [{"min_amount": 40, "max_chars": 200}, {"min_amount": 100, "max_chars": 300},
@@ -58,7 +63,8 @@ LAUNCH_DEFAULTS = {
     "goal_is_active": False,
 }
 _CREATOR_COLS = """id::text, streamer_slug AS slug, streamer_name AS name, status, razorpay_account, pusher_group,
-    order_prefix, brand_color, moderation_mode, user_id IS NOT NULL AS claimed, created_at"""
+    order_prefix, brand_color, text_approval_required, voice_approval_required, media_approval_required,
+    user_id IS NOT NULL AS claimed, created_at"""
 
 
 async def insert_creator(cur, fields: dict, pusher_groups: tuple[int, ...]) -> dict:

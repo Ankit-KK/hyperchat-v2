@@ -2537,7 +2537,7 @@ def test_0045_round_trip_and_its_downgrade_refuses_once_the_audit_holds_its_even
         try:
             with pytest.raises(Exception, match="0045 downgrade refused"):
                 command.downgrade(cfg, "0044")
-            assert _version() == HEAD
+            assert _version() == "0045"  # the refusal stops at 0045 (later revisions were already downgraded)
         finally:
             with _owner() as conn:
                 conn.execute("DELETE FROM public.kyc_enforcement_events WHERE id = %s", (event,))
@@ -2550,5 +2550,97 @@ def test_0045_round_trip_and_its_downgrade_refuses_once_the_audit_holds_its_even
         command.upgrade(cfg, "0045")
         assert "RETURN 'account_revoked'" in _body("kyc_receive_webhook")
     finally:
+        command.upgrade(cfg, "head")
+    assert _version() == HEAD
+
+
+# (moderation_mode, media_moderation_enabled) -> (text, voice, media approval required) as 0046 backfills: today's rule,
+# NULL read as the column default ('auto_approve' / true)
+LEGACY_SETTINGS_0046 = {
+    "migtest46-manual": (("manual", False), (True, True, True)),
+    "migtest46-manual-null": (("manual", None), (True, True, True)),
+    "migtest46-auto-off": (("auto_approve", False), (False, False, False)),
+    "migtest46-auto-on": (("auto_approve", True), (False, True, True)),
+    "migtest46-auto-null": (("auto_approve", None), (False, True, True)),
+    "migtest46-null-off": ((None, False), (False, False, False)),
+    "migtest46-null-null": ((None, None), (False, True, True)),
+}
+APPROVAL_COLUMNS_0046 = ("text_approval_required", "voice_approval_required", "media_approval_required")
+
+
+def _objects_0046() -> dict:
+    with _owner() as conn:
+        return {
+            "columns": conn.execute("SELECT attname FROM pg_attribute WHERE attrelid = 'public.streamers'::regclass "
+                                    "AND attnum > 0 AND NOT attisdropped AND attname = ANY(%s) ORDER BY 1",
+                                    (list(APPROVAL_COLUMNS_0046),)).fetchall(),
+            "check": conn.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = "
+                                  "'public.donations'::regclass AND conname = 'donations_attachment_without_message'"
+                                  ).fetchall(),
+            "payment": conn.execute("SELECT p.proname, md5(p.prosrc) FROM pg_proc p WHERE p.proname = ANY(%s) "
+                                    "ORDER BY 1", (list(PAYMENT_DEFINER_FUNCTIONS),)).fetchall(),
+            "triggers": conn.execute("SELECT tgrelid::regclass::text, tgname, tgenabled FROM pg_trigger "
+                                     "WHERE NOT tgisinternal ORDER BY 1, 2").fetchall(),
+            "streamers": conn.execute("SELECT id, updated_at, moderation_mode, media_moderation_enabled "
+                                      "FROM public.streamers ORDER BY id").fetchall(),
+        }
+
+
+def test_0046_round_trip_maps_each_creator_to_per_mode_approval_and_adds_the_message_check(monkeypatch):
+    """0046 (per-mode moderation): every existing creator keeps today's behaviour (each legacy combination, NULLs
+    included), no creator's updated_at or old setting moves, no trigger or PAY-15 function changes; the donations
+    CHECK refuses a new row with a message and an attachment but exempts older rows; the downgrade drops the CHECK and
+    the columns."""
+    monkeypatch.setenv("HYPERCHAT_MIGRATION_DSN", DSN)
+    down = "0045"  # 0046's down_revision
+    cfg = _cfg()
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, down)
+    sids: dict[str, str] = {}
+    try:
+        with _owner() as conn:
+            for slug, ((mode, media), _) in LEGACY_SETTINGS_0046.items():
+                sids[slug] = conn.execute(
+                    "INSERT INTO public.streamers (streamer_slug, streamer_name, status, moderation_mode, "
+                    "media_moderation_enabled) VALUES (%s, 'M46', 'active', %s, %s) RETURNING id::text",
+                    (slug, mode, media)).fetchone()[0]
+            old = conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                               "amount_inr, payment_status, moderation_status, message, voice_message_url) VALUES "
+                               "(%s, 'migtest46-old', 'Old', 1, 'INR', 1, 'pending', 'pending', 'old text', "
+                               "'https://x.example/v.webm') RETURNING id::text",
+                               (sids["migtest46-manual"],)).fetchone()[0]
+        before = _objects_0046()
+        assert before["columns"] == [] and before["check"] == []
+        command.upgrade(cfg, "0046")
+        after = _objects_0046()
+        assert after["payment"] == before["payment"] and after["triggers"] == before["triggers"]
+        assert after["streamers"] == before["streamers"]  # no updated_at, no old setting moved
+        assert after["columns"] == [(c,) for c in sorted(APPROVAL_COLUMNS_0046)]
+        [(definition,)] = after["check"]
+        assert "created_at <" in definition and "message IS NULL" in definition
+        with _owner() as conn:
+            got = {s: tuple(r) for s, *r in conn.execute(
+                f"SELECT streamer_slug, {', '.join(APPROVAL_COLUMNS_0046)} FROM public.streamers "
+                "WHERE streamer_slug = ANY(%s)", (list(LEGACY_SETTINGS_0046),)).fetchall()}
+            assert got == {slug: required for slug, (_, required) in LEGACY_SETTINGS_0046.items()}
+            # the older row keeps both and can still be updated; a new row with both is refused
+            conn.execute("UPDATE public.donations SET moderation_status = 'rejected' WHERE id = %s", (old,))
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute("INSERT INTO public.donations (streamer_id, order_id, donor_name, amount, currency, "
+                             "amount_inr, payment_status, moderation_status, message, hypersound_url) VALUES "
+                             "(%s, 'migtest46-new', 'New', 1, 'INR', 1, 'pending', 'pending', 'x', 'https://x/h.mp3')",
+                             (sids["migtest46-manual"],))
+            for column in APPROVAL_COLUMNS_0046:
+                with pytest.raises(psycopg.errors.NotNullViolation):
+                    conn.execute(f"UPDATE public.streamers SET {column} = NULL WHERE id = %s",
+                                 (sids["migtest46-manual"],))
+        command.downgrade(cfg, down)
+        assert _version() == down
+        gone = _objects_0046()
+        assert gone["columns"] == [] and gone["check"] == [] and gone["streamers"] == before["streamers"]
+    finally:
+        with _owner() as conn:
+            conn.execute("DELETE FROM public.donations WHERE order_id LIKE 'migtest46-%%'")
+            conn.execute("DELETE FROM public.streamers WHERE streamer_slug LIKE 'migtest46-%%'")
         command.upgrade(cfg, "head")
     assert _version() == HEAD

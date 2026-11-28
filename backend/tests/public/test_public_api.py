@@ -35,7 +35,7 @@ NOT_PUBLIC_KEYS = {"alert_box_scale", "alert_overlay_id", "leaderboard_overlay_i
                    "leaderboard_bg_enabled", "leaderboard_widget_enabled", "goal_activated_at", "goal_is_active",
                    "top_donor", "total_amount_inr", "user_id", "streamer_id", "owner_id", "razorpay_account",
                    "razorpay_key_ref", "order_prefix", "pusher_group", "obs_token", "token_hash", "status",
-                   "moderation_mode", "el_voice_id"}
+                   "moderation_mode", "text_approval_required", "voice_approval_required", "media_approval_required", "el_voice_id"}
 
 
 def streamer(slug: str, user_id: str | None = None, terms: bool = True, **cols) -> str:

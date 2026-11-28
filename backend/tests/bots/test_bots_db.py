@@ -95,7 +95,7 @@ def pay(did, vaani=frozenset()):
 # ── enqueue boundary ────────────────────────────────────────────────────────
 
 def test_notify_job_is_enqueued_with_the_payment(clean):
-    manual = creator("authtest-p11-manual", moderation_mode="manual")
+    manual = creator("authtest-p11-manual", text_approval_required=True)
     auto = creator("authtest-p11-auto")
     d1, d2, d3 = pending_payment(manual), pending_payment(auto), pending_payment(manual)
     pay(d1)
@@ -167,7 +167,7 @@ def work(handler, did, rounds=40):
 
 
 def test_historical_backlog_is_never_sent(clean):
-    sid = creator("authtest-p11-backlog", moderation_mode="manual")
+    sid = creator("authtest-p11-backlog", text_approval_required=True)
     add_moderator(sid, telegram=TG_MOD)
     old = make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE)
     with db() as conn:  # a paid, never-notified donation from before Phase 11 (2 days old)
@@ -181,7 +181,7 @@ def test_historical_backlog_is_never_sent(clean):
 
 
 def test_job_end_to_end_retry_only_resends_what_failed(clean):
-    sid = creator("authtest-p11-e2e", moderation_mode="manual", discord_moderation_enabled=True,
+    sid = creator("authtest-p11-e2e", text_approval_required=True, discord_moderation_enabled=True,
                   discord_moderation_channel_id=DC_CHANNEL)
     tg_mod = add_moderator(sid, telegram=TG_MOD)
     add_moderator(sid, discord=DC_MOD, can_ban=True)
@@ -208,7 +208,7 @@ def test_job_end_to_end_retry_only_resends_what_failed(clean):
 
 
 def test_allowlist_and_disabled(clean):
-    sid = creator("authtest-p11-allow", moderation_mode="manual")
+    sid = creator("authtest-p11-allow", text_approval_required=True)
     add_moderator(sid, telegram=TG_MOD)
     add_moderator(sid, telegram=TG_OTHER)
     did = pending_payment(sid)
@@ -280,7 +280,7 @@ def press(update_id, user, data):
 
 
 def test_telegram_webhook_end_to_end(bots_app):
-    sid = creator("authtest-p11-tg", moderation_mode="manual")
+    sid = creator("authtest-p11-tg", text_approval_required=True)
     mod = add_moderator(sid, telegram=TG_MOD)
     add_moderator(sid, telegram=TG_OTHER)
     did = make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
@@ -309,8 +309,8 @@ def test_telegram_webhook_end_to_end(bots_app):
 
 
 def test_creator_outside_the_allowlist_gets_no_buttons_and_cannot_be_moderated(bots_app):
-    listed = creator("authtest-p11-tg", moderation_mode="manual")
-    unlisted = creator("authtest-p11-unlisted", moderation_mode="manual")
+    listed = creator("authtest-p11-tg", text_approval_required=True)
+    unlisted = creator("authtest-p11-unlisted", text_approval_required=True)
     update_streamer(unlisted, streamer_name="Unlisted Creator")
     add_moderator(listed, telegram=TG_MOD)
     unlisted_mod = add_moderator(unlisted, telegram=TG_MOD)
@@ -346,11 +346,11 @@ def command_update(text, n):
 def test_commands_cover_every_creator_beyond_ten(bots_app):
     """The old lookup ended in LIMIT 10: a moderator of 11+ creators never saw the rest. Name order is slug order."""
     for i, slug in enumerate(MANY, 1):
-        sid = creator(slug, moderation_mode="manual")
+        sid = creator(slug, text_approval_required=True)
         update_streamer(sid, streamer_name=f"P11 Many {i:02d}")
         add_moderator(sid, telegram=TG_MOD, is_active=i <= 11)
         make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
-    other = creator("authtest-p11-not-mine", moderation_mode="manual")  # allow-listed, but not this user's
+    other = creator("authtest-p11-not-mine", text_approval_required=True)  # allow-listed, but not this user's
     update_streamer(other, streamer_name="P11 Many 00 Not Mine")
     add_moderator(other, telegram=TG_OTHER)
     make_donation(other, 100, payment="success", moderation="pending", name="Ravi")
@@ -396,7 +396,7 @@ REVERSAL = [("reject", "telegram", "pending", "rejected"), ("approve", "telegram
 
 
 def test_telegram_repeated_decision_after_reversal_is_audited_and_duplicates_are_not(bots_app):
-    sid = creator("authtest-p11-repeat", moderation_mode="manual")
+    sid = creator("authtest-p11-repeat", text_approval_required=True)
     mod = add_moderator(sid, telegram=TG_MOD)
     did = make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE, name="Ravi")
     reject = callback(bots_app, "telegram", sid, did, "reject", TG_MOD, mod)
@@ -417,7 +417,7 @@ def test_telegram_repeated_decision_after_reversal_is_audited_and_duplicates_are
 
 
 def test_discord_repeated_decision_after_reversal_is_audited_and_duplicates_are_not(bots_app):
-    sid = creator("authtest-p11-repeat-dc", moderation_mode="manual", discord_moderation_enabled=True,
+    sid = creator("authtest-p11-repeat-dc", text_approval_required=True, discord_moderation_enabled=True,
                   discord_moderation_channel_id=DC_CHANNEL)
     mod = add_moderator(sid, discord=DC_MOD)
     did = make_donation(sid, 100, payment="success", moderation="pending")
@@ -440,7 +440,7 @@ def test_discord_repeated_decision_after_reversal_is_audited_and_duplicates_are_
 
 
 def test_telegram_viewer_and_disabled(bots_app):
-    sid = creator("authtest-p11-view", moderation_mode="manual")
+    sid = creator("authtest-p11-view", text_approval_required=True)
     viewer = add_moderator(sid, telegram=TG_MOD, role="viewer")
     did = make_donation(sid, 100, payment="success", moderation="pending")
     r = tg_post(bots_app, press(800000000 + secrets.randbelow(10**8), TG_MOD,
@@ -465,7 +465,7 @@ def discord_post(client, body: dict, private=PRIVATE, ts=None):
 
 
 def test_discord_webhook_end_to_end(bots_app):
-    sid = creator("authtest-p11-dc", moderation_mode="manual", discord_moderation_enabled=True,
+    sid = creator("authtest-p11-dc", text_approval_required=True, discord_moderation_enabled=True,
                   discord_moderation_channel_id=DC_CHANNEL)
     add_moderator(sid, discord=DC_MOD, can_ban=False)
     did = make_donation(sid, 100, payment="success", moderation="pending")
@@ -493,7 +493,7 @@ def test_disabled_by_default(app):
 
 
 def test_nothing_sensitive_in_logs(bots_app):
-    sid = creator("authtest-p11-log", moderation_mode="manual")
+    sid = creator("authtest-p11-log", text_approval_required=True)
     mod = add_moderator(sid, telegram=TG_MOD)
     did = make_donation(sid, 100, payment="success", moderation="pending", message=MESSAGE, name="Secret Donor Name")
     data = callback(bots_app, "telegram", sid, did, "approve", TG_MOD, mod)
@@ -534,7 +534,7 @@ def _chain(did):
 
 
 def test_concurrent_identical_presses_apply_and_audit_once(clean):
-    sid = creator("authtest-p11-conc-same", moderation_mode="manual")
+    sid = creator("authtest-p11-conc-same", text_approval_required=True)
     mod = add_moderator(sid, telegram=TG_MOD)
     did = make_donation(sid, 100, payment="success", moderation="pending", name="Ravi")
     outcomes = run(_gathered([_bot_moderate(sid, did, mod, "reject")] * 12))
@@ -546,7 +546,7 @@ def test_concurrent_reversals_keep_an_ordered_complete_audit_history(clean):
     """Racing approve / reject presses: every applied step has exactly one audit row, the counter matches, and the
     history read back by time is an unbroken chain ending in the donation's final state (the rows are stamped when
     the action is applied under the row lock, not when its transaction started)."""
-    sid = creator("authtest-p11-conc-flip", moderation_mode="manual")
+    sid = creator("authtest-p11-conc-flip", text_approval_required=True)
     mod = add_moderator(sid, telegram=TG_MOD)
     did = make_donation(sid, 100, payment="success", moderation="pending", name="Ravi")
     rng = random.Random(11)
@@ -572,7 +572,7 @@ class _Allow:
 def test_one_telegram_update_delivered_concurrently_moderates_once(clean):
     """Telegram may deliver one update again while the first delivery is still running: the update_id nonce lets
     exactly one through (real PostgresNonceStore, real moderation core, one connection per call)."""
-    sid = creator("authtest-p11-conc-update", moderation_mode="manual")
+    sid = creator("authtest-p11-conc-update", text_approval_required=True)
     mod = add_moderator(sid, telegram=TG_MOD)
     did = make_donation(sid, 100, payment="success", moderation="pending", name="Ravi")
     f = factory()

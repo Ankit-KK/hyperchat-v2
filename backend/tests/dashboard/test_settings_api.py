@@ -29,8 +29,10 @@ pytestmark = requires_db
 S = "/api/v1/dashboard/streamers"
 
 DEFAULTS = {  # a new creator row, as served (nullable booleans get their column default)
-    "slug": "authtest-set", "name": "Auth Test", "status": "active", "moderation_mode": "auto_approve",
-    "telegram_moderation_enabled": True, "discord_moderation_enabled": False, "media_moderation_enabled": True,
+    "slug": "authtest-set", "name": "Auth Test", "status": "active",
+    # 0046's column defaults: text auto-approved, voice and media wait for a moderator
+    "text_approval_required": False, "voice_approval_required": True, "media_approval_required": True,
+    "telegram_moderation_enabled": True, "discord_moderation_enabled": False,
     "tts_enabled": True, "tts_language_boost": "Hindi", "el_voice_id": None,
     "media_upload_enabled": False, "message_min_amount": None, "voice_min_amount": None, "media_min_amount": 100.0,
     "message_char_tiers": None, "voice_tiers": [],
@@ -40,10 +42,11 @@ DEFAULTS = {  # a new creator row, as served (nullable booleans get their column
     "goal_activated_at": None,
 }
 EVERYTHING = {
-    "moderation_mode": "manual", "telegram_moderation_enabled": False, "discord_moderation_enabled": True,
+    "text_approval_required": True, "voice_approval_required": False, "media_approval_required": False,
+    "telegram_moderation_enabled": False, "discord_moderation_enabled": True,
     "tts_enabled": False, "alert_box_scale": 1.25, "goal_is_active": True,
     "goal_name": "  New mic  ", "goal_target_amount": 2500.5,
-    "media_upload_enabled": True, "media_moderation_enabled": False, "tts_language_boost": "english",
+    "media_upload_enabled": True, "tts_language_boost": "english",
     "alert_overlay_id": 16, "leaderboard_overlay_id": 15, "overlay_adjust_mode": True, "leaderboard_bg_enabled": False,
     "goal_overlay_id": 6, "brand_color": "#ABCDEF", "leaderboard_widget_enabled": False, "el_voice_id": "Voice123456",
     "message_min_amount": 75.5, "voice_min_amount": 200, "media_min_amount": 250,
@@ -67,13 +70,14 @@ def test_read_settings_fields_defaults_and_refs(app):
 
 
 def test_read_settings_serves_stored_values_and_null_defaults(app):
-    sid, _ = owned_creator(app, "authtest-set2", tts_enabled=None, hyperemotes_enabled=None, moderation_mode=None,
+    sid, _ = owned_creator(app, "authtest-set2", tts_enabled=None, hyperemotes_enabled=None, moderation_mode="manual",
                            goal_is_active=None, tts_language_boost="hindi", hyperemotes_min_amount=50,
                            media_min_amount=20, status="pending", rejection_reason="authtest-hidden")
     body = app.get(f"{S}/authtest-set2/settings").json()
     assert body["tts_enabled"] is True and body["goal_is_active"] is False
     assert "hyperemote" not in str(body).lower()  # discontinued: the stored columns are never served
-    assert body["moderation_mode"] == "auto_approve"
+    assert "moderation_mode" not in body and "media_moderation_enabled" not in body  # 0046: no longer read
+    assert body["text_approval_required"] is False  # the per-mode column, whatever the retired column holds
     assert body["tts_language_boost"] == "hindi"  # legacy lowercase row is served as stored (A2: no migration)
     assert body["media_min_amount"] == 20.0
     assert body["status"] == "pending" and "rejection_reason" not in body and "authtest-hidden" not in str(body)
@@ -90,7 +94,7 @@ def test_patch_every_writable_field_then_idempotent(app):
     assert s["goal_name"] == "New mic" and s["tts_language_boost"] == "English" and s["el_voice_id"] == "Voice123456"
     assert _db(sid, "goal_activated_at IS NOT NULL") == (True,)
     assert (s["alert_overlay_id"], s["leaderboard_overlay_id"], s["goal_overlay_id"]) == (16, 15, 6)
-    assert s["alert_box_scale"] == 1.25 and s["goal_target_amount"] == 2500.5 and s["moderation_mode"] == "manual"
+    assert s["alert_box_scale"] == 1.25 and s["goal_target_amount"] == 2500.5 and s["text_approval_required"] is True
     assert app.get(url).json() == s
     assert _db(sid, "goal_name", "tts_language_boost", "alert_box_scale", "goal_target_amount") == (
         "New mic", "English", Decimal("1.25"), Decimal("2500.5"))

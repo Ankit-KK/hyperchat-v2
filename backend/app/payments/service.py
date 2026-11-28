@@ -104,7 +104,9 @@ class PaymentService:
             raise rules.bad_request("Only one attachment per donation", "too_many_attachments")
         kind = attached[0] if attached else "text"
         rules.check_minimum(creator, kind, amount, currency)
-        message = rules.sanitize(body.message)
+        message = rules.sanitize(body.message)  # None for an empty one: stored NULL, never ''
+        if message is not None and kind not in rules.MESSAGE_MODES:  # owner 2026-11-28 (and the 0046 CHECK)
+            raise rules.bad_request("Only a text donation carries a message", "message_not_allowed")
         limit = rules.message_char_limit(creator["message_char_tiers"], amount_inr)
         if limit is not None and message and len(message) > limit:
             raise rules.bad_request(f"Message exceeds {limit} character limit for this donation amount",

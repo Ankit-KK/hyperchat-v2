@@ -402,7 +402,8 @@ class PaymentRepository:
                     SELECT d.streamer_id::text AS streamer_id, d.donor_name, d.amount_inr, d.payment_status,
                            d.provider_payment_id, d.voice_message_url IS NOT NULL AS has_voice,
                            d.hypersound_url IS NOT NULL AS has_hypersound, d.media_url IS NOT NULL AS has_media,
-                           s.moderation_mode, s.media_moderation_enabled, s.streamer_slug, d.message
+                           s.text_approval_required, s.voice_approval_required, s.media_approval_required,
+                           s.streamer_slug, d.message
                     FROM public.donations d JOIN public.streamers s ON s.id = d.streamer_id
                     WHERE d.id = %s FOR UPDATE OF d
                 """, (donation_id,))
@@ -438,8 +439,9 @@ class PaymentRepository:
             return applied
         auto = rules.auto_approves(
             has_hypersound=row["has_hypersound"], has_voice=row["has_voice"],
-            has_media=row["has_media"], moderation_mode=row["moderation_mode"],
-            media_moderation_enabled=row["media_moderation_enabled"])
+            has_media=row["has_media"], text_approval_required=row["text_approval_required"],
+            voice_approval_required=row["voice_approval_required"],
+            media_approval_required=row["media_approval_required"])
         await cur.execute("""
             UPDATE public.donations SET payment_status = 'success', provider_payment_id = %(pid)s,
                 moderation_status = CASE WHEN %(auto)s THEN 'auto_approved' ELSE 'pending' END,

@@ -31,6 +31,15 @@ MEDIA_URL_COLUMNS = {
 DONATION_CLEARED_COLUMNS = ("voice_message_url", "hypersound_url", "media_url", "media_type", "tts_audio_url",
                             "status_token_hash", "upload_token_hash")
 
+# Migration 0046's per-mode require-approval switches, from each legacy creator's own moderation_mode and
+# media_moderation_enabled (legacy has neither new column; NULL read as the column default). Exactly migration 0046's
+# BACKFILL (test_etl_mapping pins them equal), so an imported creator keeps the behaviour it had in legacy instead of
+# silently getting the new-creator defaults.
+_MANUAL = "coalesce(moderation_mode, 'auto_approve') = 'manual'"
+_HELD = f"({_MANUAL} OR coalesce(media_moderation_enabled, true))"
+MODERATION_FROM_LEGACY = {"text_approval_required": _MANUAL, "voice_approval_required": _HELD,
+                          "media_approval_required": _HELD}
+
 # Columns the V2 schema added to straight-copied tables that legacy never had: left to their defaults (or, in
 # LEGACY_VALUES, set to the value the migration gave the rows that existed then). Explicit: any OTHER target column
 # missing in the source still fails the load. A new migration that adds a column to one of these tables must add it

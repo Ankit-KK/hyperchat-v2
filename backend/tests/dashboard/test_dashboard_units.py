@@ -77,8 +77,12 @@ def test_writable_settings_are_the_legacy_allowlist_plus_the_pay14_pricing_field
               "leaderboard_widget_enabled", "el_voice_id"}  # update-streamer-settings/index.ts:132
     retired = {"hyperemotes_enabled", "hyperemotes_min_amount"}  # HyperEmotes discontinued (owner, 2026-11-13)
     pay14 = {"message_min_amount", "voice_min_amount", "message_char_tiers", "voice_tiers"}  # D-M3b, 2026-11-25
-    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 24
-    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.SERVER_OWNED_SETTINGS) - retired | pay14
+    # migration 0046 (owner 2026-11-28): one require-approval switch per donation mode replaces the two legacy ones
+    replaced = {"moderation_mode", "media_moderation_enabled"}
+    per_mode = {"text_approval_required", "voice_approval_required", "media_approval_required"}
+    assert len(legacy) == 23 and len(v.WRITABLE_SETTINGS) == 25
+    assert set(v.WRITABLE_SETTINGS) == legacy - set(v.SERVER_OWNED_SETTINGS) - retired - replaced | pay14 | per_mode
+    assert not replaced & (set(v.WRITABLE_SETTINGS) | set(models.DashboardSettings.model_fields))
     assert not retired & (set(v.WRITABLE_SETTINGS) | set(models.DashboardSettings.model_fields))
     assert set(models.SettingsPatch.model_fields) == set(v.WRITABLE_SETTINGS)
     assert tuple(SETTINGS_SQL_TYPES) == tuple(c for c in v.WRITABLE_SETTINGS if c != "voice_tiers")
@@ -96,8 +100,7 @@ def _patch(body: dict) -> dict:
 
 
 VALID = [
-    ({"moderation_mode": "manual"}, "manual"),
-    ({"moderation_mode": "auto_approve"}, "auto_approve"),
+    *[({f"{mode}_approval_required": value}, value) for mode in ("text", "voice", "media") for value in (True, False)],
     ({"tts_enabled": False}, False),
     ({"leaderboard_widget_enabled": True}, True),
     ({"alert_box_scale": 0.75}, 0.75),
@@ -130,7 +133,9 @@ def test_valid_settings(body, expected):
 
 
 INVALID = [
-    {"moderation_mode": "MANUAL"}, {"moderation_mode": "auto"}, {"moderation_mode": None},
+    {"text_approval_required": "true"}, {"text_approval_required": 1}, {"voice_approval_required": None},
+    {"media_approval_required": "manual"},
+    {"moderation_mode": "manual"}, {"media_moderation_enabled": False}, {"voice_enabled": False},  # 0046: unknown
     {"tts_enabled": "true"}, {"tts_enabled": 1}, {"tts_enabled": 0}, {"tts_enabled": None},
     {"goal_is_active": "yes"}, {"overlay_adjust_mode": None}, {"leaderboard_bg_enabled": "false"},
     {"alert_box_scale": 2}, {"alert_box_scale": 0.5}, {"alert_box_scale": "1.0"}, {"alert_box_scale": True},
@@ -171,8 +176,8 @@ def test_invalid_settings(body):
 
 
 def test_patch_reports_only_sent_fields_in_a_fixed_order():
-    body = {"el_voice_id": None, "brand_color": "#000000", "moderation_mode": "manual"}
-    assert list(_patch(body)) == ["moderation_mode", "brand_color", "el_voice_id"]
+    body = {"el_voice_id": None, "brand_color": "#000000", "media_approval_required": True}
+    assert list(_patch(body)) == ["media_approval_required", "brand_color", "el_voice_id"]
     assert _patch({}) == {}
 
 

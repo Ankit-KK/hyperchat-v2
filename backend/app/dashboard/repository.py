@@ -26,10 +26,9 @@ from app.realtime import outbox
 
 # Nullable booleans / mode are served with their column default, as Phase 4 does for the public API.
 _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
-    COALESCE(moderation_mode, 'auto_approve') AS moderation_mode,
+    text_approval_required, voice_approval_required, media_approval_required,
     COALESCE(telegram_moderation_enabled, true) AS telegram_moderation_enabled,
     COALESCE(discord_moderation_enabled, false) AS discord_moderation_enabled,
-    COALESCE(media_moderation_enabled, true) AS media_moderation_enabled,
     COALESCE(tts_enabled, true) AS tts_enabled, tts_language_boost, el_voice_id,
     COALESCE(media_upload_enabled, false) AS media_upload_enabled,
     min_text_amount_inr AS message_min_amount, min_voice_amount_inr AS voice_min_amount, media_min_amount,
@@ -46,10 +45,11 @@ _SETTINGS_COLS = """streamer_slug AS slug, streamer_name AS name, status,
 # Column types of the writable settings: parameters are cast so that IS DISTINCT FROM compares values
 # exactly as stored (e.g. numeric 1.00 equals 1.0).
 SETTINGS_SQL_TYPES = {
-    "moderation_mode": "text", "telegram_moderation_enabled": "boolean", "discord_moderation_enabled": "boolean",
+    "text_approval_required": "boolean", "voice_approval_required": "boolean", "media_approval_required": "boolean",
+    "telegram_moderation_enabled": "boolean", "discord_moderation_enabled": "boolean",
     "tts_enabled": "boolean", "alert_box_scale": "numeric",
     "goal_is_active": "boolean", "goal_name": "text", "goal_target_amount": "numeric",
-    "media_upload_enabled": "boolean", "media_moderation_enabled": "boolean",
+    "media_upload_enabled": "boolean",
     "tts_language_boost": "text", "alert_overlay_id": "smallint", "leaderboard_overlay_id": "smallint",
     "overlay_adjust_mode": "boolean", "leaderboard_bg_enabled": "boolean", "goal_overlay_id": "smallint",
     "brand_color": "text", "leaderboard_widget_enabled": "boolean", "el_voice_id": "text",

@@ -411,6 +411,25 @@ def test_media_needs_the_creator_switch(client, world):
     assert (r.status_code, r.json()) == (403, {"error": "Media uploads are not enabled for this creator"})
 
 
+@pytest.mark.parametrize("attach", ["voice", "media", "hypersound"])
+def test_only_a_text_donation_carries_a_message(client, world, attach):
+    """Owner 2026-11-28: a voice message, an image/GIF or a HyperSound carries only the donor's name. A message is
+    400 before any order exists; one that sanitises to nothing is no message (stored NULL, never '')."""
+    seed_voice(world)
+    seed_media(world, MEDIA)
+    kw = {"voice": {"amount": 150, "voice_message_url": f"{BASE}/{VOICE}"},
+          "media": {"amount": 100, "media_url": f"{BASE}/{MEDIA}"},
+          "hypersound": {"amount": 30, "hypersound_url": f"{BASE}/hypersounds/Air%20Horn.mp3"}}[attach]
+    r = checkout(client, message="hello stream", **kw)
+    assert (r.status_code, r.json()) == (400, {"error": "Only a text donation carries a message"})
+    assert world.razorpay.calls == []
+    for empty in ("", "   ", "<b></b>"):
+        assert checkout(client, message=empty, **kw).status_code == 201
+        assert world.repo.donations[-1]["message"] is None
+    assert checkout(client, amount=100, message="hello stream").status_code == 201  # text: the message is kept
+    assert world.repo.donations[-1]["message"] == "hello stream"
+
+
 def test_storage_failures(client, world):
     seed_voice(world)
     world.store.fail_with, world.store.fail_ops = "r2_InternalError", {"head"}

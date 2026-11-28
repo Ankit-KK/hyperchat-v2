@@ -48,13 +48,33 @@ Errors use `{"error": "..."}` (FastAPI's `{"detail": [...]}` for 422): 401 `Not 
 `Invalid CSRF token`; 404 `Streamer not found`, `Donation not found`, `Moderator not found`.
 
 ## G1 settings
-**D-R1 fields:** `slug, name, status, moderation_mode, telegram_moderation_enabled,
-discord_moderation_enabled, media_moderation_enabled, tts_enabled, tts_language_boost, el_voice_id,
+**D-R1 fields:** `slug, name, status, text_approval_required, voice_approval_required, media_approval_required,
+telegram_moderation_enabled, discord_moderation_enabled, tts_enabled, tts_language_boost, el_voice_id,
 media_upload_enabled, message_min_amount, voice_min_amount, media_min_amount, message_char_tiers, voice_tiers,
 brand_color,
 alert_box_scale, alert_overlay_id, leaderboard_overlay_id, goal_overlay_id, overlay_adjust_mode,
 leaderboard_bg_enabled, leaderboard_widget_enabled, goal_name, goal_target_amount, goal_is_active,
-goal_activated_at`. Nullable booleans and `moderation_mode` are served with their column default.
+goal_activated_at`. Nullable booleans are served with their column default.
+
+**Per-mode moderation (migration 0046, owner 2026-11-28).** The creator (and a linked account, as for every setting)
+has one "require approval" switch per donation mode, as the legacy dashboard's Moderation Settings card had for media:
+`text_approval_required` (text messages and plain donations), `voice_approval_required` (audio / voice messages) and
+`media_approval_required` (images and GIFs). `false` approves the donation when it is paid; `true` holds it in the
+moderation queue. HyperSounds have no switch: they are always auto-approved. Telegram and Discord moderation are
+unchanged.
+- **Only a text donation carries a message.** A voice message, an image/GIF or a HyperSound carries only the donor's
+  name: checkout answers 400 `Only a text donation carries a message`, and the database's
+  `donations_attachment_without_message` CHECK refuses the row (donations created before 0046 are exempt). So no
+  unmoderated text rides on an auto-approved HyperSound (security audit run-4 NV4-5). The donor name is moderated as
+  before, with the donation.
+- **They replace `moderation_mode` (Moderation Mode) and `media_moderation_enabled` (Require Approval for Media)**,
+  which are no longer served or accepted (422 as unknown fields). 0046 mapped every creator so its behaviour did not
+  change (NULL read as the column default, `auto_approve` / true): text = `moderation_mode` was manual; voice and
+  media = it was manual, or media moderation was on. The cutover ETL maps each legacy creator the same way
+  (`etl.mapping.MODERATION_FROM_LEGACY`).
+- **New creators** start with text `false` and voice and media `true` (owner 2026-11-28, "Keep manual approval";
+  `app.admin.repository.NEW_CREATOR_MODERATION`, the one place).
+- **Later modes** (e.g. sound effects, music) get their own switch the same way.
 `status` is shown, `rejection_reason` never is.
 
 **`goal_activated_at` is server-owned (D-G, 2026-10-29).**
@@ -68,13 +88,13 @@ goal_activated_at`. Nullable booleans and `moderation_mode` are served with thei
 - **Sending `goal_activated_at`** (any value, including null) is an unknown field: 422, nothing changed.
 - **`changed`** lists `goal_activated_at` when it was stamped, and the realtime `goal-progress` event follows as for any goal setting.
 
-**D-M1** accepts any subset of the 24 writable fields (the legacy `update-streamer-settings`
-allowlist minus HyperEmotes and the server-owned `goal_activated_at`, plus the PAY-14 pricing fields):
+**D-M1** accepts any subset of the 25 writable fields (the legacy `update-streamer-settings`
+allowlist minus HyperEmotes and the server-owned `goal_activated_at`, plus the PAY-14 pricing fields, with the two
+legacy moderation fields replaced by migration 0046's three switches):
 
 | Field | Rule |
 |---|---|
-| `moderation_mode` | `auto_approve` or `manual` |
-| `telegram_moderation_enabled`, `discord_moderation_enabled`, `tts_enabled`, `goal_is_active`, `media_upload_enabled`, `media_moderation_enabled`, `overlay_adjust_mode`, `leaderboard_bg_enabled`, `leaderboard_widget_enabled` | JSON boolean, not null |
+| `text_approval_required`, `voice_approval_required`, `media_approval_required`, `telegram_moderation_enabled`, `discord_moderation_enabled`, `tts_enabled`, `goal_is_active`, `media_upload_enabled`, `overlay_adjust_mode`, `leaderboard_bg_enabled`, `leaderboard_widget_enabled` | JSON boolean, not null |
 | `alert_box_scale` | one of 0.75, 1.0, 1.25, 1.5 |
 | `goal_name` | trimmed, 1–120 characters |
 | `goal_target_amount` | number, > 0 and ≤ 100,000,000 |

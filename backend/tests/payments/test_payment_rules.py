@@ -259,27 +259,38 @@ def test_status_token_hash_and_constant_time_check():
     assert not rules.status_token_matches(digest, digest)  # the stored hash is not a token
 
 
-# ── auto-approve (D2) ───────────────────────────────────────────────────────
+# ── auto-approve: one require-approval switch per donation mode (migration 0046) ─
+
+MODES = {"text": {}, "voice": {"has_voice": True}, "media": {"has_media": True}}
+
 
 def approve(**kw):
-    base = dict(has_hypersound=False, has_voice=False, has_media=False,
-                moderation_mode="auto_approve", media_moderation_enabled=True)
+    base = dict(has_hypersound=False, has_voice=False, has_media=False, text_approval_required=False,
+                voice_approval_required=False, media_approval_required=False)
     return rules.auto_approves(**{**base, **kw})
 
 
-@pytest.mark.parametrize("kw, expected", [
-    ({}, True),                                                          # text, auto mode
-    ({"moderation_mode": None}, True),                                   # NULL = auto_approve
-    ({"moderation_mode": "manual"}, False),
-    ({"has_media": True}, False), ({"has_voice": True}, False),          # D2: voice held like media
-    ({"has_media": True, "media_moderation_enabled": False}, True),
-    ({"has_voice": True, "media_moderation_enabled": False}, True),
-    ({"has_voice": True, "media_moderation_enabled": None}, False),      # NULL = moderation on
-    ({"has_hypersound": True, "moderation_mode": "manual"}, True),       # hypersounds always
-    ({"has_voice": True, "moderation_mode": "manual", "media_moderation_enabled": False}, False),
-])
-def test_auto_approve_rule(kw, expected):
-    assert approve(**kw) is expected
+@pytest.mark.parametrize("mode", list(MODES))
+@pytest.mark.parametrize("required", [False, True])
+def test_each_mode_follows_its_own_switch_only(mode, required):
+    """Each mode x auto/manual: the donation follows its own mode's switch, whatever the other two say."""
+    switches = {f"{m}_approval_required": (required if m == mode else not required) for m in MODES}
+    assert approve(**MODES[mode], **switches) is (not required)
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_a_hypersound_is_always_auto_approved(required):
+    assert approve(has_hypersound=True, **{f"{m}_approval_required": required for m in MODES}) is True
+
+
+@pytest.mark.parametrize("value", [None, "false", 0])
+def test_anything_but_false_waits(value):  # fail closed: the columns are boolean NOT NULL anyway
+    assert approve(text_approval_required=value) is False
+
+
+def test_only_a_text_donation_carries_a_message():  # owner 2026-11-28
+    assert rules.MESSAGE_MODES == frozenset({"text"})
+    assert set(rules.MODERATED_MODES) == set(MODES)
 
 
 def test_hyperemotes_have_no_auto_approve_rule():

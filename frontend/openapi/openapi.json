@@ -949,6 +949,10 @@
             "title": "Leaderboard Widget Enabled",
             "type": "boolean"
           },
+          "media_approval_required": {
+            "title": "Media Approval Required",
+            "type": "boolean"
+          },
           "media_min_amount": {
             "anyOf": [
               {
@@ -959,10 +963,6 @@
               }
             ],
             "title": "Media Min Amount"
-          },
-          "media_moderation_enabled": {
-            "title": "Media Moderation Enabled",
-            "type": "boolean"
           },
           "media_upload_enabled": {
             "title": "Media Upload Enabled",
@@ -981,10 +981,6 @@
               }
             ],
             "title": "Message Min Amount"
-          },
-          "moderation_mode": {
-            "title": "Moderation Mode",
-            "type": "string"
           },
           "name": {
             "title": "Name",
@@ -1006,6 +1002,10 @@
             "title": "Telegram Moderation Enabled",
             "type": "boolean"
           },
+          "text_approval_required": {
+            "title": "Text Approval Required",
+            "type": "boolean"
+          },
           "tts_enabled": {
             "title": "Tts Enabled",
             "type": "boolean"
@@ -1020,6 +1020,10 @@
               }
             ],
             "title": "Tts Language Boost"
+          },
+          "voice_approval_required": {
+            "title": "Voice Approval Required",
+            "type": "boolean"
           },
           "voice_min_amount": {
             "anyOf": [
@@ -1045,10 +1049,11 @@
           "slug",
           "name",
           "status",
-          "moderation_mode",
+          "text_approval_required",
+          "voice_approval_required",
+          "media_approval_required",
           "telegram_moderation_enabled",
           "discord_moderation_enabled",
-          "media_moderation_enabled",
           "tts_enabled",
           "tts_language_boost",
           "el_voice_id",
@@ -2802,6 +2807,17 @@
             ],
             "title": "Leaderboard Widget Enabled"
           },
+          "media_approval_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Approval Required"
+          },
           "media_min_amount": {
             "anyOf": [
               {
@@ -2812,17 +2828,6 @@
               }
             ],
             "title": "Media Min Amount"
-          },
-          "media_moderation_enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Media Moderation Enabled"
           },
           "media_upload_enabled": {
             "anyOf": [
@@ -2860,21 +2865,6 @@
             ],
             "title": "Message Min Amount"
           },
-          "moderation_mode": {
-            "anyOf": [
-              {
-                "enum": [
-                  "auto_approve",
-                  "manual"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Moderation Mode"
-          },
           "overlay_adjust_mode": {
             "anyOf": [
               {
@@ -2897,6 +2887,17 @@
             ],
             "title": "Telegram Moderation Enabled"
           },
+          "text_approval_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text Approval Required"
+          },
           "tts_enabled": {
             "anyOf": [
               {
@@ -2918,6 +2919,17 @@
               }
             ],
             "title": "Tts Language Boost"
+          },
+          "voice_approval_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Voice Approval Required"
           },
           "voice_min_amount": {
             "anyOf": [

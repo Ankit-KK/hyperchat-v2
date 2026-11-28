@@ -22,9 +22,12 @@ def parse_uuid(value: str | None) -> str | None:
 # ── settings (legacy update-streamer-settings allowlist minus HyperEmotes, plus the PAY-14 pricing fields) ──
 
 WRITABLE_SETTINGS = (
-    "moderation_mode", "telegram_moderation_enabled", "discord_moderation_enabled", "tts_enabled",
+    # migration 0046 (owner 2026-11-28): one require-approval switch per donation mode, replacing moderation_mode and
+    # media_moderation_enabled (columns kept, no longer read or written by the API)
+    "text_approval_required", "voice_approval_required", "media_approval_required",
+    "telegram_moderation_enabled", "discord_moderation_enabled", "tts_enabled",
     "alert_box_scale", "goal_is_active", "goal_name", "goal_target_amount",
-    "media_upload_enabled", "media_moderation_enabled", "tts_language_boost",
+    "media_upload_enabled", "tts_language_boost",
     "alert_overlay_id", "leaderboard_overlay_id", "overlay_adjust_mode", "leaderboard_bg_enabled",
     "goal_overlay_id", "brand_color", "leaderboard_widget_enabled", "el_voice_id",
     # PAY-14 (D-M3b, approved 2026-11-25): the creator's own minimums and tiers; voice_tiers is its own table

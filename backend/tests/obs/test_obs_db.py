@@ -274,7 +274,7 @@ def pending_payment(sid, message, **cols):
 def test_vaani_celebration_on_payment_completion(clean):
     slug = "authtest-p10-vaani"
     sid = make_streamer(slug)
-    update_streamer(sid, moderation_mode="manual")  # forced auto-approval whatever the moderation mode
+    update_streamer(sid, text_approval_required=True)  # forced auto-approval whatever the moderation setting
     did = pending_payment(sid, "  !VAANI ")
     repo = PaymentRepository(factory(), vaani_creators=frozenset({slug}))
     applied = run(repo.apply(did, "captured", "pay_TESTp10" + secrets.token_hex(4)))
@@ -291,10 +291,9 @@ def test_vaani_celebration_on_payment_completion(clean):
     assert claim(sid, slug).item is None  # never queued
 
 
-@pytest.mark.parametrize("message, cols, configured", [
-    ("!vaani please", {}, True), ("!vaani", {"voice_message_url": "https://x/y.webm"}, True),
-    ("!vaani", {"hypersound_url": "https://x/h.mp3"}, True), ("!vaani", {}, False),
-])
+# "!vaani" with a voice message or a HyperSound can no longer exist (0046: only a text donation carries a message;
+# the donations CHECK refuses the row), so those cases stay in the pure rule's tests (is_vaani_celebration).
+@pytest.mark.parametrize("message, cols, configured", [("!vaani please", {}, True), ("!vaani", {}, False)])
 def test_not_a_vaani_celebration(clean, message, cols, configured):
     slug = "authtest-p10-novaani"
     sid = make_streamer(slug)

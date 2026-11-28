@@ -31,7 +31,7 @@ Checks, in order:
 4. **Amount**: positive, at most 2 decimals, at most ₹5,00,000 in INR at the fixed rates.
 5. **Attachments**: at most one of voice / hypersound / media (D8).
 6. **Minimum**: the one the pricing page shows (`GET …/{slug}/pricing`) for the donation's kind (text, voice, hypersound, media), in the donor's currency. The text floor is ₹40 (D3).
-7. **Message**: sanitised like the name, cut to 500 characters. Its length must fit the creator's `message_char_tiers` tier for the amount in INR.
+7. **Message**: sanitised like the name, cut to 500 characters. Its length must fit the creator's `message_char_tiers` tier for the amount in INR. **Only a text donation carries one** (owner 2026-11-28, migration 0046): with a voice message, media or a HyperSound a message is 400 `Only a text donation carries a message`; one that sanitises to nothing is no message (stored NULL). The database's `donations_attachment_without_message` CHECK refuses such a row too.
 8. **Attachment URLs**:
    - **Voice and media**: exactly a URL issued by `docs/uploads-api.md` for **this creator** in this environment's bucket (`<public base>/voice-messages/<slug>_…webm`, `<public base>/donation-media/<slug>_….<ext>`).
      - Anything else is refused: other host, other creator, query, fragment, encoded or relative paths.
@@ -134,7 +134,7 @@ When a donation is paid:
   authorisations automatically, and refusing one would hold the donor's money with no donation. Tests:
   `test_checkout_uploads_and_inserts_follow_one_rule_and_existing_orders_finalize` (restriction) and
   `test_a_late_capture_for_a_creator_suspended_after_checkout_completes_and_credits` (suspension).
-- **Auto-approve rule (D2, D7)**: HyperSounds are always auto-approved. HyperEmotes are discontinued (owner decision D16, 2026-11-13): no donation is auto-approved for being one, an imported `is_hyperemote` row included. Otherwise only creators in `auto_approve` mode auto-approve, and with media moderation on (default) a donation with **media or a voice message** waits for a moderator.
+- **Auto-approve rule (migration 0046, owner 2026-11-28)**: HyperSounds are always auto-approved. Every other donation follows its own mode's require-approval switch (`docs/dashboard-api.md` G1): a voice message `voice_approval_required`, media `media_approval_required`, a text message or a plain donation `text_approval_required`; `false` approves, `true` waits for a moderator. HyperEmotes are discontinued (owner decision D16, 2026-11-13): no donation is auto-approved for being one, an imported `is_hyperemote` row included.
 - **If auto-approved**:
   - `moderation_status = auto_approved`, `approved_by_label = system`;
   - `audio_scheduled_at = now + 10 s`;

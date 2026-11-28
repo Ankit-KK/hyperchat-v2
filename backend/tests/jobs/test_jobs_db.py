@@ -292,7 +292,7 @@ def test_approval_rolls_back_when_the_enqueue_fails(clean, monkeypatch):
 
 def test_manual_approval_enqueues_rejection_does_not(clean):
     sid = make_streamer("authtest-p8-manual")
-    update_streamer(sid, moderation_mode="manual")
+    update_streamer(sid, text_approval_required=True)
     did, other = paid_donation(sid), paid_donation(sid)
     repo = DashboardRepository(factory())
     run(repo.moderate(sid, did, "approve", actor_user_id=None, actor_label="Dashboard", notes=None))
@@ -454,7 +454,8 @@ def voice_donation(client, slug, email):
     sid = make_streamer(slug, user_id=uid)
     voice_key = f"voice-messages/{slug}_1800000000000_{secrets.token_hex(16)}.webm"
     client.store.objects[voice_key] = StoredObject(b"OPUS-BYTES", "audio/webm", "", {})
-    did = paid_donation(sid, moderation="approved", voice_message_url=f"https://media.example.test/{voice_key}")
+    did = paid_donation(sid, message=None, moderation="approved",  # 0046: a voice donation carries no message
+                        voice_message_url=f"https://media.example.test/{voice_key}")
     r = login(client, email)
     assert r.status_code == 200
     return sid, did, {**ORIGIN, "x-csrf-token": r.json()["csrf_token"]}
@@ -489,7 +490,8 @@ def test_transcription_authorization_and_scoping(tx_client):
     slug = "authtest-p8-txa"
     sid, did, headers = voice_donation(tx_client, slug, "p8txa" + DOMAIN)
     other_sid = make_streamer("authtest-p8-txb", user_id=make_user("p8txb" + DOMAIN))
-    foreign = paid_donation(other_sid, moderation="approved", voice_message_url="https://media.example.test/x.webm")
+    foreign = paid_donation(other_sid, message=None, moderation="approved",
+                            voice_message_url="https://media.example.test/x.webm")
     text_only = paid_donation(sid, moderation="approved")
     assert tx_client.post(url(slug, foreign), headers=headers).status_code == 404       # another creator's donation
     assert tx_client.post(url(slug, "not-a-uuid"), headers=headers).status_code == 404
@@ -514,7 +516,8 @@ def test_transcription_rate_limit_and_unavailable(tx_client):
 
 def test_transcription_job_never_reads_a_foreign_url(clean):
     sid = make_streamer("authtest-p8-ssrf")
-    did = paid_donation(sid, moderation="approved", voice_message_url="http://169.254.169.254/latest/meta-data")
+    did = paid_donation(sid, message=None, moderation="approved",
+                        voice_message_url="http://169.254.169.254/latest/meta-data")
     run(JobQueue(factory()).enqueue("voice_transcription", did, {"donation_id": did}))
     sarvam = FakeSarvam()
     work(VoiceTranscriptionHandler(AudioRepository(factory()), InMemoryObjectStore(), sarvam), did)
