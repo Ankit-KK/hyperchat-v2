@@ -69,7 +69,7 @@ The donation is re-read when the job runs. If it is gone, unpaid, no longer appr
 
 **Speech routing** (legacy, plus D4):
 - `tts_voice_id` `moss_audio_*` uses MiniMax `t2a_v2` / `speech-2.8-hd`. Emoji-spam messages (more than 5 unique emoji) go to ElevenLabs when `el_voice_id` is set.
-- Any other voice uses ElevenLabs when `el_voice_id` is set: `eleven_v3`, falling back to `eleven_multilingual_v2` without audio tags.
+- Any other voice uses ElevenLabs when `el_voice_id` is set: `eleven_v4` (owner 2026-11-28; it performs the square-bracket audio tags; voice settings stability 0.5 and similarity 0.75 only, as v4 has no style, speed or speaker-boost setting), falling back on any failure to `eleven_multilingual_v2` without audio tags (stability 0.5, similarity 0.75, style 0.3, speaker boost). When both fail, the fallback's error is reported. Endpoint `POST /v1/text-to-speech/{voice_id}`, `mp3_44100_128`.
 - Otherwise MiniMax with `HYPERCHAT_MINIMAX_DEFAULT_VOICE_ID`.
 - Provider audio must be a valid MP3 (Phase 6 parser), non-empty, at most 5 MB and 60 s.
 

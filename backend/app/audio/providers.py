@@ -1,6 +1,6 @@
 """Paid audio providers over httpx (server-side only; keys never logged, returned or put in an exception).
 
-  SpeechProvider        MiniMax t2a_v2 (speech-2.8-hd), ElevenLabs TTS (eleven_v3 -> eleven_multilingual_v2)
+  SpeechProvider        MiniMax t2a_v2 (speech-2.8-hd), ElevenLabs TTS (eleven_v4 -> eleven_multilingual_v2)
   SoundEffectProvider   ElevenLabs sound-generation (10 s)
   MusicProvider         ElevenLabs music (music_v2_5, 10 s)
   TranscriptionProvider Sarvam speech-to-text-translate (saaras:v3, mode transcribe)
@@ -150,6 +150,7 @@ class MiniMaxProvider(_Http):
 
 class ElevenLabsProvider(_Http):
     name = "elevenlabs"
+    TTS_MODEL, TTS_FALLBACK = "eleven_v4", "eleven_multilingual_v2"  # tags first; the fallback speaks them stripped
     MUSIC_MODEL, MUSIC_LENGTH_MS = "music_v2_5", 10_000
     SFX_SECONDS, SFX_PROMPT_INFLUENCE = 10, 0.3
 
@@ -162,7 +163,8 @@ class ElevenLabsProvider(_Http):
         return {"xi-api-key": self._key, "Accept": "audio/mpeg"}
 
     async def _tts(self, text: str, voice_id: str, model: str) -> bytes:
-        settings = ({"stability": 0.5, "similarity_boost": 0.75, "use_speaker_boost": True} if model == "eleven_v3"
+        # eleven_v4 takes only Stability and Similarity (its docs: no style, speed or speaker boost)
+        settings = ({"stability": 0.5, "similarity_boost": 0.75} if model == self.TTS_MODEL
                     else {"stability": 0.5, "similarity_boost": 0.75, "style": 0.3, "use_speaker_boost": True})
         response = await self._post(f"/v1/text-to-speech/{voice_id}", headers=self._headers(),
                                     params={"output_format": "mp3_44100_128"},
@@ -170,14 +172,15 @@ class ElevenLabsProvider(_Http):
         return response.content
 
     async def speech(self, text: str, voice_id: str, language_boost: str | None) -> bytes:
-        """eleven_v3 performs the hype line's audio tags; on any failure, eleven_multilingual_v2 speaks the
-        line without them (legacy), and its error is the one reported."""
+        """eleven_v4 (owner 2026-11-28) performs the hype line's square-bracket audio tags; on any failure,
+        eleven_multilingual_v2 speaks the line without them (legacy), so an alert never goes silent while either
+        model answers, and its error is the one reported when both fail."""
         if not _EL_VOICE.match(voice_id or ""):
             raise Permanent("invalid_voice")
         try:
-            return await self._tts(text, voice_id, "eleven_v3")
+            return await self._tts(text, voice_id, self.TTS_MODEL)
         except (Retryable, Permanent):
-            return await self._tts(strip_audio_tags(text), voice_id, "eleven_multilingual_v2")
+            return await self._tts(strip_audio_tags(text), voice_id, self.TTS_FALLBACK)
 
     async def sound_effect(self, prompt: str) -> bytes:
         try:
