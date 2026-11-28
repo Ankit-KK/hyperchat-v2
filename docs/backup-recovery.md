@@ -453,7 +453,10 @@ Stop order is the reverse. The worker can stop at any time.
 - **Script:** `install -o root -g root -m 750 deploy/backup/hyperchat-pgbackup.sh /usr/local/sbin/hyperchat-pgbackup`. The same script serves both environments.
 - **Units:** `install -o root -g root -m 644 deploy/backup/hyperchat-{,dev-}pgbackup.{service,timer} /etc/systemd/system/`, then `systemctl daemon-reload`.
 - **Sandbox (audit S7):** both backup units carry `NoNewPrivileges`, `ProtectSystem=strict` with `ReadWritePaths` for the environment's own backup directory only, `PrivateTmp` and `ProtectHome`.
-  - **Before** a sandboxed unit is installed on a server, a transient-unit probe with the same properties must show that `sudo -u postgres psql` works there. The host's sudo is sudo-rs.
+  - **The backup script runs the PostgreSQL tools through `runuser -u postgres --`, never `sudo`.**
+    - The host's sudo is sudo-rs, which refuses to run at all under `NoNewPrivileges`. The transient-unit probe of 2026-11-28 showed it on both clusters, with the message "the no new privileges flag is set, which prevents sudo from running as root".
+    - `runuser` only drops privileges, so it works in the sandbox. It needs root, and the script refuses anything else.
+    - The installed copies (`/usr/local/sbin/hyperchat-pgbackup` and DEV's `-dev` copy) must be this version before their units get the sandbox.
   - Then one manual run per unit must end `backup ok`.
   - **DEV:** the S0-6 backup monitor pins the DEV unit's hash, so the unit and a re-pinned monitor go in together, between two monitor runs.
 - **Production:** keeps its existing timer. A manual run (`systemctl start hyperchat-pgbackup.service`) must end `backup ok`. Existing old-layout dumps stay until 3 new sets exist.

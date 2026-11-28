@@ -68,8 +68,15 @@ esac
   || die "owner, host and run-as are fixed outside test"
 for tool in pg_dump pg_restore psql; do [[ -x "$BIN/$tool" ]] || die "$BIN/$tool not found"; done
 
-run_pg() {  # the PostgreSQL tools as the cluster's own superuser (peer auth); test: as the caller
-  if [[ -n "$RUN_AS" && "$(id -un)" != "$RUN_AS" ]]; then sudo -u "$RUN_AS" "$@"; else "$@"; fi
+# The PostgreSQL tools run as the cluster's own superuser (peer auth) through runuser, never sudo: the backup units set
+# NoNewPrivileges=yes, and sudo (sudo-rs) refuses to run under that flag (F-1 sandbox probe X3, 2026-11-28). runuser
+# only drops privileges, so it works there; it needs root, which the units are. Test profile: as the caller.
+if [[ -n "$RUN_AS" && "$(id -un)" != "$RUN_AS" ]]; then
+  [[ "$(id -u)" == 0 ]] || die "the PostgreSQL tools run as $RUN_AS through runuser, which needs root"
+  command -v runuser >/dev/null || die "runuser (util-linux) not found"
+fi
+run_pg() {  # stdout and the exit status are the tool's own (q() judges stdout only, as before)
+  if [[ -n "$RUN_AS" && "$(id -un)" != "$RUN_AS" ]]; then runuser -u "$RUN_AS" -- "$@"; else "$@"; fi
 }
 q() { run_pg "$BIN/psql" -X -A -t -q -v ON_ERROR_STOP=1 -h "$HOST" -p "$PORT" -d "$DB" -c "$1"; }
 
