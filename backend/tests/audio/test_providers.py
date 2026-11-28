@@ -134,26 +134,30 @@ def test_bad_voice_ids_never_reach_the_network(voice):
 
 # ── ElevenLabs ──────────────────────────────────────────────────────────────
 
-def test_elevenlabs_v3_first():
+def test_elevenlabs_v4_first_with_only_stability_and_similarity():
     e, rec = eleven(lambda r: httpx.Response(200, content=MP3))
     assert run(e.speech("[excited] hi", "voiceABC", None)) == MP3
     (req,) = rec.requests
     body = json.loads(req.content)
     assert str(req.url) == "https://api.elevenlabs.io/v1/text-to-speech/voiceABC?output_format=mp3_44100_128"
-    assert req.headers["xi-api-key"] == KEY and body["model_id"] == "eleven_v3" and body["text"] == "[excited] hi"
+    assert req.headers["xi-api-key"] == KEY and body["model_id"] == "eleven_v4" and body["text"] == "[excited] hi"
+    assert body["voice_settings"] == {"stability": 0.5, "similarity_boost": 0.75}  # v4: no style, speed, boost
 
 
 def test_elevenlabs_falls_back_to_v2_without_tags():
     def respond(r):
-        return httpx.Response(500) if json.loads(r.content)["model_id"] == "eleven_v3" else httpx.Response(200, content=MP3)
+        return httpx.Response(500) if json.loads(r.content)["model_id"] == "eleven_v4" else httpx.Response(200, content=MP3)
     e, rec = eleven(respond)
     assert run(e.speech("[excited] hi there", "voiceABC", None)) == MP3
-    assert [json.loads(r.content)["model_id"] for r in rec.requests] == ["eleven_v3", "eleven_multilingual_v2"]
-    assert json.loads(rec.requests[1].content)["text"] == "hi there"
+    assert [json.loads(r.content)["model_id"] for r in rec.requests] == ["eleven_v4", "eleven_multilingual_v2"]
+    fallback = json.loads(rec.requests[1].content)
+    assert fallback["text"] == "hi there"
+    assert fallback["voice_settings"] == {"stability": 0.5, "similarity_boost": 0.75, "style": 0.3,
+                                          "use_speaker_boost": True}
 
 
 def test_elevenlabs_both_models_failing_reports_the_fallback_error():
-    e, rec = eleven(lambda r: httpx.Response(429 if json.loads(r.content)["model_id"] == "eleven_v3" else 401))
+    e, rec = eleven(lambda r: httpx.Response(429 if json.loads(r.content)["model_id"] == "eleven_v4" else 401))
     assert error_of(e.speech("hi", "voiceABC", None)) == ("Permanent", "provider_auth")
     assert len(rec.requests) == 2
 
