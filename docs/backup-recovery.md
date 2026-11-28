@@ -254,6 +254,7 @@ It protects only while it is **not** restored together with an older backup: an 
    Copy the printed line, which is public, into the owner's records. Without it, a recovery cannot tell genuine sets from planted ones.
 2. **Units:**
    - Install the units, a `hyperchat[-dev]-offsite.timer.d/schedule.conf` drop-in with the approved time, and an `alert.conf` drop-in (`OnFailure=hyperchat-offsite-alert@%n.service`).
+   - **The alert:** `deploy/backup/hyperchat-offsite-alert@.service` and `-ok@.service` run `deploy/backup/hyperchat-offsite-notify` (installed as `/usr/local/sbin/hyperchat-offsite-notify`) as a sandboxed DynamicUser. The failed unit's result comes from systemd's `$MONITOR_SERVICE_RESULT` and `$MONITOR_EXIT_STATUS`, because `systemctl show` returns nothing in that sandbox. The label names the environment: `[DEV off-site backup]`, or `[PRODUCTION backup]` for production units.
    - The repo timer times are placeholders: set the time outside the maintenance windows, after the environment's backup.
 3. **Production also:** the same `OnFailure=` drop-in on `hyperchat-pgbackup.service`. When production's backup fails, `--latest` re-verifies yesterday's complete set and succeeds, so the off-site unit alone never reports a stale copy.
 4. **First upload:** `systemctl start hyperchat[-dev]-offsite.service` once by hand, then `verify` and `list`.
